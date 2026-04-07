@@ -1,0 +1,80 @@
+[build-system]
+requires = ["uv_build"]
+build-backend = "uv_build"
+
+[project]
+name = "medmcp"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Julian McGinnis", email = "julian.mcginnis@tum.de"},
+    { name = "Paul Friedrich", email = "paul.friedrich@unibas.ch"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Healthcare Industry",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+keywords = ["medical", "image processing", "ai-agent"]
+requires-python = ">=3.12"
+dependencies = [
+]
+
+[dependency-groups]
+test = [
+    "pytest>=9",
+    "pytest-asyncio>=1.2"
+]
+quality = [
+    "ruff>=0.15",
+    "pyright>=1.1.400",
+    "pre-commit>=4.5"
+]
+dev = [
+    { include-group = "test" },
+    { include-group = "quality" },
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "N",        # pep8-naming
+    "UP",       # pyupgrade
+    "B",        # flake8-bugbear
+    "SIM",      # flake8-simplify
+    "RUF",      # ruff-specific
+    "ANN",      # flake8-annotations
+    "D"         # pydocstyle
+]
+
+ignore = ["D100", "D104"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"

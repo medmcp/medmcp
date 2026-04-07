@@ -1,2 +1,2 @@
-# medmcp-dev
+# MedMCP
 Dev Repo for MedMCP

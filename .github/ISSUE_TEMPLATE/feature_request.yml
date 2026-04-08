@@ -5,16 +5,14 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for suggesting an improvement. MedMCP grows through community
-        contributions — feature requests are welcome.
+        Thanks for suggesting an improvement. MedMCP grows through community contributions — feature requests are welcome.
 
   - type: textarea
     id: problem
     attributes:
       label: What problem does this solve?
       description: |
-        Describe the use case, not just the proposed solution. What can't
-        you do today, and why does it matter?
+        Describe the use case, not just the proposed solution. What can't you do today, and why does it matter?
     validations:
       required: true
 

@@ -5,16 +5,14 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to file a bug. Please fill in as much
-        detail as you can — it speeds up triage.
+        Thanks for taking the time to file a bug. Please fill in as much detail as you can — it speeds up triage.
 
   - type: checkboxes
     id: privacy
     attributes:
       label: Privacy check
       description: |
-        MedMCP is used in clinical and research environments. Please confirm
-        before submitting.
+        MedMCP is used in clinical and research environments. Please confirm before submitting.
       options:
         - label: I have not pasted any patient data, PHI, or sensitive imaging metadata in this report.
           required: true

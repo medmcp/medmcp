@@ -3,36 +3,46 @@
 Thank you for your interest in contributing to MedMCP!
 This guide will help you get set up and familiar with our development workflow.
 
-## Prerequisites
+## Get started!
 
-- Python 3.12 or newer
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager
+Ready to contribute? Here's how to set up `medmcp` for local development.
 
-## Development setup
+### 1) Create an issue on the GitHub repository
 
-1. Fork and clone the repository:
+It's good practice to first discuss the proposed changes as the feature might
+already be implemented.
 
-   ```bash
-   git clone https://github.com/<your-username>/medmcp.git
-   cd medmcp
-   ```
 
-2. Install the project with all dev dependencies:
+### 2) Fork the `medmcp` repository on GitHub
 
-   ```bash
-   uv sync
-   ```
+Click [here](https://github.com/medmcp/medmcp-dev/fork) to create your fork.
 
-   This installs the package in editable mode together with the `test` and
-   `quality` dependency groups (linting, type-checking, testing).
+### 3) Clone your fork locally
 
-3. Install the pre-commit hooks:
+```bash
+git clone https://github.com/<your-username>/medmcp-dev.git
+cd medmcp-dev
+```
 
-   ```bash
-   uv run pre-commit install
-   ```
+### 4) Install your local copy into a virtual environment
 
-## Running checks locally
+[uv](https://docs.astral.sh/uv/) is recommended for development. You can simply install it with:
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+We provide simple [just](https://just.systems/) commands to set up the rest of the development environment. Just can be installed with:
+```bash
+uv tool install rust-just
+```
+
+You can now install `medmcp` and all its dependencies with:
+```bash
+just setup
+```
+
+
+### 5) Running checks locally
 
 Before pushing, make sure all checks pass - these are the same checks that run
 in CI:

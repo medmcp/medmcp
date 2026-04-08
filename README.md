@@ -11,7 +11,20 @@ MedMCP runs entirely on-premise and is designed to meet the data governance and 
 
 ---
 
+## Vision
+
+MedMCP aims to become a **community-driven framework of tested medical imaging skills** for local AI agents. The core idea:
+
+- **Accessibility** - MedMCP exists to make validated imaging tools reachable, not to produce new ones. Every architectural decision is evaluated against one question: *"Does this reduce the barrier between a working method and the practitioner who needs it?"*
+- **Local-First** - MedMCP runs entirely on-premise: LLM inference is handled by a locally served model (in our case via Ollama), and no imaging data, patient metadata, or intermediate results leave the institution's infrastructure. This is a hard architectural constraint, not an optional feature.
+- **Community Driven** - MedMCP is designed to grow through community contributions: a shared schema for tool and skill metadata, CI-based testing, and a central registry for discovery ensure that each new contribution is immediately available to all users. Accessibility scales with the community, not with any single team's capacity. [Learn how to contibute!](CONTRIBUTING.md)
+
+---
+
 ## Table of Contents
+
+- [Installation](#Installation)
+- [Contributing](#Contributing)
 
 ---
 

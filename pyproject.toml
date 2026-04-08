@@ -31,6 +31,9 @@ dependencies = [
     "mistral-vibe>=2.7,<3",
 ]
 
+[project.scripts]
+medmcp-ui = "medmcp.cli:main"
+
 [dependency-groups]
 test = [
     "pytest>=9",

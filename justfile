@@ -37,3 +37,7 @@ pull_model:
 # Launch mistral-vibe CLI (reads .vibe/config.toml)
 vibe *ARGS:
     uv run vibe {{ARGS}}
+
+# Launch the Chainlit web UI
+ui:
+    uv run chainlit run src/medmcp/app.py

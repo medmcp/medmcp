@@ -30,6 +30,20 @@ MedMCP aims to become a **community-driven framework of tested medical imaging s
 
 ## Installation
 
+### Prerequisites
+
+Linux, Python ≥3.12, [Ollama](https://ollama.com/), and [just](https://github.com/casey/just).
+
+### Quickstart
+
+```bash
+just setup        # installs uv, ollama, syncs Python deps
+just pull_model   # builds the local Devstral model (~15 GB, one-time)
+just ui           # launches the web UI at http://localhost:8000
+```
+
+Every tool call in the UI (bash, file writes, web fetches) requires an interactive Approve / Reject click. See the `SECURITY MODEL` section in `src/medmcp/app.py` for the full threat model.
+
 ---
 
 ## Contributing

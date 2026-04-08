@@ -57,20 +57,12 @@ favorites = false
 # Add emoji reaction when message is received (requires reactions:write OAuth scope)
 reaction_on_message_received = false
 
-# Authorize users to spontaneously upload files with messages.
-# Restricted to medical-imaging-relevant types so an unattended UI can't be
-# used as a generic file drop. max_size_mb stays high (single DICOM studies
-# can be hundreds of MB) but max_files is capped to bound total upload size.
+# File uploads are intentionally disabled for now. The app's `on_message`
+# handler does not yet consume `message.elements`, so advertising the capability
+# would let users drag files in that silently go nowhere. Re-enable this
+# section (with a MIME allowlist) once the ingest path is implemented.
 [features.spontaneous_file_upload]
-    enabled = true
-    accept = [
-        "image/*",
-        "application/dicom",
-        "application/octet-stream",
-        "application/zip",
-    ]
-    max_files = 5
-    max_size_mb = 500
+    enabled = false
 
 [features.audio]
     # Enable audio features

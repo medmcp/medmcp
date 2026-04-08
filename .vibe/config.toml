@@ -19,33 +19,13 @@ enable_notifications = true
 tool_paths = []
 mcp_servers = []
 enabled_tools = []
-disabled_tools = []
+disabled_tools = ["web_search"]
 agent_paths = []
 enabled_agents = []
 disabled_agents = []
 skill_paths = []
 enabled_skills = []
 disabled_skills = []
-
-[[providers]]
-name = "mistral"
-api_base = "https://api.mistral.ai/v1"
-api_key_env_var = "MISTRAL_API_KEY"
-api_style = "openai"
-backend = "mistral"
-reasoning_field_name = "reasoning_content"
-project_id = ""
-region = ""
-
-[[providers]]
-name = "llamacpp"
-api_base = "http://127.0.0.1:8080/v1"
-api_key_env_var = ""
-api_style = "openai"
-backend = "generic"
-reasoning_field_name = "reasoning_content"
-project_id = ""
-region = ""
 
 [[providers]]
 name = "ollama"
@@ -56,33 +36,6 @@ backend = "generic"
 reasoning_field_name = "reasoning_content"
 project_id = ""
 region = ""
-
-[[models]]
-name = "mistral-vibe-cli-latest"
-provider = "mistral"
-alias = "devstral-2"
-temperature = 0.2
-input_price = 0.4
-output_price = 2.0
-thinking = "off"
-
-[[models]]
-name = "devstral-small-latest"
-provider = "mistral"
-alias = "devstral-small"
-temperature = 0.2
-input_price = 0.1
-output_price = 0.3
-thinking = "off"
-
-[[models]]
-name = "devstral"
-provider = "llamacpp"
-alias = "local-llamacpp"
-temperature = 0.1
-input_price = 0.0
-output_price = 0.0
-thinking = "off"
 
 [[models]]
 name = "devstral-medmcp"
@@ -102,65 +55,6 @@ max_depth = 3
 max_files = 1000
 max_dirs_per_level = 20
 timeout_seconds = 2.0
-
-[tools.web_search]
-permission = "ask"
-allowlist = []
-denylist = []
-timeout = 120
-model = "mistral-vibe-cli-with-tools"
-
-[tools.bash]
-permission = "ask"
-allowlist = [
-    "echo",
-    "git diff",
-    "git log",
-    "git status",
-    "tree",
-    "whoami",
-    "cat",
-    "file",
-    "head",
-    "ls",
-    "pwd",
-    "stat",
-    "tail",
-    "uname",
-    "wc",
-    "which",
-]
-denylist = [
-    "gdb",
-    "pdb",
-    "passwd",
-    "nano",
-    "vim",
-    "vi",
-    "emacs",
-    "bash -i",
-    "sh -i",
-    "zsh -i",
-    "fish -i",
-    "dash -i",
-    "screen",
-    "tmux",
-]
-max_output_bytes = 16000
-default_timeout = 300
-denylist_standalone = [
-    "python",
-    "python3",
-    "ipython",
-    "bash",
-    "sh",
-    "nohup",
-    "vi",
-    "vim",
-    "emacs",
-    "nano",
-    "su",
-]
 
 [tools.task]
 permission = "ask"

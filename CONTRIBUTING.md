@@ -40,6 +40,9 @@ You can now install `medmcp` and all its dependencies with:
 ```bash
 just setup
 ```
+The command (1) checks if [uv](https://docs.astral.sh/uv/) is available if necessary installs it;
+(2) checks if [Ollama](https://ollama.com/) is available and if necessary installs it;
+(3) installs all other dependencies.
 
 
 ### 5) Running checks locally

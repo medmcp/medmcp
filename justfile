@@ -1,3 +1,5 @@
+set quiet := true
+
 default:
     @just --list
 
@@ -16,8 +18,13 @@ clean:
 	if ! command -v uv >/dev/null 2>&1; then \
 		echo "uv is not installed. Installing..."; \
 		curl -LsSf https://astral.sh/uv/install.sh | sh; \
+	else \
+	  echo "uv is available and ready to use..."; \
 	fi
 
-setup: install_uv
+install_ollama:
+    @./scripts/install_ollama.sh
+
+setup: install_uv install_ollama
     uv sync
     uv run pre-commit install

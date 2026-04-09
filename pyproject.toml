@@ -29,6 +29,8 @@ requires-python = ">=3.12"
 dependencies = [
     "chainlit>=2.0,<3",
     "mistral-vibe>=2.7,<3",
+    "sqlalchemy[asyncio]>=2.0,<3",
+    "aiosqlite>=0.20",
 ]
 
 [project.scripts]

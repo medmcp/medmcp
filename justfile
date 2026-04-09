@@ -14,6 +14,12 @@ clean:
     rm -f .coverage
     rm -f coverage.*
 
+clean-chats:
+    rm -rf .vibe/logs
+    rm -f .vibe/medmcp_threads.db
+    rm -f .vibe/trusted_folders.toml
+    rm -rf .vibe/vibehistory
+
 @install_uv:
 	if ! command -v uv >/dev/null 2>&1; then \
 		echo "uv is not installed. Installing..."; \
@@ -40,4 +46,4 @@ vibe *ARGS:
 
 # Launch the Chainlit web UI
 ui:
-    uv run chainlit run src/medmcp/app.py
+    @./scripts/run_ui.sh

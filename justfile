@@ -13,6 +13,11 @@ clean:
     rm -rf src/*.egg-info
     rm -f .coverage
     rm -f coverage.*
+    rm -rf .vibe/logs
+    rm -f .vibe/medmcp_threads.db
+    rm -f .vibe/trusted_folders.toml
+    rm -rf .vibe/vibehistory
+    rm -f .env
 
 @install_uv:
 	if ! command -v uv >/dev/null 2>&1; then \
@@ -40,4 +45,4 @@ vibe *ARGS:
 
 # Launch the Chainlit web UI
 ui:
-    uv run chainlit run src/medmcp/app.py
+    @./scripts/run_ui.sh

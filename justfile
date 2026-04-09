@@ -13,6 +13,8 @@ clean:
     rm -rf src/*.egg-info
     rm -f .coverage
     rm -f coverage.*
+
+clean-chats:
     rm -rf .vibe/logs
     rm -f .vibe/medmcp_threads.db
     rm -f .vibe/trusted_folders.toml

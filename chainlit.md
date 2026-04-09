@@ -1,0 +1,1 @@
+<!-- Intentionally empty. Chainlit treats an empty chainlit.md as "no welcome screen", which is what we want for MedMCP. If this file is deleted, Chainlit auto-regenerates a default marketing page on next startup (see chainlit/markdown.py:init_markdown) — don't do that. -->

@@ -1,0 +1,22 @@
+# Custom Devstral configuration for medmcp tool-calling.
+#
+# Default Ollama num_ctx is 2048 tokens — far too small for MCP tool schemas.
+# medmcp's 8 tools consume ~1500 tokens of schema alone, leaving almost nothing
+# for system prompt + conversation. 32768 matches Devstral's trained context
+# and gives ample room for tool definitions + multi-turn dialogue.
+#
+# Low temperature keeps tool-call argument generation deterministic, but at
+# temp 0.1 with no repetition penalty Devstral is prone to falling into a
+# repeat-loop on open-ended prompts (e.g. listing fictional "skills" forever).
+# repeat_penalty + repeat_last_n + a num_predict ceiling guard against that.
+#
+# Build with:
+#   ollama create devstral-medmcp -f Modelfile.devstral
+
+FROM devstral-small-2:latest
+
+PARAMETER num_ctx 32768
+PARAMETER temperature 0.1
+PARAMETER repeat_penalty 1.15
+PARAMETER repeat_last_n 256
+PARAMETER num_predict 2048

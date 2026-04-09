@@ -30,6 +30,20 @@ MedMCP aims to become a **community-driven framework of tested medical imaging s
 
 ## Installation
 
+### Prerequisites
+
+Linux (tested for Ubuntu), [uv](https://docs.astral.sh/uv/), and [just](https://github.com/casey/just) (we recommend to install `rust-just` with `uv tool install rust-just`.
+
+### Quickstart
+
+```bash
+just setup        # installs uv, ollama, and syncs Python deps
+just pull_model   # builds the local Devstral model (~15 GB, one-time)
+just ui           # launches the web UI at http://localhost:8000
+```
+
+Every tool call in the UI (bash, file writes, web fetches) requires an interactive Approve / Reject click. See the `SECURITY MODEL` section in `src/medmcp/app.py` for the full threat model.
+
 ---
 
 ## Contributing

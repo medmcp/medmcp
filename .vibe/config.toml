@@ -1,0 +1,139 @@
+active_model = "local"
+vim_keybindings = false
+disable_welcome_banner_animation = false
+autocopy_to_clipboard = true
+file_watcher_for_autocomplete = false
+auto_compact_threshold = 200000
+context_warnings = false
+auto_approve = false
+system_prompt_id = "medmcp"
+include_commit_signature = true
+include_model_info = true
+include_project_context = true
+include_prompt_detail = true
+api_timeout = 720.0
+enable_telemetry = false
+enable_update_checks = false
+enable_auto_update = false
+enable_notifications = true
+tool_paths = []
+mcp_servers = []
+enabled_tools = []
+disabled_tools = ["web_search"]
+agent_paths = []
+enabled_agents = []
+disabled_agents = []
+skill_paths = []
+enabled_skills = []
+disabled_skills = []
+
+[[providers]]
+name = "ollama"
+api_base = "http://localhost:11434/v1"
+api_key_env_var = ""
+api_style = "openai"
+backend = "generic"
+reasoning_field_name = "reasoning_content"
+project_id = ""
+region = ""
+
+[[models]]
+name = "devstral-medmcp"
+provider = "ollama"
+alias = "local"
+temperature = 0.1
+input_price = 0.0
+output_price = 0.0
+thinking = "off"
+
+[project_context]
+max_chars = 40000
+default_commit_count = 5
+max_doc_bytes = 32768
+truncation_buffer = 1000
+max_depth = 3
+max_files = 1000
+max_dirs_per_level = 20
+timeout_seconds = 2.0
+
+[tools.task]
+permission = "ask"
+allowlist = [
+    "explore",
+]
+denylist = []
+
+[tools.web_fetch]
+permission = "ask"
+allowlist = []
+denylist = []
+default_timeout = 30
+max_timeout = 120
+max_content_bytes = 512000
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+[tools.write_file]
+permission = "ask"
+allowlist = []
+denylist = []
+max_write_bytes = 64000
+create_parent_dirs = true
+
+[tools.todo]
+permission = "always"
+allowlist = []
+denylist = []
+max_todos = 100
+
+[tools.search_replace]
+permission = "ask"
+allowlist = []
+denylist = []
+max_content_size = 100000
+create_backup = false
+fuzzy_threshold = 0.9
+
+[tools.read_file]
+permission = "always"
+allowlist = []
+denylist = []
+max_read_bytes = 64000
+
+[tools.grep]
+permission = "always"
+allowlist = []
+denylist = []
+max_output_bytes = 64000
+default_max_matches = 100
+default_timeout = 60
+exclude_patterns = [
+    ".venv/",
+    "venv/",
+    ".env/",
+    "env/",
+    "node_modules/",
+    ".git/",
+    "__pycache__/",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".tox/",
+    ".nox/",
+    ".coverage/",
+    "htmlcov/",
+    "dist/",
+    "build/",
+    ".idea/",
+    ".vscode/",
+    "*.egg-info",
+    "*.pyc",
+    "*.pyo",
+    "*.pyd",
+    ".DS_Store",
+    "Thumbs.db",
+]
+codeignore_file = ".vibeignore"
+
+[tools.ask_user_question]
+permission = "always"
+allowlist = []
+denylist = []

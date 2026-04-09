@@ -28,3 +28,16 @@ install_ollama:
 setup: install_uv install_ollama
     uv sync
     uv run pre-commit install
+
+# Pull base model and build custom devstral-medmcp (32k context)
+pull_model:
+    ollama pull devstral-small-2:latest
+    ollama create devstral-medmcp -f Modelfile.devstral
+
+# Launch mistral-vibe CLI (reads .vibe/config.toml)
+vibe *ARGS:
+    uv run vibe {{ARGS}}
+
+# Launch the Chainlit web UI
+ui:
+    uv run chainlit run src/medmcp/app.py

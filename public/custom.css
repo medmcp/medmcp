@@ -1,0 +1,14 @@
+/* Replace Chainlit's default watermark text with a MedMCP notice. */
+.watermark > * {
+    display: none;
+}
+.watermark {
+    margin: 0 !important;
+    padding: 0 !important;
+}
+.watermark::before {
+    content: "MedMCP — Research Preview";
+    font-size: 0.75rem;
+    line-height: 1;
+    color: hsl(var(--muted-foreground));
+}

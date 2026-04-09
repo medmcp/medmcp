@@ -32,12 +32,12 @@ MedMCP aims to become a **community-driven framework of tested medical imaging s
 
 ### Prerequisites
 
-Linux, Python ≥3.12, [Ollama](https://ollama.com/), and [just](https://github.com/casey/just).
+Linux (tested for Ubuntu), [uv](https://docs.astral.sh/uv/), and [just](https://github.com/casey/just) (we recommend to install `rust-just` with `uv tool install rust-just`.
 
 ### Quickstart
 
 ```bash
-just setup        # installs uv, ollama, syncs Python deps
+just setup        # installs uv, ollama, and syncs Python deps
 just pull_model   # builds the local Devstral model (~15 GB, one-time)
 just ui           # launches the web UI at http://localhost:8000
 ```

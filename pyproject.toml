@@ -85,3 +85,10 @@ quote-style = "double"
 include = ["src", "tests"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
+
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+reportPrivateUsage = "none"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

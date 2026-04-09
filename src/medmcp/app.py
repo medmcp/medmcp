@@ -638,20 +638,10 @@ async def on_chat_start() -> None:
     session_id = cast("str", result["sessionId"])
     _set_session_id(session_id)
     _client.register_session(session_id)
-
-    # Persist the chainlit-thread → vibe-session mapping so on_chat_resume can
-    # find it. Chainlit creates the thread row on first message anyway; calling
-    # update_thread here upserts an empty thread with the metadata set so the
-    # mapping is recoverable even if the user never sends a message.
-    thread_id = cl_context.session.thread_id
-    data_layer = cast("Any", cl_get_data_layer())
-    if thread_id and data_layer is not None:
-        with contextlib.suppress(Exception):
-            await data_layer.update_thread(
-                thread_id=thread_id,
-                user_id=_persisted_user_id(),
-                metadata={"vibe_session_id": session_id},
-            )
+    # Persisting the chainlit-thread → vibe-session mapping is deferred until
+    # the first user message (see on_message). Doing it eagerly here would
+    # upsert an empty thread row on every F5, littering the sidebar with empty
+    # threads from refreshes that never produced a conversation.
 
 
 @cl.on_chat_resume  # pyright: ignore[reportUnknownMemberType]
@@ -697,6 +687,10 @@ async def on_chat_resume(thread: ThreadDict) -> None:
     # rather than in limbo.
     queue = _client.register_session(vibe_session_id)
     _set_session_id(vibe_session_id)
+    # Resumed threads already have the mapping in their metadata (that's how
+    # we found vibe_session_id), so flag this chat as already persisted to
+    # skip the lazy update_thread call in on_message.
+    cl.user_session.set("vibe_session_persisted", True)  # pyright: ignore[reportUnknownMemberType]
 
     resp = await _client.request(
         "session/load",
@@ -737,6 +731,22 @@ async def on_message(message: cl.Message) -> None:
     if session_id is None:
         await cl.Message(content="Session not initialized. Please refresh.").send()
         return
+
+    # Persist the chainlit-thread → vibe-session mapping on the first message
+    # of this chat. Done lazily (rather than in on_chat_start) so refreshes
+    # that never produce a conversation don't leave empty threads in the
+    # sidebar. Idempotent: gated by a per-chat flag in user_session.
+    if not cl.user_session.get("vibe_session_persisted"):  # pyright: ignore[reportUnknownMemberType]
+        thread_id = cl_context.session.thread_id
+        data_layer = cast("Any", cl_get_data_layer())
+        if thread_id and data_layer is not None:
+            with contextlib.suppress(Exception):
+                await data_layer.update_thread(
+                    thread_id=thread_id,
+                    user_id=_persisted_user_id(),
+                    metadata={"vibe_session_id": session_id},
+                )
+        cl.user_session.set("vibe_session_persisted", True)  # pyright: ignore[reportUnknownMemberType]
 
     queue = _client.get_session_queue(session_id)
     if queue is None:

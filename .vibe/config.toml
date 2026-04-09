@@ -137,3 +137,9 @@ codeignore_file = ".vibeignore"
 permission = "always"
 allowlist = []
 denylist = []
+
+[tools.bash]
+permission = "ask"
+allowlist = []
+denylist_standalone = []
+sensitive_patterns = ["sudo"]

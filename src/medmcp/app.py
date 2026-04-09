@@ -226,7 +226,13 @@ class VibeAcpClient:
             self._pending.clear()
 
     async def request(self, method: str, params: JsonDict | None = None) -> JsonDict:
-        """Send a JSON-RPC request and await its response."""
+        """Send a JSON-RPC request and await its response.
+
+        The ``try/finally`` around ``await fut`` guarantees the pending-request
+        entry is removed from ``_pending`` even if the awaiting task is
+        cancelled mid-flight (e.g. the user clicks Stop). Without it, cancelled
+        requests would leak entries into ``_pending`` forever.
+        """
         assert self.proc is not None and self.proc.stdin is not None
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[JsonDict] = loop.create_future()
@@ -239,7 +245,10 @@ class VibeAcpClient:
                 msg["params"] = params
             self.proc.stdin.write(_encode(msg))
             await self.proc.stdin.drain()
-        return await fut
+        try:
+            return await fut
+        finally:
+            self._pending.pop(req_id, None)
 
     async def notify(self, method: str, params: JsonDict | None = None) -> None:
         """Send a JSON-RPC notification (no id, no response expected)."""
@@ -700,6 +709,12 @@ async def on_chat_resume(thread: ThreadDict) -> None:
 
     # Drain replay events. Chainlit already has the conversation in its own
     # data layer and renders it from there, so we just acknowledge and discard.
+    #
+    # Invariant: vibe-acp flushes all replay frames BEFORE writing the
+    # session/load response, so by the time we get here the reader task has
+    # already routed them into this queue. Do not change to ``await queue.get()``
+    # without verifying that invariant still holds — otherwise stale replay
+    # frames could leak into the next on_message.
     while not queue.empty():
         with contextlib.suppress(asyncio.QueueEmpty):
             queue.get_nowait()
@@ -824,6 +839,11 @@ async def on_message(message: cl.Message) -> None:
         # Chainlit cancels our task when the user clicks Stop or sends a new
         # message mid-stream. Tell vibe-acp to abort its agent loop too,
         # otherwise the next session/prompt is rejected as concurrent.
+        #
+        # Also cancel the in-flight prompt request so the ``try/finally`` in
+        # ``VibeAcpClient.request`` runs and pops its entry from ``_pending``.
+        if not prompt_fut.done():
+            prompt_fut.cancel()
         await _cancel_and_drain()
         raise
 

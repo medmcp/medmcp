@@ -17,7 +17,6 @@ clean:
     rm -f .vibe/medmcp_threads.db
     rm -f .vibe/trusted_folders.toml
     rm -rf .vibe/vibehistory
-    rm -f .env
 
 @install_uv:
 	if ! command -v uv >/dev/null 2>&1; then \

@@ -18,11 +18,18 @@ jobs:
           enable-cache: true
       - name: Set up Python
         run: uv python install ${{ matrix.python-version }}
-      - name: Configure SSH for private deps
+      - name: Generate token for private deps
         if: matrix.extras != ''
-        uses: webfactory/ssh-agent@v0.9.1
+        id: app-token
+        uses: actions/create-github-app-token@v2
         with:
-          ssh-private-key: ${{ secrets.MEDMCP_DEPLOY_KEY }}
+          app-id: ${{ secrets.MEDMCP_APP_ID }}
+          private-key: ${{ secrets.MEDMCP_APP_PRIVATE_KEY }}
+          owner: medmcp
+          repositories: medmcp-neuro
+      - name: Configure git for private deps
+        if: matrix.extras != ''
+        run: git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "ssh://git@github.com/"
       - name: Sync
         run: uv sync --all-groups ${{ matrix.extras != '' && format('--extra {0}', matrix.extras) || '' }}
       - name: Ruff check

@@ -8,9 +8,16 @@ from pathlib import Path
 
 
 def main() -> None:
-    """Launch the Chainlit UI."""
+    """Launch the Chainlit UI on localhost.
+
+    The ``-h 127.0.0.1`` flag ensures the server never accidentally binds to
+    all interfaces. See the security model in ``app.py`` for why this matters.
+    """
     app = str(Path(__file__).resolve().parent / "app.py")
-    subprocess.run([sys.executable, "-m", "chainlit", "run", app, "-w"], check=True)
+    subprocess.run(
+        [sys.executable, "-m", "chainlit", "run", app, "-w", "-h", "127.0.0.1"],
+        check=True,
+    )
 
 
 if __name__ == "__main__":

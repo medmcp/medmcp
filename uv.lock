@@ -1296,7 +1296,7 @@ test = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "chainlit", specifier = ">=2.0,<3" },
-    { name = "medmcp-neuro", marker = "extra == 'neuro'", git = "ssh://git@github.com/medmcp/medmcp-neuro.git?branch=main" },
+    { name = "medmcp-neuro", marker = "extra == 'neuro'", git = "ssh://git@github.com/medmcp/medmcp-neuro.git?rev=aa4dad5d89d8da28dd0776ae39d97b98cee5d6d8" },
     { name = "mistral-vibe", specifier = ">=2.7,<3" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<3" },
 ]
@@ -1332,7 +1332,7 @@ dependencies = [
 [[package]]
 name = "medmcp-neuro"
 version = "0.0.0"
-source = { git = "ssh://git@github.com/medmcp/medmcp-neuro.git?branch=main#aa4dad5d89d8da28dd0776ae39d97b98cee5d6d8" }
+source = { git = "ssh://git@github.com/medmcp/medmcp-neuro.git?rev=aa4dad5d89d8da28dd0776ae39d97b98cee5d6d8#aa4dad5d89d8da28dd0776ae39d97b98cee5d6d8" }
 dependencies = [
     { name = "mcp" },
     { name = "medmcp-dicom" },

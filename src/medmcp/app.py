@@ -169,7 +169,7 @@ class VibeAcpClient:
                 "vibe-acp",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=None,  # inherit parent stderr so logs appear in terminal
                 cwd=PROJECT_ROOT,
                 env={**os.environ, "VIBE_HOME": str(VIBE_HOME)},
             )

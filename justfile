@@ -83,3 +83,15 @@ vibe *ARGS:
 # Launch the Chainlit web UI
 ui:
     @./scripts/run_ui.sh
+
+# Start the Ollama server (blocks until stopped)
+serve-ollama:
+    ollama serve
+
+# One-shot: install everything, pull model, start Ollama, launch the UI
+medmcp: setup pull_model
+    @echo "Starting Ollama server..."
+    @ollama serve &
+    @sleep 2
+    @echo "Launching MedMCP UI..."
+    @./scripts/run_ui.sh

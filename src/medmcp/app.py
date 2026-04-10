@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import chainlit as cl
+import httpx
 from chainlit.context import context as cl_context
 from chainlit.data import get_data_layer as cl_get_data_layer
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
@@ -87,6 +88,17 @@ THREADS_DB_PATH: Path = VIBE_HOME / "medmcp_threads.db"
 # Single fixed user identity used by the data layer. There is no auth: this
 # exists only so chainlit's per-user thread scoping has a stable key.
 LOCAL_USER_ID: str = "local"
+
+# ── Explain tool calls (opt-in) ──────────────────────────
+#
+# When enabled by the user, each permission prompt is preceded by a short
+# LLM-generated plain-language explanation of what the tool call does.
+# The explanation is produced by the same local Ollama model that powers the
+# agent, via a lightweight direct API call.
+
+OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "devstral-medmcp")
+EXPLAIN_TIMEOUT: float = 15.0
 
 # ── JSON-RPC wire helpers ──────────────────────────────────
 
@@ -436,6 +448,58 @@ def get_data_layer() -> SQLAlchemyDataLayer:
     return SQLAlchemyDataLayer(conninfo=f"sqlite+aiosqlite:///{THREADS_DB_PATH}")
 
 
+# ── Tool-call explanation (opt-in) ────────────────────────
+
+
+async def _generate_human_readable(tc: JsonDict) -> str | None:
+    """Ask the local Ollama model to explain a tool call in plain language.
+
+    Returns a short explanation string, or ``None`` if the request fails or
+    times out. Errors are logged but never propagated — the permission dialog
+    simply renders without an explanation.
+    """
+    title = tc.get("title") or ""
+    raw_input_val: object = tc.get("rawInput") or ""
+    if isinstance(raw_input_val, dict):
+        ri_dict = cast("JsonDict", raw_input_val)
+        try:
+            raw_input_str = json.dumps(ri_dict, indent=2)
+        except (TypeError, ValueError):
+            raw_input_str = str(ri_dict)
+    else:
+        raw_input_str = str(raw_input_val)
+
+    prompt = (
+        "You are a SECURITY-AWARE assistant. A tool call is about to be "
+        "executed on the user's machine. Explain what it does in ONE short "
+        "sentence that a NON-TECHNICAL user can understand. Focus on the "
+        "effect and any risks. Reply with ONLY the explanation.\n\n"
+        f"Tool: {title}\nInput: {raw_input_str}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=EXPLAIN_TIMEOUT) as client:
+            resp = await client.post(
+                f"{OLLAMA_BASE_URL}/v1/chat/completions",
+                json={
+                    "model": OLLAMA_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.0,
+                    "max_tokens": 120,
+                },
+            )
+            resp.raise_for_status()
+            data = cast("JsonDict", resp.json())
+            choices = cast("list[JsonDict]", data.get("choices") or [])
+            if not choices:
+                return None
+            message = cast("JsonDict", choices[0].get("message") or {})
+            text = str(message.get("content") or "").strip()
+            return text or None
+    except Exception:
+        _audit.warning("failed to generate tool-call explanation", exc_info=True)
+        return None
+
+
 # ── Permission UI ──────────────────────────────────────────
 
 
@@ -443,12 +507,17 @@ def _format_permission_prompt(tc: JsonDict) -> str:
     """Build the markdown body shown in the permission dialog.
 
     ``tc`` is a ToolCallUpdate from ACP — it has ``title`` (human label, e.g.
-    ``"bash: ls -la ~/msseg"``) and ``rawInput`` (the JSON-serialized tool args).
+    ``"bash: ls -la ~/msseg"``), ``rawInput`` (the JSON-serialized tool args),
+    and optionally ``humanReadable`` (a plain-language explanation of what the
+    tool call does and why).
     """
     title = tc.get("title") or "tool call"
     raw_input = tc.get("rawInput")
+    human_readable = tc.get("humanReadable")
 
     body = f"**Approve tool call?**\n\n`{title}`"
+    if isinstance(human_readable, str) and human_readable:
+        body += f"\n\n> {human_readable}"
     if raw_input:
         if isinstance(raw_input, str):
             input_str = raw_input
@@ -577,6 +646,8 @@ async def _handle_tool_call(
         info["title"] = t
     if (ri := update.get("rawInput")) is not None:
         info["rawInput"] = ri
+    if (hr := update.get("humanReadable")) is not None:
+        info["humanReadable"] = hr
 
     raw_input = update.get("rawInput")
     if tc_id in tool_steps:
@@ -615,6 +686,23 @@ async def _handle_tool_call_update(update: JsonDict, tool_steps: dict[str, cl.St
         await step.update()
 
 
+# ── Explain toggle (ChatSettings) ─────────────────────────
+
+
+def _is_explain_enabled() -> bool:
+    """Check whether the user has opted in to tool-call explanations."""
+    val = cl.user_session.get("explain_tools")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    return bool(val)  # pyright: ignore[reportUnknownArgumentType]
+
+
+@cl.on_settings_update  # pyright: ignore[reportUnknownMemberType]
+async def on_settings_update(settings: dict[str, Any]) -> None:
+    """Persist chat-settings changes (explain toggle) into the user session."""
+    new_value = bool(settings.get("explain_tools", False))
+    cl.user_session.set("explain_tools", new_value)  # pyright: ignore[reportUnknownMemberType]
+    _audit.info("explain_tools set to %s via settings", new_value)
+
+
 # ── Chainlit hooks ─────────────────────────────────────────
 
 
@@ -627,6 +715,20 @@ async def on_chat_start() -> None:
     session is persisted in thread metadata so :func:`on_chat_resume` can pick
     it back up later.
     """
+    cl.user_session.set("explain_tools", False)  # pyright: ignore[reportUnknownMemberType]
+    await cl.ChatSettings(
+        inputs=[
+            cl.input_widget.Switch(
+                id="explain_tools",
+                label="Explain tool calls",
+                initial=False,
+                description=(
+                    "Enable this option to add a plain-language explanation to each tool call."
+                ),
+            ),
+        ],
+    ).send()
+
     await _client.ensure_started()
 
     resp = await _client.request("session/new", {"cwd": PROJECT_ROOT, "mcp_servers": []})
@@ -655,6 +757,20 @@ async def on_chat_resume(thread: ThreadDict) -> None:
     history at us via ``session/update`` events; we drain and discard them
     because chainlit's persistence is the source of truth for the UI.
     """
+    cl.user_session.set("explain_tools", False)  # pyright: ignore[reportUnknownMemberType]
+    await cl.ChatSettings(
+        inputs=[
+            cl.input_widget.Switch(
+                id="explain_tools",
+                label="Explain tool calls",
+                initial=False,
+                description=(
+                    "Enable this option to add a plain-language explanation to each tool call."
+                ),
+            ),
+        ],
+    ).send()
+
     await _client.ensure_started()
 
     # ThreadDict's typing carries Dict[Unknown, Unknown] for the metadata field,
@@ -906,9 +1022,15 @@ async def _process_session_frame(
         # Backfill title/rawInput from the cached tool_call event, because
         # request_permission only ships the toolCallId.
         cached = tool_call_info.get(cast("str", tc.get("toolCallId") or ""), {})
-        for key in ("title", "rawInput"):
+        for key in ("title", "rawInput", "humanReadable"):
             if tc.get(key) is None and cached.get(key) is not None:
                 tc[key] = cached[key]
+
+        # Generate a plain-language explanation if the user opted in and
+        # one wasn't already provided by vibe-acp.
+        if _is_explain_enabled() and tc.get("humanReadable") is None:
+            with contextlib.suppress(Exception):
+                tc["humanReadable"] = await _generate_human_readable(tc)
 
         outcome = await _ask_user_for_permission(tc, options)
         await _client.respond(req_id, {"outcome": outcome})

@@ -1,6 +1,35 @@
-// Override the Reset button in the ChatSettings panel so that it restores
-// widget defaults (the `initial` values) rather than the values captured when
-// the panel was opened.
+// ── Hide unused feedback buttons ─────────────────────────────────────
+// Chainlit shows thumbs-up / thumbs-down when a data layer is configured
+// (needed for thread persistence), but MedMCP does not use feedback.
+(function () {
+  const SELECTOR =
+    ".positive-feedback-on, .positive-feedback-off, .negative-feedback-on, .negative-feedback-off";
+
+  function hide(root) {
+    for (const el of root.querySelectorAll(SELECTOR)) {
+      el.style.display = "none";
+    }
+  }
+
+  hide(document);
+
+  new MutationObserver(function (mutations) {
+    for (const m of mutations) {
+      for (const node of m.addedNodes) {
+        if (node.nodeType === 1) {
+          if (node.matches && node.matches(SELECTOR)) {
+            node.style.display = "none";
+          }
+          hide(node);
+        }
+      }
+    }
+  }).observe(document.body, { childList: true, subtree: true });
+})();
+
+// ── Override the ChatSettings Reset button ───────────────────────────
+// Restores widget defaults (the `initial` values) rather than the values
+// captured when the panel was opened.
 (function () {
   "use strict";
 

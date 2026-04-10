@@ -17,7 +17,12 @@ enable_update_checks = false
 enable_auto_update = false
 enable_notifications = true
 tool_paths = []
-mcp_servers = []
+[[mcp_servers]]
+name = "medmcp-neuro"
+transport = "stdio"
+command = "medmcp-neuro"
+startup_timeout_sec = 10.0
+tool_timeout_sec = 120.0
 enabled_tools = []
 disabled_tools = ["web_search"]
 agent_paths = []

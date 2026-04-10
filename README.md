@@ -44,6 +44,36 @@ just ui           # launches the web UI at http://localhost:8000
 
 Every tool call in the UI (bash, file writes, web fetches) requires an interactive Approve / Reject click. See the `SECURITY MODEL` section in `src/medmcp/app.py` for the full threat model.
 
+### Imaging stacks
+
+MedMCP's imaging capabilities are provided by optional **stack** packages. Each stack bundles domain-specific tools and their foundation dependencies into a single MCP server.
+
+```
+┌─ medmcp (core) ──────────────────────────────────┐
+│  Chainlit UI, agent loop, prompts, config        │
+└──────────────────────────────────────────────────┘
+           │ installs via optional extras
+           ▼
+┌─ stack layer (domain-specific) ──────────────────┐
+│  medmcp-neuro       brain extraction, seg, reg   │
+│  medmcp-cardiac     (planned)                    │
+│  medmcp-microscopy  (planned)                    │
+└──────────────────────────────────────────────────┘
+           │ depends on
+           ▼
+┌─ foundation layer (shared I/O) ──────────────────┐
+│  medmcp-dicom       DICOM inspection + conversion│
+└──────────────────────────────────────────────────┘
+```
+
+Install a stack with the corresponding extra:
+
+```bash
+uv sync --extra neuro    # pulls medmcp-neuro + medmcp-dicom
+```
+
+The MCP server is configured in `.vibe/config.toml` and starts automatically when the UI launches.
+
 ---
 
 ## Contributing

@@ -629,7 +629,7 @@ async def on_chat_start() -> None:
     """
     await _client.ensure_started()
 
-    resp = await _client.request("session/new", {"cwd": PROJECT_ROOT, "mcp_servers": []})
+    resp = await _client.request("session/new", {"cwd": PROJECT_ROOT})
     if "error" in resp:
         await cl.Message(content=f"Failed to create vibe-acp session: {resp['error']}").send()
         return
@@ -694,7 +694,7 @@ async def on_chat_resume(thread: ThreadDict) -> None:
 
     resp = await _client.request(
         "session/load",
-        {"cwd": PROJECT_ROOT, "session_id": vibe_session_id, "mcp_servers": []},
+        {"cwd": PROJECT_ROOT, "session_id": vibe_session_id},
     )
     if "error" in resp:
         _audit.warning("resume: session/load failed: %s", resp["error"])

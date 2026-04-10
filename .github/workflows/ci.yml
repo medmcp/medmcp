@@ -10,6 +10,7 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
+        extras: ["", "neuro"]
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
@@ -17,8 +18,13 @@ jobs:
           enable-cache: true
       - name: Set up Python
         run: uv python install ${{ matrix.python-version }}
+      - name: Configure SSH for private deps
+        if: matrix.extras != ''
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.MEDMCP_DEPLOY_KEY }}
       - name: Sync
-        run: uv sync --all-groups
+        run: uv sync --all-groups ${{ matrix.extras != '' && format('--extra {0}', matrix.extras) || '' }}
       - name: Ruff check
         run: uv run ruff check
       - name: Ruff format

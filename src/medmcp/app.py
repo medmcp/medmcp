@@ -61,6 +61,7 @@ from chainlit.data import get_data_layer as cl_get_data_layer
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.types import ThreadDict
 from chainlit.user import User
+from chainlit.utils import utc_now as _utc_now
 
 # A loose alias for parsed JSON-RPC payloads. The ACP protocol is too dynamic
 # to model exhaustively as TypedDicts, so we keep the wire format as
@@ -558,15 +559,21 @@ async def _ask_user_for_permission(tc: JsonDict, options: list[JsonDict]) -> Jso
     ]
 
     _audit.info("permission requested: %s", title)
-    response = await cl.AskActionMessage(
+    ask_msg = cl.AskActionMessage(
         content=_format_permission_prompt(tc),
         actions=actions,
         timeout=300,
-    ).send()
+    )
+    response = await ask_msg.send()
 
     if response is None:
         _audit.warning("permission timed out: %s", title)
         return {"outcome": "cancelled"}
+
+    # Remove the permission prompt from the chat so approved/denied tool calls
+    # don't pile up as stale "Selected: ..." bubbles. The tool step that wraps
+    # the call already provides a persistent record of what ran.
+    await ask_msg.remove()
 
     # AskActionResponse is a TypedDict whose ``payload`` field is typed as a
     # bare ``Dict``; pyright can't see the contents we put in it on the way out.
@@ -661,7 +668,7 @@ async def _handle_tool_call(
     else:
         title_val = update.get("title")
         tool_title = title_val if isinstance(title_val, str) and title_val else "tool"
-        step = cl.Step(name=tool_title, type="tool", parent_id=parent_id)
+        step = cl.Step(name=tool_title, type="run", parent_id=parent_id)
         if raw_input is not None:
             step.input = _stringify_raw(raw_input)
         await step.send()
@@ -715,13 +722,13 @@ async def on_chat_start() -> None:
     session is persisted in thread metadata so :func:`on_chat_resume` can pick
     it back up later.
     """
-    cl.user_session.set("explain_tools", False)  # pyright: ignore[reportUnknownMemberType]
+    cl.user_session.set("explain_tools", True)  # pyright: ignore[reportUnknownMemberType]
     await cl.ChatSettings(
         inputs=[
             cl.input_widget.Switch(
                 id="explain_tools",
                 label="Explain tool calls",
-                initial=False,
+                initial=True,
                 description=(
                     "Enable this option to add a plain-language explanation to each tool call."
                 ),
@@ -757,13 +764,13 @@ async def on_chat_resume(thread: ThreadDict) -> None:
     history at us via ``session/update`` events; we drain and discard them
     because chainlit's persistence is the source of truth for the UI.
     """
-    cl.user_session.set("explain_tools", False)  # pyright: ignore[reportUnknownMemberType]
+    cl.user_session.set("explain_tools", True)  # pyright: ignore[reportUnknownMemberType]
     await cl.ChatSettings(
         inputs=[
             cl.input_widget.Switch(
                 id="explain_tools",
                 label="Explain tool calls",
-                initial=False,
+                initial=True,
                 description=(
                     "Enable this option to add a plain-language explanation to each tool call."
                 ),
@@ -890,6 +897,9 @@ async def on_message(message: cl.Message) -> None:
     # it later in the permission dialog. vibe-acp's `session/request_permission`
     # payload only carries `toolCallId`, not the title or raw_input.
     tool_call_info: dict[str, JsonDict] = {}
+    # Mutable holder for the single visible tool-summary Step (type="tool").
+    # Created lazily on the first tool call; keyed by "step" when present.
+    tool_summary_holder: dict[str, cl.Step] = {}
 
     # Send the prompt and get a future for its response. We then race the
     # future against queue reads so session_update notifications and
@@ -942,6 +952,7 @@ async def on_message(message: cl.Message) -> None:
                             assistant_msg_getter=_ensure_assistant_msg,
                             tool_steps=tool_steps,
                             tool_call_info=tool_call_info,
+                            tool_summary_holder=tool_summary_holder,
                             parent_id=parent_id,
                         )
                 # Surface any error from the prompt response itself.
@@ -958,6 +969,7 @@ async def on_message(message: cl.Message) -> None:
                 assistant_msg_getter=_ensure_assistant_msg,
                 tool_steps=tool_steps,
                 tool_call_info=tool_call_info,
+                tool_summary_holder=tool_summary_holder,
                 parent_id=parent_id,
             )
 
@@ -976,6 +988,65 @@ async def on_message(message: cl.Message) -> None:
     if assistant_msg is not None:
         await assistant_msg.update()
 
+    # Final refresh of the tool summary step — set end to stop the spinner.
+    await _update_tool_summary(tool_summary_holder, tool_call_info, final=True)
+
+
+def _build_tool_summary(tool_call_info: dict[str, JsonDict]) -> str:
+    """Build a markdown summary of all tool calls for the summary step output."""
+    lines: list[str] = []
+    for info in tool_call_info.values():
+        title = str(info.get("title") or "tool")
+        status = info.get("status")
+        status_icon = (
+            "done" if status == "completed" else ("error" if status == "failed" else "...")
+        )
+        line = f"- **{title}** — *{status_icon}*"
+
+        human_readable = info.get("humanReadable")
+        if isinstance(human_readable, str) and human_readable:
+            line += f"\n  > {human_readable}"
+
+        ro = info.get("rawOutput")
+        ot = info.get("outputText")
+        output_str: str | None = None
+        if ro is not None:
+            output_str = _stringify_raw(ro)
+        elif isinstance(ot, str):
+            output_str = ot
+        if output_str is not None:
+            preview = output_str[:200].replace("\n", " ")
+            if len(output_str) > 200:
+                preview += "…"
+            line += f"\n  ```\n  {preview}\n  ```"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+async def _update_tool_summary(
+    tool_summary_holder: dict[str, cl.Step],
+    tool_call_info: dict[str, JsonDict],
+    *,
+    final: bool = False,
+) -> None:
+    """Refresh the single visible tool-summary Step.
+
+    While tools are running the step keeps ``start`` set and ``end`` unset so
+    that Chainlit's frontend treats it as a running ``type="tool"`` step.  This
+    is important because the frontend suppresses its own loader when it detects
+    a running tool step; without this the user sees two spinners.
+
+    Pass ``final=True`` once the agent turn is complete to set ``end`` and stop
+    the spinner.
+    """
+    step = tool_summary_holder.get("step")
+    if step is None:
+        return
+    step.output = _build_tool_summary(tool_call_info)
+    if final:
+        step.end = _utc_now()
+    await step.update()
+
 
 async def _process_session_frame(
     msg: JsonDict,
@@ -983,6 +1054,7 @@ async def _process_session_frame(
     assistant_msg_getter: Callable[[], Awaitable[cl.Message]],
     tool_steps: dict[str, cl.Step],
     tool_call_info: dict[str, JsonDict],
+    tool_summary_holder: dict[str, cl.Step],
     parent_id: str | None,
 ) -> None:
     """Dispatch one inbound JSON-RPC frame from a session queue.
@@ -1006,10 +1078,44 @@ async def _process_session_frame(
                 await target.stream_token(text)
 
         elif update_type == "tool_call":
+            tc_id = cast("str", update.get("toolCallId") or "")
+            is_new_tool = tc_id not in tool_steps
             await _handle_tool_call(update, tool_steps, tool_call_info, parent_id)
+            # Maintain a single visible summary Step (type="tool") that the
+            # user can expand. Individual tool steps use type="run" and are
+            # hidden by cot="tool_call".
+            if is_new_tool:
+                if "step" not in tool_summary_holder:
+                    summary = cl.Step(name="Tool Calls (1)", type="tool", parent_id=parent_id)
+                    summary.start = _utc_now()
+                    summary.output = _build_tool_summary(tool_call_info)
+                    await summary.send()
+                    tool_summary_holder["step"] = summary
+                else:
+                    tool_summary_holder["step"].name = f"Tool Calls ({len(tool_call_info)})"
+                    await _update_tool_summary(tool_summary_holder, tool_call_info)
 
         elif update_type == "tool_call_update":
+            # Track tool output for the summary step.
+            tc_id = cast("str", update.get("toolCallId") or "")
+            if tc_id in tool_call_info:
+                raw_output = update.get("rawOutput")
+                if raw_output is not None:
+                    tool_call_info[tc_id]["rawOutput"] = raw_output
+                else:
+                    text_parts = _extract_text_blocks(update.get("content"))
+                    if text_parts:
+                        tool_call_info[tc_id]["outputText"] = "\n".join(text_parts)
+                status = update.get("status")
+                if isinstance(status, str):
+                    tool_call_info[tc_id]["status"] = status
             await _handle_tool_call_update(update, tool_steps)
+            # Refresh the summary step after each tool completion.
+            if "step" in tool_summary_holder and update.get("status") in (
+                "completed",
+                "failed",
+            ):
+                await _update_tool_summary(tool_summary_holder, tool_call_info)
 
     elif method == "session/request_permission":
         req_id_raw = msg.get("id")
@@ -1031,6 +1137,14 @@ async def _process_session_frame(
         if _is_explain_enabled() and tc.get("humanReadable") is None:
             with contextlib.suppress(Exception):
                 tc["humanReadable"] = await _generate_human_readable(tc)
+
+        # Persist the explanation back into tool_call_info so the summary
+        # step can display it when the user unfolds it.
+        tc_id_perm = cast("str", tc.get("toolCallId") or "")
+        if tc_id_perm in tool_call_info and isinstance(tc.get("humanReadable"), str):
+            tool_call_info[tc_id_perm]["humanReadable"] = tc["humanReadable"]
+            if "step" in tool_summary_holder:
+                await _update_tool_summary(tool_summary_holder, tool_call_info)
 
         outcome = await _ask_user_for_permission(tc, options)
         await _client.respond(req_id, {"outcome": outcome})

@@ -1,5 +1,6 @@
 set quiet := true
 
+# Defaults to just --list
 default:
     @just --list
 
@@ -24,6 +25,7 @@ clean-chats:
     rm -f .vibe/trusted_folders.toml
     rm -rf .vibe/vibehistory
 
+# Install uv (only if just is installed via package manager)
 @install_uv:
     if ! command -v uv >/dev/null 2>&1; then \
         echo "uv is not installed. Installing..."; \

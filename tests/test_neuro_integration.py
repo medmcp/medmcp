@@ -5,6 +5,7 @@ These tests require ``uv sync --extra neuro`` and are skipped otherwise.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 import sys
@@ -12,11 +13,7 @@ from typing import Any, cast
 
 import pytest
 
-neuro_available = True
-try:
-    import medmcp_neuro as _  # pyright: ignore[reportMissingTypeStubs,reportUnusedImport]  # noqa: F401
-except ImportError:
-    neuro_available = False
+neuro_available = importlib.util.find_spec("medmcp_neuro") is not None
 
 skip_no_neuro = pytest.mark.skipif(not neuro_available, reason="medmcp-neuro not installed")
 

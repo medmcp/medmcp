@@ -124,6 +124,7 @@ def _load_mcp_servers() -> list[JsonDict]:
         )
     return servers
 
+
 # ── Explain tool calls (opt-in) ──────────────────────────
 #
 # When enabled by the user, each permission prompt is preceded by a short

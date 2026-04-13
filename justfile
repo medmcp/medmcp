@@ -1,5 +1,6 @@
 set quiet := true
 
+# Defaults to just --list
 default:
     @just --list
 
@@ -24,7 +25,8 @@ clean-chats:
     rm -f .vibe/trusted_folders.toml
     rm -rf .vibe/vibehistory
 
-@install_uv:
+# Install uv (only if just is installed via package manager)
+@install-uv:
     if ! command -v uv >/dev/null 2>&1; then \
         echo "uv is not installed. Installing..."; \
         curl -LsSf https://astral.sh/uv/install.sh | sh; \
@@ -33,11 +35,11 @@ clean-chats:
     fi
 
 # Install Ollama via bundled script
-install_ollama:
+install-ollama:
     @./scripts/install_ollama.sh
 
 # Install uv + Ollama, sync dev environment, register pre-commit hooks
-setup: install_uv install_ollama
+setup: install-uv install-ollama
     uv sync
     uv run pre-commit install
 
@@ -80,4 +82,16 @@ vibe *ARGS:
 
 # Launch the Chainlit web UI
 ui:
+    @./scripts/run_ui.sh
+
+# Start the Ollama server (blocks until stopped)
+serve-ollama:
+    ollama serve
+
+# One-shot: install everything, pull model, start Ollama, launch the UI
+medmcp: setup pull_model
+    @echo "Starting Ollama server..."
+    @ollama serve &
+    @sleep 2
+    @echo "Launching MedMCP UI..."
     @./scripts/run_ui.sh

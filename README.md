@@ -11,20 +11,14 @@ MedMCP runs entirely on-premise and is designed to meet the data governance and 
 
 ---
 
-## Vision
-
-MedMCP aims to become a **community-driven framework of tested medical imaging skills** for local AI agents. The core idea:
-
-- **Accessibility** - MedMCP exists to make validated imaging tools reachable, not to produce new ones. Every architectural decision is evaluated against one question: *"Does this reduce the barrier between a working method and the practitioner who needs it?"*
-- **Local-First** - MedMCP runs entirely on-premise: LLM inference is handled by a locally served model (in our case via Ollama), and no imaging data, patient metadata, or intermediate results leave the institution's infrastructure. This is a hard architectural constraint, not an optional feature.
-- **Community Driven** - MedMCP is designed to grow through community contributions: a shared schema for tool and skill metadata, CI-based testing, and a central registry for discovery ensure that each new contribution is immediately available to all users. Accessibility scales with the community, not with any single team's capacity. [Learn how to contibute!](CONTRIBUTING.md)
-
----
-
 ## Table of Contents
 
-- [Installation](#Installation)
-- [Contributing](#Contributing)
+- [Installation](#installation)
+- [Vision](#vision)
+- [Architecture](#architecture)
+- [Security](#security)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
@@ -32,18 +26,70 @@ MedMCP aims to become a **community-driven framework of tested medical imaging s
 
 ### Prerequisites
 
-Linux (tested for Ubuntu), [uv](https://docs.astral.sh/uv/), and [just](https://github.com/casey/just) (we recommend to install `rust-just` with `uv tool install rust-just`.
+- **OS:** Linux (tested on Ubuntu)
+- **Hardware:** A GPU with at least 24 GB VRAM is recommended for running the local Devstral model (~15 GB). CPU-only inference works but will be slow.
+- **Tools:** [uv](https://docs.astral.sh/uv/) and [just](https://github.com/casey/just) (we recommend installing `rust-just` with `uv tool install rust-just`)
 
 ### Quickstart
+
+The fastest way to get started is a single command that handles the full setup
+(uv, Ollama, Python deps, model pull) and then launches the UI:
+
+```bash
+just medmcp       # install everything, pull model, start Ollama, launch UI
+```
+
+If you prefer to run each step separately:
 
 ```bash
 just setup        # installs uv, ollama, and syncs Python deps
 just pull_model   # builds the local Devstral model (~15 GB, one-time)
+just serve-ollama # start the Ollama server (foreground, Ctrl-C to stop)
 just ui           # launches the web UI at http://localhost:8000
 ```
 
-Every tool call in the UI (bash, file writes, web fetches) requires an interactive Approve / Reject click. See the `SECURITY MODEL` section in `src/medmcp/app.py` for the full threat model.
+---
+
+## Vision
+
+MedMCP aims to become a **community-driven framework of tested medical imaging skills** for local AI agents. The core idea:
+
+- **Accessibility** — MedMCP exists to make validated imaging tools reachable, not to produce new ones. Every architectural decision is evaluated against one question: *"Does this reduce the barrier between a working method and the practitioner who needs it?"*
+- **Local-First** — MedMCP runs entirely on-premise: LLM inference is handled by a locally served model (in our case via Ollama), and no imaging data, patient metadata, or intermediate results leave the institution's infrastructure. This is a hard architectural constraint, not an optional feature.
+- **Community Driven** — MedMCP is designed to grow through community contributions: a shared schema for tool and skill metadata, CI-based testing, and a central registry for discovery ensure that each new contribution is immediately available to all users. Accessibility scales with the community, not with any single team's capacity. [Learn how to contribute!](CONTRIBUTING.md)
+
+---
+
+## Architecture
+
+MedMCP is built as a three-layer stack:
+
+1. **Chainlit web UI** (`src/medmcp/app.py`) — the user-facing chat interface served at `http://localhost:8000`.
+2. **vibe-acp subprocess** — an agent orchestrator that receives JSON-RPC 2.0 messages from the UI, manages tool execution, and communicates with the local LLM.
+3. **Ollama** — serves the local Devstral model (`Modelfile.devstral`) with 32k context, low temperature, and repeat-penalty guards.
+
+The UI spawns a single vibe-acp subprocess and demultiplexes sessions over it. Every tool call (bash, file writes, web fetches) is gated by an interactive Approve/Reject prompt — the user must explicitly approve each action before any side effect occurs.
+
+---
+
+## Security
+
+MedMCP's security model is designed around the assumption that the local model may be steered by prompt injection (e.g. content pasted from untrusted documents). Key constraints:
+
+- **No auto-approval** — every tool call requires an explicit user click. There is no auto-approval path.
+- **Localhost only** — the Chainlit server binds to localhost. Do not expose port 8000 over a network without adding real authentication.
+- **No data exfiltration** — `web_search` is disabled; `web_fetch` requires approval. No data leaves the institution's infrastructure by default.
+
+For vulnerability reporting, see [SECURITY.md](SECURITY.md).
 
 ---
 
 ## Contributing
+
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for instructions on forking, setting up a development environment, running checks, and submitting pull requests.
+
+---
+
+## License
+
+MedMCP is released under the [Apache License 2.0](LICENSE).

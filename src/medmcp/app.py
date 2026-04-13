@@ -55,11 +55,14 @@ from pathlib import Path
 from typing import Any, cast
 
 import chainlit as cl
+import httpx
 from chainlit.context import context as cl_context
 from chainlit.data import get_data_layer as cl_get_data_layer
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
+from chainlit.data.storage_clients.base import BaseStorageClient
 from chainlit.types import ThreadDict
 from chainlit.user import User
+from chainlit.utils import utc_now as _utc_now
 
 # A loose alias for parsed JSON-RPC payloads. The ACP protocol is too dynamic
 # to model exhaustively as TypedDicts, so we keep the wire format as
@@ -87,6 +90,37 @@ THREADS_DB_PATH: Path = VIBE_HOME / "medmcp_threads.db"
 # Single fixed user identity used by the data layer. There is no auth: this
 # exists only so chainlit's per-user thread scoping has a stable key.
 LOCAL_USER_ID: str = "local"
+
+# ── Explain tool calls (opt-in) ──────────────────────────
+#
+# When enabled by the user, each permission prompt is preceded by a short
+# LLM-generated plain-language explanation of what the tool call does.
+# The explanation is produced by the same local Ollama model that powers the
+# agent, via a lightweight direct API call.
+
+OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "devstral-medmcp")
+# Timeout for the explanation call.  Local Ollama inference is fast but the
+# model may be cold-starting; 20 s is generous without blocking the UI too long.
+EXPLAIN_TIMEOUT: float = 20.0
+
+# ── Risk taxonomy ──────────────────────────────────────────
+# Predefined categories for tool-call risk assessment.  The LLM is instructed
+# to pick from these keys only — it never invents new ones.
+# Each value is (display_label, severity).  severity drives the icon shown in
+# the permission dialog and the tool-call summary.
+RISK_CATEGORIES: dict[str, tuple[str, str]] = {
+    "file_read": ("Reads existing files", "low"),
+    "file_write": ("Creates or modifies files", "medium"),
+    "file_delete": ("Deletes files — may be irreversible", "high"),
+    "network": ("Contacts an external server or website", "medium"),
+    "code_exec": ("Runs a program or shell command", "high"),
+    "data_exfil": ("Could send your data to an external service", "high"),
+    "system_config": ("Changes system or application settings", "medium"),
+    "privacy": ("Accesses personal or sensitive information", "high"),
+}
+
+_SEVERITY_ICON: dict[str, str] = {"low": "🟢", "medium": "🟡", "high": "🔴"}
 
 # ── JSON-RPC wire helpers ──────────────────────────────────
 
@@ -429,34 +463,204 @@ async def header_auth_callback(_headers: object) -> User | None:
     return User(identifier=LOCAL_USER_ID, metadata={"role": "local"})
 
 
+class _NullStorageClient(BaseStorageClient):
+    """No-op storage client used when file uploads are disabled.
+
+    Chainlit's SQLAlchemyDataLayer logs a warning when no storage provider is
+    supplied, even though file uploads are explicitly disabled in config.toml.
+    Passing this stub silences the warning without changing any behaviour —
+    upload/delete/read_url calls should never occur with uploads disabled.
+    """
+
+    async def upload_file(
+        self,
+        object_key: str,
+        data: bytes | str,
+        mime: str = "application/octet-stream",
+        overwrite: bool = True,
+        content_disposition: str | None = None,
+    ) -> dict[str, Any]:
+        return {}
+
+    async def delete_file(self, object_key: str) -> bool:
+        return True
+
+    async def get_read_url(self, object_key: str) -> str:
+        return ""
+
+    async def close(self) -> None:
+        pass
+
+
 @cl.data_layer  # pyright: ignore[reportUnknownMemberType]
 def get_data_layer() -> SQLAlchemyDataLayer:
     """Wire chainlit to a local sqlite database for thread persistence."""
     _bootstrap_threads_db(THREADS_DB_PATH)
-    return SQLAlchemyDataLayer(conninfo=f"sqlite+aiosqlite:///{THREADS_DB_PATH}")
+    return SQLAlchemyDataLayer(
+        conninfo=f"sqlite+aiosqlite:///{THREADS_DB_PATH}",
+        storage_provider=_NullStorageClient(),
+    )
+
+
+# ── Tool-call explanation (opt-in) ────────────────────────
+
+
+def _raw_input_to_str(raw_input_val: object) -> str:
+    """Stringify a rawInput value for inclusion in the explanation prompt."""
+    if isinstance(raw_input_val, dict):
+        try:
+            # pyright: ignore — json.dumps accepts Any-typed dict values at runtime
+            return json.dumps(raw_input_val, indent=2)  # pyright: ignore[reportUnknownArgumentType]
+        except (TypeError, ValueError):
+            return str(raw_input_val)  # pyright: ignore[reportUnknownArgumentType]
+    return str(raw_input_val)
+
+
+async def _generate_explanation(tc: JsonDict) -> tuple[str, list[str]] | None:
+    """Ask the local Ollama model to explain a tool call for a non-technical user.
+
+    Returns ``(explanation, risks)`` on success or ``None`` on failure/timeout.
+    ``explanation`` is a single plain-language sentence aimed at a physician with
+    no IT background.  ``risks`` is a (possibly empty) list of keys from
+    :data:`RISK_CATEGORIES` that the model identified as applicable.
+
+    Errors are logged but never propagated — the permission dialog renders
+    without an explanation rather than blocking the user.
+    """
+    title = tc.get("title") or ""
+    raw_input_str = _raw_input_to_str(tc.get("rawInput") or "")
+
+    # Keep the input snippet short so the prompt stays well within the model's
+    # context window.  The full raw input is already shown in the JSON fence
+    # inside the permission dialog, so truncating here is fine.
+    if len(raw_input_str) > 400:
+        raw_input_str = raw_input_str[:400] + "\n… (truncated)"
+
+    valid_keys = ", ".join(RISK_CATEGORIES)
+    prompt = (
+        "You are a security-aware assistant helping a physician review an AI action "
+        "before it runs on their computer. Your job is to explain what the action does "
+        "and flag any risks — in plain language that requires no IT knowledge.\n\n"
+        "Guidelines for the explanation:\n"
+        "- Write ONE clear sentence a doctor with no computer background can understand.\n"
+        "- Avoid all technical jargon. Translate terms like 'bash', 'stdin', 'API', "
+        "'filesystem path', 'subprocess', or 'flag' into everyday language "
+        "(e.g. 'runs a program', 'opens a file', 'contacts a website').\n"
+        "- State what the action will DO and what will CHANGE as a result.\n\n"
+        "Then select every applicable risk from this fixed list (use the exact keys):\n"
+        f"{valid_keys}\n\n"
+        "Respond with ONLY a JSON object — no markdown fences, no extra text:\n"
+        '{"explanation": "<one sentence>", "risks": ["<key>", ...]}\n\n'
+        f"Tool: {title}\n"
+        f"Input: {raw_input_str}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=EXPLAIN_TIMEOUT) as client:
+            resp = await client.post(
+                f"{OLLAMA_BASE_URL}/v1/chat/completions",
+                json={
+                    "model": OLLAMA_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 300,
+                },
+            )
+            resp.raise_for_status()
+            data = cast("JsonDict", resp.json())
+            choices = cast("list[JsonDict]", data.get("choices") or [])
+            if not choices:
+                return None
+            message = cast("JsonDict", choices[0].get("message") or {})
+            raw_text = str(message.get("content") or "").strip()
+    except Exception:
+        _audit.warning("failed to generate tool-call explanation", exc_info=True)
+        return None
+
+    return _parse_explanation_response(raw_text)
+
+
+def _parse_explanation_response(raw_text: str) -> tuple[str, list[str]] | None:
+    """Parse the LLM's JSON response into ``(explanation, risks)``.
+
+    Handles models that wrap JSON in markdown code fences.  Returns ``None`` if
+    no valid JSON object can be extracted.
+    """
+    import re
+
+    text = raw_text.strip()
+
+    # Strip markdown code fences if present (```json ... ``` or ``` ... ```)
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fence_match:
+        text = fence_match.group(1)
+    else:
+        # Find the first { ... } block in case the model added preamble text
+        brace_match = re.search(r"\{.*\}", text, re.DOTALL)
+        if brace_match:
+            text = brace_match.group(0)
+
+    try:
+        payload_raw: object = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        _audit.warning("could not parse explanation JSON: %r", raw_text[:200])
+        return None
+
+    if not isinstance(payload_raw, dict):
+        return None
+    payload = cast("JsonDict", payload_raw)
+
+    explanation = str(payload.get("explanation") or "").strip()  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+    if not explanation:
+        return None
+
+    raw_risks = payload.get("risks")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    risks: list[str] = (
+        [k for k in cast("list[object]", raw_risks) if isinstance(k, str) and k in RISK_CATEGORIES]
+        if isinstance(raw_risks, list)
+        else []
+    )
+
+    return explanation, risks
 
 
 # ── Permission UI ──────────────────────────────────────────
+
+
+def _format_risk_badges(risks: list[str]) -> str:
+    """Render a list of risk keys as a compact inline string with severity icons."""
+    parts: list[str] = []
+    for key in risks:
+        entry = RISK_CATEGORIES.get(key)
+        if entry is None:
+            continue
+        label, severity = entry
+        icon = _SEVERITY_ICON.get(severity, "⚠️")
+        parts.append(f"{icon} {label}" if icon else label)
+    return "  ·  ".join(parts)
 
 
 def _format_permission_prompt(tc: JsonDict) -> str:
     """Build the markdown body shown in the permission dialog.
 
     ``tc`` is a ToolCallUpdate from ACP — it has ``title`` (human label, e.g.
-    ``"bash: ls -la ~/msseg"``) and ``rawInput`` (the JSON-serialized tool args).
+    ``"bash: ls -la ~/msseg"``), ``rawInput`` (the JSON-serialized tool args),
+    ``humanReadable`` (a plain-language explanation aimed at a non-technical
+    user), and optionally ``risks`` (a list of :data:`RISK_CATEGORIES` keys).
     """
     title = tc.get("title") or "tool call"
     raw_input = tc.get("rawInput")
+    human_readable = tc.get("humanReadable")
+    raw_risks = tc.get("risks")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    risks: list[str] = cast("list[str]", raw_risks) if isinstance(raw_risks, list) else []
 
     body = f"**Approve tool call?**\n\n`{title}`"
+    if isinstance(human_readable, str) and human_readable:
+        body += f"\n\n> {human_readable}"
+    if risks:
+        body += f"\n\n{_format_risk_badges(risks)}"
     if raw_input:
-        if isinstance(raw_input, str):
-            input_str = raw_input
-        else:
-            try:
-                input_str = json.dumps(raw_input, indent=2)
-            except (TypeError, ValueError):
-                input_str = str(raw_input)
+        input_str = _raw_input_to_str(raw_input)
         body += f"\n\n```json\n{input_str}\n```"
     return body
 
@@ -489,15 +693,21 @@ async def _ask_user_for_permission(tc: JsonDict, options: list[JsonDict]) -> Jso
     ]
 
     _audit.info("permission requested: %s", title)
-    response = await cl.AskActionMessage(
+    ask_msg = cl.AskActionMessage(
         content=_format_permission_prompt(tc),
         actions=actions,
         timeout=300,
-    ).send()
+    )
+    response = await ask_msg.send()
 
     if response is None:
         _audit.warning("permission timed out: %s", title)
         return {"outcome": "cancelled"}
+
+    # Remove the permission prompt from the chat so approved/denied tool calls
+    # don't pile up as stale "Selected: ..." bubbles. The tool step that wraps
+    # the call already provides a persistent record of what ran.
+    await ask_msg.remove()
 
     # AskActionResponse is a TypedDict whose ``payload`` field is typed as a
     # bare ``Dict``; pyright can't see the contents we put in it on the way out.
@@ -577,6 +787,8 @@ async def _handle_tool_call(
         info["title"] = t
     if (ri := update.get("rawInput")) is not None:
         info["rawInput"] = ri
+    if (hr := update.get("humanReadable")) is not None:
+        info["humanReadable"] = hr
 
     raw_input = update.get("rawInput")
     if tc_id in tool_steps:
@@ -590,7 +802,7 @@ async def _handle_tool_call(
     else:
         title_val = update.get("title")
         tool_title = title_val if isinstance(title_val, str) and title_val else "tool"
-        step = cl.Step(name=tool_title, type="tool", parent_id=parent_id)
+        step = cl.Step(name=tool_title, type="run", parent_id=parent_id)
         if raw_input is not None:
             step.input = _stringify_raw(raw_input)
         await step.send()
@@ -615,6 +827,23 @@ async def _handle_tool_call_update(update: JsonDict, tool_steps: dict[str, cl.St
         await step.update()
 
 
+# ── Explain toggle (ChatSettings) ─────────────────────────
+
+
+def _is_explain_enabled() -> bool:
+    """Check whether the user has opted in to tool-call explanations."""
+    val = cl.user_session.get("explain_tools")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    return bool(val)  # pyright: ignore[reportUnknownArgumentType]
+
+
+@cl.on_settings_update  # pyright: ignore[reportUnknownMemberType]
+async def on_settings_update(settings: dict[str, Any]) -> None:
+    """Persist chat-settings changes (explain toggle) into the user session."""
+    new_value = bool(settings.get("explain_tools", False))
+    cl.user_session.set("explain_tools", new_value)  # pyright: ignore[reportUnknownMemberType]
+    _audit.info("explain_tools set to %s via settings", new_value)
+
+
 # ── Chainlit hooks ─────────────────────────────────────────
 
 
@@ -627,6 +856,20 @@ async def on_chat_start() -> None:
     session is persisted in thread metadata so :func:`on_chat_resume` can pick
     it back up later.
     """
+    cl.user_session.set("explain_tools", True)  # pyright: ignore[reportUnknownMemberType]
+    await cl.ChatSettings(
+        inputs=[
+            cl.input_widget.Switch(
+                id="explain_tools",
+                label="Explain tool calls",
+                initial=True,
+                description=(
+                    "Enable this option to add a plain-language explanation to each tool call."
+                ),
+            ),
+        ],
+    ).send()
+
     await _client.ensure_started()
 
     resp = await _client.request("session/new", {"cwd": PROJECT_ROOT, "mcp_servers": []})
@@ -655,6 +898,20 @@ async def on_chat_resume(thread: ThreadDict) -> None:
     history at us via ``session/update`` events; we drain and discard them
     because chainlit's persistence is the source of truth for the UI.
     """
+    cl.user_session.set("explain_tools", True)  # pyright: ignore[reportUnknownMemberType]
+    await cl.ChatSettings(
+        inputs=[
+            cl.input_widget.Switch(
+                id="explain_tools",
+                label="Explain tool calls",
+                initial=True,
+                description=(
+                    "Enable this option to add a plain-language explanation to each tool call."
+                ),
+            ),
+        ],
+    ).send()
+
     await _client.ensure_started()
 
     # ThreadDict's typing carries Dict[Unknown, Unknown] for the metadata field,
@@ -774,6 +1031,9 @@ async def on_message(message: cl.Message) -> None:
     # it later in the permission dialog. vibe-acp's `session/request_permission`
     # payload only carries `toolCallId`, not the title or raw_input.
     tool_call_info: dict[str, JsonDict] = {}
+    # Mutable holder for the single visible tool-summary Step (type="tool").
+    # Created lazily on the first tool call; keyed by "step" when present.
+    tool_summary_holder: dict[str, cl.Step] = {}
 
     # Send the prompt and get a future for its response. We then race the
     # future against queue reads so session_update notifications and
@@ -826,6 +1086,7 @@ async def on_message(message: cl.Message) -> None:
                             assistant_msg_getter=_ensure_assistant_msg,
                             tool_steps=tool_steps,
                             tool_call_info=tool_call_info,
+                            tool_summary_holder=tool_summary_holder,
                             parent_id=parent_id,
                         )
                 # Surface any error from the prompt response itself.
@@ -842,6 +1103,7 @@ async def on_message(message: cl.Message) -> None:
                 assistant_msg_getter=_ensure_assistant_msg,
                 tool_steps=tool_steps,
                 tool_call_info=tool_call_info,
+                tool_summary_holder=tool_summary_holder,
                 parent_id=parent_id,
             )
 
@@ -860,6 +1122,70 @@ async def on_message(message: cl.Message) -> None:
     if assistant_msg is not None:
         await assistant_msg.update()
 
+    # Final refresh of the tool summary step — set end to stop the spinner.
+    await _update_tool_summary(tool_summary_holder, tool_call_info, final=True)
+
+
+def _build_tool_summary(tool_call_info: dict[str, JsonDict]) -> str:
+    """Build a markdown summary of all tool calls for the summary step output."""
+    lines: list[str] = []
+    for info in tool_call_info.values():
+        title = str(info.get("title") or "tool")
+        status = info.get("status")
+        status_icon = (
+            "done" if status == "completed" else ("error" if status == "failed" else "...")
+        )
+        line = f"- **{title}** — *{status_icon}*"
+
+        human_readable = info.get("humanReadable")
+        if isinstance(human_readable, str) and human_readable:
+            line += f"\n  > {human_readable}"
+        raw_risks: object = info.get("risks")
+        if isinstance(raw_risks, list) and raw_risks:
+            badges = _format_risk_badges(cast("list[str]", raw_risks))
+            if badges:
+                line += f"\n  {badges}"
+
+        ro = info.get("rawOutput")
+        ot = info.get("outputText")
+        output_str: str | None = None
+        if ro is not None:
+            output_str = _stringify_raw(ro)
+        elif isinstance(ot, str):
+            output_str = ot
+        if output_str is not None:
+            preview = output_str[:200].replace("\n", " ")
+            if len(output_str) > 200:
+                preview += "…"
+            line += f"\n  ```\n  {preview}\n  ```"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+async def _update_tool_summary(
+    tool_summary_holder: dict[str, cl.Step],
+    tool_call_info: dict[str, JsonDict],
+    *,
+    final: bool = False,
+) -> None:
+    """Refresh the single visible tool-summary Step.
+
+    While tools are running the step keeps ``start`` set and ``end`` unset so
+    that Chainlit's frontend treats it as a running ``type="tool"`` step.  This
+    is important because the frontend suppresses its own loader when it detects
+    a running tool step; without this the user sees two spinners.
+
+    Pass ``final=True`` once the agent turn is complete to set ``end`` and stop
+    the spinner.
+    """
+    step = tool_summary_holder.get("step")
+    if step is None:
+        return
+    step.output = _build_tool_summary(tool_call_info)
+    if final:
+        step.end = _utc_now()
+    await step.update()
+
 
 async def _process_session_frame(
     msg: JsonDict,
@@ -867,6 +1193,7 @@ async def _process_session_frame(
     assistant_msg_getter: Callable[[], Awaitable[cl.Message]],
     tool_steps: dict[str, cl.Step],
     tool_call_info: dict[str, JsonDict],
+    tool_summary_holder: dict[str, cl.Step],
     parent_id: str | None,
 ) -> None:
     """Dispatch one inbound JSON-RPC frame from a session queue.
@@ -890,10 +1217,44 @@ async def _process_session_frame(
                 await target.stream_token(text)
 
         elif update_type == "tool_call":
+            tc_id = cast("str", update.get("toolCallId") or "")
+            is_new_tool = tc_id not in tool_steps
             await _handle_tool_call(update, tool_steps, tool_call_info, parent_id)
+            # Maintain a single visible summary Step (type="tool") that the
+            # user can expand. Individual tool steps use type="run" and are
+            # hidden by cot="tool_call".
+            if is_new_tool:
+                if "step" not in tool_summary_holder:
+                    summary = cl.Step(name="Tool Calls (1)", type="tool", parent_id=parent_id)
+                    summary.start = _utc_now()
+                    summary.output = _build_tool_summary(tool_call_info)
+                    await summary.send()
+                    tool_summary_holder["step"] = summary
+                else:
+                    tool_summary_holder["step"].name = f"Tool Calls ({len(tool_call_info)})"
+                    await _update_tool_summary(tool_summary_holder, tool_call_info)
 
         elif update_type == "tool_call_update":
+            # Track tool output for the summary step.
+            tc_id = cast("str", update.get("toolCallId") or "")
+            if tc_id in tool_call_info:
+                raw_output = update.get("rawOutput")
+                if raw_output is not None:
+                    tool_call_info[tc_id]["rawOutput"] = raw_output
+                else:
+                    text_parts = _extract_text_blocks(update.get("content"))
+                    if text_parts:
+                        tool_call_info[tc_id]["outputText"] = "\n".join(text_parts)
+                status = update.get("status")
+                if isinstance(status, str):
+                    tool_call_info[tc_id]["status"] = status
             await _handle_tool_call_update(update, tool_steps)
+            # Refresh the summary step after each tool completion.
+            if "step" in tool_summary_holder and update.get("status") in (
+                "completed",
+                "failed",
+            ):
+                await _update_tool_summary(tool_summary_holder, tool_call_info)
 
     elif method == "session/request_permission":
         req_id_raw = msg.get("id")
@@ -903,12 +1264,34 @@ async def _process_session_frame(
         params = cast("JsonDict", msg.get("params") or {})
         tc: JsonDict = dict(cast("JsonDict", params.get("toolCall") or {}))
         options = cast("list[JsonDict]", params.get("options") or [])
-        # Backfill title/rawInput from the cached tool_call event, because
-        # request_permission only ships the toolCallId.
+        # Backfill title/rawInput/humanReadable/risks from the cached tool_call
+        # event, because request_permission only ships the toolCallId.
         cached = tool_call_info.get(cast("str", tc.get("toolCallId") or ""), {})
-        for key in ("title", "rawInput"):
+        for key in ("title", "rawInput", "humanReadable", "risks"):
             if tc.get(key) is None and cached.get(key) is not None:
                 tc[key] = cached[key]
+
+        # Generate a plain-language explanation + risk assessment if the user
+        # opted in and one wasn't already provided by vibe-acp.
+        if _is_explain_enabled() and tc.get("humanReadable") is None:
+            with contextlib.suppress(Exception):
+                result = await _generate_explanation(tc)
+                if result is not None:
+                    tc["humanReadable"], tc["risks"] = result
+
+        # Persist explanation and risks back into tool_call_info so the
+        # summary step can display them when the user unfolds it.
+        tc_id_perm = cast("str", tc.get("toolCallId") or "")
+        if tc_id_perm in tool_call_info:
+            updated = False
+            if isinstance(tc.get("humanReadable"), str):
+                tool_call_info[tc_id_perm]["humanReadable"] = tc["humanReadable"]
+                updated = True
+            if isinstance(tc.get("risks"), list):
+                tool_call_info[tc_id_perm]["risks"] = tc["risks"]
+                updated = True
+            if updated and "step" in tool_summary_holder:
+                await _update_tool_summary(tool_summary_holder, tool_call_info)
 
         outcome = await _ask_user_for_permission(tc, options)
         await _client.respond(req_id, {"outcome": outcome})

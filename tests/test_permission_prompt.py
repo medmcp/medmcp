@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -11,8 +12,10 @@ import pytest
 from medmcp.app import (
     OLLAMA_BASE_URL,  # pyright: ignore[reportPrivateUsage]
     OLLAMA_MODEL,  # pyright: ignore[reportPrivateUsage]
+    RISK_CATEGORIES,  # pyright: ignore[reportPrivateUsage]
     _format_permission_prompt,  # pyright: ignore[reportPrivateUsage]
-    _generate_human_readable,  # pyright: ignore[reportPrivateUsage]
+    _generate_explanation,  # pyright: ignore[reportPrivateUsage]
+    _parse_explanation_response,  # pyright: ignore[reportPrivateUsage]
 )
 
 # ── _format_permission_prompt ─────────────────────────────
@@ -86,41 +89,251 @@ class TestFormatPermissionPrompt:
         result = _format_permission_prompt({})
         assert "`tool call`" in result
 
+    def test_risks_rendered_as_badges(self) -> None:
+        """Known risk keys should render as labelled badge lines."""
+        result = _format_permission_prompt(
+            {
+                "title": "bash: rm -rf /data",
+                "humanReadable": "Permanently deletes the /data folder.",
+                "risks": ["file_delete", "code_exec"],
+            }
+        )
+        label_delete, _ = RISK_CATEGORIES["file_delete"]
+        label_exec, _ = RISK_CATEGORIES["code_exec"]
+        assert label_delete in result
+        assert label_exec in result
 
-# ── _generate_human_readable ──────────────────────────────
+    def test_risks_appear_after_human_readable(self) -> None:
+        """Risk badges must follow the blockquote explanation, before the JSON fence."""
+        result = _format_permission_prompt(
+            {
+                "title": "bash: curl http://example.com",
+                "rawInput": {"url": "http://example.com"},
+                "humanReadable": "Downloads a file from the internet.",
+                "risks": ["network"],
+            }
+        )
+        hr_pos = result.index("> Downloads")
+        label_network, _ = RISK_CATEGORIES["network"]
+        risk_pos = result.index(label_network)
+        raw_pos = result.index("```json")
+        assert hr_pos < risk_pos < raw_pos
+
+    def test_unknown_risk_keys_ignored(self) -> None:
+        """Risk keys not in RISK_CATEGORIES should be silently dropped."""
+        result = _format_permission_prompt(
+            {
+                "title": "bash: ls",
+                "risks": ["not_a_real_risk", "file_read"],
+            }
+        )
+        assert "not_a_real_risk" not in result
+        label_read, _ = RISK_CATEGORIES["file_read"]
+        assert label_read in result
+
+    def test_no_risks_no_badge_line(self) -> None:
+        """An empty risks list should not add any badge output."""
+        result_with = _format_permission_prompt({"title": "bash: ls", "risks": ["file_read"]})
+        result_without = _format_permission_prompt({"title": "bash: ls", "risks": []})
+        assert len(result_with) > len(result_without)
 
 
-def _mock_ollama_response(text: str) -> httpx.Response:
+# ── _parse_explanation_response ───────────────────────────
+
+
+class TestParseExplanationResponse:
+    """Unit tests for the JSON parser — no Ollama calls needed."""
+
+    def test_valid_json(self) -> None:
+        """Clean JSON should parse to (explanation, risks)."""
+        payload = json.dumps({"explanation": "Lists folder contents.", "risks": ["file_read"]})
+        result = _parse_explanation_response(payload)
+        assert result == ("Lists folder contents.", ["file_read"])
+
+    def test_json_in_code_fence(self) -> None:
+        """JSON wrapped in a markdown code fence should still parse correctly."""
+        payload = '```json\n{"explanation": "Reads a file.", "risks": ["file_read"]}\n```'
+        result = _parse_explanation_response(payload)
+        assert result is not None
+        explanation, risks = result
+        assert explanation == "Reads a file."
+        assert risks == ["file_read"]
+
+    def test_preamble_text_stripped(self) -> None:
+        """If the model adds leading text before the JSON object, it should be stripped."""
+        payload = 'Here is the result:\n{"explanation": "Does something.", "risks": []}'
+        result = _parse_explanation_response(payload)
+        assert result is not None
+        assert result[0] == "Does something."
+
+    def test_invalid_risk_keys_filtered(self) -> None:
+        """Risk keys not in RISK_CATEGORIES should be removed."""
+        payload = json.dumps(
+            {"explanation": "Does something.", "risks": ["file_read", "invented_risk"]}
+        )
+        result = _parse_explanation_response(payload)
+        assert result is not None
+        _, risks = result
+        assert risks == ["file_read"]
+        assert "invented_risk" not in risks
+
+    def test_all_valid_risk_keys_accepted(self) -> None:
+        """All keys in RISK_CATEGORIES should be accepted."""
+        all_keys = list(RISK_CATEGORIES)
+        payload = json.dumps({"explanation": "Does everything.", "risks": all_keys})
+        result = _parse_explanation_response(payload)
+        assert result is not None
+        _, risks = result
+        assert set(risks) == set(all_keys)
+
+    def test_missing_explanation_returns_none(self) -> None:
+        """A payload without an explanation key should return None."""
+        payload = json.dumps({"risks": ["file_read"]})
+        assert _parse_explanation_response(payload) is None
+
+    def test_empty_explanation_returns_none(self) -> None:
+        """An empty explanation string should be treated as absent."""
+        payload = json.dumps({"explanation": "   ", "risks": []})
+        assert _parse_explanation_response(payload) is None
+
+    def test_empty_risks_list_allowed(self) -> None:
+        """An empty risks list is valid — some tool calls have no notable risks."""
+        payload = json.dumps({"explanation": "Checks the date.", "risks": []})
+        result = _parse_explanation_response(payload)
+        assert result == ("Checks the date.", [])
+
+    def test_invalid_json_returns_none(self) -> None:
+        """Garbage text that cannot be parsed as JSON should return None."""
+        assert _parse_explanation_response("not json at all") is None
+
+    def test_non_dict_json_returns_none(self) -> None:
+        """A JSON array at the top level should return None."""
+        assert _parse_explanation_response('["a", "b"]') is None
+
+
+# ── _generate_explanation ─────────────────────────────────
+
+
+def _mock_ollama_response(body: str) -> httpx.Response:
     """Build a fake httpx.Response mimicking Ollama's chat/completions endpoint."""
     return httpx.Response(
         200,
-        json={
-            "choices": [{"message": {"content": text}}],
-        },
+        json={"choices": [{"message": {"content": body}}]},
         request=httpx.Request("POST", f"{OLLAMA_BASE_URL}/v1/chat/completions"),
     )
 
 
-class TestGenerateHumanReadable:
-    """Verify _generate_human_readable calls Ollama and parses the response."""
+class TestGenerateExplanation:
+    """Verify _generate_explanation calls Ollama and parses the structured response."""
 
     @pytest.mark.asyncio
-    async def test_returns_explanation(self) -> None:
-        """A successful Ollama response should yield the explanation text."""
-        mock_response = _mock_ollama_response("Lists all files in the current directory.")
-        with patch("medmcp.app.httpx.AsyncClient") as mock_client_cls:
+    async def test_returns_explanation_and_risks(self) -> None:
+        """A successful Ollama JSON response yields (explanation, risks)."""
+        body = json.dumps({"explanation": "Lists all files in the folder.", "risks": ["file_read"]})
+        with patch("medmcp.app.httpx.AsyncClient") as mock_cls:
             instance = AsyncMock()
-            instance.post.return_value = mock_response
+            instance.post.return_value = _mock_ollama_response(body)
             instance.__aenter__ = AsyncMock(return_value=instance)
             instance.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = instance
+            mock_cls.return_value = instance
 
-            result = await _generate_human_readable({"title": "bash: ls -la"})
+            result = await _generate_explanation({"title": "bash: ls -la"})
 
-        assert result == "Lists all files in the current directory."
-        instance.post.assert_called_once()
+        assert result is not None
+        explanation, risks = result
+        assert explanation == "Lists all files in the folder."
+        assert risks == ["file_read"]
+
+    @pytest.mark.asyncio
+    async def test_correct_model_and_low_temperature(self) -> None:
+        """The request must use the configured model and temperature=0."""
+        body = json.dumps({"explanation": "Does something.", "risks": []})
+        with patch("medmcp.app.httpx.AsyncClient") as mock_cls:
+            instance = AsyncMock()
+            instance.post.return_value = _mock_ollama_response(body)
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = instance
+
+            await _generate_explanation({"title": "bash: ls"})
+
         call_kwargs: dict[str, Any] = instance.post.call_args[1]
         assert call_kwargs["json"]["model"] == OLLAMA_MODEL
+        assert call_kwargs["json"]["temperature"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_prompt_contains_physician_language(self) -> None:
+        """The prompt must explicitly mention the physician audience."""
+        body = json.dumps({"explanation": "x", "risks": []})
+        with patch("medmcp.app.httpx.AsyncClient") as mock_cls:
+            instance = AsyncMock()
+            instance.post.return_value = _mock_ollama_response(body)
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = instance
+
+            await _generate_explanation({"title": "bash: ls"})
+
+        call_kwargs: dict[str, Any] = instance.post.call_args[1]
+        prompt: str = call_kwargs["json"]["messages"][0]["content"]
+        assert "physician" in prompt.lower()
+
+    @pytest.mark.asyncio
+    async def test_prompt_lists_all_risk_keys(self) -> None:
+        """Every key in RISK_CATEGORIES must appear in the prompt."""
+        body = json.dumps({"explanation": "x", "risks": []})
+        with patch("medmcp.app.httpx.AsyncClient") as mock_cls:
+            instance = AsyncMock()
+            instance.post.return_value = _mock_ollama_response(body)
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = instance
+
+            await _generate_explanation({"title": "bash: ls"})
+
+        call_kwargs: dict[str, Any] = instance.post.call_args[1]
+        prompt: str = call_kwargs["json"]["messages"][0]["content"]
+        for key in RISK_CATEGORIES:
+            assert key in prompt, f"Risk key '{key}' missing from prompt"
+
+    @pytest.mark.asyncio
+    async def test_dict_raw_input_serialized_in_prompt(self) -> None:
+        """Dict rawInput should be JSON-serialized in the prompt, not repr'd."""
+        body = json.dumps({"explanation": "Writes a file.", "risks": ["file_write"]})
+        with patch("medmcp.app.httpx.AsyncClient") as mock_cls:
+            instance = AsyncMock()
+            instance.post.return_value = _mock_ollama_response(body)
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = instance
+
+            await _generate_explanation(
+                {"title": "write_file", "rawInput": {"path": "/tmp/x", "content": "hello"}}
+            )
+
+        call_kwargs: dict[str, Any] = instance.post.call_args[1]
+        prompt: str = call_kwargs["json"]["messages"][0]["content"]
+        assert '"path"' in prompt
+
+    @pytest.mark.asyncio
+    async def test_long_raw_input_truncated(self) -> None:
+        """RawInput longer than 400 chars should be truncated in the prompt."""
+        body = json.dumps({"explanation": "Does something.", "risks": []})
+        long_input = "x" * 600
+        with patch("medmcp.app.httpx.AsyncClient") as mock_cls:
+            instance = AsyncMock()
+            instance.post.return_value = _mock_ollama_response(body)
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = instance
+
+            await _generate_explanation({"title": "bash: cat", "rawInput": long_input})
+
+        call_kwargs: dict[str, Any] = instance.post.call_args[1]
+        prompt: str = call_kwargs["json"]["messages"][0]["content"]
+        assert "truncated" in prompt
+        # The full 600-char string must not appear verbatim
+        assert long_input not in prompt
 
     @pytest.mark.asyncio
     async def test_returns_none_on_empty_choices(self) -> None:
@@ -130,62 +343,41 @@ class TestGenerateHumanReadable:
             json={"choices": []},
             request=httpx.Request("POST", f"{OLLAMA_BASE_URL}/v1/chat/completions"),
         )
-        with patch("medmcp.app.httpx.AsyncClient") as mock_client_cls:
+        with patch("medmcp.app.httpx.AsyncClient") as mock_cls:
             instance = AsyncMock()
             instance.post.return_value = response
             instance.__aenter__ = AsyncMock(return_value=instance)
             instance.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = instance
+            mock_cls.return_value = instance
 
-            result = await _generate_human_readable({"title": "bash: ls"})
+            result = await _generate_explanation({"title": "bash: ls"})
 
         assert result is None
 
     @pytest.mark.asyncio
     async def test_returns_none_on_network_error(self) -> None:
         """Network failures should return None, not raise."""
-        with patch("medmcp.app.httpx.AsyncClient") as mock_client_cls:
+        with patch("medmcp.app.httpx.AsyncClient") as mock_cls:
             instance = AsyncMock()
             instance.post.side_effect = httpx.ConnectError("connection refused")
             instance.__aenter__ = AsyncMock(return_value=instance)
             instance.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = instance
+            mock_cls.return_value = instance
 
-            result = await _generate_human_readable({"title": "bash: ls"})
-
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_returns_none_on_blank_content(self) -> None:
-        """A blank content string should be treated as no explanation."""
-        response = _mock_ollama_response("   ")
-        with patch("medmcp.app.httpx.AsyncClient") as mock_client_cls:
-            instance = AsyncMock()
-            instance.post.return_value = response
-            instance.__aenter__ = AsyncMock(return_value=instance)
-            instance.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = instance
-
-            result = await _generate_human_readable({"title": "bash: ls"})
+            result = await _generate_explanation({"title": "bash: ls"})
 
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_dict_raw_input_serialized(self) -> None:
-        """Dict rawInput should be JSON-serialized in the prompt sent to Ollama."""
-        mock_response = _mock_ollama_response("Writes hello to a file.")
-        with patch("medmcp.app.httpx.AsyncClient") as mock_client_cls:
+    async def test_returns_none_on_invalid_json_response(self) -> None:
+        """A non-JSON response body should return None, not raise."""
+        with patch("medmcp.app.httpx.AsyncClient") as mock_cls:
             instance = AsyncMock()
-            instance.post.return_value = mock_response
+            instance.post.return_value = _mock_ollama_response("I cannot help with that.")
             instance.__aenter__ = AsyncMock(return_value=instance)
             instance.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = instance
+            mock_cls.return_value = instance
 
-            await _generate_human_readable(
-                {"title": "write_file", "rawInput": {"path": "/tmp/x", "content": "hello"}}
-            )
+            result = await _generate_explanation({"title": "bash: ls"})
 
-        call_kwargs: dict[str, Any] = instance.post.call_args[1]
-        prompt: str = call_kwargs["json"]["messages"][0]["content"]
-        # The dict should have been serialized, not repr'd
-        assert '"path"' in prompt
+        assert result is None

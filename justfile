@@ -26,7 +26,7 @@ clean-chats:
     rm -rf .vibe/vibehistory
 
 # Install uv (only if just is installed via package manager)
-@install_uv:
+@install-uv:
     if ! command -v uv >/dev/null 2>&1; then \
         echo "uv is not installed. Installing..."; \
         curl -LsSf https://astral.sh/uv/install.sh | sh; \
@@ -35,11 +35,11 @@ clean-chats:
     fi
 
 # Install Ollama via bundled script
-install_ollama:
+install-ollama:
     @./scripts/install_ollama.sh
 
 # Install uv + Ollama, sync dev environment, register pre-commit hooks
-setup: install_uv install_ollama
+setup: install-uv install-ollama
     uv sync
     uv run pre-commit install
 

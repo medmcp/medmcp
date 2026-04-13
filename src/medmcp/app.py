@@ -59,6 +59,7 @@ import httpx
 from chainlit.context import context as cl_context
 from chainlit.data import get_data_layer as cl_get_data_layer
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
+from chainlit.data.storage_clients.base import BaseStorageClient
 from chainlit.types import ThreadDict
 from chainlit.user import User
 from chainlit.utils import utc_now as _utc_now
@@ -99,7 +100,27 @@ LOCAL_USER_ID: str = "local"
 
 OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "devstral-medmcp")
-EXPLAIN_TIMEOUT: float = 15.0
+# Timeout for the explanation call.  Local Ollama inference is fast but the
+# model may be cold-starting; 20 s is generous without blocking the UI too long.
+EXPLAIN_TIMEOUT: float = 20.0
+
+# ── Risk taxonomy ──────────────────────────────────────────
+# Predefined categories for tool-call risk assessment.  The LLM is instructed
+# to pick from these keys only — it never invents new ones.
+# Each value is (display_label, severity).  severity drives the icon shown in
+# the permission dialog and the tool-call summary.
+RISK_CATEGORIES: dict[str, tuple[str, str]] = {
+    "file_read": ("Reads existing files", "low"),
+    "file_write": ("Creates or modifies files", "medium"),
+    "file_delete": ("Deletes files — may be irreversible", "high"),
+    "network": ("Contacts an external server or website", "medium"),
+    "code_exec": ("Runs a program or shell command", "high"),
+    "data_exfil": ("Could send your data to an external service", "high"),
+    "system_config": ("Changes system or application settings", "medium"),
+    "privacy": ("Accesses personal or sensitive information", "high"),
+}
+
+_SEVERITY_ICON: dict[str, str] = {"low": "🟢", "medium": "🟡", "high": "🔴"}
 
 # ── JSON-RPC wire helpers ──────────────────────────────────
 
@@ -442,41 +463,98 @@ async def header_auth_callback(_headers: object) -> User | None:
     return User(identifier=LOCAL_USER_ID, metadata={"role": "local"})
 
 
+class _NullStorageClient(BaseStorageClient):
+    """No-op storage client used when file uploads are disabled.
+
+    Chainlit's SQLAlchemyDataLayer logs a warning when no storage provider is
+    supplied, even though file uploads are explicitly disabled in config.toml.
+    Passing this stub silences the warning without changing any behaviour —
+    upload/delete/read_url calls should never occur with uploads disabled.
+    """
+
+    async def upload_file(
+        self,
+        object_key: str,
+        data: bytes | str,
+        mime: str = "application/octet-stream",
+        overwrite: bool = True,
+        content_disposition: str | None = None,
+    ) -> dict[str, Any]:
+        return {}
+
+    async def delete_file(self, object_key: str) -> bool:
+        return True
+
+    async def get_read_url(self, object_key: str) -> str:
+        return ""
+
+    async def close(self) -> None:
+        pass
+
+
 @cl.data_layer  # pyright: ignore[reportUnknownMemberType]
 def get_data_layer() -> SQLAlchemyDataLayer:
     """Wire chainlit to a local sqlite database for thread persistence."""
     _bootstrap_threads_db(THREADS_DB_PATH)
-    return SQLAlchemyDataLayer(conninfo=f"sqlite+aiosqlite:///{THREADS_DB_PATH}")
+    return SQLAlchemyDataLayer(
+        conninfo=f"sqlite+aiosqlite:///{THREADS_DB_PATH}",
+        storage_provider=_NullStorageClient(),
+    )
 
 
 # ── Tool-call explanation (opt-in) ────────────────────────
 
 
-async def _generate_human_readable(tc: JsonDict) -> str | None:
-    """Ask the local Ollama model to explain a tool call in plain language.
+def _raw_input_to_str(raw_input_val: object) -> str:
+    """Stringify a rawInput value for inclusion in the explanation prompt."""
+    if isinstance(raw_input_val, dict):
+        try:
+            # pyright: ignore — json.dumps accepts Any-typed dict values at runtime
+            return json.dumps(raw_input_val, indent=2)  # pyright: ignore[reportUnknownArgumentType]
+        except (TypeError, ValueError):
+            return str(raw_input_val)  # pyright: ignore[reportUnknownArgumentType]
+    return str(raw_input_val)
 
-    Returns a short explanation string, or ``None`` if the request fails or
-    times out. Errors are logged but never propagated — the permission dialog
-    simply renders without an explanation.
+
+async def _generate_explanation(tc: JsonDict) -> tuple[str, list[str]] | None:
+    """Ask the local Ollama model to explain a tool call for a non-technical user.
+
+    Returns ``(explanation, risks)`` on success or ``None`` on failure/timeout.
+    ``explanation`` is a single plain-language sentence aimed at a physician with
+    no IT background.  ``risks`` is a (possibly empty) list of keys from
+    :data:`RISK_CATEGORIES` that the model identified as applicable.
+
+    Errors are logged but never propagated — the permission dialog renders
+    without an explanation rather than blocking the user.
     """
     title = tc.get("title") or ""
-    raw_input_val: object = tc.get("rawInput") or ""
-    if isinstance(raw_input_val, dict):
-        ri_dict = cast("JsonDict", raw_input_val)
-        try:
-            raw_input_str = json.dumps(ri_dict, indent=2)
-        except (TypeError, ValueError):
-            raw_input_str = str(ri_dict)
-    else:
-        raw_input_str = str(raw_input_val)
+    raw_input_str = _raw_input_to_str(tc.get("rawInput") or "")
 
+    # Keep the input snippet short so the prompt stays well within the model's
+    # context window.  The full raw input is already shown in the JSON fence
+    # inside the permission dialog, so truncating here is fine.
+    if len(raw_input_str) > 400:
+        raw_input_str = raw_input_str[:400] + "\n… (truncated)"
+
+    valid_keys = ", ".join(RISK_CATEGORIES)
     prompt = (
-        "You are a SECURITY-AWARE assistant. A tool call is about to be "
-        "executed on the user's machine. Explain what it does in ONE short "
-        "sentence that a NON-TECHNICAL user can understand. Focus on the "
-        "effect and any risks. Reply with ONLY the explanation.\n\n"
-        f"Tool: {title}\nInput: {raw_input_str}"
+        "You are a security-aware assistant helping a physician review an AI action "
+        "before it runs on their computer. Your job is to explain what the action does "
+        "and flag any risks — in plain language that requires no IT knowledge.\n\n"
+        "Guidelines for the explanation:\n"
+        "- Write ONE clear sentence a doctor with no computer background can understand.\n"
+        "- Avoid all technical jargon. Translate terms like 'bash', 'stdin', 'API', "
+        "'filesystem path', 'subprocess', or 'flag' into everyday language "
+        "(e.g. 'runs a program', 'opens a file', 'contacts a website').\n"
+        "- State what the action will DO and what will CHANGE as a result.\n\n"
+        "Then select every applicable risk from this fixed list (use the exact keys):\n"
+        f"{valid_keys}\n\n"
+        "Respond with ONLY a JSON object — no markdown fences, no extra text:\n"
+        '{"explanation": "<one sentence>", "risks": ["<key>", ...]}\n\n'
+        f"Tool: {title}\n"
+        f"Input: {raw_input_str}"
     )
+
     try:
         async with httpx.AsyncClient(timeout=EXPLAIN_TIMEOUT) as client:
             resp = await client.post(
@@ -484,8 +562,8 @@ async def _generate_human_readable(tc: JsonDict) -> str | None:
                 json={
                     "model": OLLAMA_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.0,
-                    "max_tokens": 120,
+                    "temperature": 0.1,
+                    "max_tokens": 300,
                 },
             )
             resp.raise_for_status()
@@ -494,14 +572,72 @@ async def _generate_human_readable(tc: JsonDict) -> str | None:
             if not choices:
                 return None
             message = cast("JsonDict", choices[0].get("message") or {})
-            text = str(message.get("content") or "").strip()
-            return text or None
+            raw_text = str(message.get("content") or "").strip()
     except Exception:
         _audit.warning("failed to generate tool-call explanation", exc_info=True)
         return None
 
+    return _parse_explanation_response(raw_text)
+
+
+def _parse_explanation_response(raw_text: str) -> tuple[str, list[str]] | None:
+    """Parse the LLM's JSON response into ``(explanation, risks)``.
+
+    Handles models that wrap JSON in markdown code fences.  Returns ``None`` if
+    no valid JSON object can be extracted.
+    """
+    import re
+
+    text = raw_text.strip()
+
+    # Strip markdown code fences if present (```json ... ``` or ``` ... ```)
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fence_match:
+        text = fence_match.group(1)
+    else:
+        # Find the first { ... } block in case the model added preamble text
+        brace_match = re.search(r"\{.*\}", text, re.DOTALL)
+        if brace_match:
+            text = brace_match.group(0)
+
+    try:
+        payload_raw: object = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        _audit.warning("could not parse explanation JSON: %r", raw_text[:200])
+        return None
+
+    if not isinstance(payload_raw, dict):
+        return None
+    payload = cast("JsonDict", payload_raw)
+
+    explanation = str(payload.get("explanation") or "").strip()  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+    if not explanation:
+        return None
+
+    raw_risks = payload.get("risks")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    risks: list[str] = (
+        [k for k in cast("list[object]", raw_risks) if isinstance(k, str) and k in RISK_CATEGORIES]
+        if isinstance(raw_risks, list)
+        else []
+    )
+
+    return explanation, risks
+
 
 # ── Permission UI ──────────────────────────────────────────
+
+
+def _format_risk_badges(risks: list[str]) -> str:
+    """Render a list of risk keys as a compact inline string with severity icons."""
+    parts: list[str] = []
+    for key in risks:
+        entry = RISK_CATEGORIES.get(key)
+        if entry is None:
+            continue
+        label, severity = entry
+        icon = _SEVERITY_ICON.get(severity, "⚠️")
+        parts.append(f"{icon} {label}" if icon else label)
+    return "  ·  ".join(parts)
 
 
 def _format_permission_prompt(tc: JsonDict) -> str:
@@ -509,24 +645,22 @@ def _format_permission_prompt(tc: JsonDict) -> str:
 
     ``tc`` is a ToolCallUpdate from ACP — it has ``title`` (human label, e.g.
     ``"bash: ls -la ~/msseg"``), ``rawInput`` (the JSON-serialized tool args),
-    and optionally ``humanReadable`` (a plain-language explanation of what the
-    tool call does and why).
+    ``humanReadable`` (a plain-language explanation aimed at a non-technical
+    user), and optionally ``risks`` (a list of :data:`RISK_CATEGORIES` keys).
     """
     title = tc.get("title") or "tool call"
     raw_input = tc.get("rawInput")
     human_readable = tc.get("humanReadable")
+    raw_risks = tc.get("risks")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    risks: list[str] = cast("list[str]", raw_risks) if isinstance(raw_risks, list) else []
 
     body = f"**Approve tool call?**\n\n`{title}`"
     if isinstance(human_readable, str) and human_readable:
         body += f"\n\n> {human_readable}"
+    if risks:
+        body += f"\n\n{_format_risk_badges(risks)}"
     if raw_input:
-        if isinstance(raw_input, str):
-            input_str = raw_input
-        else:
-            try:
-                input_str = json.dumps(raw_input, indent=2)
-            except (TypeError, ValueError):
-                input_str = str(raw_input)
+        input_str = _raw_input_to_str(raw_input)
         body += f"\n\n```json\n{input_str}\n```"
     return body
 
@@ -1006,6 +1140,11 @@ def _build_tool_summary(tool_call_info: dict[str, JsonDict]) -> str:
         human_readable = info.get("humanReadable")
         if isinstance(human_readable, str) and human_readable:
             line += f"\n  > {human_readable}"
+        raw_risks: object = info.get("risks")
+        if isinstance(raw_risks, list) and raw_risks:
+            badges = _format_risk_badges(cast("list[str]", raw_risks))
+            if badges:
+                line += f"\n  {badges}"
 
         ro = info.get("rawOutput")
         ot = info.get("outputText")
@@ -1125,25 +1264,33 @@ async def _process_session_frame(
         params = cast("JsonDict", msg.get("params") or {})
         tc: JsonDict = dict(cast("JsonDict", params.get("toolCall") or {}))
         options = cast("list[JsonDict]", params.get("options") or [])
-        # Backfill title/rawInput from the cached tool_call event, because
-        # request_permission only ships the toolCallId.
+        # Backfill title/rawInput/humanReadable/risks from the cached tool_call
+        # event, because request_permission only ships the toolCallId.
         cached = tool_call_info.get(cast("str", tc.get("toolCallId") or ""), {})
-        for key in ("title", "rawInput", "humanReadable"):
+        for key in ("title", "rawInput", "humanReadable", "risks"):
             if tc.get(key) is None and cached.get(key) is not None:
                 tc[key] = cached[key]
 
-        # Generate a plain-language explanation if the user opted in and
-        # one wasn't already provided by vibe-acp.
+        # Generate a plain-language explanation + risk assessment if the user
+        # opted in and one wasn't already provided by vibe-acp.
         if _is_explain_enabled() and tc.get("humanReadable") is None:
             with contextlib.suppress(Exception):
-                tc["humanReadable"] = await _generate_human_readable(tc)
+                result = await _generate_explanation(tc)
+                if result is not None:
+                    tc["humanReadable"], tc["risks"] = result
 
-        # Persist the explanation back into tool_call_info so the summary
-        # step can display it when the user unfolds it.
+        # Persist explanation and risks back into tool_call_info so the
+        # summary step can display them when the user unfolds it.
         tc_id_perm = cast("str", tc.get("toolCallId") or "")
-        if tc_id_perm in tool_call_info and isinstance(tc.get("humanReadable"), str):
-            tool_call_info[tc_id_perm]["humanReadable"] = tc["humanReadable"]
-            if "step" in tool_summary_holder:
+        if tc_id_perm in tool_call_info:
+            updated = False
+            if isinstance(tc.get("humanReadable"), str):
+                tool_call_info[tc_id_perm]["humanReadable"] = tc["humanReadable"]
+                updated = True
+            if isinstance(tc.get("risks"), list):
+                tool_call_info[tc_id_perm]["risks"] = tc["risks"]
+                updated = True
+            if updated and "step" in tool_summary_holder:
                 await _update_tool_summary(tool_summary_holder, tool_call_info)
 
         outcome = await _ask_user_for_permission(tc, options)

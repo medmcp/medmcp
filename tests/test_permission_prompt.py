@@ -246,7 +246,7 @@ class TestGenerateExplanation:
 
     @pytest.mark.asyncio
     async def test_correct_model_and_low_temperature(self) -> None:
-        """The request must use the configured model and temperature=0."""
+        """The request must use the configured model and a low temperature."""
         body = json.dumps({"explanation": "Does something.", "risks": []})
         with patch("medmcp.app.httpx.AsyncClient") as mock_cls:
             instance = AsyncMock()
@@ -259,7 +259,7 @@ class TestGenerateExplanation:
 
         call_kwargs: dict[str, Any] = instance.post.call_args[1]
         assert call_kwargs["json"]["model"] == OLLAMA_MODEL
-        assert call_kwargs["json"]["temperature"] == 0.0
+        assert call_kwargs["json"]["temperature"] == 0.1
 
     @pytest.mark.asyncio
     async def test_prompt_contains_physician_language(self) -> None:

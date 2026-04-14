@@ -90,7 +90,7 @@ MedMCP's imaging capabilities are provided by optional **stack** packages. Each 
 ┌─ medmcp (core) ──────────────────────────────────┐
 │  Chainlit UI, agent loop, prompts, config        │
 └──────────────────────────────────────────────────┘
-           │ installs via optional extras
+           │ discovers via uv tool environments
            ▼
 ┌─ stack layer (domain-specific) ──────────────────┐
 │  medmcp-neuro       brain extraction, seg, reg   │
@@ -104,13 +104,13 @@ MedMCP's imaging capabilities are provided by optional **stack** packages. Each 
 └──────────────────────────────────────────────────┘
 ```
 
-Install a stack with the corresponding extra:
+Each stack runs in its own isolated uv tool environment. Install a stack with:
 
 ```bash
-uv sync --extra neuro    # pulls medmcp-neuro + medmcp-dicom
+just install-stack "git+ssh://git@github.com/medmcp/medmcp-neuro.git"
 ```
 
-The MCP server is configured in `.vibe/config.toml` and starts automatically when the UI launches.
+Once installed, the stack is auto-discovered via its `[medmcp.stacks]` entry point and appears as a toggle in the UI's ChatSettings — no manual edits to `.vibe/config.toml` needed. Restart the UI after installing or removing a stack.
 
 ---
 

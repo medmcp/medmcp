@@ -17,22 +17,21 @@ enable_update_checks = false
 enable_auto_update = false
 enable_notifications = true
 tool_paths = []
-
-[[mcp_servers]]
-name = "medmcp-neuro"
-transport = "stdio"
-command = "medmcp-neuro"
-startup_timeout_sec = 10.0
-tool_timeout_sec = 1800.0
-
 enabled_tools = []
-disabled_tools = ["web_search"]
+disabled_tools = [
+    "web_search",
+]
 agent_paths = []
 enabled_agents = []
 disabled_agents = []
 skill_paths = []
 enabled_skills = []
 disabled_skills = []
+
+[[mcp_servers]]
+name = "medmcp-neuro"
+transport = "stdio"
+command = "/home/paul.friedrich/.local/share/uv/tools/medmcp-neuro/bin/medmcp-neuro"
 
 [[providers]]
 name = "ollama"
@@ -149,4 +148,6 @@ denylist = []
 permission = "ask"
 allowlist = []
 denylist_standalone = []
-sensitive_patterns = ["sudo"]
+sensitive_patterns = [
+    "sudo",
+]

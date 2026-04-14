@@ -45,6 +45,14 @@ setup: install-uv install-ollama
     uv sync
     uv run pre-commit install
 
+# Install a stack package into its own isolated uv environment.
+# _load_mcp_servers() discovers it automatically by scanning uv tool envs for
+# [medmcp.stacks] entry points — no changes to config files needed.
+# Usage: just install-stack ../medmcp-neuro
+#        just install-stack "git+ssh://git@github.com/medmcp/medmcp-neuro.git"
+install-stack STACK:
+    uv tool install {{STACK}}
+
 # Run every CI check locally (lint, format, typecheck, tests)
 check: lint format-check typecheck test
 

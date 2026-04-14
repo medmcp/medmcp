@@ -44,11 +44,14 @@ Chats are persisted in two places:
 from __future__ import annotations
 
 import asyncio
+import configparser
 import contextlib
 import json
 import logging
 import os
+import re
 import sqlite3
+import subprocess
 import sys
 from collections.abc import Awaitable, Callable
 from functools import lru_cache
@@ -57,6 +60,7 @@ from typing import Any, cast
 
 import chainlit as cl
 import httpx
+import tomli_w
 from chainlit.context import context as cl_context
 from chainlit.data import get_data_layer as cl_get_data_layer
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
@@ -87,42 +91,272 @@ if not _audit.handlers:
 PROJECT_ROOT: str = str(Path(__file__).resolve().parent.parent.parent)
 VIBE_HOME: Path = Path(PROJECT_ROOT) / ".vibe"
 THREADS_DB_PATH: Path = VIBE_HOME / "medmcp_threads.db"
+# Tracks which discovered stacks are enabled; defaults to all when absent.
+_ACTIVE_STACKS_PATH: Path = VIBE_HOME / "active_stacks.json"
 
 # Single fixed user identity used by the data layer. There is no auth: this
 # exists only so chainlit's per-user thread scoping has a stable key.
 LOCAL_USER_ID: str = "local"
 
 
+_stack_log: logging.Logger = logging.getLogger(__name__)
+
+
+def _get_uv_tool_dir() -> Path | None:
+    """Return the uv tool installation directory, or ``None`` if unavailable."""
+    try:
+        result = subprocess.run(["uv", "tool", "dir"], capture_output=True, text=True, timeout=5)
+        return Path(result.stdout.strip()) if result.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _call_entry_point(python: Path, module: str, attr: str) -> object:
+    """Call ``module.attr()`` inside *python*'s environment and return the result.
+
+    Raises ``RuntimeError`` on non-zero exit and ``ValueError`` on JSON-decode
+    failure; both are caught by the caller so broken stacks are skipped cleanly.
+    """
+    result = subprocess.run(
+        [str(python), "-c", f"import json,{module};print(json.dumps({module}.{attr}()))"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip())
+    return json.loads(result.stdout)
+
+
 @lru_cache(maxsize=1)
 def _load_mcp_servers() -> list[JsonDict]:
-    """Read MCP server definitions from ``.vibe/config.toml``.
+    """Discover MCP servers from uv tool environments and ``.vibe/config.toml``.
 
-    Returns the servers as ACP-wire-format dicts (camelCase keys) suitable for
-    inclusion in ``session/new`` and ``session/load`` params.
+    Server configs are collected from two sources:
+
+    1. **Installed uv tools** (authoritative) — any package installed via
+       ``uv tool install`` that registers a ``[medmcp.stacks]`` entry point in
+       its dist-info is auto-discovered.  The entry point must be a zero-argument
+       callable returning a dict with at least ``name`` and ``command`` keys.
+       The executable is resolved to its absolute path inside the isolated tool
+       env, so PATH ordering never causes the wrong binary to be picked up.
+
+    2. **Manual ``[[mcp_servers]]`` entries in ``.vibe/config.toml``** — only
+       entries whose ``name`` is *not* already registered by a uv tool are
+       accepted.  This covers stacks that have not yet been installed via
+       ``just install-stack``.
+
+    Returns a list of server-config dicts ready for ``_sync_servers_to_vibe_config``.
     """
-    config_path = VIBE_HOME / "config.toml"
-    if not config_path.exists():
-        return []
+    servers: dict[str, JsonDict] = {}
 
+    # ── 1. Scan uv tool environments ─────────────────────────────────────────
+    tool_dir = _get_uv_tool_dir()
+    if tool_dir is not None:
+        cp = configparser.ConfigParser()
+        cp.optionxform = lambda optionstr: optionstr  # preserve case
+        for ep_file in tool_dir.glob("*/lib/python*/site-packages/*.dist-info/entry_points.txt"):
+            cp.clear()
+            cp.read(ep_file)
+            if not cp.has_section("medmcp.stacks"):
+                continue
+            # tool env root: entry_points.txt → dist-info → site-packages →
+            #                python3.x → lib → <tool-env>
+            tool_env = ep_file.parents[4]
+            python = tool_env / "bin" / "python"
+            if not python.exists():
+                continue
+            for ep_name, ep_value in cp.items("medmcp.stacks"):
+                parts = ep_value.strip().split(":")
+                if len(parts) != 2:
+                    continue
+                module, attr = parts
+                # Reject non-identifier strings before passing to a subprocess.
+                if not re.fullmatch(r"[\w.]+", module) or not re.fullmatch(r"\w+", attr):
+                    _stack_log.warning("Skipping malformed entry point %r = %r", ep_name, ep_value)
+                    continue
+                try:
+                    raw = _call_entry_point(python, module, attr)
+                except Exception as exc:
+                    _stack_log.warning("medmcp.stacks entry point %r failed: %s", ep_name, exc)
+                    continue
+                if not isinstance(raw, dict) or "name" not in raw:
+                    _stack_log.warning(
+                        "medmcp.stacks entry point %r returned an invalid config "
+                        "(expected dict with 'name' key); skipping",
+                        ep_name,
+                    )
+                    continue
+                srv = cast("JsonDict", raw)
+                name = str(srv.get("name", ""))
+                if not name:
+                    continue
+                # Resolve command to the absolute executable inside the tool env
+                # so vibe-acp always uses the fully-dep-installed binary.
+                command = str(srv.get("command", ""))
+                candidate = tool_env / "bin" / command
+                if candidate.exists():
+                    command = str(candidate)
+                servers[name] = {
+                    "name": name,
+                    "command": command,
+                    "args": list(cast("list[Any]", srv.get("args", []))),
+                    "env": list(cast("list[Any]", srv.get("env", []))),
+                }
+
+    # ── 2. Manual config.toml entries ────────────────────────────────────────
+    # Only accepted for names NOT already claimed by an installed uv tool.
+    # This prevents a feedback loop where servers written to config.toml by
+    # _sync_servers_to_vibe_config shadow the live tool-env definitions.
+    config_path = VIBE_HOME / "config.toml"
+    if config_path.exists():
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+            import tomli as tomllib  # type: ignore[no-redef]
+
+        try:
+            with config_path.open("rb") as f:
+                cfg = tomllib.load(f)
+        except Exception as exc:
+            _stack_log.warning("Could not parse %s; skipping manual entries: %s", config_path, exc)
+            return list(servers.values())
+
+        tool_names = set(servers)
+        for srv in cfg.get("mcp_servers", []):
+            name = cast("str", srv.get("name", ""))
+            if name and name not in tool_names:
+                servers[name] = {
+                    "name": name,
+                    "command": cast("str", srv.get("command", "")),
+                    "args": cast("list[Any]", srv.get("args", [])),
+                    "env": [],
+                }
+
+    return list(servers.values())
+
+
+def _load_active_server_names() -> set[str]:
+    """Return the set of server names currently marked active.
+
+    When ``.vibe/active_stacks.json`` is absent (first run) every discovered
+    server is considered active so behaviour is identical to the previous
+    all-servers-always-on model.
+    """
+    all_names = {s["name"] for s in _load_mcp_servers()}
+    if not _ACTIVE_STACKS_PATH.exists():
+        return all_names
+    try:
+        data = cast("dict[str, Any]", json.loads(_ACTIVE_STACKS_PATH.read_text()))
+        return set(cast("list[str]", data.get("active", list(all_names))))
+    except (json.JSONDecodeError, OSError):
+        return all_names
+
+
+def _save_active_server_names(names: set[str]) -> None:
+    """Persist the active server set to ``.vibe/active_stacks.json``."""
+    _ACTIVE_STACKS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _ACTIVE_STACKS_PATH.write_text(json.dumps({"active": sorted(names)}))
+
+
+def _active_servers() -> list[JsonDict]:
+    """Return only the active subset of all discovered servers."""
+    active_names = _load_active_server_names()
+    return [s for s in _load_mcp_servers() if s["name"] in active_names]
+
+
+def _sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
+    """Overwrite the ``[[mcp_servers]]`` section of ``.vibe/config.toml``.
+
+    This is the mechanism that makes entry-point discovery actually take effect:
+    vibe-acp reads its server list directly from the TOML file and ignores the
+    ``mcpServers`` field in JSON-RPC calls, so we must write the desired set
+    here before each ``session/new`` or ``session/load``.
+
+    Only the ``mcp_servers`` array is replaced.  All other keys (model config,
+    tool permissions, etc.) are left untouched.  For servers already present in
+    the file, vibe-acp-specific fields such as ``startup_timeout_sec`` are
+    preserved; only ``command`` and ``args`` are updated from the discovery
+    result.
+    """
     try:
         import tomllib
     except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
         import tomli as tomllib  # type: ignore[no-redef]
 
-    with config_path.open("rb") as f:
-        cfg = tomllib.load(f)
+    config_path = VIBE_HOME / "config.toml"
+    cfg: dict[str, Any] = {}
+    existing_by_name: dict[str, JsonDict] = {}
 
-    servers: list[JsonDict] = []
-    for srv in cfg.get("mcp_servers", []):
-        servers.append(
-            {
-                "name": srv.get("name", ""),
-                "command": srv.get("command", ""),
-                "args": srv.get("args", []),
-                "env": [],
-            }
+    if config_path.exists():
+        try:
+            with config_path.open("rb") as fh:
+                cfg = tomllib.load(fh)
+        except Exception as exc:
+            _stack_log.warning(
+                "Could not parse %s; skipping mcp_servers sync: %s", config_path, exc
+            )
+            return
+        for raw in cast("list[JsonDict]", cfg.get("mcp_servers", [])):
+            name = cast("str", raw.get("name", ""))
+            if name:
+                existing_by_name[name] = raw
+
+    new_entries: list[JsonDict] = []
+    for srv in servers:
+        name = srv["name"]
+        if name in existing_by_name:
+            # Preserve vibe-acp-specific fields (timeouts, transport, etc.)
+            # and overwrite discovery-owned fields (command, args).
+            entry = dict(existing_by_name[name])
+            entry["command"] = srv["command"]
+            if srv.get("args"):
+                entry["args"] = srv["args"]
+            else:
+                entry.pop("args", None)
+            new_entries.append(entry)
+        else:
+            # Brand-new server from an entry point — minimal vibe-acp fields.
+            entry = {"name": name, "transport": "stdio", "command": srv["command"]}
+            if srv.get("args"):
+                entry["args"] = srv["args"]
+            new_entries.append(entry)
+
+    cfg["mcp_servers"] = new_entries
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with config_path.open("wb") as fh:
+        tomli_w.dump(cfg, fh)
+
+
+def _build_chat_settings_inputs() -> list[Any]:
+    """Return the ChatSettings input list for on_chat_start / on_chat_resume.
+
+    Includes the explain-tools toggle plus one Switch per discovered MCP stack.
+    """
+    inputs: list[Any] = [
+        cl.input_widget.Switch(
+            id="explain_tools",
+            label="Explain tool calls",
+            initial=True,
+            description=(
+                "Enable this option to add a plain-language explanation to each tool call."
+            ),
+        ),
+    ]
+    active_names = _load_active_server_names()
+    for srv in _load_mcp_servers():
+        inputs.append(
+            cl.input_widget.Switch(
+                id=f"stack_{srv['name']}",
+                label=f"Stack: {srv['name']}",
+                initial=srv["name"] in active_names,
+                description=(
+                    f"Load the {srv['name']} MCP stack. "
+                    "Changes take effect on the next conversation."
+                ),
+            )
         )
-    return servers
+    return inputs
 
 
 # ── Explain tool calls (opt-in) ──────────────────────────
@@ -222,6 +456,32 @@ class VibeAcpClient:
         self._write_lock: asyncio.Lock = asyncio.Lock()
         self._initialized: bool = False
 
+    async def stop(self) -> None:
+        """Terminate the vibe-acp process and reset client state.
+
+        After this call :meth:`ensure_started` will spawn a fresh process.
+        Existing session queues are cleared; any in-flight requests will
+        receive a ``RuntimeError`` via their futures.
+        """
+        async with self._init_lock:
+            if self.proc is not None:
+                self.proc.terminate()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self.proc.wait(), timeout=5.0)
+                self.proc = None
+            if self._reader_task is not None:
+                self._reader_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._reader_task
+                self._reader_task = None
+            for fut in self._pending.values():
+                if not fut.done():
+                    fut.set_exception(RuntimeError("vibe-acp restarted"))
+            self._pending.clear()
+            self._sessions.clear()
+            self._limbo.clear()
+            self._initialized = False
+
     async def ensure_started(self) -> None:
         """Spawn vibe-acp on first use and run the ACP ``initialize`` handshake.
 
@@ -292,6 +552,9 @@ class VibeAcpClient:
                 if not fut.done():
                     fut.set_exception(ConnectionError("vibe-acp subprocess closed"))
             self._pending.clear()
+            # Allow ensure_started() to respawn on the next request.
+            self._initialized = False
+            self.proc = None
 
     async def request(self, method: str, params: JsonDict | None = None) -> JsonDict:
         """Send a JSON-RPC request and await its response.
@@ -355,6 +618,13 @@ class VibeAcpClient:
 # Module-level singleton. Chainlit imports this file once at startup, but the
 # subprocess itself is started lazily on first chat to avoid blocking import.
 _client: VibeAcpClient = VibeAcpClient()
+
+# Set to True when the active MCP stack set changes (via on_settings_update).
+# on_chat_start checks this flag and restarts the vibe-acp process before
+# creating the new session, so the fresh process reads the updated config.toml.
+# Existing open chats are not affected — they continue on the old process until
+# the process is replaced at the next on_chat_start.
+_vibe_restart_needed: bool = False
 
 
 # ── Chainlit data layer (sqlite under .vibe/) ─────────────
@@ -872,56 +1142,91 @@ def _is_explain_enabled() -> bool:
 
 @cl.on_settings_update  # pyright: ignore[reportUnknownMemberType]
 async def on_settings_update(settings: dict[str, Any]) -> None:
-    """Persist chat-settings changes (explain toggle) into the user session."""
+    """Persist chat-settings changes into the user session.
+
+    Handles two setting types:
+    - ``explain_tools`` — stored in the Chainlit user session for the current chat.
+    - ``stack_<name>`` — updates the persistent active-stack set in
+      ``.vibe/active_stacks.json``; the new set takes effect on the next
+      conversation (vibe-acp reads config.toml at session-creation time).
+    """
     new_value = bool(settings.get("explain_tools", False))
     cl.user_session.set("explain_tools", new_value)  # pyright: ignore[reportUnknownMemberType]
     _audit.info("explain_tools set to %s via settings", new_value)
+
+    all_servers = _load_mcp_servers()
+    if all_servers:
+        active_names: set[str] = {
+            srv["name"] for srv in all_servers if bool(settings.get(f"stack_{srv['name']}", True))
+        }
+        if active_names != _load_active_server_names():
+            _save_active_server_names(active_names)
+            global _vibe_restart_needed
+            _vibe_restart_needed = True
+            _audit.info(
+                "active stacks updated to: %s; vibe-acp will restart on next session",
+                sorted(active_names),
+            )
 
 
 # ── Chainlit hooks ─────────────────────────────────────────
 
 
-@cl.on_chat_start  # pyright: ignore[reportUnknownMemberType]
-async def on_chat_start() -> None:
-    """Create a fresh vibe-acp session for this chainlit thread.
+async def _create_new_session() -> bool:
+    """Create a new vibe-acp session and store its ID in the user session.
 
-    The vibe-acp subprocess is shared across all chats; this only allocates a
-    new session id on top of it. The mapping from chainlit thread → vibe
-    session is persisted in thread metadata so :func:`on_chat_resume` can pick
-    it back up later.
+    Handles the vibe-acp restart if :data:`_vibe_restart_needed` is set.
+    Returns ``True`` on success or ``False`` after emitting an error message.
     """
-    cl.user_session.set("explain_tools", True)  # pyright: ignore[reportUnknownMemberType]
-    await cl.ChatSettings(
-        inputs=[
-            cl.input_widget.Switch(
-                id="explain_tools",
-                label="Explain tool calls",
-                initial=True,
-                description=(
-                    "Enable this option to add a plain-language explanation to each tool call."
-                ),
-            ),
-        ],
-    ).send()
+    global _vibe_restart_needed
+    if _vibe_restart_needed:
+        await _client.stop()
+        _vibe_restart_needed = False
 
+    active = _active_servers()
+    _sync_servers_to_vibe_config(active)
     await _client.ensure_started()
 
     resp = await _client.request(
         "session/new",
-        {"cwd": PROJECT_ROOT, "mcpServers": _load_mcp_servers()},
+        {"cwd": PROJECT_ROOT, "mcpServers": active},
     )
     if "error" in resp:
         await cl.Message(content=f"Failed to create vibe-acp session: {resp['error']}").send()
-        return
+        return False
 
     result = cast("JsonDict", resp.get("result") or {})
-    session_id = cast("str", result["sessionId"])
+    session_id = cast("str", result.get("sessionId", ""))
+    if not session_id:
+        await cl.Message(content="vibe-acp session/new returned no sessionId").send()
+        return False
     _set_session_id(session_id)
     _client.register_session(session_id)
-    # Persisting the chainlit-thread → vibe-session mapping is deferred until
-    # the first user message (see on_message). Doing it eagerly here would
-    # upsert an empty thread row on every F5, littering the sidebar with empty
-    # threads from refreshes that never produced a conversation.
+    return True
+
+
+@cl.on_chat_start  # pyright: ignore[reportUnknownMemberType]
+async def on_chat_start() -> None:
+    """Set up the UI for a new chat; defer vibe-acp session creation to the first message.
+
+    Session creation is lazy so the user can adjust ChatSettings (e.g. toggle
+    MCP stacks on/off) before sending their first prompt and have those choices
+    take effect immediately — without needing to open a second chat.
+
+    vibe-acp is pre-started here concurrently with building the settings widget
+    so the process is warm by the time the first message arrives.  MCP tools are
+    not loaded until ``session/new`` (inside ``_create_new_session``), so stack
+    toggle changes made before the first message still take full effect.
+    """
+    cl.user_session.set("explain_tools", True)  # pyright: ignore[reportUnknownMemberType]
+    # Start vibe-acp and build the settings widget concurrently — both involve
+    # subprocess calls on first run, so overlapping them saves startup time.
+    # ensure_started is a no-op if already running; failure is non-fatal here
+    # because _create_new_session will surface any error on the first message.
+    warmup_task = asyncio.create_task(_client.ensure_started())
+    await cl.ChatSettings(inputs=_build_chat_settings_inputs()).send()
+    with contextlib.suppress(Exception):
+        await warmup_task
 
 
 @cl.on_chat_resume  # pyright: ignore[reportUnknownMemberType]
@@ -936,20 +1241,7 @@ async def on_chat_resume(thread: ThreadDict) -> None:
     because chainlit's persistence is the source of truth for the UI.
     """
     cl.user_session.set("explain_tools", True)  # pyright: ignore[reportUnknownMemberType]
-    await cl.ChatSettings(
-        inputs=[
-            cl.input_widget.Switch(
-                id="explain_tools",
-                label="Explain tool calls",
-                initial=True,
-                description=(
-                    "Enable this option to add a plain-language explanation to each tool call."
-                ),
-            ),
-        ],
-    ).send()
-
-    await _client.ensure_started()
+    await cl.ChatSettings(inputs=_build_chat_settings_inputs()).send()
 
     # ThreadDict's typing carries Dict[Unknown, Unknown] for the metadata field,
     # which infects any direct access. Cast to a plain dict[str, Any] once and
@@ -968,13 +1260,22 @@ async def on_chat_resume(thread: ThreadDict) -> None:
 
     if not isinstance(vibe_session_id, str):
         # Old thread without a mapping (or one created before this code shipped).
-        # Fall back to a fresh session so the UI is at least usable.
+        # ChatSettings are already sent above; session will be created lazily on
+        # the first message, identical to a fresh on_chat_start.
         _audit.warning(
-            "resume: thread %s has no vibe_session_id; starting fresh",
+            "resume: thread %s has no vibe_session_id; session will be created on first message",
             thread_any.get("id"),
         )
-        await on_chat_start()
         return
+
+    global _vibe_restart_needed
+    if _vibe_restart_needed:
+        await _client.stop()
+        _vibe_restart_needed = False
+
+    active = _active_servers()
+    _sync_servers_to_vibe_config(active)
+    await _client.ensure_started()
 
     # Pre-register the queue *before* sending session/load so any replay events
     # that arrive while we're waiting for the response land in the queue
@@ -991,7 +1292,7 @@ async def on_chat_resume(thread: ThreadDict) -> None:
         {
             "cwd": PROJECT_ROOT,
             "session_id": vibe_session_id,
-            "mcpServers": _load_mcp_servers(),
+            "mcpServers": active,
         },
     )
     if "error" in resp:
@@ -1027,13 +1328,16 @@ async def on_message(message: cl.Message) -> None:
     """Send a prompt to vibe-acp and stream the response back into the UI."""
     session_id = _get_session_id()
     if session_id is None:
-        await cl.Message(content="Session not initialized. Please refresh.").send()
-        return
+        # First message of a new chat — create the vibe-acp session now so the
+        # user's current ChatSettings (MCP stack toggles, etc.) are applied.
+        if not await _create_new_session():
+            return
+        session_id = _get_session_id()
+        assert session_id is not None  # _create_new_session sets this on success
 
     # Persist the chainlit-thread → vibe-session mapping on the first message
-    # of this chat. Done lazily (rather than in on_chat_start) so refreshes
-    # that never produce a conversation don't leave empty threads in the
-    # sidebar. Idempotent: gated by a per-chat flag in user_session.
+    # of this chat. Done lazily so refreshes that never produce a conversation
+    # don't leave empty threads in the sidebar. Idempotent: gated by a flag.
     if not cl.user_session.get("vibe_session_persisted"):  # pyright: ignore[reportUnknownMemberType]
         thread_id = cl_context.session.thread_id
         data_layer = cast("Any", cl_get_data_layer())

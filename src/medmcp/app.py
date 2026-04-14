@@ -51,6 +51,7 @@ import os
 import sqlite3
 import sys
 from collections.abc import Awaitable, Callable
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
 
@@ -90,6 +91,39 @@ THREADS_DB_PATH: Path = VIBE_HOME / "medmcp_threads.db"
 # Single fixed user identity used by the data layer. There is no auth: this
 # exists only so chainlit's per-user thread scoping has a stable key.
 LOCAL_USER_ID: str = "local"
+
+
+@lru_cache(maxsize=1)
+def _load_mcp_servers() -> list[JsonDict]:
+    """Read MCP server definitions from ``.vibe/config.toml``.
+
+    Returns the servers as ACP-wire-format dicts (camelCase keys) suitable for
+    inclusion in ``session/new`` and ``session/load`` params.
+    """
+    config_path = VIBE_HOME / "config.toml"
+    if not config_path.exists():
+        return []
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    with config_path.open("rb") as f:
+        cfg = tomllib.load(f)
+
+    servers: list[JsonDict] = []
+    for srv in cfg.get("mcp_servers", []):
+        servers.append(
+            {
+                "name": srv.get("name", ""),
+                "command": srv.get("command", ""),
+                "args": srv.get("args", []),
+                "env": [],
+            }
+        )
+    return servers
+
 
 # ── Explain tool calls (opt-in) ──────────────────────────
 #
@@ -203,7 +237,7 @@ class VibeAcpClient:
                 "vibe-acp",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=None,  # inherit parent stderr so logs appear in terminal
                 cwd=PROJECT_ROOT,
                 env={**os.environ, "VIBE_HOME": str(VIBE_HOME)},
             )
@@ -872,7 +906,10 @@ async def on_chat_start() -> None:
 
     await _client.ensure_started()
 
-    resp = await _client.request("session/new", {"cwd": PROJECT_ROOT, "mcp_servers": []})
+    resp = await _client.request(
+        "session/new",
+        {"cwd": PROJECT_ROOT, "mcpServers": _load_mcp_servers()},
+    )
     if "error" in resp:
         await cl.Message(content=f"Failed to create vibe-acp session: {resp['error']}").send()
         return
@@ -951,7 +988,11 @@ async def on_chat_resume(thread: ThreadDict) -> None:
 
     resp = await _client.request(
         "session/load",
-        {"cwd": PROJECT_ROOT, "session_id": vibe_session_id, "mcp_servers": []},
+        {
+            "cwd": PROJECT_ROOT,
+            "session_id": vibe_session_id,
+            "mcpServers": _load_mcp_servers(),
+        },
     )
     if "error" in resp:
         _audit.warning("resume: session/load failed: %s", resp["error"])

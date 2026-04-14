@@ -82,6 +82,36 @@ MedMCP's security model is designed around the assumption that the local model m
 
 For vulnerability reporting, see [SECURITY.md](SECURITY.md).
 
+### Imaging stacks
+
+MedMCP's imaging capabilities are provided by optional **stack** packages. Each stack bundles domain-specific tools and their foundation dependencies into a single MCP server.
+
+```
+┌─ medmcp (core) ──────────────────────────────────┐
+│  Chainlit UI, agent loop, prompts, config        │
+└──────────────────────────────────────────────────┘
+           │ installs via optional extras
+           ▼
+┌─ stack layer (domain-specific) ──────────────────┐
+│  medmcp-neuro       brain extraction, seg, reg   │
+│  medmcp-cardiac     (planned)                    │
+│  medmcp-microscopy  (planned)                    │
+└──────────────────────────────────────────────────┘
+           │ depends on
+           ▼
+┌─ foundation layer (shared I/O) ──────────────────┐
+│  medmcp-dicom       DICOM inspection + conversion│
+└──────────────────────────────────────────────────┘
+```
+
+Install a stack with the corresponding extra:
+
+```bash
+uv sync --extra neuro    # pulls medmcp-neuro + medmcp-dicom
+```
+
+The MCP server is configured in `.vibe/config.toml` and starts automatically when the UI launches.
+
 ---
 
 ## Contributing

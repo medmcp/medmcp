@@ -1269,6 +1269,11 @@ dependencies = [
     { name = "sqlalchemy", extra = ["asyncio"] },
 ]
 
+[package.optional-dependencies]
+neuro = [
+    { name = "medmcp-neuro" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pre-commit" },
@@ -1291,9 +1296,11 @@ test = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "chainlit", specifier = ">=2.0,<3" },
+    { name = "medmcp-neuro", marker = "extra == 'neuro'", git = "ssh://git@github.com/medmcp/medmcp-neuro.git?rev=aa4dad5d89d8da28dd0776ae39d97b98cee5d6d8" },
     { name = "mistral-vibe", specifier = ">=2.7,<3" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<3" },
 ]
+provides-extras = ["neuro"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1311,6 +1318,24 @@ quality = [
 test = [
     { name = "pytest", specifier = ">=9" },
     { name = "pytest-asyncio", specifier = ">=1.2" },
+]
+
+[[package]]
+name = "medmcp-dicom"
+version = "0.0.0"
+source = { git = "ssh://git@github.com/medmcp/medmcp-dicom.git?branch=main#3c62af612c29612dd6f2f56ecd528ddfa3634e66" }
+dependencies = [
+    { name = "mcp" },
+    { name = "pydicom" },
+]
+
+[[package]]
+name = "medmcp-neuro"
+version = "0.0.0"
+source = { git = "ssh://git@github.com/medmcp/medmcp-neuro.git?rev=aa4dad5d89d8da28dd0776ae39d97b98cee5d6d8#aa4dad5d89d8da28dd0776ae39d97b98cee5d6d8" }
+dependencies = [
+    { name = "mcp" },
+    { name = "medmcp-dicom" },
 ]
 
 [[package]]
@@ -2495,6 +2520,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/52/6d/fffca34caecc4a3f97bda81b2098da5e8ab7efc9a66e819074a11955d87e/pydantic_settings-2.13.1.tar.gz", hash = "sha256:b4c11847b15237fb0171e1462bf540e294affb9b86db4d9aa5c01730bdbe4025", size = 223826, upload-time = "2026-02-19T13:45:08.055Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/00/4b/ccc026168948fec4f7555b9164c724cf4125eac006e176541483d2c959be/pydantic_settings-2.13.1-py3-none-any.whl", hash = "sha256:d56fd801823dbeae7f0975e1f8c8e25c258eb75d278ea7abb5d9cebb01b56237", size = 58929, upload-time = "2026-02-19T13:45:06.034Z" },
+]
+
+[[package]]
+name = "pydicom"
+version = "3.0.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7a/de/52aaf905f1f0ae7aba85996e2592ea2c1fe49157f3cfbcd1871965bdb51d/pydicom-3.0.2.tar.gz", hash = "sha256:5942bfc2d72c6fa4b3b5b62c527f54b7f2355f21d6f5d296df6bb30188df6a4f", size = 2886792, upload-time = "2026-03-19T21:46:20.935Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/46/e0/60466c6d712dad2cf807df315e39863e91609ffd1064ecb835994460bbda/pydicom-3.0.2-py3-none-any.whl", hash = "sha256:abf971a5440f84dbaf42c4b6758e30e62480902584f8b270b9a5d146e278a07b", size = 2376822, upload-time = "2026-03-19T21:46:19.042Z" },
 ]
 
 [[package]]

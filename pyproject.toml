@@ -33,6 +33,9 @@ dependencies = [
     "aiosqlite>=0.20",
 ]
 
+[project.optional-dependencies]
+neuro = ["medmcp-neuro>=0.1"]
+
 [project.scripts]
 medmcp-ui = "medmcp.cli:main"
 
@@ -53,6 +56,9 @@ dev = [
 
 [tool.uv]
 default-groups = ["dev"]
+
+[tool.uv.sources]
+medmcp-neuro = { git = "ssh://git@github.com/medmcp/medmcp-neuro.git", rev = "aa4dad5d89d8da28dd0776ae39d97b98cee5d6d8" }
 
 [tool.ruff]
 line-length = 100

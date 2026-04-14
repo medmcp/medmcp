@@ -10,6 +10,7 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
+        extras: ["", "neuro"]
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
@@ -17,8 +18,11 @@ jobs:
           enable-cache: true
       - name: Set up Python
         run: uv python install ${{ matrix.python-version }}
+      - name: Configure git for private deps
+        if: matrix.extras != ''
+        run: git config --global url."https://x-access-token:${{ secrets.MEDMCP_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
       - name: Sync
-        run: uv sync --all-groups
+        run: uv sync --all-groups ${{ matrix.extras != '' && format('--extra {0}', matrix.extras) || '' }}
       - name: Ruff check
         run: uv run ruff check
       - name: Ruff format

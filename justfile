@@ -1,5 +1,7 @@
 set quiet := true
 
+alias help := default
+
 # Defaults to just --list
 default:
     @just --list
@@ -72,7 +74,7 @@ fix:
     uv run ruff format
 
 # Pull base model and build custom devstral-medmcp (32k context)
-pull_model:
+pull-model:
     ollama pull devstral-small-2:latest
     ollama create devstral-medmcp -f Modelfile.devstral
 
@@ -89,7 +91,7 @@ serve-ollama:
     ollama serve
 
 # One-shot: install everything, pull model, start Ollama, launch the UI
-medmcp: setup pull_model
+medmcp: setup pull-model
     @echo "Starting Ollama server..."
     @ollama serve &
     @sleep 2

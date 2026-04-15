@@ -27,7 +27,7 @@ MedMCP runs entirely on-premise and is designed to meet the data governance and 
 ### Prerequisites
 
 - **OS:** Linux (tested on Ubuntu)
-- **Hardware:** A GPU with at least 24 GB VRAM is recommended for running the local Devstral model (~15 GB). CPU-only inference works but will be slow.
+- **Hardware:** A GPU with at least 24 GB VRAM is recommended for running the local Gemma 4 26B model (~18 GB loaded). CPU-only inference works but will be slow.
 - **Tools:** [uv](https://docs.astral.sh/uv/) and [just](https://github.com/casey/just) (we recommend installing `rust-just` with `uv tool install rust-just`)
 
 ### Quickstart
@@ -43,7 +43,7 @@ If you prefer to run each step separately:
 
 ```bash
 just setup        # installs uv, ollama, and syncs Python deps
-just pull_model   # builds the local Devstral model (~15 GB, one-time)
+just pull-model   # pulls Gemma 4 26B and builds gemma4-medmcp (~18 GB, one-time)
 just serve-ollama # start the Ollama server (foreground, Ctrl-C to stop)
 just ui           # launches the web UI at http://localhost:8000
 ```
@@ -66,7 +66,7 @@ MedMCP is built as a three-layer stack:
 
 1. **Chainlit web UI** (`src/medmcp/app.py`) — the user-facing chat interface served at `http://localhost:8000`.
 2. **vibe-acp subprocess** — an agent orchestrator that receives JSON-RPC 2.0 messages from the UI, manages tool execution, and communicates with the local LLM.
-3. **Ollama** — serves the local Devstral model (`Modelfile.devstral`) with 32k context, low temperature, and repeat-penalty guards.
+3. **Ollama** — serves the local Gemma 4 model (`Modelfile.gemma4`) with 32k context, top-p/top-k sampling, and repeat-penalty guards. The agent runs at temperature 0.1 (set in `.vibe/config.toml`).
 
 The UI spawns a single vibe-acp subprocess and demultiplexes sessions over it. Every tool call (bash, file writes, web fetches) is gated by an interactive Approve/Reject prompt — the user must explicitly approve each action before any side effect occurs.
 

@@ -45,7 +45,7 @@ project_id = ""
 region = ""
 
 [[models]]
-name = "devstral-medmcp"
+name = "gemma4-medmcp"
 provider = "ollama"
 alias = "local"
 temperature = 0.1

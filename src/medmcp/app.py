@@ -133,7 +133,7 @@ def _load_mcp_servers() -> list[JsonDict]:
 # agent, via a lightweight direct API call.
 
 OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "devstral-medmcp")
+OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "gemma4-medmcp")
 # Timeout for the explanation call.  Local Ollama inference is fast but the
 # model may be cold-starting; 20 s is generous without blocking the UI too long.
 EXPLAIN_TIMEOUT: float = 20.0
@@ -238,6 +238,7 @@ class VibeAcpClient:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=None,  # inherit parent stderr so logs appear in terminal
+                limit=16 * 1024 * 1024,  # 16 MB; default 64 KB overflows with large LLM responses
                 cwd=PROJECT_ROOT,
                 env={**os.environ, "VIBE_HOME": str(VIBE_HOME)},
             )
@@ -591,21 +592,22 @@ async def _generate_explanation(tc: JsonDict) -> tuple[str, list[str]] | None:
 
     try:
         async with httpx.AsyncClient(timeout=EXPLAIN_TIMEOUT) as client:
+            # Use the native Ollama /api/chat endpoint: the OpenAI-compatible
+            # endpoint ignores think:false, causing thinking models to emit output
+            # into "reasoning" only and leave "content" empty.
             resp = await client.post(
-                f"{OLLAMA_BASE_URL}/v1/chat/completions",
+                f"{OLLAMA_BASE_URL}/api/chat",
                 json={
                     "model": OLLAMA_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.1,
-                    "max_tokens": 300,
+                    "stream": False,
+                    "think": False,
+                    "options": {"temperature": 1.0, "num_predict": 1024},
                 },
             )
             resp.raise_for_status()
             data = cast("JsonDict", resp.json())
-            choices = cast("list[JsonDict]", data.get("choices") or [])
-            if not choices:
-                return None
-            message = cast("JsonDict", choices[0].get("message") or {})
+            message = cast("JsonDict", data.get("message") or {})
             raw_text = str(message.get("content") or "").strip()
     except Exception:
         _audit.warning("failed to generate tool-call explanation", exc_info=True)

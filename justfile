@@ -81,10 +81,10 @@ fix:
     uv run ruff check --fix
     uv run ruff format
 
-# Pull base model and build custom devstral-medmcp (32k context)
+# Pull Gemma 4 26B and build custom gemma4-medmcp (32k context)
 pull-model:
-    ollama pull devstral-small-2:latest
-    ollama create devstral-medmcp -f Modelfile.devstral
+    ollama pull gemma4:26b
+    ollama create gemma4-medmcp -f Modelfile.gemma4
 
 # Launch mistral-vibe CLI (reads .vibe/config.toml)
 vibe *ARGS:
@@ -98,7 +98,7 @@ ui:
 serve-ollama:
     ollama serve
 
-# One-shot: install everything, pull model, start Ollama, launch the UI
+# One-shot: install everything, pull Gemma 4 model, start Ollama, launch the UI
 medmcp: setup pull-model
     @echo "Starting Ollama server..."
     @ollama serve &

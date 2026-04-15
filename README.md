@@ -66,7 +66,7 @@ MedMCP is built as a three-layer stack:
 
 1. **Chainlit web UI** (`src/medmcp/app.py`) — the user-facing chat interface served at `http://localhost:8000`.
 2. **vibe-acp subprocess** — an agent orchestrator that receives JSON-RPC 2.0 messages from the UI, manages tool execution, and communicates with the local LLM.
-3. **Ollama** — serves the local Gemma 4 model (`Modelfile.gemma4`) with 32k context, top-p/top-k sampling, and repeat-penalty guards. The agent runs at temperature 0.1 (set in `.vibe/config.toml`).
+3. **Ollama** — serves the local Gemma 4 model (`Modelfile.gemma4`) with 32k context, top-p/top-k sampling, and repeat-penalty guards. The agent runs at temperature 1.0 (Gemma 4's recommended default, set in `.vibe/config.toml`).
 
 The UI spawns a single vibe-acp subprocess and demultiplexes sessions over it. Every tool call (bash, file writes, web fetches) is gated by an interactive Approve/Reject prompt — the user must explicitly approve each action before any side effect occurs.
 

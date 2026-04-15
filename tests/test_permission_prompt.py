@@ -260,6 +260,8 @@ class TestGenerateExplanation:
         call_kwargs: dict[str, Any] = instance.post.call_args[1]
         assert call_kwargs["json"]["model"] == OLLAMA_MODEL
         assert call_kwargs["json"]["options"]["temperature"] == 1.0
+        assert call_kwargs["json"]["think"] is False
+        assert call_kwargs["json"]["stream"] is False
 
     @pytest.mark.asyncio
     async def test_prompt_contains_physician_language(self) -> None:
@@ -336,12 +338,12 @@ class TestGenerateExplanation:
         assert long_input not in prompt
 
     @pytest.mark.asyncio
-    async def test_returns_none_on_empty_choices(self) -> None:
-        """An empty choices array should return None."""
+    async def test_returns_none_on_missing_message(self) -> None:
+        """A response with no 'message' key should return None."""
         response = httpx.Response(
             200,
-            json={"choices": []},
-            request=httpx.Request("POST", f"{OLLAMA_BASE_URL}/v1/chat/completions"),
+            json={},
+            request=httpx.Request("POST", f"{OLLAMA_BASE_URL}/api/chat"),
         )
         with patch("medmcp.app.httpx.AsyncClient") as mock_cls:
             instance = AsyncMock()

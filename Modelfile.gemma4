@@ -4,8 +4,8 @@
 #
 # num_ctx 32768; keeps ample room for MCP tool schemas (~1500 tokens), the system prompt, and multi-turn dialogue.
 #
-# Low temperature for deterministic tool-call argument generation.
-# repeat_penalty + repeat_last_n guard against open-ended generation loops
+# Temperature 1.0 is Gemma 4's recommended default for instruction-following.
+# repeat_penalty + repeat_last_n guard against open-ended generation loops.
 #
 # Build with:
 #   ollama create gemma4-medmcp -f Modelfile.gemma4

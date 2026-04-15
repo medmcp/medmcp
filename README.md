@@ -16,6 +16,7 @@ MedMCP runs entirely on-premise and is designed to meet the data governance and 
 - [Installation](#installation)
 - [Vision](#vision)
 - [Architecture](#architecture)
+- [Imaging Stacks](#imaging-stacks)
 - [Security](#security)
 - [Contributing](#contributing)
 - [License](#license)
@@ -72,17 +73,7 @@ The UI spawns a single vibe-acp subprocess and demultiplexes sessions over it. E
 
 ---
 
-## Security
-
-MedMCP's security model is designed around the assumption that the local model may be steered by prompt injection (e.g. content pasted from untrusted documents). Key constraints:
-
-- **No auto-approval** — every tool call requires an explicit user click. There is no auto-approval path.
-- **Localhost only** — the Chainlit server binds to localhost. Do not expose port 8000 over a network without adding real authentication.
-- **No data exfiltration** — `web_search` is disabled; `web_fetch` requires approval. No data leaves the institution's infrastructure by default.
-
-For vulnerability reporting, see [SECURITY.md](SECURITY.md).
-
-### Imaging stacks
+## Imaging Stacks
 
 MedMCP's imaging capabilities are provided by optional **stack** packages. Each stack bundles domain-specific tools and their foundation dependencies into a single MCP server.
 
@@ -110,7 +101,19 @@ Each stack runs in its own isolated uv tool environment. Install a stack with:
 just install-stack "git+ssh://git@github.com/medmcp/medmcp-neuro.git"
 ```
 
-Once installed, the stack is auto-discovered via its `[medmcp.stacks]` entry point and appears as a toggle in the UI's ChatSettings — no manual edits to `.vibe/config.toml` needed. Restart the UI after installing or removing a stack.
+Once installed, the stack is auto-discovered via its `[medmcp.stacks]` entry point and appears as a toggle in the UI's **ChatSettings panel** — no manual edits to `.vibe/config.toml` needed. Toggle changes take effect on the next conversation. Restart the UI after installing or removing a stack.
+
+---
+
+## Security
+
+MedMCP's security model is designed around the assumption that the local model may be steered by prompt injection (e.g. content pasted from untrusted documents). Key constraints:
+
+- **No auto-approval** — every tool call requires an explicit user click. There is no auto-approval path.
+- **Localhost only** — the Chainlit server binds to localhost. Do not expose port 8000 over a network without adding real authentication.
+- **No data exfiltration** — `web_search` is disabled; `web_fetch` requires approval. No data leaves the institution's infrastructure by default.
+
+For vulnerability reporting, see [SECURITY.md](SECURITY.md).
 
 ---
 

@@ -216,3 +216,4 @@ __marimo__/
 .vibe/trusted_folders.toml
 .vibe/medmcp_threads.db
 .vibe/medmcp_threads.db-journal
+.vibe/active_stacks.json

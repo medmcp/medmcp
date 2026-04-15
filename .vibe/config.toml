@@ -31,7 +31,7 @@ disabled_skills = []
 [[mcp_servers]]
 name = "medmcp-neuro"
 transport = "stdio"
-command = "/home/paul.friedrich/.local/share/uv/tools/medmcp-neuro/bin/medmcp-neuro"
+command = "medmcp-neuro"
 
 [[providers]]
 name = "ollama"

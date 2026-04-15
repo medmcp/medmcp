@@ -155,6 +155,26 @@ class TestUvToolDiscovery:
 
         assert servers == []
 
+    def test_empty_command_not_resolved_to_bin_dir(self, tmp_path: Path) -> None:
+        """An entry point returning command='' must not have its command set to the bin dir.
+
+        Path / "" collapses to the parent (the bin/ dir itself), which exists,
+        so without an explicit guard command would be overwritten with a directory path.
+        """
+        _make_tool_env(tmp_path, "medmcp-test")
+        config = {"name": "medmcp-test", "command": ""}
+
+        with (
+            patch("medmcp.app._get_uv_tool_dir", return_value=tmp_path),
+            patch("medmcp.app._call_entry_point", return_value=config),
+            patch("medmcp.app.VIBE_HOME", tmp_path),
+        ):
+            servers = _load_mcp_servers()
+
+        assert len(servers) == 1
+        # command must stay empty, not become the bin directory path
+        assert servers[0]["command"] == ""
+
 
 # ── Config-toml fallback ──────────────────────────────────────────────────────
 

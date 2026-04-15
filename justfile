@@ -44,6 +44,17 @@ install-ollama:
 setup: install-uv install-ollama
     uv sync
     uv run pre-commit install
+    # .vibe/config.toml is tracked in git but also written at runtime by
+    # _sync_servers_to_vibe_config (resolves MCP server command paths).
+    # skip-worktree prevents those local writes from showing up as dirty.
+    git update-index --skip-worktree .vibe/config.toml || true
+
+# Pull upstream changes to .vibe/config.toml (e.g. new tool permissions).
+# Run this after pulling a commit that intentionally changes config.toml.
+pull-config:
+    git update-index --no-skip-worktree .vibe/config.toml
+    git checkout .vibe/config.toml
+    git update-index --skip-worktree .vibe/config.toml
 
 # Install a stack package into its own isolated uv environment.
 # _load_mcp_servers() discovers it automatically by scanning uv tool envs for

@@ -53,6 +53,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import tomllib
 from collections.abc import Awaitable, Callable
 from functools import lru_cache
 from pathlib import Path
@@ -193,10 +194,13 @@ def _load_mcp_servers() -> list[JsonDict]:
                     continue
                 # Resolve command to the absolute executable inside the tool env
                 # so vibe-acp always uses the fully-dep-installed binary.
+                # Guard: an empty command must not be resolved — Path / "" collapses
+                # to the parent dir, which exists, corrupting command to a dir path.
                 command = str(srv.get("command", ""))
-                candidate = tool_env / "bin" / command
-                if candidate.exists():
-                    command = str(candidate)
+                if command:
+                    candidate = tool_env / "bin" / command
+                    if candidate.exists():
+                        command = str(candidate)
                 servers[name] = {
                     "name": name,
                     "command": command,
@@ -210,11 +214,6 @@ def _load_mcp_servers() -> list[JsonDict]:
     # _sync_servers_to_vibe_config shadow the live tool-env definitions.
     config_path = VIBE_HOME / "config.toml"
     if config_path.exists():
-        try:
-            import tomllib
-        except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
-            import tomli as tomllib  # type: ignore[no-redef]
-
         try:
             with config_path.open("rb") as f:
                 cfg = tomllib.load(f)
@@ -279,11 +278,6 @@ def _sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
     preserved; only ``command`` and ``args`` are updated from the discovery
     result.
     """
-    try:
-        import tomllib
-    except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
-        import tomli as tomllib  # type: ignore[no-redef]
-
     config_path = VIBE_HOME / "config.toml"
     cfg: dict[str, Any] = {}
     existing_by_name: dict[str, JsonDict] = {}
@@ -343,8 +337,9 @@ def _build_chat_settings_inputs() -> list[Any]:
             ),
         ),
     ]
+    servers = _load_mcp_servers()
     active_names = _load_active_server_names()
-    for srv in _load_mcp_servers():
+    for srv in servers:
         inputs.append(
             cl.input_widget.Switch(
                 id=f"stack_{srv['name']}",
@@ -1335,7 +1330,9 @@ async def on_message(message: cl.Message) -> None:
         if not await _create_new_session():
             return
         session_id = _get_session_id()
-        assert session_id is not None  # _create_new_session sets this on success
+        if session_id is None:
+            await cl.Message(content="Internal error: session was not initialized.").send()
+            return
 
     # Persist the chainlit-thread → vibe-session mapping on the first message
     # of this chat. Done lazily so refreshes that never produce a conversation

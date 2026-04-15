@@ -246,3 +246,18 @@ class TestSyncServersToVibeConfig:
         entry = result["mcp_servers"][0]
         assert entry["transport"] == "stdio"
         assert entry["name"] == "medmcp-new"
+
+    def test_creates_config_when_absent(self, tmp_path: Path) -> None:
+        """Sync creates config.toml from scratch when the file does not exist yet."""
+        cfg_path = tmp_path / "config.toml"
+        assert not cfg_path.exists()
+
+        with patch("medmcp.app.VIBE_HOME", tmp_path):
+            _sync_servers_to_vibe_config(_TWO_SERVERS)
+
+        assert cfg_path.exists()
+        with cfg_path.open("rb") as f:
+            result = tomllib.load(f)
+
+        names = {s["name"] for s in result["mcp_servers"]}
+        assert names == {"medmcp-neuro", "medmcp-cardiac"}

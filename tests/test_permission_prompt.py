@@ -215,11 +215,11 @@ class TestParseExplanationResponse:
 
 
 def _mock_ollama_response(body: str) -> httpx.Response:
-    """Build a fake httpx.Response mimicking Ollama's chat/completions endpoint."""
+    """Build a fake httpx.Response mimicking Ollama's native /api/chat endpoint."""
     return httpx.Response(
         200,
-        json={"choices": [{"message": {"content": body}}]},
-        request=httpx.Request("POST", f"{OLLAMA_BASE_URL}/v1/chat/completions"),
+        json={"message": {"content": body}},
+        request=httpx.Request("POST", f"{OLLAMA_BASE_URL}/api/chat"),
     )
 
 
@@ -245,8 +245,8 @@ class TestGenerateExplanation:
         assert risks == ["file_read"]
 
     @pytest.mark.asyncio
-    async def test_correct_model_and_low_temperature(self) -> None:
-        """The request must use the configured model and a low temperature."""
+    async def test_correct_model_and_temperature(self) -> None:
+        """The request must use the configured model and temperature via options."""
         body = json.dumps({"explanation": "Does something.", "risks": []})
         with patch("medmcp.app.httpx.AsyncClient") as mock_cls:
             instance = AsyncMock()
@@ -259,7 +259,7 @@ class TestGenerateExplanation:
 
         call_kwargs: dict[str, Any] = instance.post.call_args[1]
         assert call_kwargs["json"]["model"] == OLLAMA_MODEL
-        assert call_kwargs["json"]["temperature"] == 0.1
+        assert call_kwargs["json"]["options"]["temperature"] == 1.0
 
     @pytest.mark.asyncio
     async def test_prompt_contains_physician_language(self) -> None:

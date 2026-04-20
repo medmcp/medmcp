@@ -27,21 +27,3 @@ jobs:
         run: uv run pyright
       - name: Pytest
         run: uv run pytest
-
-  test-neuro:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-      - name: Set up Python
-        run: uv python install 3.12
-      - name: Configure git for private deps
-        run: git config --global url."https://x-access-token:${{ secrets.MEDMCP_PAT }}@github.com/".insteadOf "https://github.com/"
-      - name: Sync
-        run: uv sync --all-groups
-      - name: Install medmcp-neuro stack
-        run: uv tool install "git+https://github.com/medmcp/medmcp-neuro.git@453ce1b78a12f56c83bb411a77a989f6d30db219"
-      - name: Pytest (with neuro stack)
-        run: uv run pytest

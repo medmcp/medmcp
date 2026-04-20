@@ -201,12 +201,19 @@ def _load_mcp_servers() -> list[JsonDict]:
                     candidate = tool_env / "bin" / command
                     if candidate.exists():
                         command = str(candidate)
-                servers[name] = {
+                dist_info = ep_file.parent.name  # e.g. "medmcp_dicom-0.1.0.dist-info"
+                version = dist_info.removesuffix(".dist-info").rsplit("-", 1)[-1]
+                entry: JsonDict = {
                     "name": name,
                     "command": command,
                     "args": list(cast("list[Any]", srv.get("args", []))),
                     "env": list(cast("list[Any]", srv.get("env", []))),
+                    "version": version,
                 }
+                for key in ("skills_path", "tool_timeout_sec", "startup_timeout_sec"):
+                    if srv.get(key) is not None:
+                        entry[key] = srv[key]
+                servers[name] = entry
 
     # ── 2. Manual config.toml entries ────────────────────────────────────────
     # Only accepted for names NOT already claimed by an installed uv tool.
@@ -320,13 +327,36 @@ def _sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
                 entry.pop("args", None)
             new_entries.append(entry)
         else:
-            # Brand-new server from an entry point — minimal vibe-acp fields.
-            entry = {"name": name, "transport": "stdio", "command": srv["command"]}
+            # Brand-new server from an entry point. Copy vibe-acp fields that
+            # packages may supply (e.g. tool_timeout_sec for long-running tools),
+            # then ensure required fields are set.
+            passthrough = {
+                "tool_timeout_sec",
+                "startup_timeout_sec",
+                "transport",
+                "env",
+                "skills_path",
+            }
+            entry = {"transport": "stdio"}
+            for key in passthrough:
+                if key in srv:
+                    entry[key] = srv[key]
+            entry["name"] = name
+            entry["command"] = srv["command"]
             if srv.get("args"):
                 entry["args"] = srv["args"]
+            else:
+                entry.pop("args", None)
             new_entries.append(entry)
 
     cfg["mcp_servers"] = new_entries
+
+    # Collect skills_path values from discovered servers and write them to
+    # skill_paths so vibe-acp loads the bundled skill docs automatically.
+    skill_paths = [srv["skills_path"] for srv in servers if srv.get("skills_path")]
+    if skill_paths:
+        cfg["skill_paths"] = skill_paths
+
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with config_path.open("wb") as fh:
         tomli_w.dump(cfg, fh)
@@ -353,7 +383,9 @@ def _build_chat_settings_inputs() -> list[Any]:
         inputs.append(
             cl.input_widget.Switch(
                 id=f"stack_{srv['name']}",
-                label=f"Stack: {srv['name']}",
+                label="Stack: "
+                + srv["name"]
+                + (f":{srv['version']}" if srv.get("version") else ""),
                 initial=srv["name"] in active_names,
                 description=(
                     f"Load the {srv['name']} MCP stack. "
@@ -391,6 +423,7 @@ RISK_CATEGORIES: dict[str, tuple[str, str]] = {
     "data_exfil": ("Could send your data to an external service", "high"),
     "system_config": ("Changes system or application settings", "medium"),
     "privacy": ("Accesses personal or sensitive information", "high"),
+    "skill_load": ("Loads external instructions into the agent context", "medium"),
 }
 
 _SEVERITY_ICON: dict[str, str] = {"low": "🟢", "medium": "🟡", "high": "🔴"}

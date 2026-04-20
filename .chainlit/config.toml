@@ -30,7 +30,7 @@ allow_origins = ["http://localhost:8000", "http://127.0.0.1:8000"]
 unsafe_allow_html = false
 
 # Process and display mathematical expressions. This can clash with "$" characters in messages.
-latex = false
+latex = true
 
 # Enable rendering of user messages markdown
 user_message_markdown = true

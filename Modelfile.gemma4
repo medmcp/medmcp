@@ -2,7 +2,7 @@
 #
 # Gemma 4 26B is Google's instruction-tuned model with native function-calling support.
 #
-# num_ctx 32768; keeps ample room for MCP tool schemas (~1500 tokens), the system prompt, and multi-turn dialogue.
+# num_ctx 131072; keeps ample room for MCP tool schemas (~1500 tokens), the system prompt, and long multi-turn dialogue.
 #
 # Temperature 1.0 is Gemma 4's recommended default for instruction-following.
 # repeat_penalty + repeat_last_n guard against open-ended generation loops.
@@ -12,7 +12,7 @@
 
 FROM gemma4:26b
 
-PARAMETER num_ctx 32768
+PARAMETER num_ctx 131072
 PARAMETER temperature 1.0
 PARAMETER top_p 0.95
 PARAMETER top_k 64

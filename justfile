@@ -64,6 +64,11 @@ pull-config:
 install-stack STACK:
     uv tool install {{STACK}}
 
+# Uninstall a stack package from its isolated uv environment.
+# Usage: just uninstall-stack medmcp-neuro
+uninstall-stack STACK:
+    uv tool uninstall {{STACK}}
+
 # Run every CI check locally (lint, format, typecheck, tests)
 check: lint format-check typecheck test
 

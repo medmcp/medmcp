@@ -224,13 +224,23 @@ def _load_mcp_servers() -> list[JsonDict]:
         tool_names = set(servers)
         for srv in cfg.get("mcp_servers", []):
             name = cast("str", srv.get("name", ""))
-            if name and name not in tool_names:
-                servers[name] = {
-                    "name": name,
-                    "command": cast("str", srv.get("command", "")),
-                    "args": cast("list[Any]", srv.get("args", [])),
-                    "env": [],
-                }
+            if not name or name in tool_names:
+                continue
+            command = cast("str", srv.get("command", ""))
+            # Skip stale entries written by _sync_servers_to_vibe_config for
+            # tools that have since been uninstalled: absolute paths that no
+            # longer exist on disk indicate a removed uv tool environment.
+            if command and Path(command).is_absolute() and not Path(command).exists():
+                _stack_log.debug(
+                    "Skipping stale config.toml entry %r (command not found: %s)", name, command
+                )
+                continue
+            servers[name] = {
+                "name": name,
+                "command": command,
+                "args": cast("list[Any]", srv.get("args", [])),
+                "env": [],
+            }
 
     return list(servers.values())
 

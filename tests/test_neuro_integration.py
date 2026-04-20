@@ -1,21 +1,33 @@
 """Integration tests for the medmcp-neuro stack.
 
-These tests require ``uv sync --extra neuro`` and are skipped otherwise.
+These tests require the medmcp-neuro stack to be installed as an isolated uv
+tool (``just install-stack medmcp-neuro``) and are skipped otherwise.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import subprocess
-import sys
 from typing import Any, cast
 
 import pytest
 
-neuro_available = importlib.util.find_spec("medmcp_neuro") is not None
 
-skip_no_neuro = pytest.mark.skipif(not neuro_available, reason="medmcp-neuro not installed")
+def _neuro_installed() -> bool:
+    """Return True if medmcp-neuro is present in the uv tool store."""
+    result = subprocess.run(
+        ["uv", "tool", "list"],
+        capture_output=True,
+        text=True,
+    )
+    return "medmcp-neuro" in result.stdout
+
+
+neuro_available = _neuro_installed()
+
+skip_no_neuro = pytest.mark.skipif(
+    not neuro_available, reason="medmcp-neuro not installed via uv tool"
+)
 
 JsonDict = dict[str, Any]
 
@@ -53,10 +65,19 @@ def _write(proc: subprocess.Popen[str], msg: str) -> None:
     proc.stdin.flush()
 
 
+def _neuro_executable() -> str:
+    """Return the absolute path to medmcp-neuro inside its isolated uv tool env."""
+    from pathlib import Path
+
+    result = subprocess.run(["uv", "tool", "dir"], capture_output=True, text=True)
+    candidate = Path(result.stdout.strip()) / "medmcp-neuro" / "bin" / "medmcp-neuro"
+    return str(candidate) if candidate.exists() else "medmcp-neuro"
+
+
 def _start_server() -> subprocess.Popen[str]:
-    """Spawn the medmcp-neuro MCP server."""
+    """Spawn the medmcp-neuro MCP server via its isolated uv tool environment."""
     return subprocess.Popen(
-        [sys.executable, "-m", "medmcp_neuro"],
+        [_neuro_executable()],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

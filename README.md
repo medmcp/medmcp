@@ -16,6 +16,7 @@ MedMCP runs entirely on-premise and is designed to meet the data governance and 
 - [Installation](#installation)
 - [Vision](#vision)
 - [Architecture](#architecture)
+- [Imaging Stacks](#imaging-stacks)
 - [Security](#security)
 - [Contributing](#contributing)
 - [License](#license)
@@ -66,23 +67,13 @@ MedMCP is built as a three-layer stack:
 
 1. **Chainlit web UI** (`src/medmcp/app.py`) — the user-facing chat interface served at `http://localhost:8000`.
 2. **vibe-acp subprocess** — an agent orchestrator that receives JSON-RPC 2.0 messages from the UI, manages tool execution, and communicates with the local LLM.
-3. **Ollama** — serves the local Gemma 4 model (`Modelfile.gemma4`) with 32k context, top-p/top-k sampling, and repeat-penalty guards. The agent runs at temperature 1.0 (Gemma 4's recommended default, set in `.vibe/config.toml`).
+3. **Ollama** — serves the local Gemma 4 model (`Modelfile.gemma4`) with 128k context, top-p/top-k sampling, and repeat-penalty guards. The agent runs at temperature 1.0 (Gemma 4's recommended default, set in `.vibe/config.toml`).
 
 The UI spawns a single vibe-acp subprocess and demultiplexes sessions over it. Every tool call (bash, file writes, web fetches) is gated by an interactive Approve/Reject prompt — the user must explicitly approve each action before any side effect occurs.
 
 ---
 
-## Security
-
-MedMCP's security model is designed around the assumption that the local model may be steered by prompt injection (e.g. content pasted from untrusted documents). Key constraints:
-
-- **No auto-approval** — every tool call requires an explicit user click. There is no auto-approval path.
-- **Localhost only** — the Chainlit server binds to localhost. Do not expose port 8000 over a network without adding real authentication.
-- **No data exfiltration** — `web_search` is disabled; `web_fetch` requires approval. No data leaves the institution's infrastructure by default.
-
-For vulnerability reporting, see [SECURITY.md](SECURITY.md).
-
-### Imaging stacks
+## Imaging Stacks
 
 MedMCP's imaging capabilities are provided by optional **stack** packages. Each stack bundles domain-specific tools and their foundation dependencies into a single MCP server.
 
@@ -90,7 +81,7 @@ MedMCP's imaging capabilities are provided by optional **stack** packages. Each 
 ┌─ medmcp (core) ──────────────────────────────────┐
 │  Chainlit UI, agent loop, prompts, config        │
 └──────────────────────────────────────────────────┘
-           │ installs via optional extras
+           │ discovers via uv tool environments
            ▼
 ┌─ stack layer (domain-specific) ──────────────────┐
 │  medmcp-neuro       brain extraction, seg, reg   │
@@ -104,13 +95,25 @@ MedMCP's imaging capabilities are provided by optional **stack** packages. Each 
 └──────────────────────────────────────────────────┘
 ```
 
-Install a stack with the corresponding extra:
+Each stack runs in its own isolated uv tool environment. Install a stack with:
 
 ```bash
-uv sync --extra neuro    # pulls medmcp-neuro + medmcp-dicom
+just install-stack "git+ssh://git@github.com/medmcp/medmcp-neuro.git"
 ```
 
-The MCP server is configured in `.vibe/config.toml` and starts automatically when the UI launches.
+Once installed, the stack is auto-discovered via its `[medmcp.stacks]` entry point and appears as a toggle in the UI's **ChatSettings panel** — no manual edits to `.vibe/config.toml` needed. Toggle changes take effect on the next conversation. Restart the UI after installing or removing a stack.
+
+---
+
+## Security
+
+MedMCP's security model is designed around the assumption that the local model may be steered by prompt injection (e.g. content pasted from untrusted documents). Key constraints:
+
+- **No auto-approval** — every tool call requires an explicit user click. There is no auto-approval path.
+- **Localhost only** — the Chainlit server binds to localhost. Do not expose port 8000 over a network without adding real authentication.
+- **No data exfiltration** — `web_search` is disabled; `web_fetch` requires approval. No data leaves the institution's infrastructure by default.
+
+For vulnerability reporting, see [SECURITY.md](SECURITY.md).
 
 ---
 

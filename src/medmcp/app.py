@@ -66,9 +66,11 @@ from chainlit.context import context as cl_context
 from chainlit.data import get_data_layer as cl_get_data_layer
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.data.storage_clients.base import BaseStorageClient
+from chainlit.server import app as _chainlit_app
 from chainlit.types import ThreadDict
 from chainlit.user import User
 from chainlit.utils import utc_now as _utc_now
+from fastapi.routing import APIRoute
 
 # A loose alias for parsed JSON-RPC payloads. The ACP protocol is too dynamic
 # to model exhaustively as TypedDicts, so we keep the wire format as
@@ -408,6 +410,60 @@ def _build_chat_settings_inputs() -> list[Any]:
 
 OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "gemma4-medmcp")
+
+# Latest token count from vibe-acp usage_update frames.  Single-user app, so
+# no per-session scoping is needed — the most recent update wins.
+_latest_context_used: int = 0
+
+# Cached context window size fetched from Ollama /api/show.  None = not yet
+# fetched.  Populated lazily on the first /api/context-usage request.
+_context_window_tokens: int | None = None
+
+
+async def _fetch_context_window() -> int:
+    """Return the active model's num_ctx by querying Ollama /api/show.
+
+    The result is cached for the process lifetime.  Falls back to 131 072
+    (the value set in Modelfile.gemma4) if Ollama is unreachable or the
+    parameter is absent from the response.
+    """
+    global _context_window_tokens
+    if _context_window_tokens is not None:
+        return _context_window_tokens
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                f"{OLLAMA_BASE_URL}/api/show",
+                json={"model": OLLAMA_MODEL},
+            )
+            resp.raise_for_status()
+            data = cast("JsonDict", resp.json())
+            params_str = str(data.get("parameters") or "")
+            for line in params_str.splitlines():
+                parts = line.strip().split()
+                if len(parts) == 2 and parts[0] == "num_ctx":
+                    _context_window_tokens = int(parts[1])
+                    return _context_window_tokens
+    except Exception:
+        _stack_log.warning("could not fetch context window size from Ollama; using fallback")
+    _context_window_tokens = 131_072
+    return _context_window_tokens
+
+
+async def _context_usage_api() -> dict[str, int]:  # pyright: ignore[reportUnusedFunction]
+    """Return current context token usage for the context-meter in the UI."""
+    return {"used": _latest_context_used, "size": await _fetch_context_window()}
+
+
+# Chainlit's router registers a /{full_path:path} SPA catch-all before our
+# module runs.  Starlette matches routes in registration order, so a route
+# appended after the catch-all is never reached.  Insert at position 0 to
+# ensure this specific path is matched first.
+_chainlit_app.router.routes.insert(  # pyright: ignore[reportUnknownMemberType]
+    0, APIRoute("/api/context-usage", _context_usage_api, methods=["GET"])
+)
+
+
 # Timeout for the explanation call.  Local Ollama inference is fast but the
 # model may be cold-starting; 20 s is generous without blocking the UI too long.
 EXPLAIN_TIMEOUT: float = 20.0
@@ -1224,10 +1280,11 @@ async def _create_new_session() -> bool:
     Handles the vibe-acp restart if :data:`_vibe_restart_needed` is set.
     Returns ``True`` on success or ``False`` after emitting an error message.
     """
-    global _vibe_restart_needed
+    global _vibe_restart_needed, _latest_context_used
     if _vibe_restart_needed:
         await _client.stop()
         _vibe_restart_needed = False
+    _latest_context_used = 0
 
     active = _active_servers()
     _sync_servers_to_vibe_config(active)
@@ -1635,6 +1692,12 @@ async def _process_session_frame(
                 else:
                     tool_summary_holder["step"].name = f"Tool Calls ({len(tool_call_info)})"
                     await _update_tool_summary(tool_summary_holder, tool_call_info)
+
+        elif update_type == "usage_update":
+            global _latest_context_used
+            used = update.get("used")
+            if isinstance(used, int):
+                _latest_context_used = used
 
         elif update_type == "tool_call_update":
             # Track tool output for the summary step.

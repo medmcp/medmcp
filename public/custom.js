@@ -27,6 +27,81 @@
   }).observe(document.body, { childList: true, subtree: true });
 })();
 
+// ── Context usage indicator ───────────────────────────────────────────
+// Injects a small bar + token label into Chainlit's .watermark footer and
+// keeps it up to date by polling /api/context-usage every 5 s.
+(function () {
+  "use strict";
+
+  // Append the badge to .watermark.  Returns true when successful.
+  // Note: querySelectorAll does not test the root element itself, so we use
+  // document.querySelector which always searches the full document.
+  function tryInject() {
+    if (document.getElementById("ctx-indicator")) return true;
+    const wm = document.querySelector(".watermark");
+    if (!wm) return false;
+    const badge = document.createElement("div");
+    badge.id = "ctx-indicator";
+    badge.innerHTML =
+      '<div id="ctx-bar-track"><div id="ctx-bar-fill"></div></div>' +
+      '<span id="ctx-label">— / —</span>';
+    wm.appendChild(badge);
+    return true;
+  }
+
+  // Poll every 200 ms until .watermark exists, then stop.
+  const injectTimer = setInterval(function () {
+    if (tryInject()) clearInterval(injectTimer);
+  }, 200);
+
+  // Re-inject if React removes our badge (e.g. on component re-mount).
+  new MutationObserver(function () {
+    if (!document.getElementById("ctx-indicator")) tryInject();
+  }).observe(document.body, { childList: true, subtree: true });
+
+  function updateBadge(used, size) {
+    const fill = document.getElementById("ctx-bar-fill");
+    const label = document.getElementById("ctx-label");
+    if (!fill || !label) return;
+
+    const pct = size > 0 ? Math.min(100, (used / size) * 100) : 0;
+    fill.style.width = pct + "%";
+    // Shift fill colour from muted → amber → rose as context fills.
+    fill.className = pct >= 80 ? "ctx-high" : pct >= 50 ? "ctx-mid" : "";
+
+    const sizeK = Math.round(size / 1000);
+    if (used > 0) {
+      const usedK = (used / 1000).toFixed(used < 10000 ? 1 : 0);
+      label.textContent = usedK + "k / " + sizeK + "k";
+    } else {
+      label.textContent = "— / " + sizeK + "k";
+    }
+  }
+
+  async function poll() {
+    try {
+      const resp = await fetch("/api/context-usage");
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (typeof data.used === "number" && typeof data.size === "number") {
+        updateBadge(data.used, data.size);
+      }
+    } catch {
+      // Ignore — server may still be starting.
+    }
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", function () {
+      poll();
+      setInterval(poll, 5000);
+    });
+  } else {
+    poll();
+    setInterval(poll, 5000);
+  }
+})();
+
 // ── Override the ChatSettings Reset button ───────────────────────────
 // Restores widget defaults (the `initial` values) rather than the values
 // captured when the panel was opened.

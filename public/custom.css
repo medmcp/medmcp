@@ -7,8 +7,12 @@
     padding: 0 !important;
 }
 .watermark::before {
-    content: "MedMCP — Research Preview";
+    content: "MedMCP — Research Preview · Not for clinical use";
     font-size: 0.75rem;
     line-height: 1;
     color: hsl(var(--muted-foreground));
+}
+
+.loading-shimmer {
+    animation-duration: 0.8s;
 }

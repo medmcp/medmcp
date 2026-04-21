@@ -24,14 +24,20 @@ disabled_tools = [
 agent_paths = []
 enabled_agents = []
 disabled_agents = []
-skill_paths = []
+skill_paths = [
+    "/home/paul.friedrich/.local/share/uv/tools/medmcp-dicom/lib/python3.12/site-packages/medmcp_dicom/skills",
+]
 enabled_skills = []
 disabled_skills = []
 
 [[mcp_servers]]
-name = "medmcp-neuro"
 transport = "stdio"
-command = "medmcp-neuro"
+skills_path = "/home/paul.friedrich/.local/share/uv/tools/medmcp-dicom/lib/python3.12/site-packages/medmcp_dicom/skills"
+tool_timeout_sec = 1800.0
+name = "medmcp-dicom"
+command = "/home/paul.friedrich/.local/share/uv/tools/medmcp-dicom/bin/medmcp-dicom"
+
+[mcp_servers.env]
 
 [[providers]]
 name = "ollama"

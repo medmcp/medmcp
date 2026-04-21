@@ -85,8 +85,8 @@ class TestUvToolDiscovery:
         expected = str(tmp_path / "medmcp-test" / "bin" / "medmcp-test")
         assert servers[0]["command"] == expected
 
-    def test_env_defaults_to_empty_list(self, tmp_path: Path) -> None:
-        """Env field defaults to [] when not returned by the entry point."""
+    def test_env_defaults_to_empty_dict(self, tmp_path: Path) -> None:
+        """Env field defaults to {} when not returned by the entry point."""
         _make_tool_env(tmp_path, "medmcp-x")
         config = {"name": "medmcp-x", "command": "medmcp-x"}
 
@@ -97,7 +97,7 @@ class TestUvToolDiscovery:
         ):
             servers = _load_mcp_servers()
 
-        assert servers[0]["env"] == []
+        assert servers[0]["env"] == {}
 
     def test_broken_entry_point_is_skipped(self, tmp_path: Path) -> None:
         """An entry point whose callable raises is skipped; others still load."""

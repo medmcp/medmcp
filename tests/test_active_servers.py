@@ -261,3 +261,57 @@ class TestSyncServersToVibeConfig:
 
         names = {s["name"] for s in result["mcp_servers"]}
         assert names == {"medmcp-neuro", "medmcp-cardiac"}
+
+    def test_skill_paths_written_when_present(self, tmp_path: Path) -> None:
+        """skill_paths in server dicts are collected into config.toml skill_paths."""
+        servers: list[JsonDict] = [
+            {
+                "name": "medmcp-neuro",
+                "command": "uvx",
+                "args": ["medmcp-neuro"],
+                "env": [],
+                "skills_path": "/opt/neuro/skills",
+            },
+        ]
+        with patch("medmcp.app.VIBE_HOME", tmp_path):
+            _sync_servers_to_vibe_config(servers)
+
+        with (tmp_path / "config.toml").open("rb") as f:
+            result = tomllib.load(f)
+
+        assert result["skill_paths"] == ["/opt/neuro/skills"]
+
+    def test_skill_paths_cleared_when_stack_deactivated(self, tmp_path: Path) -> None:
+        """Deactivating all stacks removes stale skill_paths from config.toml."""
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text('skill_paths = ["/opt/neuro/skills"]\n')
+
+        with patch("medmcp.app.VIBE_HOME", tmp_path):
+            _sync_servers_to_vibe_config([])
+
+        with cfg_path.open("rb") as f:
+            result = tomllib.load(f)
+
+        assert result.get("skill_paths") == []
+
+    def test_skill_paths_updated_when_partial_deactivation(self, tmp_path: Path) -> None:
+        """skill_paths reflects only the active servers after partial deactivation."""
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text('skill_paths = ["/opt/neuro/skills", "/opt/cardiac/skills"]\n')
+        active: list[JsonDict] = [
+            {
+                "name": "medmcp-neuro",
+                "command": "uvx",
+                "args": ["medmcp-neuro"],
+                "env": [],
+                "skills_path": "/opt/neuro/skills",
+            },
+        ]
+
+        with patch("medmcp.app.VIBE_HOME", tmp_path):
+            _sync_servers_to_vibe_config(active)
+
+        with cfg_path.open("rb") as f:
+            result = tomllib.load(f)
+
+        assert result["skill_paths"] == ["/opt/neuro/skills"]

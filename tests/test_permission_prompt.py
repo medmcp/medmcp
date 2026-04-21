@@ -259,7 +259,7 @@ class TestGenerateExplanation:
 
         call_kwargs: dict[str, Any] = instance.post.call_args[1]
         assert call_kwargs["json"]["model"] == OLLAMA_MODEL
-        assert call_kwargs["json"]["options"]["temperature"] == 1.0
+        assert call_kwargs["json"]["options"]["temperature"] == 0.2
         assert call_kwargs["json"]["think"] is False
         assert call_kwargs["json"]["stream"] is False
 

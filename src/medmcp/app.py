@@ -207,7 +207,7 @@ def _load_mcp_servers() -> list[JsonDict]:
                     "name": name,
                     "command": command,
                     "args": list(cast("list[Any]", srv.get("args", []))),
-                    "env": list(cast("list[Any]", srv.get("env", []))),
+                    "env": dict(cast("dict[str, str]", srv.get("env", {}))),
                     "version": version,
                 }
                 for key in ("skills_path", "tool_timeout_sec", "startup_timeout_sec"):
@@ -246,7 +246,7 @@ def _load_mcp_servers() -> list[JsonDict]:
                 "name": name,
                 "command": command,
                 "args": cast("list[Any]", srv.get("args", [])),
-                "env": [],
+                "env": {},
             }
 
     return list(servers.values())
@@ -272,7 +272,9 @@ def _load_active_server_names() -> set[str]:
 def _save_active_server_names(names: set[str]) -> None:
     """Persist the active server set to ``.vibe/active_stacks.json``."""
     _ACTIVE_STACKS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _ACTIVE_STACKS_PATH.write_text(json.dumps({"active": sorted(names)}))
+    tmp = _ACTIVE_STACKS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"active": sorted(names)}))
+    os.replace(tmp, _ACTIVE_STACKS_PATH)
 
 
 def _active_servers() -> list[JsonDict]:
@@ -354,12 +356,13 @@ def _sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
     # Collect skills_path values from discovered servers and write them to
     # skill_paths so vibe-acp loads the bundled skill docs automatically.
     skill_paths = [srv["skills_path"] for srv in servers if srv.get("skills_path")]
-    if skill_paths:
-        cfg["skill_paths"] = skill_paths
+    cfg["skill_paths"] = skill_paths
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    with config_path.open("wb") as fh:
+    tmp = config_path.with_suffix(".tmp")
+    with tmp.open("wb") as fh:
         tomli_w.dump(cfg, fh)
+    os.replace(tmp, config_path)
 
 
 def _build_chat_settings_inputs() -> list[Any]:
@@ -555,7 +558,8 @@ class VibeAcpClient:
         On EOF or unexpected exception, fail every still-pending future so the
         callers don't hang waiting for a response that will never come.
         """
-        assert self.proc is not None and self.proc.stdout is not None
+        if self.proc is None or self.proc.stdout is None:
+            raise RuntimeError("vibe-acp is not running; call ensure_started() first")
         try:
             while True:
                 msg = await _read_line(self.proc.stdout)
@@ -603,7 +607,8 @@ class VibeAcpClient:
         cancelled mid-flight (e.g. the user clicks Stop). Without it, cancelled
         requests would leak entries into ``_pending`` forever.
         """
-        assert self.proc is not None and self.proc.stdin is not None
+        if self.proc is None or self.proc.stdin is None:
+            raise RuntimeError("vibe-acp is not running; call ensure_started() first")
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[JsonDict] = loop.create_future()
         async with self._write_lock:
@@ -622,7 +627,8 @@ class VibeAcpClient:
 
     async def notify(self, method: str, params: JsonDict | None = None) -> None:
         """Send a JSON-RPC notification (no id, no response expected)."""
-        assert self.proc is not None and self.proc.stdin is not None
+        if self.proc is None or self.proc.stdin is None:
+            raise RuntimeError("vibe-acp is not running; call ensure_started() first")
         async with self._write_lock:
             msg: JsonDict = {"jsonrpc": "2.0", "method": method}
             if params is not None:
@@ -632,7 +638,8 @@ class VibeAcpClient:
 
     async def respond(self, req_id: int, result: JsonDict) -> None:
         """Send a JSON-RPC response for a server-initiated request."""
-        assert self.proc is not None and self.proc.stdin is not None
+        if self.proc is None or self.proc.stdin is None:
+            raise RuntimeError("vibe-acp is not running; call ensure_started() first")
         async with self._write_lock:
             self.proc.stdin.write(_rpc_response(req_id, result))
             await self.proc.stdin.drain()
@@ -910,7 +917,7 @@ async def _generate_explanation(tc: JsonDict) -> tuple[str, list[str]] | None:
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
                     "think": False,
-                    "options": {"temperature": 1.0, "num_predict": 1024},
+                    "options": {"temperature": 0.2, "num_predict": 1024},
                 },
             )
             resp.raise_for_status()
@@ -930,8 +937,6 @@ def _parse_explanation_response(raw_text: str) -> tuple[str, list[str]] | None:
     Handles models that wrap JSON in markdown code fences.  Returns ``None`` if
     no valid JSON object can be extracted.
     """
-    import re
-
     text = raw_text.strip()
 
     # Strip markdown code fences if present (```json ... ``` or ``` ... ```)
@@ -939,7 +944,8 @@ def _parse_explanation_response(raw_text: str) -> tuple[str, list[str]] | None:
     if fence_match:
         text = fence_match.group(1)
     else:
-        # Find the first { ... } block in case the model added preamble text
+        # Greedy match is intentional: .*? would stop at the first } and break
+        # on nested objects like {"risks": ["file_read"]}.
         brace_match = re.search(r"\{.*\}", text, re.DOTALL)
         if brace_match:
             text = brace_match.group(0)
@@ -980,7 +986,7 @@ def _format_risk_badges(risks: list[str]) -> str:
             continue
         label, severity = entry
         icon = _SEVERITY_ICON.get(severity, "⚠️")
-        parts.append(f"{icon} {label}" if icon else label)
+        parts.append(f"{icon} {label}")
     return "  ·  ".join(parts)
 
 
@@ -1229,7 +1235,7 @@ async def _create_new_session() -> bool:
 
     resp = await _client.request(
         "session/new",
-        {"cwd": PROJECT_ROOT, "mcpServers": active},
+        {"cwd": PROJECT_ROOT, "mcpServers": []},
     )
     if "error" in resp:
         await cl.Message(content=f"Failed to create vibe-acp session: {resp['error']}").send()
@@ -1332,7 +1338,7 @@ async def on_chat_resume(thread: ThreadDict) -> None:
         {
             "cwd": PROJECT_ROOT,
             "session_id": vibe_session_id,
-            "mcpServers": active,
+            "mcpServers": [],
         },
     )
     if "error" in resp:
@@ -1367,9 +1373,9 @@ def _persisted_user_id() -> str | None:
 async def on_message(message: cl.Message) -> None:
     """Send a prompt to vibe-acp and stream the response back into the UI."""
     session_id = _get_session_id()
-    if session_id is None:
-        # First message of a new chat — create the vibe-acp session now so the
-        # user's current ChatSettings (MCP stack toggles, etc.) are applied.
+    if session_id is None or _vibe_restart_needed:
+        # First message, or the active stack set changed mid-chat — (re)create
+        # the vibe-acp session so the updated config.toml takes effect.
         if not await _create_new_session():
             return
         session_id = _get_session_id()
@@ -1425,7 +1431,7 @@ async def on_message(message: cl.Message) -> None:
     # Send the prompt and get a future for its response. We then race the
     # future against queue reads so session_update notifications and
     # request_permission requests are interleaved with the agent loop.
-    prompt_fut = asyncio.ensure_future(
+    prompt_fut = asyncio.create_task(
         _client.request(
             "session/prompt",
             {
@@ -1451,7 +1457,7 @@ async def on_message(message: cl.Message) -> None:
             # Wait for either the next inbound frame for this session or the
             # prompt response. We can't just `await queue.get()` because the
             # response future may resolve while the queue is empty.
-            get_task: asyncio.Task[JsonDict] = asyncio.ensure_future(queue.get())
+            get_task: asyncio.Task[JsonDict] = asyncio.create_task(queue.get())
             done, _pending = await asyncio.wait(
                 {get_task, prompt_fut},
                 return_when=asyncio.FIRST_COMPLETED,
@@ -1501,6 +1507,15 @@ async def on_message(message: cl.Message) -> None:
         #
         # Also cancel the in-flight prompt request so the ``try/finally`` in
         # ``VibeAcpClient.request`` runs and pops its entry from ``_pending``.
+        if not prompt_fut.done():
+            prompt_fut.cancel()
+        await _cancel_and_drain()
+        raise
+    except Exception:
+        # Any unexpected exception from _process_session_frame (e.g. a Chainlit
+        # error inside _ask_user_for_permission) must still cancel the in-flight
+        # prompt and drain vibe-acp, otherwise the next session/prompt is
+        # rejected as concurrent and the UI becomes unresponsive.
         if not prompt_fut.done():
             prompt_fut.cancel()
         await _cancel_and_drain()

@@ -1,14 +1,62 @@
-/* Replace Chainlit's default watermark text with a MedMCP notice. */
-.watermark > * {
+/* Replace Chainlit's default watermark text with a MedMCP notice.
+   #ctx-indicator is injected as a child by custom.js; exclude it from the
+   blanket child-hide so it remains visible alongside the ::before notice. */
+.watermark > *:not(#ctx-indicator) {
     display: none;
 }
 .watermark {
     margin: 0 !important;
-    padding: 0 !important;
+    padding: 0 6px !important;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
 }
 .watermark::before {
-    content: "MedMCP — Research Preview";
+    content: "MedMCP: Research software - NOT for clinical use!";
     font-size: 0.75rem;
     line-height: 1;
     color: hsl(var(--muted-foreground));
+}
+
+.loading-shimmer {
+    animation-duration: 0.8s;
+}
+
+/* Context usage indicator — sits inline in the watermark footer bar */
+#ctx-indicator {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.68rem;
+    color: hsl(var(--muted-foreground));
+    opacity: 0.6;
+    pointer-events: none;
+    user-select: none;
+    flex-shrink: 0;
+}
+
+#ctx-bar-track {
+    width: 48px;
+    height: 3px;
+    background: hsl(var(--muted));
+    border-radius: 99px;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+#ctx-bar-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: 99px;
+    background: hsl(var(--muted-foreground));
+    transition: width 0.5s ease, background 0.5s ease;
+}
+
+#ctx-bar-fill.ctx-mid {
+    background: hsl(38 92% 50%);
+}
+
+#ctx-bar-fill.ctx-high {
+    background: hsl(0 72% 51%);
 }

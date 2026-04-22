@@ -4,7 +4,7 @@
 #
 # num_ctx 131072; keeps ample room for MCP tool schemas (~1500 tokens), the system prompt, and long multi-turn dialogue.
 #
-# Temperature 1.0 is Gemma 4's recommended default for instruction-following.
+# Temperature 0.3 for more deterministic instruction-following and structured output.
 # repeat_penalty + repeat_last_n guard against open-ended generation loops.
 #
 # Build with:
@@ -13,9 +13,8 @@
 FROM gemma4:26b
 
 PARAMETER num_ctx 131072
-PARAMETER temperature 1.0
+PARAMETER temperature 0.3
 PARAMETER top_p 0.95
 PARAMETER top_k 64
 PARAMETER repeat_penalty 1.15
 PARAMETER repeat_last_n 256
-PARAMETER num_predict 2048

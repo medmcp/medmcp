@@ -97,7 +97,7 @@ fix:
     uv run ruff check --fix
     uv run ruff format
 
-# Pull Gemma 4 26B and build custom gemma4-medmcp (32k context)
+# Pull Gemma 4 26B and build custom gemma4-medmcp
 pull-model:
     ollama pull gemma4:26b
     ollama create gemma4-medmcp -f Modelfile.gemma4

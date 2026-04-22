@@ -14,10 +14,10 @@ def main() -> None:
     to all interfaces. See the security model in ``app.py`` for why this matters.
     """
     app = str(Path(__file__).resolve().parent / "app.py")
-    subprocess.run(
+    result = subprocess.run(
         [sys.executable, "-m", "chainlit", "run", app, "-w", "--host", "127.0.0.1"],
-        check=True,
     )
+    sys.exit(result.returncode)
 
 
 if __name__ == "__main__":

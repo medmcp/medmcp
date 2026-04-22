@@ -13,7 +13,7 @@
     gap: 12px;
 }
 .watermark::before {
-    content: "MedMCP — Research Preview · Not for clinical use";
+    content: "MedMCP: Research software - NOT for clinical use!";
     font-size: 0.75rem;
     line-height: 1;
     color: hsl(var(--muted-foreground));

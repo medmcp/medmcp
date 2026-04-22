@@ -1698,6 +1698,10 @@ async def _process_session_frame(
             used = update.get("used")
             if isinstance(used, int):
                 _latest_context_used = used
+                size = _context_window_tokens if _context_window_tokens is not None else 131_072
+                await cl.context.emitter.emit(  # pyright: ignore[reportUnknownMemberType]
+                    "ctx_update", {"used": used, "size": size}
+                )
 
         elif update_type == "tool_call_update":
             # Track tool output for the summary step.

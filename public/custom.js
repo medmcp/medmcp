@@ -29,7 +29,7 @@
 
 // ── Context usage indicator ───────────────────────────────────────────
 // Injects a small bar + token label into Chainlit's .watermark footer and
-// keeps it up to date by polling /api/context-usage every 5 s.
+// keeps it up to date via Socket.IO push (ctx_update) with a 250 ms poll fallback.
 (function () {
   "use strict";
 
@@ -49,10 +49,10 @@
     return true;
   }
 
-  // Poll every 200 ms until .watermark exists, then stop.
+  // Poll every 100 ms until .watermark exists, then stop.
   const injectTimer = setInterval(function () {
     if (tryInject()) clearInterval(injectTimer);
-  }, 200);
+  }, 100);
 
   // Re-inject if React removes our badge (e.g. on component re-mount).
   new MutationObserver(function () {
@@ -78,6 +78,9 @@
     }
   }
 
+  // Expose for the socket push handler in the IIFE below.
+  window._ctxUpdateBadge = updateBadge;
+
   async function poll() {
     try {
       const resp = await fetch("/api/context-usage");
@@ -94,11 +97,11 @@
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function () {
       poll();
-      setInterval(poll, 5000);
+      setInterval(poll, 250);
     });
   } else {
     poll();
-    setInterval(poll, 5000);
+    setInterval(poll, 250);
   }
 })();
 
@@ -126,16 +129,28 @@
     return defaults;
   }
 
-  // Parse a socket.io frame for a `chat_settings` event and store the defaults.
+  // Parse a socket.io frame for events we care about.
   function parseSioFrame(text) {
     if (typeof text !== "string") return;
     // socket.io v4 frames: 42["event_name", payload]
-    const match = text.match(/42\["chat_settings",(.+?)\](?:\d|$)/s);
-    if (match) {
+    const settingsMatch = text.match(/42\["chat_settings",(.+?)\](?:\d|$)/s);
+    if (settingsMatch) {
       try {
-        _defaults = extractDefaults(JSON.parse(match[1]));
+        _defaults = extractDefaults(JSON.parse(settingsMatch[1]));
       } catch {
         // Ignore parse errors on non-matching frames.
+      }
+    }
+    // ctx_update push — real token count from vibe-acp, bypasses the poll.
+    const ctxMatch = text.match(/42\["ctx_update",(\{[^}]+\})\]/);
+    if (ctxMatch && window._ctxUpdateBadge) {
+      try {
+        const d = JSON.parse(ctxMatch[1]);
+        if (typeof d.used === "number" && typeof d.size === "number") {
+          window._ctxUpdateBadge(d.used, d.size);
+        }
+      } catch {
+        // Ignore malformed frames.
       }
     }
   }

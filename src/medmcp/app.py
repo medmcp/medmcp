@@ -53,6 +53,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import tomllib
 from collections.abc import Awaitable, Callable
 from functools import lru_cache
@@ -368,37 +369,42 @@ def _sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
 
 
 def _build_chat_settings_inputs() -> list[Any]:
-    """Return the ChatSettings input list for on_chat_start / on_chat_resume.
-
-    Includes the explain-tools toggle plus one Switch per discovered MCP stack.
-    """
-    inputs: list[Any] = [
-        cl.input_widget.Switch(
-            id="explain_tools",
-            label="Explain tool calls",
-            initial=True,
-            description=(
-                "Enable this option to add a plain-language explanation to each tool call."
+    """Return the ChatSettings Tab list for on_chat_start / on_chat_resume."""
+    general_tab = cl.input_widget.Tab(
+        id="general",
+        label="General",
+        inputs=[
+            cl.input_widget.Switch(
+                id="explain_tools",
+                label="Explain tool calls",
+                initial=True,
+                description=(
+                    "Enable this option to add a plain-language explanation to each tool call."
+                ),
             ),
-        ),
-    ]
+        ],
+    )
+
     servers = _load_mcp_servers()
     active_names = _load_active_server_names()
-    for srv in servers:
-        inputs.append(
-            cl.input_widget.Switch(
-                id=f"stack_{srv['name']}",
-                label="Stack: "
-                + srv["name"]
-                + (f":{srv['version']}" if srv.get("version") else ""),
-                initial=srv["name"] in active_names,
-                description=(
-                    f"Load the {srv['name']} MCP stack. "
-                    "Changes take effect on the next conversation."
-                ),
-            )
+    stack_inputs: list[cl.input_widget.InputWidget] = [
+        cl.input_widget.Switch(
+            id=f"stack_{srv['name']}",
+            label=srv["name"] + (f"  [v{srv['version']}]" if srv.get("version") else ""),
+            initial=srv["name"] in active_names,
+            description=(
+                f"Load the {srv['name']} MCP stack. Changes take effect on the next conversation."
+            ),
         )
-    return inputs
+        for srv in servers
+    ]
+    stacks_tab = cl.input_widget.Tab(
+        id="stacks",
+        label="Extensions (MCP)",
+        inputs=stack_inputs,
+    )
+
+    return [general_tab, stacks_tab]
 
 
 # ── Explain tool calls (opt-in) ──────────────────────────
@@ -453,6 +459,30 @@ async def _fetch_context_window() -> int:
 async def _context_usage_api() -> dict[str, int]:  # pyright: ignore[reportUnusedFunction]
     """Return current context token usage for the context-meter in the UI."""
     return {"used": _latest_context_used, "size": await _fetch_context_window()}
+
+
+async def _warmup_ollama() -> None:
+    """Load the model into Ollama's memory before the first user message.
+
+    Sends a minimal no-op chat request with keep_alive=2h so the model stays
+    resident for the typical session duration without tying up GPU memory forever.
+    Errors are silently ignored — this is a best-effort optimisation.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            await client.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json={
+                    "model": OLLAMA_MODEL,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": False,
+                    "think": False,
+                    "keep_alive": "2h",
+                    "options": {"num_predict": 1},
+                },
+            )
+    except Exception:
+        pass
 
 
 # Chainlit's router registers a /{full_path:path} SPA catch-all before our
@@ -727,6 +757,11 @@ _client: VibeAcpClient = VibeAcpClient()
 # Existing open chats are not affected — they continue on the old process until
 # the process is replaced at the next on_chat_start.
 _vibe_restart_needed: bool = False
+
+# Pre-warm MCP server discovery so on_chat_start doesn't block on the first
+# browser connection. lru_cache is effectively thread-safe in CPython; if the
+# thread hasn't finished by the time on_chat_start fires it simply re-runs.
+threading.Thread(target=_load_mcp_servers, daemon=True).start()
 
 
 # ── Chainlit data layer (sqlite under .vibe/) ─────────────
@@ -1274,8 +1309,12 @@ async def on_settings_update(settings: dict[str, Any]) -> None:
 # ── Chainlit hooks ─────────────────────────────────────────
 
 
-async def _create_new_session() -> bool:
-    """Create a new vibe-acp session and store its ID in the user session.
+async def _create_new_session(reload_session_id: str | None = None) -> bool:
+    """Create (or reload) a vibe-acp session and store its ID in the user session.
+
+    When *reload_session_id* is given the existing JSONL transcript is replayed
+    via ``session/load`` so conversation history is preserved after an MCP-stack
+    toggle.  Otherwise a fresh ``session/new`` is issued.
 
     Handles the vibe-acp restart if :data:`_vibe_restart_needed` is set.
     Returns ``True`` on success or ``False`` after emitting an error message.
@@ -1289,6 +1328,24 @@ async def _create_new_session() -> bool:
     active = _active_servers()
     _sync_servers_to_vibe_config(active)
     await _client.ensure_started()
+
+    if reload_session_id is not None:
+        # Reload the existing session so the model retains conversation history
+        # while the new MCP servers (from the updated config.toml) become active.
+        queue = _client.register_session(reload_session_id)
+        _set_session_id(reload_session_id)
+        resp = await _client.request(
+            "session/load",
+            {"cwd": PROJECT_ROOT, "session_id": reload_session_id, "mcpServers": []},
+        )
+        if "error" in resp:
+            await cl.Message(content=f"Failed to reload vibe-acp session: {resp['error']}").send()
+            return False
+        # Drain replay frames before the next on_message (same invariant as on_chat_resume).
+        while not queue.empty():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                queue.get_nowait()
+        return True
 
     resp = await _client.request(
         "session/new",
@@ -1310,26 +1367,27 @@ async def _create_new_session() -> bool:
 
 @cl.on_chat_start  # pyright: ignore[reportUnknownMemberType]
 async def on_chat_start() -> None:
-    """Set up the UI for a new chat; defer vibe-acp session creation to the first message.
+    """Set up the UI for a new chat and eagerly create a vibe-acp session.
 
-    Session creation is lazy so the user can adjust ChatSettings (e.g. toggle
-    MCP stacks on/off) before sending their first prompt and have those choices
-    take effect immediately — without needing to open a second chat.
-
-    vibe-acp is pre-started here concurrently with building the settings widget
-    so the process is warm by the time the first message arrives.  MCP tools are
-    not loaded until ``session/new`` (inside ``_create_new_session``), so stack
-    toggle changes made before the first message still take full effect.
+    The session is created here (not deferred to the first message) so that MCP
+    server subprocesses are already running when the user sends their first prompt.
+    If the user changes stack settings before typing, ``on_settings_update`` sets
+    ``_vibe_restart_needed`` and ``on_message`` recreates the session then.
     """
     cl.user_session.set("explain_tools", True)  # pyright: ignore[reportUnknownMemberType]
     # Start vibe-acp and build the settings widget concurrently — both involve
     # subprocess calls on first run, so overlapping them saves startup time.
-    # ensure_started is a no-op if already running; failure is non-fatal here
-    # because _create_new_session will surface any error on the first message.
     warmup_task = asyncio.create_task(_client.ensure_started())
+    ollama_task = asyncio.create_task(_warmup_ollama())
     await cl.ChatSettings(inputs=_build_chat_settings_inputs()).send()
     with contextlib.suppress(Exception):
         await warmup_task
+    # Eagerly create the session so MCP servers are warm before the first message.
+    # Non-fatal: on_message will retry if this fails.
+    with contextlib.suppress(Exception):
+        await _create_new_session()
+    with contextlib.suppress(Exception):
+        await ollama_task
 
 
 @cl.on_chat_resume  # pyright: ignore[reportUnknownMemberType]
@@ -1430,10 +1488,12 @@ def _persisted_user_id() -> str | None:
 async def on_message(message: cl.Message) -> None:
     """Send a prompt to vibe-acp and stream the response back into the UI."""
     session_id = _get_session_id()
+    stack_reload = _vibe_restart_needed and session_id is not None
     if session_id is None or _vibe_restart_needed:
-        # First message, or the active stack set changed mid-chat — (re)create
-        # the vibe-acp session so the updated config.toml takes effect.
-        if not await _create_new_session():
+        # First message → session/new; stack toggle mid-chat → session/load with
+        # the existing session ID so conversation history is preserved.
+        reload_id = session_id if stack_reload else None
+        if not await _create_new_session(reload_session_id=reload_id):
             return
         session_id = _get_session_id()
         if session_id is None:
@@ -1488,12 +1548,23 @@ async def on_message(message: cl.Message) -> None:
     # Send the prompt and get a future for its response. We then race the
     # future against queue reads so session_update notifications and
     # request_permission requests are interleaved with the agent loop.
+    prompt_text = message.content
+    if stack_reload:
+        active_names = ", ".join(s["name"] for s in _active_servers()) or "none"
+        prompt_text = (
+            f"[System note: MCP stack settings were just changed. "
+            f"Active MCP stacks: {active_names}. "
+            f"MCP tools from disabled stacks are no longer available; "
+            f"all built-in tools remain unchanged.]\n\n"
+            f"{prompt_text}"
+        )
+
     prompt_fut = asyncio.create_task(
         _client.request(
             "session/prompt",
             {
                 "session_id": session_id,
-                "prompt": [{"type": "text", "text": message.content}],
+                "prompt": [{"type": "text", "text": prompt_text}],
             },
         )
     )

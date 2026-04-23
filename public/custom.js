@@ -273,3 +273,18 @@
     overrideResetButton();
   }
 })();
+
+// ── Make the extensions info textarea read-only ───────────────────────
+// The TextInput widget has no readonly prop, so we set the attribute via JS.
+(function () {
+  function applyReadonly() {
+    const el = document.querySelector(
+      'textarea[name="extensions_info"], textarea[id="extensions_info"]'
+    );
+    if (el && !el.hasAttribute("readonly")) el.setAttribute("readonly", "");
+  }
+  new MutationObserver(applyReadonly).observe(document.body, {
+    childList: true,
+    subtree: true,
+  });
+})();

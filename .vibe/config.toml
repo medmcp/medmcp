@@ -20,24 +20,16 @@ tool_paths = []
 enabled_tools = []
 disabled_tools = [
     "web_search",
+    "web_fetch",
 ]
 agent_paths = []
 enabled_agents = []
 disabled_agents = []
-skill_paths = [
-    "/home/paul.friedrich/.local/share/uv/tools/medmcp-dicom/lib/python3.12/site-packages/medmcp_dicom/skills",
-]
+skill_paths = []
 enabled_skills = []
-disabled_skills = []
-
-[[mcp_servers]]
-transport = "stdio"
-skills_path = "/home/paul.friedrich/.local/share/uv/tools/medmcp-dicom/lib/python3.12/site-packages/medmcp_dicom/skills"
-tool_timeout_sec = 1800.0
-name = "medmcp-dicom"
-command = "/home/paul.friedrich/.local/share/uv/tools/medmcp-dicom/bin/medmcp-dicom"
-
-[mcp_servers.env]
+disabled_skills = [
+    "vibe",
+]
 
 [[providers]]
 name = "ollama"
@@ -56,7 +48,7 @@ alias = "local"
 temperature = 1.0
 input_price = 0.0
 output_price = 0.0
-thinking = "off"
+thinking = "medium"
 
 [project_context]
 max_chars = 40000
@@ -69,20 +61,9 @@ max_dirs_per_level = 20
 timeout_seconds = 2.0
 
 [tools.task]
-permission = "ask"
-allowlist = [
-    "explore",
-]
-denylist = []
-
-[tools.web_fetch]
-permission = "ask"
+permission = "always"
 allowlist = []
 denylist = []
-default_timeout = 30
-max_timeout = 120
-max_content_bytes = 512000
-user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 [tools.write_file]
 permission = "ask"
@@ -152,7 +133,25 @@ denylist = []
 
 [tools.bash]
 permission = "ask"
-allowlist = []
+allowlist = [
+    "ls",
+    "find",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "stat",
+    "file",
+    "pwd",
+    "which",
+    "ps",
+    "du",
+    "df",
+    "echo",
+    "sort",
+    "uniq",
+    "diff",
+]
 denylist_standalone = []
 sensitive_patterns = [
     "sudo",

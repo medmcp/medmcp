@@ -1,4 +1,4 @@
-# MedMCP: An Agentic Framework for Democratizing Medical Imaging Pipelines
+![](https://capsule-render.vercel.app/api?type=waving&height=200&color=0:D22229,100:2B4FA3&text=MedMCP&reversal=false&fontSize=46&fontAlignY=28&desc=An%20Agentic%20Framework%20for%20Democratizing%20Medical%20Imaging%20Pipelines&descSize=24&descAlignY=55&fontColor=FFFFFF)
 
 MedMCP is an open, community-driven agentic framework that exposes validated medical imaging tools through a natural-language interface.
 It is designed to enable clinicians, radiologists, and domain researchers to apply state-of-the-art image analysis methods without requiring expertise in command-line interfaces, Python environment management, or library-specific APIs.

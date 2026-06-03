@@ -18,4 +18,4 @@ if ! grep -q '^CHAINLIT_AUTH_SECRET=' .env 2>/dev/null; then
     printf '%s\n' "$secret" >> .env
 fi
 
-uv run --env-file .env chainlit run src/medmcp/app.py --host 127.0.0.1
+uv run --env-file .env chainlit run src/medmcp/app.py --host 127.0.0.1 --port "${PORT:-8000}"

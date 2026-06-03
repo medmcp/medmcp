@@ -59,10 +59,13 @@ pull-config:
 # Install a stack package into its own isolated uv environment.
 # _load_mcp_servers() discovers it automatically by scanning uv tool envs for
 # [medmcp.stacks] entry points — no changes to config files needed.
+# --torch-backend=auto detects the host NVIDIA driver at install time and picks
+# the matching CUDA wheel for any PyTorch-ecosystem deps (or CPU wheels if no GPU),
+# so GPU support works on each user's machine regardless of their driver version.
 # Usage: just install-stack ../medmcp-neuro
 #        just install-stack "git+ssh://git@github.com/medmcp/medmcp-neuro.git"
 install-stack STACK:
-    uv tool install {{STACK}}
+    uv tool install --torch-backend=auto {{STACK}}
 
 # Uninstall a stack package from its isolated uv environment.
 # Usage: just uninstall-stack medmcp-neuro

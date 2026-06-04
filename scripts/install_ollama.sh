@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+MIN_VERSION="0.20.7"
+
+INSTALLED="$(ollama --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1)"
+if [ -n "$INSTALLED" ] && [ "$(printf '%s\n' "$MIN_VERSION" "$INSTALLED" | sort -V | head -1)" = "$MIN_VERSION" ]; then
+    echo "Ollama v${INSTALLED} satisfies minimum v${MIN_VERSION}. Nothing to do."
+    exit 0
+fi
+
 echo "Attempting system-wide install via official script..."
 if curl -fsSL https://ollama.com/install.sh | sh; then
     echo "Ollama installed successfully ..."

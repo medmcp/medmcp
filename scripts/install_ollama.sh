@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-if command -v ollama >/dev/null 2>&1 || [ -x "$HOME/ollama/bin/ollama" ]; then
-    echo "Ollama is available and ready to use..."
-    exit 0
-fi
-
 echo "Attempting system-wide install via official script..."
 if curl -fsSL https://ollama.com/install.sh | sh; then
     echo "Ollama installed successfully ..."

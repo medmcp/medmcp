@@ -217,4 +217,8 @@ __marimo__/
 .vibe/medmcp_threads.db
 .vibe/medmcp_threads.db-journal
 .vibe/active_stacks.json
+.vibe/active_workflows.json
+.vibe/provenance_enabled.json
+.vibe/provenance/
+.vibe/workflows/
 data/

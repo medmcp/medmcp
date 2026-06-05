@@ -93,6 +93,35 @@ class TestBuildRecipe:
         assert step2.arguments["skull_stripped"] is True
         assert recipe.steps[0].produces["brain_path"] == "step1.brain_path"
 
+    def test_inputs_get_usage_descriptions(self) -> None:
+        """Each lifted input is described by the tool/arg that first used it."""
+        recipe = self._recipe()
+        in_1 = next(i for i in recipe.inputs if i.name == "in_1")
+        assert in_1.description == "the input_path for medmcp-neuro:skull_strip"
+
+    def test_drops_rejected_call(self) -> None:
+        """A tool the user rejected is excluded from the recipe."""
+        messages: list[JsonDict] = [
+            _assistant_call("r1", "medmcp-neuro_skull_strip", {"input_path": "data/x/t1.nii.gz"}),
+            _tool_result("r1", "User rejected the tool call, provide an alternative plan"),
+            *_MESSAGES[3:7],  # the two real neuro steps
+        ]
+        recipe = distill.build_recipe(
+            messages, server_names=["medmcp-neuro"], name="t", description="d"
+        )
+        assert [s.tool for s in recipe.steps] == ["skull_strip", "register_to_template"]
+
+    def test_drops_cancelled_call(self) -> None:
+        """A tool call wrapped in the user_cancellation tag is excluded."""
+        messages: list[JsonDict] = [
+            _assistant_call("x1", "medmcp-neuro_skull_strip", {"input_path": "data/a.nii"}),
+            _tool_result("x1", "<user_cancellation>skull_strip</user_cancellation>"),
+        ]
+        recipe = distill.build_recipe(
+            messages, server_names=["medmcp-neuro"], name="t", description="d"
+        )
+        assert recipe.steps == []
+
     def test_drops_readonly_shell_inspection(self) -> None:
         """A bash call running a read-only inspection (ls) is excluded as noise."""
         messages: list[JsonDict] = [

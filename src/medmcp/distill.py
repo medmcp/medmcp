@@ -145,6 +145,23 @@ def _is_failed_result(result_text: str) -> bool:
     return "ok: False" in result_text or "returncode: 1" in result_text
 
 
+# Markers vibe-acp writes into a tool result when the user rejected/cancelled the
+# call, so it never actually ran (see vibe ``get_user_cancellation_message`` and
+# the ACP reject path). Such calls must not become workflow steps.
+_REJECTION_MARKERS: tuple[str, ...] = (
+    "User rejected the tool call",
+    "user_cancellation",  # the <user_cancellation> tag wrapping skip/cancel text
+    "skipped by user",
+    "interrupted by user",
+    "User cancelled the operation",
+)
+
+
+def _is_rejected_result(result_text: str) -> bool:
+    """Detect a tool call the user rejected or cancelled (so it didn't execute)."""
+    return any(marker in result_text for marker in _REJECTION_MARKERS)
+
+
 def _iter_tool_calls(messages: list[JsonDict]) -> list[tuple[str, JsonDict, str]]:
     """Yield ``(tool_name, arguments, result_text)`` for each completed tool call.
 
@@ -198,7 +215,11 @@ def build_recipe(
 
     step_no = 0
     for tool_name, args, result_text in _iter_tool_calls(messages):
-        if _is_exploratory_call(tool_name, args) or _is_failed_result(result_text):
+        if (
+            _is_exploratory_call(tool_name, args)
+            or _is_failed_result(result_text)
+            or _is_rejected_result(result_text)
+        ):
             continue
         step_no += 1
         server, tool = provenance.split_tool_name(tool_name, server_names)
@@ -213,7 +234,13 @@ def build_recipe(
                     new_args[key] = f"{{{{{inputs[value].name}}}}}"
                 else:
                     placeholder = f"in_{len(inputs) + 1}"
-                    inputs[value] = WorkflowInput(name=placeholder, example=value)
+                    # Describe the input by its first use so the user knows what to
+                    # supply on replay (e.g. "the input_path for medmcp-neuro:skull_strip").
+                    inputs[value] = WorkflowInput(
+                        name=placeholder,
+                        example=value,
+                        description=f"the {key} for {server}:{tool}",
+                    )
                     new_args[key] = f"{{{{{placeholder}}}}}"
             else:
                 new_args[key] = value
@@ -389,7 +416,9 @@ def render_skill_md(recipe: Recipe, prose: JsonDict | None) -> str:
         parts += ["", "## Gotchas", "", gotchas_md.strip()]
     if recipe.inputs:
         parts += ["", "## Inputs", ""]
-        parts += [f"- `{{{{{i.name}}}}}` — e.g. `{i.example}`" for i in recipe.inputs]
+        for i in recipe.inputs:
+            desc = f" — {i.description}" if i.description else ""
+            parts.append(f"- `{{{{{i.name}}}}}`{desc} (e.g. `{i.example}`)")
     return "\n".join(parts).rstrip() + "\n"
 
 

@@ -74,7 +74,8 @@ from chainlit.user import User
 from chainlit.utils import utc_now as _utc_now
 from fastapi.routing import APIRoute
 
-from medmcp import distill, provenance
+from medmcp import distill, provenance, replay
+from medmcp.workflow import Recipe
 
 # A loose alias for parsed JSON-RPC payloads. The ACP protocol is too dynamic
 # to model exhaustively as TypedDicts, so we keep the wire format as
@@ -122,6 +123,8 @@ DISCARD_WORKFLOW_ACTION: str = "discard_workflow"
 TEST_WORKFLOW_ACTION: str = "test_workflow"
 DELETE_WORKFLOW_ACTION: str = "delete_workflow"
 EDIT_WORKFLOW_ACTION: str = "edit_workflow"
+RUN_WORKFLOW_ACTION: str = "run_workflow"
+CONFIRM_REPLAY_ACTION: str = "confirm_replay"
 
 
 _stack_log: logging.Logger = logging.getLogger(__name__)
@@ -2411,11 +2414,18 @@ async def _handle_save_workflow_command() -> None:
 def _manage_actions(name: str) -> list[cl.Action]:
     """Build the per-workflow buttons for the Manage list.
 
-    Every workflow offers Edit and Delete. Edit opens the full editable preview
-    (Test / Promote / Rename / Refine / Discard); for a promoted workflow it first
+    Every workflow offers Run, Edit and Delete. Run replays the workflow
+    deterministically on new inputs (no LLM); Edit opens the full editable preview
+    (Test / Promote / Rename / Refine / Discard); for a promoted workflow Edit first
     unpromotes it back to a draft. Activate/deactivate stays in the settings gear.
     """
     return [
+        cl.Action(
+            name=RUN_WORKFLOW_ACTION,
+            payload={"name": name},
+            label="Run",
+            tooltip="Replay this workflow on new inputs — runs the exact tools, no LLM",
+        ),
         cl.Action(
             name=EDIT_WORKFLOW_ACTION,
             payload={"name": name},
@@ -2456,6 +2466,161 @@ async def _handle_manage_workflows_command() -> None:
             content=f"**`{name}`** · {status}\n\n{description}",
             actions=_manage_actions(name),
         ).send()
+
+
+# ── Deterministic replay (Run) ────────────────────────────────────────────────
+
+
+def _workflow_dir(name: str) -> Path | None:
+    """Return the on-disk dir for workflow *name* (active wins over draft), or None."""
+    for kind in ("active", "draft"):
+        d = VIBE_HOME / "workflows" / kind / name
+        if (d / "recipe.yaml").exists():
+            return d
+    return None
+
+
+def _input_prompt(name: str, example: str, description: str) -> str:
+    """Build the message asking the user for one replay input value."""
+    desc = f" — {description}" if description else ""
+    return f"**`{name}`**{desc}\n(e.g. `{example}`)"
+
+
+def _format_replay_preview(recipe: Recipe, inputs: dict[str, str]) -> str:
+    """Render the resolved steps a replay will run, for the confirm prompt."""
+    lines: list[str] = [f"**Replay `{recipe.name}`** will run these steps, no LLM:\n"]
+    if recipe.inputs:
+        lines.append("**Inputs**")
+        for wf_input in recipe.inputs:
+            desc = f" — {wf_input.description}" if wf_input.description else ""
+            lines.append(f"- `{wf_input.name}`{desc} = `{inputs.get(wf_input.name, '?')}`")
+        lines.append("")
+    lines.append(f"**Steps ({len(recipe.steps)})**")
+    bindings: dict[str, Any] = dict(inputs)
+    for i, step in enumerate(recipe.steps, start=1):
+        # Inputs are known now; cross-step refs ({{stepM.*}}) resolve at runtime,
+        # so they intentionally still show as placeholders here.
+        args = replay.resolve_arguments(step.arguments, bindings)
+        rendered = json.dumps(args, default=str)
+        lines.append(f"{i}. `{step.server}:{step.tool}` — `{rendered}`")
+    return "\n".join(lines)
+
+
+async def _send_replay_preview(recipe: Recipe, inputs: dict[str, str]) -> None:
+    """Show the resolved steps and a Run-now button carrying the bound inputs."""
+    await cl.Message(
+        content=_format_replay_preview(recipe, inputs),
+        actions=[
+            cl.Action(
+                name=CONFIRM_REPLAY_ACTION,
+                payload={"name": recipe.name, "inputs": inputs},
+                label="Run now",
+                tooltip="Execute the steps above on the inputs shown",
+            )
+        ],
+    ).send()
+
+
+async def _run_replay_and_report(name: str, inputs: dict[str, str]) -> None:
+    """Execute a workflow replay, streaming per-step status, then report the outcome."""
+    draft_dir = _workflow_dir(name)
+    if draft_dir is None:
+        await cl.Message(content=f"Could not find a recipe for `{name}`.").send()
+        return
+    recipe = await asyncio.to_thread(distill.load_recipe, draft_dir)
+    servers = _active_servers()
+
+    progress = cl.Message(content=f"▶️ Replaying **`{name}`**…")
+    await progress.send()
+    log_lines: list[str] = []
+
+    async def _on_step(step_result: replay.StepResult) -> None:
+        icon = "✅" if step_result.ok else "❌"
+        line = f"{icon} {step_result.index}. `{step_result.server}:{step_result.tool}`"
+        if step_result.produced:
+            produced = ", ".join(f"`{v}`" for v in step_result.produced.values())
+            line += f" → {produced}"
+        if not step_result.ok and step_result.error:
+            line += f"\n   ↳ {step_result.error}"
+        log_lines.append(line)
+        progress.content = f"▶️ Replaying **`{name}`**…\n\n" + "\n".join(log_lines)
+        await progress.update()
+
+    result = await replay.run(recipe, inputs, servers=servers, cwd=PROJECT_ROOT, on_step=_on_step)
+
+    if result.ok:
+        outputs: list[str] = []
+        for step_result in result.steps:
+            outputs.extend(step_result.produced.values())
+        summary = f"✅ **Replay of `{name}` complete** — {len(result.steps)} step(s) ran."
+        if outputs:
+            summary += "\n\n**Outputs**\n" + "\n".join(f"- `{o}`" for o in outputs)
+    else:
+        summary = f"❌ **Replay of `{name}` failed.** {result.error or ''}".rstrip()
+    progress.content = f"Replayed **`{name}`**\n\n" + "\n".join(log_lines)
+    await progress.update()
+    await cl.Message(content=summary).send()
+
+
+@cl.action_callback(RUN_WORKFLOW_ACTION)  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
+async def _on_run_workflow(action: cl.Action) -> None:  # pyright: ignore[reportUnusedFunction]
+    """Start a deterministic replay: collect new inputs, then preview and confirm."""
+    name = _action_name(action)
+    if name is None:
+        await cl.Message(content="Could not determine which workflow to run.").send()
+        return
+    draft_dir = _workflow_dir(name)
+    if draft_dir is None:
+        await cl.Message(content=f"Could not find a recipe for `{name}`.").send()
+        return
+    recipe = await asyncio.to_thread(distill.load_recipe, draft_dir)
+
+    # Surface non-input problems (built-in steps, uninstalled stacks) up front by
+    # validating with the recorded examples standing in for the inputs.
+    examples = {i.name: i.example for i in recipe.inputs}
+    structural = replay.validate(recipe, examples, _active_servers())
+    if structural is not None:
+        await cl.Message(content=f"Can't replay `{name}`: {structural}").send()
+        return
+
+    if not recipe.inputs:
+        await _send_replay_preview(recipe, {})
+        return
+
+    # Collect each input as a normal message (same pattern as Rename/Refine).
+    descriptions = {i.name: i.description for i in recipe.inputs}
+    cl.user_session.set(  # pyright: ignore[reportUnknownMemberType]
+        "pending_workflow",
+        {
+            "action": "run",
+            "name": name,
+            "input_names": [i.name for i in recipe.inputs],
+            "examples": examples,
+            "descriptions": descriptions,
+            "collected": {},
+        },
+    )
+    first = recipe.inputs[0]
+    await cl.Message(
+        content=(
+            f"Replaying **`{name}`** on new data. Provide a value for each input "
+            f"(send `-` at any point to cancel).\n\n"
+            + _input_prompt(first.name, first.example, first.description)
+        )
+    ).send()
+
+
+@cl.action_callback(CONFIRM_REPLAY_ACTION)  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
+async def _on_confirm_replay(action: cl.Action) -> None:  # pyright: ignore[reportUnusedFunction]
+    """Execute a previewed replay when the user clicks Run now."""
+    payload = cast("dict[str, Any]", action.payload or {})  # pyright: ignore[reportUnknownMemberType]
+    name = payload.get("name")
+    raw_inputs: object = payload.get("inputs") or {}
+    if not isinstance(name, str) or not isinstance(raw_inputs, dict):
+        await cl.Message(content="Could not start the replay (missing parameters).").send()
+        return
+    inputs = {str(k): str(v) for k, v in cast("JsonDict", raw_inputs).items()}
+    await _run_replay_and_report(name, inputs)
 
 
 @cl.action_callback(TEST_WORKFLOW_ACTION)  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
@@ -2641,6 +2806,38 @@ async def _consume_pending_workflow_input(text: str) -> bool:
     value = text.strip()
     if value in ("", "-"):
         await cl.Message(content=f"{action.capitalize()} cancelled — `{name}` is unchanged.").send()
+        return True
+
+    if action == "run":
+        input_names = [str(n) for n in cast("list[Any]", pending.get("input_names") or [])]
+        examples = cast("JsonDict", pending.get("examples") or {})
+        descriptions = cast("JsonDict", pending.get("descriptions") or {})
+        collected = {
+            str(k): str(v) for k, v in cast("JsonDict", pending.get("collected") or {}).items()
+        }
+        # Record this answer for the next unfilled input.
+        remaining = [n for n in input_names if n not in collected]
+        if remaining:
+            collected[remaining[0]] = value
+        still = [n for n in input_names if n not in collected]
+        if still:
+            # More inputs to gather — re-arm and prompt for the next one.
+            cl.user_session.set(  # pyright: ignore[reportUnknownMemberType]
+                "pending_workflow", {**pending, "collected": collected}
+            )
+            nxt = still[0]
+            await cl.Message(
+                content=_input_prompt(
+                    nxt, str(examples.get(nxt, "")), str(descriptions.get(nxt, ""))
+                )
+            ).send()
+            return True
+        draft_dir = _workflow_dir(name)
+        if draft_dir is None:
+            await cl.Message(content=f"Could not find a recipe for `{name}`.").send()
+            return True
+        recipe = await asyncio.to_thread(distill.load_recipe, draft_dir)
+        await _send_replay_preview(recipe, collected)
         return True
 
     if action == "refine":

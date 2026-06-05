@@ -104,6 +104,8 @@ _ACTIVE_STACKS_PATH: Path = VIBE_HOME / "active_stacks.json"
 _ACTIVE_WORKFLOWS_PATH: Path = VIBE_HOME / "active_workflows.json"
 # Persists the provenance-capture on/off preference; defaults to on when absent.
 _PROVENANCE_ENABLED_PATH: Path = VIBE_HOME / "provenance_enabled.json"
+# Master on/off for the personal-workflows feature; defaults to on when absent.
+_WORKFLOWS_ENABLED_PATH: Path = VIBE_HOME / "workflows_enabled.json"
 
 # Single fixed user identity used by the data layer. There is no auth: this
 # exists only so chainlit's per-user thread scoping has a stable key.
@@ -378,6 +380,30 @@ def _save_provenance_enabled(enabled: bool) -> None:
     os.replace(tmp, _PROVENANCE_ENABLED_PATH)
 
 
+def _load_workflows_enabled() -> bool:
+    """Return whether the personal-workflows feature is enabled (default ``True``).
+
+    The master switch: when off, the Save/Manage composer buttons are hidden and
+    no personal workflow is loaded as a skill (see ``_workflow_commands`` and
+    ``_sync_servers_to_vibe_config``).
+    """
+    if not _WORKFLOWS_ENABLED_PATH.exists():
+        return True
+    try:
+        data = cast("dict[str, Any]", json.loads(_WORKFLOWS_ENABLED_PATH.read_text()))
+        return bool(data.get("enabled", True))
+    except (json.JSONDecodeError, OSError):
+        return True
+
+
+def _save_workflows_enabled(enabled: bool) -> None:
+    """Persist the personal-workflows master on/off preference to disk."""
+    _WORKFLOWS_ENABLED_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _WORKFLOWS_ENABLED_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"enabled": enabled}))
+    os.replace(tmp, _WORKFLOWS_ENABLED_PATH)
+
+
 def _active_servers() -> list[JsonDict]:
     """Return only the active subset of all discovered servers."""
     active_names = _load_active_server_names()
@@ -457,24 +483,32 @@ def _sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
     # Collect skills_path values from discovered servers and write them to
     # skill_paths so vibe-acp loads the bundled skill docs automatically.
     skill_paths = [srv["skills_path"] for srv in servers if srv.get("skills_path")]
-    # Promoted, reusable workflows live here as <name>/SKILL.md; include the
-    # directory so distilled workflows are discoverable as skills (Tier 3).
-    workflows_active = VIBE_HOME / "workflows" / "active"
-    if workflows_active.is_dir():
-        skill_paths.append(str(workflows_active))
-    # Draft workflows are loaded too, so a draft can be tested (invoked as
-    # `/<name>`) before it is promoted. Promotion just moves the draft into
-    # active/ to keep it permanently; both dirs hold <name>/SKILL.md entries.
-    workflows_draft = VIBE_HOME / "workflows" / "draft"
-    if workflows_draft.is_dir():
-        skill_paths.append(str(workflows_draft))
+    # The personal-workflows feature can be turned off entirely by the master
+    # toggle; when off, no workflow dir is added to skill_paths and every workflow
+    # is listed in disabled_skills, so nothing personal is loaded.
+    workflows_enabled = _load_workflows_enabled()
+    if workflows_enabled:
+        # Promoted, reusable workflows live here as <name>/SKILL.md; include the
+        # directory so distilled workflows are discoverable as skills (Tier 3).
+        workflows_active = VIBE_HOME / "workflows" / "active"
+        if workflows_active.is_dir():
+            skill_paths.append(str(workflows_active))
+        # Draft workflows are loaded too, so a draft can be tested (invoked as
+        # `/<name>`) before it is promoted. Promotion just moves the draft into
+        # active/ to keep it permanently; both dirs hold <name>/SKILL.md entries.
+        workflows_draft = VIBE_HOME / "workflows" / "draft"
+        if workflows_draft.is_dir():
+            skill_paths.append(str(workflows_draft))
     cfg["skill_paths"] = skill_paths
 
     # Personal workflows toggled off in the gear are disabled by name so vibe-acp
-    # skips loading them, without removing them from disk. Non-workflow entries in
-    # disabled_skills (if any were set manually) are preserved.
+    # skips loading them, without removing them from disk. With the master toggle
+    # off, all of them are disabled. Non-workflow entries in disabled_skills (if
+    # any were set manually) are preserved.
     all_workflows = {w["name"] for w in _discover_workflows()}
-    deactivated = all_workflows - _load_active_workflow_names()
+    deactivated = (
+        all_workflows if not workflows_enabled else (all_workflows - _load_active_workflow_names())
+    )
     existing_disabled = cast("list[str]", cfg.get("disabled_skills", []))
     preserved = [s for s in existing_disabled if s not in all_workflows]
     cfg["disabled_skills"] = sorted(set(preserved) | deactivated)
@@ -509,6 +543,15 @@ def _build_chat_settings_inputs() -> list[Any]:
                     "permission decisions, and a summary report."
                 ),
             ),
+            cl.input_widget.Switch(
+                id="workflows_enabled",
+                label="Personal workflows",
+                initial=_load_workflows_enabled(),
+                description=(
+                    "Turn the personal-workflows feature on or off. When off, the Save/Manage "
+                    "workflow buttons are hidden and no saved workflow is loaded as a skill."
+                ),
+            ),
         ],
     )
 
@@ -533,7 +576,9 @@ def _build_chat_settings_inputs() -> list[Any]:
 
     tabs: list[Any] = [general_tab, stacks_tab]
 
-    workflows = _discover_workflows()
+    # The per-workflow switches only matter while the feature is on; when the
+    # master toggle is off they would be inert, so hide the whole tab.
+    workflows = _discover_workflows() if _load_workflows_enabled() else []
     if workflows:
         active_workflows = _load_active_workflow_names()
         workflow_inputs: list[cl.input_widget.InputWidget] = [
@@ -559,7 +604,13 @@ def _workflow_commands() -> list[CommandDict]:
     Rendered as buttons in the message box; clicking one and sending sets
     ``message.command`` so ``on_message`` can act on it (distill the chat, or
     list workflows) instead of forwarding the text to the agent.
+
+    Returns an empty list when the personal-workflows feature is toggled off, so
+    the buttons disappear from the composer.
     """
+    if not _load_workflows_enabled():
+        return []
+
     save: CommandDict = {
         "id": SAVE_WORKFLOW_COMMAND,
         "icon": "save",
@@ -930,6 +981,9 @@ _client: VibeAcpClient = VibeAcpClient()
 # the process is replaced at the next on_chat_start.
 _vibe_restart_needed: bool = False
 
+# Guards the one-shot orphaned-provenance GC (see _gc_orphaned_provenance).
+_provenance_gc_done: bool = False
+
 # Pre-warm MCP server discovery so on_chat_start doesn't block on the first
 # browser connection. lru_cache is effectively thread-safe in CPython; if the
 # thread hasn't finished by the time on_chat_start fires it simply re-runs.
@@ -1138,10 +1192,74 @@ class _MedMcpDataLayer(SQLAlchemyDataLayer):
             _audit.info("deleted thread %s and purged session logs %s", thread_id, session_id)
 
 
+def _referenced_vibe_session_ids() -> set[str] | None:
+    """Collect every vibe_session_id referenced by a persisted thread.
+
+    Returns ``None`` — meaning "could not determine the full reference set" — if
+    the threads DB is missing, the query fails, or any row's metadata can't be
+    parsed. Callers MUST treat ``None`` as "do not delete anything": an empty or
+    partial set would otherwise make the GC wipe logs for chats that still exist.
+    A successfully read DB with zero matching rows correctly returns an empty set.
+    """
+    if not THREADS_DB_PATH.exists():
+        return None
+    try:
+        con = sqlite3.connect(THREADS_DB_PATH)
+        try:
+            rows = con.execute("SELECT metadata FROM threads").fetchall()
+        finally:
+            con.close()
+    except Exception:
+        return None
+    ids: set[str] = set()
+    for (raw,) in rows:
+        if not raw:
+            # No metadata → this thread has no provenance to reference; safe.
+            continue
+        try:
+            meta: object = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            # Can't tell what this thread references → bail rather than risk
+            # deleting its logs.
+            return None
+        if not isinstance(meta, dict):
+            return None
+        sid = cast("dict[str, Any]", meta).get("vibe_session_id")
+        if isinstance(sid, str):
+            ids.add(sid)
+    return ids
+
+
+def _gc_orphaned_provenance() -> None:
+    """Once per process, purge provenance records no thread references anymore.
+
+    Belt-and-suspenders to the on-delete purge: cleans up records left behind by
+    older builds, crashes, or any path that created provenance without persisting
+    a thread mapping, so users never have to fall back to the CLI / just recipes.
+
+    Fail-safe: if the referenced set can't be determined with certainty
+    (:func:`_referenced_vibe_session_ids` returns ``None``) the GC is skipped, so
+    a transient read error can never delete logs for chats that still exist.
+    """
+    global _provenance_gc_done
+    if _provenance_gc_done:
+        return
+    _provenance_gc_done = True
+    referenced = _referenced_vibe_session_ids()
+    if referenced is None:
+        _audit.info("gc: skipped — could not determine referenced sessions")
+        return
+    with contextlib.suppress(Exception):
+        purged = provenance.purge_orphans(referenced)
+        if purged:
+            _audit.info("gc: purged %d orphaned provenance record(s): %s", len(purged), purged)
+
+
 @cl.data_layer  # pyright: ignore[reportUnknownMemberType]
 def get_data_layer() -> SQLAlchemyDataLayer:
     """Wire chainlit to a local sqlite database for thread persistence."""
     _bootstrap_threads_db(THREADS_DB_PATH)
+    _gc_orphaned_provenance()
     return _MedMcpDataLayer(
         conninfo=f"sqlite+aiosqlite:///{THREADS_DB_PATH}",
         storage_provider=_NullStorageClient(),
@@ -1506,6 +1624,9 @@ async def on_settings_update(settings: dict[str, Any]) -> None:
     - ``stack_<name>`` — updates the persistent active-stack set in
       ``.vibe/active_stacks.json``; the new set takes effect on the next
       conversation (vibe-acp reads config.toml at session-creation time).
+    - ``workflows_enabled`` — master on/off for personal workflows, persisted to
+      ``.vibe/workflows_enabled.json``. Hides/shows the composer buttons
+      immediately and toggles workflow skill loading on the next session.
     - ``workflow_<name>`` — updates the active-workflow set in
       ``.vibe/active_workflows.json``; deactivated workflows are written to
       ``disabled_skills`` on the next session so vibe-acp skips loading them.
@@ -1535,7 +1656,19 @@ async def on_settings_update(settings: dict[str, Any]) -> None:
                 sorted(active_names),
             )
 
-    workflows = _discover_workflows()
+    wf_enabled = bool(settings.get("workflows_enabled", True))
+    if wf_enabled != _load_workflows_enabled():
+        _save_workflows_enabled(wf_enabled)
+        _vibe_restart_needed = True
+        # Show/hide the Save/Manage composer buttons immediately for this chat.
+        with contextlib.suppress(Exception):
+            await cl.context.emitter.set_commands(_workflow_commands())  # pyright: ignore[reportUnknownMemberType]
+        _audit.info("personal workflows %s via settings", "enabled" if wf_enabled else "disabled")
+
+    # Per-workflow switches only exist while the feature is on; when off the
+    # Workflows tab is hidden, so skip this to preserve the saved active set
+    # instead of resetting it from absent settings keys.
+    workflows = _discover_workflows() if wf_enabled else []
     if workflows:
         active_workflows: set[str] = {
             wf["name"] for wf in workflows if bool(settings.get(f"workflow_{wf['name']}", True))
@@ -1612,10 +1745,11 @@ async def _create_new_session(reload_session_id: str | None = None) -> bool:
         return False
     _set_session_id(session_id)
     _client.register_session(session_id)
-    # Capture the environment manifest (Tier-1 provenance) for this session.
-    if _is_provenance_enabled():
-        with contextlib.suppress(Exception):
-            provenance.write_manifest(session_id, servers=active, model_name=OLLAMA_MODEL)
+    # The Tier-1 provenance manifest is intentionally NOT written here. session/new
+    # runs eagerly on every page load (to warm MCP servers), but the thread→session
+    # mapping that lets the UI purge provenance on delete is only saved on the first
+    # message. Writing the manifest here would leak un-purgeable records for chats
+    # that are opened but never used; it is written in on_message instead.
     return True
 
 
@@ -1772,20 +1906,39 @@ async def on_message(message: cl.Message) -> None:
             await cl.Message(content="Internal error: session was not initialized.").send()
             return
 
-    # Persist the chainlit-thread → vibe-session mapping on the first message
-    # of this chat. Done lazily so refreshes that never produce a conversation
-    # don't leave empty threads in the sidebar. Idempotent: gated by a flag.
+    # Persist the chainlit-thread → vibe-session mapping on the first message of
+    # this chat. Done lazily so refreshes that never produce a conversation don't
+    # leave empty threads in the sidebar. This mapping is what lets the UI find
+    # and purge the session's logs on delete, so the "persisted" flag is only set
+    # once the mapping is actually written — otherwise a chat whose thread_id was
+    # not ready yet (or whose write failed) would lose its logs forever. We retry
+    # on the next message until it sticks.
     if not cl.user_session.get("vibe_session_persisted"):  # pyright: ignore[reportUnknownMemberType]
         thread_id = cl_context.session.thread_id
         data_layer = cast("Any", cl_get_data_layer())
+        mapping_saved = False
         if thread_id and data_layer is not None:
-            with contextlib.suppress(Exception):
+            try:
                 await data_layer.update_thread(
                     thread_id=thread_id,
                     user_id=_persisted_user_id(),
                     metadata={"vibe_session_id": session_id},
                 )
-        cl.user_session.set("vibe_session_persisted", True)  # pyright: ignore[reportUnknownMemberType]
+                mapping_saved = True
+            except Exception:
+                _audit.warning(
+                    "could not persist thread→session mapping for %s; will retry", session_id
+                )
+        if mapping_saved:
+            # Write the Tier-1 provenance manifest only now that the mapping
+            # exists, so provenance is never created for a session the UI can't
+            # later find and purge on delete.
+            if _is_provenance_enabled():
+                with contextlib.suppress(Exception):
+                    provenance.write_manifest(
+                        session_id, servers=_active_servers(), model_name=OLLAMA_MODEL
+                    )
+            cl.user_session.set("vibe_session_persisted", True)  # pyright: ignore[reportUnknownMemberType]
 
     queue = _client.get_session_queue(session_id)
     if queue is None:
@@ -2525,6 +2678,15 @@ async def on_chat_end() -> None:
     session_id = _get_session_id()
     if session_id is not None:
         _client.unregister_session(session_id)
+        # A session that was eagerly created (to warm MCP servers) but never
+        # received a message has no thread mapping, so it can never be deleted
+        # from the UI. Purge its on-disk logs here so abandoned chats — page
+        # refreshes, opened-and-closed tabs — don't leak transcripts/provenance.
+        if not cl.user_session.get("vibe_session_persisted"):  # pyright: ignore[reportUnknownMemberType]
+            with contextlib.suppress(Exception):
+                provenance.purge_session(session_id)
+            _audit.info("purged logs for abandoned (unsent) session %s", session_id)
+            return
         # Render the human-readable provenance report for this session.
         if _is_provenance_enabled():
             with contextlib.suppress(Exception):

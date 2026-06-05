@@ -197,6 +197,42 @@ def test_purge_session_is_safe_when_absent(tmp_path: Path) -> None:
         provenance.purge_session(SESSION_ID)  # no error
 
 
+# ── orphan GC ────────────────────────────────────────────────────────────────
+
+
+def test_purge_orphans_removes_unreferenced_only(tmp_path: Path) -> None:
+    """purge_orphans deletes provenance dirs whose id is not referenced."""
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        provenance.append_run_event("keep-1", {"tool": "a"})
+        provenance.append_run_event("drop-1", {"tool": "b"})
+        provenance.append_run_event("drop-2", {"tool": "c"})
+
+        purged = provenance.purge_orphans({"keep-1"})
+
+        assert sorted(purged) == ["drop-1", "drop-2"]
+        assert provenance.provenance_dir("keep-1").exists()
+        assert not provenance.provenance_dir("drop-1").exists()
+        assert not provenance.provenance_dir("drop-2").exists()
+
+
+def test_purge_orphans_leaves_vibe_transcripts(tmp_path: Path) -> None:
+    """purge_orphans never touches vibe transcript dirs, only provenance."""
+    vibe_dir = tmp_path / "logs" / "session" / "session_20260101_000000_abcd1234"
+    vibe_dir.mkdir(parents=True)
+    (vibe_dir / "meta.json").write_text(json.dumps({"session_id": SESSION_ID}))
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        provenance.append_run_event(SESSION_ID, {"tool": "a"})
+        provenance.purge_orphans(set())  # nothing referenced
+        assert not provenance.provenance_dir(SESSION_ID).exists()
+        assert vibe_dir.exists()
+
+
+def test_purge_orphans_empty_when_no_records(tmp_path: Path) -> None:
+    """With no provenance directory at all, purge_orphans is a no-op."""
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        assert provenance.purge_orphans(set()) == []
+
+
 # ── report ───────────────────────────────────────────────────────────────────
 
 

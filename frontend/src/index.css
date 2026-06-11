@@ -338,11 +338,66 @@ button:hover {
   color: var(--blue-xl);
 }
 
+.volume-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.overlay-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--dark2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.overlay-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.overlay-select {
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  max-width: 280px;
+  min-width: 0;
+}
+
+.overlay-select:focus {
+  outline: none;
+  border-color: rgba(127, 168, 245, 0.4);
+}
+
+.overlay-select-cmap {
+  font-family: var(--sans);
+  max-width: 110px;
+}
+
+.overlay-opacity {
+  width: 110px;
+  accent-color: var(--blue-l);
+}
+
 .niivue-canvas {
   width: 100%;
   height: 100%;
   display: block;
   outline: none;
+  min-height: 0;
+  flex: 1;
 }
 
 .pdf-frame {

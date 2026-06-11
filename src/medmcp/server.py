@@ -5,9 +5,11 @@ and exposes:
 
 - a small filesystem API rooted at ``WORKSPACE_ROOT`` (tree listing, raw file
   content for the viewer, rename/delete/mkdir/upload),
+- a settings API (``/api/settings``) for the stack/workflow/feature toggles
+  shared with the Chainlit UI via ``medmcp.settings``,
 - a WebSocket chat endpoint that relays the vibe-acp agent loop to the browser
   (text chunks, tool calls, usage updates, and interactive permission
-  requests).
+  requests, optionally enriched with LLM explanations and risk tags).
 
 Run with:  medmcp-workspace  (or ``just workspace``)
 
@@ -20,8 +22,17 @@ Same threat model as the Chainlit app (``app.py``):
 2. Every tool call is gated by an interactive permission request forwarded to
    the browser; the user must click Approve before any side effect occurs.
    There is no auto-approval path. Do not add one.
-3. Permission decisions are logged via the ``medmcp.audit`` logger (stderr).
+3. Permission decisions are logged via the ``medmcp.audit`` logger (stderr)
+   and mirrored to the session's provenance record when capture is enabled.
 4. The filesystem API refuses paths that resolve outside ``WORKSPACE_ROOT``.
+
+PROVENANCE
+==========
+When "Record provenance" is on, each chat session gets the same Tier-1 record
+as in the Chainlit UI (manifest on first prompt, run.jsonl per tool call,
+permissions.log). Caveat: workspace sessions are not registered in the
+Chainlit threads DB, so the Chainlit app's orphaned-provenance GC will treat
+their records as orphans and delete them at its next startup.
 """
 
 from __future__ import annotations
@@ -31,6 +42,7 @@ import contextlib
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import cast
 
@@ -40,6 +52,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from medmcp import explain, provenance, settings
 from medmcp.acp import PROJECT_ROOT, JsonDict, VibeAcpClient
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
@@ -72,6 +85,10 @@ app = FastAPI(title="MedMCP Workspace")
 # One vibe-acp subprocess shared by every websocket connection, exactly like
 # the Chainlit app shares one across browser tabs.
 _client: VibeAcpClient = VibeAcpClient()
+
+# Live websocket connections, so a settings-triggered vibe restart can close
+# them (each client auto-reconnects into a fresh session on the new process).
+_connections: set[_ChatConnection] = set()
 
 
 # ── Filesystem API ─────────────────────────────────────────
@@ -194,6 +211,95 @@ async def post_upload(file: UploadFile, dir: str = "") -> JsonDict:
     return {"ok": True, "path": str(target.relative_to(WORKSPACE_ROOT))}
 
 
+# ── Settings API ───────────────────────────────────────────
+
+
+class SettingsPayload(BaseModel):
+    """Full settings state as submitted by the UI's settings drawer."""
+
+    explain_tools: bool
+    record_provenance: bool
+    workflows_enabled: bool
+    active_stacks: list[str]
+    active_workflows: list[str]
+
+
+def _settings_state() -> JsonDict:
+    """Assemble the current settings state (runs blocking discovery)."""
+    stacks = settings.load_mcp_servers()
+    active = settings.load_active_server_names()
+    workflows = settings.discover_workflows()
+    active_wf = settings.load_active_workflow_names()
+    return {
+        "explain_tools": settings.load_explain_enabled(),
+        "record_provenance": settings.load_provenance_enabled(),
+        "workflows_enabled": settings.load_workflows_enabled(),
+        "stacks": [
+            {"name": s["name"], "version": s.get("version"), "active": s["name"] in active}
+            for s in stacks
+        ],
+        "workflows": [
+            {
+                "name": w["name"],
+                "description": w["description"],
+                "kind": w["kind"],
+                "active": w["name"] in active_wf,
+            }
+            for w in workflows
+        ],
+    }
+
+
+@app.get("/api/settings")
+async def get_settings() -> JsonDict:
+    """Return toggles plus the discovered stacks/workflows with active state."""
+    return await asyncio.to_thread(_settings_state)
+
+
+@app.put("/api/settings")
+async def put_settings(payload: SettingsPayload) -> JsonDict:
+    """Persist settings; restart vibe-acp when its config inputs changed.
+
+    Stack and workflow changes are baked into ``.vibe/config.toml`` at session
+    start, so applying them requires a fresh vibe-acp process. All live chat
+    sockets are closed; each client auto-reconnects into a new session.
+    """
+
+    def _apply() -> bool:
+        old_stacks = settings.load_active_server_names()
+        old_workflows = settings.load_active_workflow_names()
+        old_wf_enabled = settings.load_workflows_enabled()
+
+        settings.save_explain_enabled(payload.explain_tools)
+        settings.save_provenance_enabled(payload.record_provenance)
+        settings.save_workflows_enabled(payload.workflows_enabled)
+        settings.save_active_server_names(set(payload.active_stacks))
+        settings.save_active_workflow_names(set(payload.active_workflows))
+
+        restart = (
+            set(payload.active_stacks) != old_stacks
+            or set(payload.active_workflows) != old_workflows
+            or payload.workflows_enabled != old_wf_enabled
+        )
+        if restart:
+            settings.sync_servers_to_vibe_config(settings.active_servers())
+        return restart
+
+    restart_needed = await asyncio.to_thread(_apply)
+    if restart_needed:
+        _audit.info("settings changed; restarting vibe-acp")
+        await _restart_vibe()
+    return {"ok": True, "restarted": restart_needed}
+
+
+async def _restart_vibe() -> None:
+    """Stop the shared vibe-acp process and drop every live chat socket."""
+    await _client.stop()
+    for conn in list(_connections):
+        with contextlib.suppress(Exception):
+            await conn.ws.close()
+
+
 # ── WebSocket chat ─────────────────────────────────────────
 #
 # Wire protocol (JSON messages):
@@ -207,7 +313,9 @@ async def post_upload(file: UploadFile, dir: str = "") -> JsonDict:
 #      "output": str | None}
 #     {"type": "usage", "used": int}
 #     {"type": "permission_request", "requestId": int, "toolCall": {...},
-#      "options": [{"optionId": str, "name": str, "kind": str}]}
+#      "options": [{"optionId": str, "name": str, "kind": str}],
+#      "explanation": str | None,
+#      "risks": [{"key": str, "label": str, "severity": str}]}
 #     {"type": "done"} | {"type": "error", "message": str}
 #
 #   client → server
@@ -243,6 +351,10 @@ class _ChatConnection:
         self.queue = queue
         self._pending_perms: dict[int, asyncio.Future[str | None]] = {}
         self._prompt_task: asyncio.Task[None] | None = None
+        # Tool-call state accumulated across frames, keyed by toolCallId; feeds
+        # the permission dialog backfill and the provenance run log.
+        self._tool_calls: dict[str, JsonDict] = {}
+        self._prompted: bool = False
 
     async def run(self) -> None:
         """Receive client messages until the socket closes."""
@@ -268,9 +380,17 @@ class _ChatConnection:
                 await self._cancel_prompt()
 
     async def close(self) -> None:
-        """Abort any in-flight prompt and drop the session queue."""
+        """Abort any in-flight prompt and drop the session queue.
+
+        A session that never received a prompt is purged (transcript +
+        provenance), mirroring the Chainlit ``on_chat_end`` cleanup for
+        abandoned tabs/refreshes.
+        """
         await self._cancel_prompt()
         _client.unregister_session(self.session_id)
+        if not self._prompted:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(provenance.purge_session, self.session_id)
 
     async def _cancel_prompt(self) -> None:
         """Cancel the running prompt task and tell vibe-acp to abort its loop."""
@@ -299,6 +419,16 @@ class _ChatConnection:
         the next inbound session frame or the prompt response, then drain
         whatever is left in the queue once the response lands.
         """
+        if not self._prompted:
+            self._prompted = True
+            if settings.load_provenance_enabled():
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(
+                        provenance.write_manifest,
+                        self.session_id,
+                        servers=settings.active_servers(),
+                        model_name=settings.OLLAMA_MODEL,
+                    )
         prompt_fut = asyncio.create_task(
             _client.request(
                 "session/prompt",
@@ -353,29 +483,61 @@ class _ChatConnection:
                 if content.get("type") == "text":
                     await self._send({"type": "chunk", "text": str(content.get("text") or "")})
             elif update_type == "tool_call":
+                tc_id = str(update.get("toolCallId") or "")
+                title = str(update.get("title") or "tool")
+                status = str(update.get("status") or "pending")
+                info = self._tool_calls.setdefault(tc_id, {"_started": time.monotonic()})
+                info["title"] = title
+                info["status"] = status
+                if update.get("rawInput") is not None:
+                    info["rawInput"] = update.get("rawInput")
                 await self._send(
                     {
                         "type": "tool_call",
-                        "toolCallId": str(update.get("toolCallId") or ""),
-                        "title": str(update.get("title") or "tool"),
-                        "status": str(update.get("status") or "pending"),
+                        "toolCallId": tc_id,
+                        "title": title,
+                        "status": status,
                         "kind": update.get("kind"),
                         "rawInput": update.get("rawInput"),
                     }
                 )
             elif update_type == "tool_call_update":
+                tc_id = str(update.get("toolCallId") or "")
                 output = _extract_text(update.get("content"))
                 raw_output = update.get("rawOutput")
                 if not output and raw_output is not None:
                     output = str(raw_output)
+                status = update.get("status")
+                info = self._tool_calls.get(tc_id)
+                if info is not None:
+                    if isinstance(status, str):
+                        info["status"] = status
+                    if raw_output is not None:
+                        info["rawOutput"] = raw_output
+                    elif output:
+                        info["outputText"] = output
                 await self._send(
                     {
                         "type": "tool_call_update",
-                        "toolCallId": str(update.get("toolCallId") or ""),
-                        "status": update.get("status"),
+                        "toolCallId": tc_id,
+                        "status": status,
                         "output": output[:2000] if output else None,
                     }
                 )
+                if (
+                    status in ("completed", "failed")
+                    and info is not None
+                    and settings.load_provenance_enabled()
+                ):
+                    server_names = [str(s["name"]) for s in settings.active_servers()]
+                    with contextlib.suppress(Exception):
+                        await asyncio.to_thread(
+                            provenance.record_tool_event,
+                            self.session_id,
+                            tc_id,
+                            info,
+                            server_names,
+                        )
             elif update_type == "usage_update":
                 used = update.get("used")
                 if isinstance(used, int):
@@ -386,22 +548,43 @@ class _ChatConnection:
     async def _handle_permission(self, msg: JsonDict) -> None:
         """Forward a permission request to the browser and relay the decision.
 
-        Every decision (or timeout) is written to the ``medmcp.audit`` log,
-        like the Chainlit permission prompt. A closed socket or timeout
-        resolves to ``cancelled`` — never to approval.
+        The request is backfilled with the cached ``tool_call`` metadata
+        (``request_permission`` only ships the toolCallId) and, when the user
+        enabled explanations, enriched with a plain-language explanation and
+        risk tags from the local model. Every decision (or timeout) is written
+        to the ``medmcp.audit`` log and mirrored to the provenance record. A
+        closed socket or timeout resolves to ``cancelled`` — never approval.
         """
         req_id_raw = msg.get("id")
         if not isinstance(req_id_raw, int):
             return
         params = cast("JsonDict", msg.get("params") or {})
-        tool_call = cast("JsonDict", params.get("toolCall") or {})
+        tool_call: JsonDict = dict(cast("JsonDict", params.get("toolCall") or {}))
         options = cast("list[JsonDict]", params.get("options") or [])
-        title = tool_call.get("title") or tool_call.get("toolCallId") or "<unknown>"
+        tc_id = str(tool_call.get("toolCallId") or "")
+        cached = self._tool_calls.get(tc_id, {})
+        for key in ("title", "rawInput"):
+            if tool_call.get(key) is None and cached.get(key) is not None:
+                tool_call[key] = cached[key]
+        title = tool_call.get("title") or tc_id or "<unknown>"
 
         if not options:
             _audit.warning("permission request had no options; cancelling: %s", title)
             await _client.respond(req_id_raw, {"outcome": {"outcome": "cancelled"}})
             return
+
+        explanation: str | None = None
+        risk_keys: list[str] = []
+        if settings.load_explain_enabled():
+            with contextlib.suppress(Exception):
+                result = await explain.generate_explanation(tool_call)
+                if result is not None:
+                    explanation, risk_keys = result
+        if explanation is not None and cached:
+            # Persist into the accumulated state so the provenance run log
+            # carries the explanation and risks alongside the decision.
+            cached["humanReadable"] = explanation
+            cached["risks"] = risk_keys
 
         _audit.info("permission requested: %s", title)
         loop = asyncio.get_running_loop()
@@ -413,6 +596,8 @@ class _ChatConnection:
                 "requestId": req_id_raw,
                 "toolCall": tool_call,
                 "options": options,
+                "explanation": explanation,
+                "risks": explain.resolve_risks(risk_keys),
             }
         )
         try:
@@ -424,19 +609,32 @@ class _ChatConnection:
 
         if option_id is None:
             _audit.warning("permission cancelled/timed out: %s", title)
+            decision = "cancelled"
             outcome: JsonDict = {"outcome": "cancelled"}
         else:
             _audit.info("permission decision: %s -> %s", title, option_id)
+            decision = option_id
             outcome = {"outcome": "selected", "optionId": option_id}
+        if cached:
+            cached["decision"] = decision
+        if settings.load_provenance_enabled():
+            with contextlib.suppress(Exception):
+                provenance.log_permission(self.session_id, title=str(title), decision=decision)
         await _client.respond(req_id_raw, {"outcome": outcome})
 
 
 @app.websocket("/ws/chat")
 async def ws_chat(ws: WebSocket) -> None:
-    """Create a vibe-acp session for this socket and run the chat loop."""
+    """Create a vibe-acp session for this socket and run the chat loop.
+
+    The config sync before ``session/new`` is mandatory: vibe-acp reads its
+    MCP server list and skill paths from ``.vibe/config.toml``, not from the
+    JSON-RPC call.
+    """
     await ws.accept()
     conn: _ChatConnection | None = None
     try:
+        await asyncio.to_thread(settings.sync_servers_to_vibe_config, settings.active_servers())
         await _client.ensure_started()
         resp = await _client.request("session/new", {"cwd": PROJECT_ROOT, "mcpServers": []})
         if "error" in resp:
@@ -451,12 +649,14 @@ async def ws_chat(ws: WebSocket) -> None:
             return
         queue = _client.register_session(session_id)
         conn = _ChatConnection(ws, session_id, queue)
+        _connections.add(conn)
         await ws.send_json({"type": "ready", "sessionId": session_id})
         await conn.run()
     except WebSocketDisconnect:
         pass
     finally:
         if conn is not None:
+            _connections.discard(conn)
             await conn.close()
 
 

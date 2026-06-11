@@ -225,3 +225,4 @@ __marimo__/
 data/
 node_modules/
 frontend/dist/
+.vibe/explain_enabled.json

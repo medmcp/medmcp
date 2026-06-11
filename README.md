@@ -16,6 +16,7 @@ MedMCP runs entirely on-premise and is designed to meet the data governance and 
 - [Installation](#installation)
 - [Vision](#vision)
 - [Architecture](#architecture)
+- [Workspace UI](#workspace-ui)
 - [Imaging Stacks](#imaging-stacks)
 - [Provenance & Reusable Workflows](#provenance--reusable-workflows)
 - [Security](#security)
@@ -47,7 +48,16 @@ If you prefer to run each step separately:
 just setup        # installs uv, ollama, and syncs Python deps
 just pull-model   # pulls Gemma 4 26B and builds gemma4-medmcp (~18 GB, one-time)
 just serve-ollama # start the Ollama server (foreground, Ctrl-C to stop)
-just ui           # launches the web UI at http://localhost:8000
+just ui           # launches the chat web UI at http://localhost:8000
+```
+
+MedMCP also ships an experimental **workspace UI** — a three-panel interface
+(file explorer, medical-image viewer, chat) for working with imaging data
+alongside the agent. See [Workspace UI](#workspace-ui).
+
+```bash
+just workspace-build  # build the workspace frontend (one-time / after updates; needs node + npm)
+just workspace        # launches the workspace UI at http://localhost:8100
 ```
 
 ---
@@ -66,11 +76,33 @@ MedMCP aims to become a **community-driven framework of tested medical imaging s
 
 MedMCP is built as a three-layer stack:
 
-1. **Chainlit web UI** (`src/medmcp/app.py`) — the user-facing chat interface served at `http://localhost:8000`.
+1. **Web UI** — the user-facing frontend. Two are available on top of the same backend: the **Chainlit chat UI** (`src/medmcp/app.py`, `http://localhost:8000`) and the **workspace UI** (`src/medmcp/server.py` + `frontend/`, `http://localhost:8100`; see [Workspace UI](#workspace-ui)).
 2. **vibe-acp subprocess** — an agent orchestrator that receives JSON-RPC 2.0 messages from the UI, manages tool execution, and communicates with the local LLM.
 3. **Ollama** — serves the local Gemma 4 model (`Modelfile.gemma4`) with 128k context, top-p/top-k sampling, and repeat-penalty guards. The model runs at temperature 0.3 for deterministic instruction-following, configured in `Modelfile.gemma4`.
 
 The UI spawns a single vibe-acp subprocess and demultiplexes sessions over it. Every tool call (bash, file writes, web fetches) is gated by an interactive Approve/Reject prompt — the user must explicitly approve each action before any side effect occurs.
+
+---
+
+## Workspace UI
+
+In addition to the chat-only Chainlit interface, MedMCP ships an experimental **workspace UI** — a three-panel layout built for working *with* imaging data, not just chatting about it:
+
+- **File explorer** (top-left) — browse, rename, move, delete, and upload files in your workspace.
+- **Image viewer** (top-right) — view medical images directly in the browser: NIfTI/NRRD/MGZ volumes render with multiplanar slices and a 3D view (scroll to move through slices), and PDFs, images, and text files open inline. **Drag a segmentation from the explorer onto an image** to overlay it — each label is drawn in a distinct color over the anatomy, with an adjustable opacity, and the background stays transparent in both the slices and the 3D render.
+- **Chat** (bottom) — the same agent as the Chainlit UI, with streamed responses, per-tool-call approval prompts (with plain-language explanations and risk tags), and a settings drawer for the stack/workflow/feature toggles.
+
+The workspace UI is served by a separate local server on `http://localhost:8100` and shares all of MedMCP's machinery below the interface (agent loop, tool approval, provenance) with the Chainlit UI — the two are parallel frontends.
+
+```bash
+just workspace-build  # build the React frontend (requires node + npm; one-time / after updates)
+just workspace        # launch the workspace UI at http://localhost:8100
+```
+
+By default the explorer is rooted at the repository directory; point it at a data folder with `MEDMCP_WORKSPACE=/path/to/data just workspace`. Like the chat UI, the server binds to localhost only and gates every tool call behind explicit approval.
+
+> [!NOTE]
+> The workspace UI is under active development. Chat history/resume and in-UI workflow management are not yet available there — use the [Chainlit UI](#architecture) (`just ui`) for those.
 
 ---
 

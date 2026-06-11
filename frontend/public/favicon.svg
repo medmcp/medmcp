@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="7" fill="#131416"/>
-  <g fill="none" stroke="#e4e5e7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <rect width="32" height="32" rx="7" fill="#0d0f14"/>
+  <g fill="none" stroke="#7fa8f5" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
     <polygon points="16 7 8 11 16 15 24 11 16 7"/>
     <polyline points="8 16 16 20 24 16"/>
     <polyline points="8 21 16 25 24 21"/>

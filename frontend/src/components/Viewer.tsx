@@ -28,7 +28,7 @@ function VolumeView({ url }: { url: string }) {
     if (!canvas) return
     const nv = new Niivue({
       multiplanarShowRender: SHOW_RENDER.ALWAYS,
-      backColor: [0.075, 0.078, 0.086, 1],
+      backColor: [0.051, 0.059, 0.078, 1],
     })
     let cancelled = false
     const load = async () => {

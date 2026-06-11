@@ -10,6 +10,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
     "@niivue/niivue": "^0.69.0",
     "react": "^19.2.6",
     "react-arborist": "^3.10.1",

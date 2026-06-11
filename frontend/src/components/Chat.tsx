@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import { ChatSocket } from '../chatSocket'
 import type { ChatSocketStatus } from '../chatSocket'
 import type { ChatItem, PermissionRequest, ServerFrame, ToolCallState } from '../types'
+import { ShieldIcon } from './icons'
 
 function ToolCard({ tc }: { tc: ToolCallState }) {
   const statusClass =
@@ -38,11 +39,13 @@ function PermissionCard({
   onDecide: (optionId: string | null) => void
 }) {
   return (
-    <div className="permission-card">
-      <div className="permission-title">
-        Permission required: <strong>{perm.toolCall.title ?? 'tool call'}</strong>
+    <div className="approval-box">
+      <div className="approval-header">
+        <ShieldIcon size={13} strokeWidth={2.5} />
+        Action requires your approval
       </div>
-      {perm.explanation && <div className="permission-explanation">{perm.explanation}</div>}
+      <div className="approval-title">{perm.toolCall.title ?? 'tool call'}</div>
+      {perm.explanation && <div className="approval-explanation">{perm.explanation}</div>}
       {perm.risks && perm.risks.length > 0 && (
         <div className="risk-chips">
           {perm.risks.map((r) => (
@@ -53,15 +56,16 @@ function PermissionCard({
         </div>
       )}
       {perm.toolCall.rawInput != null && (
-        <pre className="permission-input">{JSON.stringify(perm.toolCall.rawInput, null, 2)}</pre>
+        <pre className="approval-input">{JSON.stringify(perm.toolCall.rawInput, null, 2)}</pre>
       )}
-      <div className="permission-actions">
+      <div className="approval-btns">
         {perm.options.map((opt) => (
           <button
             key={opt.optionId}
-            className={opt.kind?.includes('reject') ? 'btn-danger' : 'btn-primary'}
+            className={opt.kind?.includes('reject') ? 'abtn-reject' : 'abtn-approve'}
             onClick={() => onDecide(opt.optionId)}
           >
+            {opt.kind?.includes('reject') ? '' : '✓ '}
             {opt.name ?? opt.optionId}
           </button>
         ))}
@@ -198,20 +202,24 @@ export function Chat() {
           if (item.kind === 'user') {
             return (
               <div key={i} className="msg msg-user">
-                {item.text}
+                <div className="msg-avatar avatar-user">You</div>
+                <div className="msg-bubble bubble-user">{item.text}</div>
               </div>
             )
           }
           if (item.kind === 'error') {
             return (
-              <div key={i} className="msg msg-error">
+              <div key={i} className="msg-error">
                 {item.text}
               </div>
             )
           }
           return (
-            <div key={i} className="msg msg-assistant">
-              <ReactMarkdown>{item.text}</ReactMarkdown>
+            <div key={i} className="msg msg-ai">
+              <div className="msg-avatar avatar-ai">AI</div>
+              <div className="msg-bubble bubble-ai">
+                <ReactMarkdown>{item.text}</ReactMarkdown>
+              </div>
             </div>
           )
         })}

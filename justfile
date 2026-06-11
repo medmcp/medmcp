@@ -150,6 +150,18 @@ delete-workflow NAME:
 ui:
     @./scripts/run_ui.sh
 
+# Launch the workspace UI (explorer + viewer + chat) at http://localhost:8100
+workspace:
+    uv run medmcp-workspace
+
+# Build the workspace frontend bundle (requires node/npm)
+workspace-build:
+    cd frontend && npm install && npm run build
+
+# Run the frontend dev server with hot reload (proxies to medmcp-workspace)
+workspace-dev:
+    cd frontend && npm run dev
+
 # Start the Ollama server (blocks until stopped)
 serve-ollama:
     ollama serve

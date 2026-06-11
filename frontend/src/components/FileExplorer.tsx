@@ -1,0 +1,158 @@
+import { useEffect, useRef, useState } from 'react'
+import { Tree } from 'react-arborist'
+import type { NodeApi, NodeRendererProps } from 'react-arborist'
+import { deletePath, fetchTree, mkdir, renamePath, uploadFile } from '../api'
+import type { TreeNode } from '../types'
+
+interface FileExplorerProps {
+  onOpenFile: (path: string) => void
+}
+
+function parentDir(path: string): string {
+  const idx = path.lastIndexOf('/')
+  return idx === -1 ? '' : path.slice(0, idx)
+}
+
+function joinPath(dir: string, name: string): string {
+  return dir ? `${dir}/${name}` : name
+}
+
+function NodeRow({ node, style, dragHandle }: NodeRendererProps<TreeNode>) {
+  const isDir = !node.isLeaf
+  return (
+    <div
+      ref={dragHandle}
+      style={style}
+      className={`tree-row${node.isSelected ? ' selected' : ''}`}
+      onClick={() => {
+        if (isDir) node.toggle()
+      }}
+      onDoubleClick={() => {
+        if (!isDir) node.activate()
+      }}
+    >
+      <span className="tree-icon">{isDir ? (node.isOpen ? '📂' : '📁') : fileIcon(node.data.name)}</span>
+      {node.isEditing ? (
+        <input
+          autoFocus
+          defaultValue={node.data.name}
+          onBlur={() => node.reset()}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') node.reset()
+            if (e.key === 'Enter') node.submit(e.currentTarget.value)
+          }}
+        />
+      ) : (
+        <span className="tree-name" title={node.data.id}>
+          {node.data.name}
+        </span>
+      )}
+    </div>
+  )
+}
+
+function fileIcon(name: string): string {
+  const lower = name.toLowerCase()
+  if (lower.endsWith('.nii') || lower.endsWith('.nii.gz') || lower.endsWith('.mgz') || lower.endsWith('.nrrd')) return '🧠'
+  if (lower.endsWith('.dcm')) return '🩻'
+  if (lower.endsWith('.pdf')) return '📄'
+  if (/\.(png|jpe?g|gif|svg|webp)$/.test(lower)) return '🖼️'
+  return '📃'
+}
+
+/** Workspace file tree with open/rename/move/delete/upload. */
+export function FileExplorer({ onOpenFile }: FileExplorerProps) {
+  const [data, setData] = useState<TreeNode[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [size, setSize] = useState({ width: 280, height: 400 })
+  const containerRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const reload = () => {
+    fetchTree()
+      .then((tree) => {
+        setData(tree)
+        setError(null)
+      })
+      .catch((e: unknown) => setError(String(e)))
+  }
+
+  useEffect(reload, [])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const obs = new ResizeObserver(() => setSize({ width: el.clientWidth, height: el.clientHeight }))
+    obs.observe(el)
+    return () => obs.disconnect()
+  }, [])
+
+  const run = (op: Promise<void>) => {
+    op.then(reload).catch((e: unknown) => {
+      setError(String(e))
+      reload()
+    })
+  }
+
+  const onActivate = (node: NodeApi<TreeNode>) => {
+    if (node.isLeaf) onOpenFile(node.data.id)
+  }
+
+  return (
+    <div className="panel">
+      <div className="panel-header">
+        <span>Files</span>
+        <span className="panel-actions">
+          <button title="New folder" onClick={() => {
+            const name = window.prompt('New folder name')
+            if (name) run(mkdir(name))
+          }}>
+            📁+
+          </button>
+          <button title="Upload file" onClick={() => fileInputRef.current?.click()}>⬆️</button>
+          <button title="Refresh" onClick={reload}>↻</button>
+        </span>
+        <input
+          ref={fileInputRef}
+          type="file"
+          hidden
+          onChange={(e) => {
+            const file = e.target.files?.[0]
+            if (file) run(uploadFile(file, ''))
+            e.target.value = ''
+          }}
+        />
+      </div>
+      {error && <div className="panel-error">{error}</div>}
+      <div className="panel-body" ref={containerRef}>
+        <Tree<TreeNode>
+          data={data}
+          width={size.width}
+          height={size.height}
+          rowHeight={26}
+          indent={14}
+          openByDefault={false}
+          disableMultiSelection
+          onActivate={onActivate}
+          onRename={({ node, name }) => {
+            run(renamePath(node.data.id, joinPath(parentDir(node.data.id), name)))
+          }}
+          onMove={({ dragNodes, parentNode }) => {
+            const destDir = parentNode ? parentNode.data.id : ''
+            for (const node of dragNodes) {
+              run(renamePath(node.data.id, joinPath(destDir, node.data.name)))
+            }
+          }}
+          onDelete={({ nodes }) => {
+            const names = nodes.map((n) => n.data.name).join(', ')
+            if (window.confirm(`Delete ${names}?`)) {
+              for (const node of nodes) run(deletePath(node.data.id))
+            }
+          }}
+        >
+          {NodeRow}
+        </Tree>
+      </div>
+    </div>
+  )
+}

@@ -1,0 +1,464 @@
+/* MedMCP workspace — dark three-panel layout. */
+
+:root {
+  --bg: #0e1117;
+  --bg-panel: #161b24;
+  --bg-header: #1c2330;
+  --bg-input: #0b0e14;
+  --border: #2a3242;
+  --text: #d7dde7;
+  --text-dim: #8b93a3;
+  --accent: #4f8cff;
+  --accent-dim: #2c4a80;
+  --danger: #e05656;
+  --ok: #41c46a;
+  --warn: #e0a93c;
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 14px;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-header);
+  color: var(--text);
+  padding: 4px 10px;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+.btn-primary {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+.btn-danger {
+  background: #4a2020;
+  border-color: var(--danger);
+}
+
+.btn-plain {
+  background: transparent;
+}
+
+/* ── Shell ── */
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.app-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border);
+}
+
+.app-logo {
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.app-subtitle {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.app-main {
+  flex: 1;
+  min-height: 0;
+}
+
+.sep {
+  background: var(--border);
+  transition: background 0.15s;
+}
+
+.sep:hover,
+.sep[data-resize='active'] {
+  background: var(--accent);
+}
+
+.sep-v {
+  width: 4px;
+}
+
+.sep-h {
+  height: 4px;
+}
+
+/* ── Panels ── */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  font-size: 13px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 400;
+}
+
+.panel-actions button,
+.panel-actions a {
+  padding: 2px 7px;
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.panel-error {
+  color: var(--danger);
+  font-size: 12px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── File explorer ── */
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  height: 100%;
+  cursor: pointer;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.tree-row:hover {
+  background: #202839;
+}
+
+.tree-row.selected {
+  background: var(--accent-dim);
+}
+
+.tree-icon {
+  font-size: 13px;
+}
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-row input {
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 4px;
+  width: 100%;
+}
+
+/* ── Viewer ── */
+
+.viewer-body {
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+}
+
+.viewer-title {
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.viewer-message {
+  margin: auto;
+  color: var(--text-dim);
+  padding: 24px;
+  text-align: center;
+}
+
+.niivue-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  outline: none;
+}
+
+.pdf-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #fff;
+}
+
+.image-view {
+  max-width: 100%;
+  max-height: 100%;
+  margin: auto;
+  object-fit: contain;
+}
+
+.text-view {
+  flex: 1;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* ── Chat ── */
+
+.chat-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+
+.msg {
+  max-width: 75%;
+  padding: 8px 12px;
+  border-radius: 10px;
+  line-height: 1.5;
+  overflow-wrap: break-word;
+}
+
+.msg-user {
+  align-self: flex-end;
+  background: var(--accent-dim);
+  white-space: pre-wrap;
+}
+
+.msg-assistant {
+  align-self: flex-start;
+  background: #1d2433;
+}
+
+.msg-assistant > :first-child {
+  margin-top: 0;
+}
+
+.msg-assistant > :last-child {
+  margin-bottom: 0;
+}
+
+.msg-assistant pre {
+  background: var(--bg-input);
+  padding: 8px;
+  border-radius: 6px;
+  overflow: auto;
+  font-size: 12px;
+}
+
+.msg-assistant code {
+  background: var(--bg-input);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 12px;
+}
+
+.msg-error {
+  align-self: stretch;
+  background: #3a1d1d;
+  border: 1px solid var(--danger);
+  font-size: 13px;
+}
+
+.thinking {
+  color: var(--text-dim);
+  letter-spacing: 3px;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.chat-meta {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.usage {
+  color: var(--text-dim);
+}
+
+.conn-open {
+  color: var(--ok);
+}
+
+.conn-connecting {
+  color: var(--warn);
+}
+
+.conn-closed {
+  color: var(--danger);
+}
+
+.chat-input-row {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.chat-input-row textarea {
+  flex: 1;
+  resize: none;
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+  line-height: 1.4;
+}
+
+.chat-input-row textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ── Tool & permission cards ── */
+
+.tool-card {
+  align-self: stretch;
+  background: #141a26;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.tool-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.ok {
+  background: var(--ok);
+}
+
+.status-dot.fail {
+  background: var(--danger);
+}
+
+.status-dot.busy {
+  background: var(--warn);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.tool-title {
+  font-weight: 600;
+}
+
+.tool-status {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.tool-card details {
+  margin-top: 4px;
+}
+
+.tool-card summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.tool-card pre {
+  background: var(--bg-input);
+  border-radius: 6px;
+  padding: 8px;
+  overflow: auto;
+  max-height: 240px;
+  font-size: 12px;
+  margin: 4px 0 0;
+}
+
+.permission-card {
+  align-self: stretch;
+  border: 1px solid var(--warn);
+  background: #221c10;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.permission-title {
+  margin-bottom: 6px;
+}
+
+.permission-input {
+  background: var(--bg-input);
+  border-radius: 6px;
+  padding: 8px;
+  overflow: auto;
+  max-height: 200px;
+  font-size: 12px;
+}
+
+.permission-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}

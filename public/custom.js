@@ -274,6 +274,58 @@
   }
 })();
 
+// ── One-click "Save workflow" command ─────────────────────────────────
+// Native Chainlit commands fire only when a message is *sent* — clicking the
+// composer command button merely selects the command (onCommandSelect). So the
+// "Save workflow" button normally needs a follow-up Enter. When the user clicks
+// it we submit the composer ourselves so it acts as a single click.
+//
+// Each button is identified by its stable DOM id. Chainlit renders every command
+// button with id `command-<command id>`, so ours are `command-save-workflow` and
+// `command-manage-workflows` (must match the command ids in app.py). After the
+// click registers the selection, we send the same way a manual Enter does: the
+// composer's send handler fires on a plain `Enter` keydown (it checks only key +
+// shiftKey), and React 18 delegates events at the document root, so a bubbling
+// synthetic keydown reaches it even with an empty input.
+(function () {
+  "use strict";
+
+  const ONE_CLICK_COMMAND_IDS = ["command-save-workflow", "command-manage-workflows"];
+  const SELECTOR = ONE_CLICK_COMMAND_IDS.map((id) => '[id="' + id + '"]').join(",");
+  let busy = false;
+
+  function submitComposer() {
+    const input = document.getElementById("chat-input");
+    if (!input) return;
+    input.focus();
+    const submit = document.getElementById("chat-submit");
+    if (submit && !submit.disabled) {
+      submit.click();
+      return;
+    }
+    const opts = { key: "Enter", code: "Enter", bubbles: true, cancelable: true };
+    input.dispatchEvent(new KeyboardEvent("keydown", opts));
+    input.dispatchEvent(new KeyboardEvent("keyup", opts));
+  }
+
+  document.addEventListener(
+    "click",
+    function (e) {
+      if (busy) return;
+      const el = e.target;
+      if (!(el instanceof Element)) return;
+      if (!el.closest(SELECTOR)) return;
+      busy = true;
+      // Let React register the command selection before we submit.
+      setTimeout(function () {
+        busy = false;
+        submitComposer();
+      }, 200);
+    },
+    true
+  );
+})();
+
 // ── Make the extensions info textarea read-only ───────────────────────
 // The TextInput widget has no readonly prop, so we set the attribute via JS.
 (function () {

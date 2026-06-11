@@ -54,6 +54,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import tomllib
 from collections.abc import Awaitable, Callable
 from functools import lru_cache
@@ -68,10 +69,13 @@ from chainlit.data import get_data_layer as cl_get_data_layer
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.data.storage_clients.base import BaseStorageClient
 from chainlit.server import app as _chainlit_app
-from chainlit.types import ThreadDict
+from chainlit.types import CommandDict, ThreadDict
 from chainlit.user import User
 from chainlit.utils import utc_now as _utc_now
 from fastapi.routing import APIRoute
+
+from medmcp import distill, provenance, replay
+from medmcp.workflow import Recipe
 
 # A loose alias for parsed JSON-RPC payloads. The ACP protocol is too dynamic
 # to model exhaustively as TypedDicts, so we keep the wire format as
@@ -97,10 +101,30 @@ VIBE_HOME: Path = Path(PROJECT_ROOT) / ".vibe"
 THREADS_DB_PATH: Path = VIBE_HOME / "medmcp_threads.db"
 # Tracks which discovered stacks are enabled; defaults to all when absent.
 _ACTIVE_STACKS_PATH: Path = VIBE_HOME / "active_stacks.json"
+# Tracks which personal workflows are enabled (loaded as skills); all when absent.
+_ACTIVE_WORKFLOWS_PATH: Path = VIBE_HOME / "active_workflows.json"
+# Persists the provenance-capture on/off preference; defaults to on when absent.
+_PROVENANCE_ENABLED_PATH: Path = VIBE_HOME / "provenance_enabled.json"
+# Master on/off for the personal-workflows feature; defaults to on when absent.
+_WORKFLOWS_ENABLED_PATH: Path = VIBE_HOME / "workflows_enabled.json"
 
 # Single fixed user identity used by the data layer. There is no auth: this
 # exists only so chainlit's per-user thread scoping has a stable key.
 LOCAL_USER_ID: str = "local"
+
+# Composer command id (a button in the message box) and the review action names
+# for the in-chat workflow-distillation flow. See _handle_save_workflow_command.
+SAVE_WORKFLOW_COMMAND: str = "save-workflow"
+MANAGE_WORKFLOWS_COMMAND: str = "manage-workflows"
+PROMOTE_WORKFLOW_ACTION: str = "promote_workflow"
+REFINE_WORKFLOW_ACTION: str = "refine_workflow"
+RENAME_WORKFLOW_ACTION: str = "rename_workflow"
+DISCARD_WORKFLOW_ACTION: str = "discard_workflow"
+TEST_WORKFLOW_ACTION: str = "test_workflow"
+DELETE_WORKFLOW_ACTION: str = "delete_workflow"
+EDIT_WORKFLOW_ACTION: str = "edit_workflow"
+RUN_WORKFLOW_ACTION: str = "run_workflow"
+CONFIRM_REPLAY_ACTION: str = "confirm_replay"
 
 
 _stack_log: logging.Logger = logging.getLogger(__name__)
@@ -280,6 +304,109 @@ def _save_active_server_names(names: set[str]) -> None:
     os.replace(tmp, _ACTIVE_STACKS_PATH)
 
 
+def _read_skill_description(skill_md: Path) -> str:
+    """Return the ``description:`` frontmatter value from a SKILL.md, or ``''``."""
+    try:
+        lines = skill_md.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in lines[:15]:
+        if line.startswith("description:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def _discover_workflows() -> list[JsonDict]:
+    """Discover personal workflows from ``draft/`` and ``active/``.
+
+    Returns ``{name, description, kind}`` dicts, deduplicated by name (an active
+    workflow shadows a draft of the same name). ``kind`` is ``"active"`` for
+    promoted workflows and ``"draft"`` for unpromoted ones.
+    """
+    found: dict[str, JsonDict] = {}
+    for kind in ("active", "draft"):
+        base = VIBE_HOME / "workflows" / kind
+        if not base.is_dir():
+            continue
+        for d in sorted(base.iterdir()):
+            skill = d / "SKILL.md"
+            if not d.is_dir() or not skill.is_file() or d.name in found:
+                continue
+            found[d.name] = {
+                "name": d.name,
+                "description": _read_skill_description(skill),
+                "kind": kind,
+            }
+    return list(found.values())
+
+
+def _load_active_workflow_names() -> set[str]:
+    """Return the set of workflow names currently enabled (loaded as skills).
+
+    When ``.vibe/active_workflows.json`` is absent every discovered workflow is
+    active, so a freshly distilled/promoted workflow is on by default.
+    """
+    all_names = {w["name"] for w in _discover_workflows()}
+    if not _ACTIVE_WORKFLOWS_PATH.exists():
+        return all_names
+    try:
+        data = cast("dict[str, Any]", json.loads(_ACTIVE_WORKFLOWS_PATH.read_text()))
+        return set(cast("list[str]", data.get("active", list(all_names))))
+    except (json.JSONDecodeError, OSError):
+        return all_names
+
+
+def _save_active_workflow_names(names: set[str]) -> None:
+    """Persist the active workflow set to ``.vibe/active_workflows.json``."""
+    _ACTIVE_WORKFLOWS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _ACTIVE_WORKFLOWS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"active": sorted(names)}))
+    os.replace(tmp, _ACTIVE_WORKFLOWS_PATH)
+
+
+def _load_provenance_enabled() -> bool:
+    """Return whether provenance capture is enabled (default ``True`` when unset)."""
+    if not _PROVENANCE_ENABLED_PATH.exists():
+        return True
+    try:
+        data = cast("dict[str, Any]", json.loads(_PROVENANCE_ENABLED_PATH.read_text()))
+        return bool(data.get("enabled", True))
+    except (json.JSONDecodeError, OSError):
+        return True
+
+
+def _save_provenance_enabled(enabled: bool) -> None:
+    """Persist the provenance-capture on/off preference to disk."""
+    _PROVENANCE_ENABLED_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _PROVENANCE_ENABLED_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"enabled": enabled}))
+    os.replace(tmp, _PROVENANCE_ENABLED_PATH)
+
+
+def _load_workflows_enabled() -> bool:
+    """Return whether the personal-workflows feature is enabled (default ``True``).
+
+    The master switch: when off, the Save/Manage composer buttons are hidden and
+    no personal workflow is loaded as a skill (see ``_workflow_commands`` and
+    ``_sync_servers_to_vibe_config``).
+    """
+    if not _WORKFLOWS_ENABLED_PATH.exists():
+        return True
+    try:
+        data = cast("dict[str, Any]", json.loads(_WORKFLOWS_ENABLED_PATH.read_text()))
+        return bool(data.get("enabled", True))
+    except (json.JSONDecodeError, OSError):
+        return True
+
+
+def _save_workflows_enabled(enabled: bool) -> None:
+    """Persist the personal-workflows master on/off preference to disk."""
+    _WORKFLOWS_ENABLED_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _WORKFLOWS_ENABLED_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"enabled": enabled}))
+    os.replace(tmp, _WORKFLOWS_ENABLED_PATH)
+
+
 def _active_servers() -> list[JsonDict]:
     """Return only the active subset of all discovered servers."""
     active_names = _load_active_server_names()
@@ -359,7 +486,35 @@ def _sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
     # Collect skills_path values from discovered servers and write them to
     # skill_paths so vibe-acp loads the bundled skill docs automatically.
     skill_paths = [srv["skills_path"] for srv in servers if srv.get("skills_path")]
+    # The personal-workflows feature can be turned off entirely by the master
+    # toggle; when off, no workflow dir is added to skill_paths and every workflow
+    # is listed in disabled_skills, so nothing personal is loaded.
+    workflows_enabled = _load_workflows_enabled()
+    if workflows_enabled:
+        # Promoted, reusable workflows live here as <name>/SKILL.md; include the
+        # directory so distilled workflows are discoverable as skills (Tier 3).
+        workflows_active = VIBE_HOME / "workflows" / "active"
+        if workflows_active.is_dir():
+            skill_paths.append(str(workflows_active))
+        # Draft workflows are loaded too, so a draft can be tested (invoked as
+        # `/<name>`) before it is promoted. Promotion just moves the draft into
+        # active/ to keep it permanently; both dirs hold <name>/SKILL.md entries.
+        workflows_draft = VIBE_HOME / "workflows" / "draft"
+        if workflows_draft.is_dir():
+            skill_paths.append(str(workflows_draft))
     cfg["skill_paths"] = skill_paths
+
+    # Personal workflows toggled off in the gear are disabled by name so vibe-acp
+    # skips loading them, without removing them from disk. With the master toggle
+    # off, all of them are disabled. Non-workflow entries in disabled_skills (if
+    # any were set manually) are preserved.
+    all_workflows = {w["name"] for w in _discover_workflows()}
+    deactivated = (
+        all_workflows if not workflows_enabled else (all_workflows - _load_active_workflow_names())
+    )
+    existing_disabled = cast("list[str]", cfg.get("disabled_skills", []))
+    preserved = [s for s in existing_disabled if s not in all_workflows]
+    cfg["disabled_skills"] = sorted(set(preserved) | deactivated)
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = config_path.with_suffix(".tmp")
@@ -380,6 +535,24 @@ def _build_chat_settings_inputs() -> list[Any]:
                 initial=True,
                 description=(
                     "Enable this option to add a plain-language explanation to each tool call."
+                ),
+            ),
+            cl.input_widget.Switch(
+                id="record_provenance",
+                label="Record provenance",
+                initial=_load_provenance_enabled(),
+                description=(
+                    "Record a reproducible log of each session: environment, tool calls, "
+                    "permission decisions, and a summary report."
+                ),
+            ),
+            cl.input_widget.Switch(
+                id="workflows_enabled",
+                label="Personal workflows",
+                initial=_load_workflows_enabled(),
+                description=(
+                    "Turn the personal-workflows feature on or off. When off, the Save/Manage "
+                    "workflow buttons are hidden and no saved workflow is loaded as a skill."
                 ),
             ),
         ],
@@ -404,7 +577,60 @@ def _build_chat_settings_inputs() -> list[Any]:
         inputs=stack_inputs,
     )
 
-    return [general_tab, stacks_tab]
+    tabs: list[Any] = [general_tab, stacks_tab]
+
+    # The per-workflow switches only matter while the feature is on; when the
+    # master toggle is off they would be inert, so hide the whole tab.
+    workflows = _discover_workflows() if _load_workflows_enabled() else []
+    if workflows:
+        active_workflows = _load_active_workflow_names()
+        workflow_inputs: list[cl.input_widget.InputWidget] = [
+            cl.input_widget.Switch(
+                id=f"workflow_{wf['name']}",
+                label=wf["name"] + ("  (draft)" if wf["kind"] == "draft" else ""),
+                initial=wf["name"] in active_workflows,
+                description=(
+                    (wf["description"] or "Personal workflow")
+                    + " — loaded as a skill when on. Changes take effect on the next message."
+                ),
+            )
+            for wf in workflows
+        ]
+        tabs.append(cl.input_widget.Tab(id="workflows", label="Workflows", inputs=workflow_inputs))
+
+    return tabs
+
+
+def _workflow_commands() -> list[CommandDict]:
+    """Return the composer command list (Save / Manage workflow buttons).
+
+    Rendered as buttons in the message box; clicking one and sending sets
+    ``message.command`` so ``on_message`` can act on it (distill the chat, or
+    list workflows) instead of forwarding the text to the agent.
+
+    Returns an empty list when the personal-workflows feature is toggled off, so
+    the buttons disappear from the composer.
+    """
+    if not _load_workflows_enabled():
+        return []
+
+    save: CommandDict = {
+        "id": SAVE_WORKFLOW_COMMAND,
+        "icon": "save",
+        "description": "Distill this chat into a reusable workflow",
+        "button": True,
+        "persistent": False,
+        "selected": False,
+    }
+    manage: CommandDict = {
+        "id": MANAGE_WORKFLOWS_COMMAND,
+        "icon": "list",
+        "description": "List your workflows to test, promote, or delete them",
+        "button": True,
+        "persistent": False,
+        "selected": False,
+    }
+    return [save, manage]
 
 
 # ── Explain tool calls (opt-in) ──────────────────────────
@@ -758,6 +984,9 @@ _client: VibeAcpClient = VibeAcpClient()
 # the process is replaced at the next on_chat_start.
 _vibe_restart_needed: bool = False
 
+# Guards the one-shot orphaned-provenance GC (see _gc_orphaned_provenance).
+_provenance_gc_done: bool = False
+
 # Pre-warm MCP server discovery so on_chat_start doesn't block on the first
 # browser connection. lru_cache is effectively thread-safe in CPython; if the
 # thread hasn't finished by the time on_chat_start fires it simply re-runs.
@@ -933,11 +1162,108 @@ class _NullStorageClient(BaseStorageClient):
         pass
 
 
+class _MedMcpDataLayer(SQLAlchemyDataLayer):
+    """Data layer that also purges on-disk session logs when a thread is deleted.
+
+    Chainlit's delete only removes the thread from the SQLite index; the vibe-acp
+    transcript and our provenance record live on disk and would otherwise be
+    orphaned. We resolve the thread's ``vibe_session_id`` first, then purge both
+    after the row is gone.
+    """
+
+    async def _vibe_session_id_for(self, thread_id: str) -> str | None:
+        """Read the vibe-acp session id from a thread's metadata, if present."""
+        with contextlib.suppress(Exception):
+            thread = await self.get_thread(thread_id)
+            if thread is None:
+                return None
+            raw_meta: object = cast("dict[str, Any]", thread).get("metadata") or {}
+            if isinstance(raw_meta, str):
+                raw_meta = cast("object", json.loads(raw_meta))
+            if isinstance(raw_meta, dict):
+                sid = cast("dict[str, Any]", raw_meta).get("vibe_session_id")
+                return sid if isinstance(sid, str) else None
+        return None
+
+    async def delete_thread(self, thread_id: str) -> None:
+        """Delete the thread, then purge its vibe transcript and provenance logs."""
+        session_id = await self._vibe_session_id_for(thread_id)
+        await super().delete_thread(thread_id)  # pyright: ignore[reportUnknownMemberType]
+        if session_id:
+            with contextlib.suppress(Exception):
+                provenance.purge_session(session_id)
+            _audit.info("deleted thread %s and purged session logs %s", thread_id, session_id)
+
+
+def _referenced_vibe_session_ids() -> set[str] | None:
+    """Collect every vibe_session_id referenced by a persisted thread.
+
+    Returns ``None`` — meaning "could not determine the full reference set" — if
+    the threads DB is missing, the query fails, or any row's metadata can't be
+    parsed. Callers MUST treat ``None`` as "do not delete anything": an empty or
+    partial set would otherwise make the GC wipe logs for chats that still exist.
+    A successfully read DB with zero matching rows correctly returns an empty set.
+    """
+    if not THREADS_DB_PATH.exists():
+        return None
+    try:
+        con = sqlite3.connect(THREADS_DB_PATH)
+        try:
+            rows = con.execute("SELECT metadata FROM threads").fetchall()
+        finally:
+            con.close()
+    except Exception:
+        return None
+    ids: set[str] = set()
+    for (raw,) in rows:
+        if not raw:
+            # No metadata → this thread has no provenance to reference; safe.
+            continue
+        try:
+            meta: object = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            # Can't tell what this thread references → bail rather than risk
+            # deleting its logs.
+            return None
+        if not isinstance(meta, dict):
+            return None
+        sid = cast("dict[str, Any]", meta).get("vibe_session_id")
+        if isinstance(sid, str):
+            ids.add(sid)
+    return ids
+
+
+def _gc_orphaned_provenance() -> None:
+    """Once per process, purge provenance records no thread references anymore.
+
+    Belt-and-suspenders to the on-delete purge: cleans up records left behind by
+    older builds, crashes, or any path that created provenance without persisting
+    a thread mapping, so users never have to fall back to the CLI / just recipes.
+
+    Fail-safe: if the referenced set can't be determined with certainty
+    (:func:`_referenced_vibe_session_ids` returns ``None``) the GC is skipped, so
+    a transient read error can never delete logs for chats that still exist.
+    """
+    global _provenance_gc_done
+    if _provenance_gc_done:
+        return
+    _provenance_gc_done = True
+    referenced = _referenced_vibe_session_ids()
+    if referenced is None:
+        _audit.info("gc: skipped — could not determine referenced sessions")
+        return
+    with contextlib.suppress(Exception):
+        purged = provenance.purge_orphans(referenced)
+        if purged:
+            _audit.info("gc: purged %d orphaned provenance record(s): %s", len(purged), purged)
+
+
 @cl.data_layer  # pyright: ignore[reportUnknownMemberType]
 def get_data_layer() -> SQLAlchemyDataLayer:
     """Wire chainlit to a local sqlite database for thread persistence."""
     _bootstrap_threads_db(THREADS_DB_PATH)
-    return SQLAlchemyDataLayer(
+    _gc_orphaned_provenance()
+    return _MedMcpDataLayer(
         conninfo=f"sqlite+aiosqlite:///{THREADS_DB_PATH}",
         storage_provider=_NullStorageClient(),
     )
@@ -1224,6 +1550,7 @@ async def _handle_tool_call(
     """
     tc_id = cast("str", update.get("toolCallId") or "")
     info = tool_call_info.setdefault(tc_id, {})
+    info.setdefault("_started", time.monotonic())
     if (t := update.get("title")) is not None:
         info["title"] = t
     if (ri := update.get("rawInput")) is not None:
@@ -1277,19 +1604,47 @@ def _is_explain_enabled() -> bool:
     return bool(val)  # pyright: ignore[reportUnknownArgumentType]
 
 
+def _is_provenance_enabled() -> bool:
+    """Check whether provenance capture is enabled for the current chat.
+
+    Falls back to the persisted preference when the per-chat value is unset (e.g.
+    a code path that runs before ``on_chat_start`` has populated the session).
+    """
+    val = cl.user_session.get("record_provenance")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    if val is None:
+        return _load_provenance_enabled()
+    return bool(val)  # pyright: ignore[reportUnknownArgumentType]
+
+
 @cl.on_settings_update  # pyright: ignore[reportUnknownMemberType]
 async def on_settings_update(settings: dict[str, Any]) -> None:
     """Persist chat-settings changes into the user session.
 
-    Handles two setting types:
+    Handles four setting types:
     - ``explain_tools`` — stored in the Chainlit user session for the current chat.
+    - ``record_provenance`` — persisted to ``.vibe/provenance_enabled.json`` and
+      mirrored into the user session; takes effect immediately.
     - ``stack_<name>`` — updates the persistent active-stack set in
       ``.vibe/active_stacks.json``; the new set takes effect on the next
       conversation (vibe-acp reads config.toml at session-creation time).
+    - ``workflows_enabled`` — master on/off for personal workflows, persisted to
+      ``.vibe/workflows_enabled.json``. Hides/shows the composer buttons
+      immediately and toggles workflow skill loading on the next session.
+    - ``workflow_<name>`` — updates the active-workflow set in
+      ``.vibe/active_workflows.json``; deactivated workflows are written to
+      ``disabled_skills`` on the next session so vibe-acp skips loading them.
     """
+    global _vibe_restart_needed
+
     new_value = bool(settings.get("explain_tools", False))
     cl.user_session.set("explain_tools", new_value)  # pyright: ignore[reportUnknownMemberType]
     _audit.info("explain_tools set to %s via settings", new_value)
+
+    prov_value = bool(settings.get("record_provenance", True))
+    cl.user_session.set("record_provenance", prov_value)  # pyright: ignore[reportUnknownMemberType]
+    if prov_value != _load_provenance_enabled():
+        _save_provenance_enabled(prov_value)
+        _audit.info("provenance recording set to %s via settings", prov_value)
 
     all_servers = _load_mcp_servers()
     if all_servers:
@@ -1298,11 +1653,35 @@ async def on_settings_update(settings: dict[str, Any]) -> None:
         }
         if active_names != _load_active_server_names():
             _save_active_server_names(active_names)
-            global _vibe_restart_needed
             _vibe_restart_needed = True
             _audit.info(
                 "active stacks updated to: %s; vibe-acp will restart on next session",
                 sorted(active_names),
+            )
+
+    wf_enabled = bool(settings.get("workflows_enabled", True))
+    if wf_enabled != _load_workflows_enabled():
+        _save_workflows_enabled(wf_enabled)
+        _vibe_restart_needed = True
+        # Show/hide the Save/Manage composer buttons immediately for this chat.
+        with contextlib.suppress(Exception):
+            await cl.context.emitter.set_commands(_workflow_commands())  # pyright: ignore[reportUnknownMemberType]
+        _audit.info("personal workflows %s via settings", "enabled" if wf_enabled else "disabled")
+
+    # Per-workflow switches only exist while the feature is on; when off the
+    # Workflows tab is hidden, so skip this to preserve the saved active set
+    # instead of resetting it from absent settings keys.
+    workflows = _discover_workflows() if wf_enabled else []
+    if workflows:
+        active_workflows: set[str] = {
+            wf["name"] for wf in workflows if bool(settings.get(f"workflow_{wf['name']}", True))
+        }
+        if active_workflows != _load_active_workflow_names():
+            _save_active_workflow_names(active_workflows)
+            _vibe_restart_needed = True
+            _audit.info(
+                "active workflows updated to: %s; vibe-acp will reload on next message",
+                sorted(active_workflows),
             )
 
 
@@ -1345,6 +1724,13 @@ async def _create_new_session(reload_session_id: str | None = None) -> bool:
         while not queue.empty():
             with contextlib.suppress(asyncio.QueueEmpty):
                 queue.get_nowait()
+        # Refresh the provenance manifest so the stack/model set is recorded for
+        # the post-toggle continuation of this session.
+        if _is_provenance_enabled():
+            with contextlib.suppress(Exception):
+                provenance.write_manifest(
+                    reload_session_id, servers=active, model_name=OLLAMA_MODEL
+                )
         return True
 
     resp = await _client.request(
@@ -1362,6 +1748,11 @@ async def _create_new_session(reload_session_id: str | None = None) -> bool:
         return False
     _set_session_id(session_id)
     _client.register_session(session_id)
+    # The Tier-1 provenance manifest is intentionally NOT written here. session/new
+    # runs eagerly on every page load (to warm MCP servers), but the thread→session
+    # mapping that lets the UI purge provenance on delete is only saved on the first
+    # message. Writing the manifest here would leak un-purgeable records for chats
+    # that are opened but never used; it is written in on_message instead.
     return True
 
 
@@ -1375,6 +1766,8 @@ async def on_chat_start() -> None:
     ``_vibe_restart_needed`` and ``on_message`` recreates the session then.
     """
     cl.user_session.set("explain_tools", True)  # pyright: ignore[reportUnknownMemberType]
+    cl.user_session.set("record_provenance", _load_provenance_enabled())  # pyright: ignore[reportUnknownMemberType]
+    await cl.context.emitter.set_commands(_workflow_commands())  # pyright: ignore[reportUnknownMemberType]
     # Start vibe-acp and build the settings widget concurrently — both involve
     # subprocess calls on first run, so overlapping them saves startup time.
     warmup_task = asyncio.create_task(_client.ensure_started())
@@ -1402,6 +1795,8 @@ async def on_chat_resume(thread: ThreadDict) -> None:
     because chainlit's persistence is the source of truth for the UI.
     """
     cl.user_session.set("explain_tools", True)  # pyright: ignore[reportUnknownMemberType]
+    cl.user_session.set("record_provenance", _load_provenance_enabled())  # pyright: ignore[reportUnknownMemberType]
+    await cl.context.emitter.set_commands(_workflow_commands())  # pyright: ignore[reportUnknownMemberType]
     await cl.ChatSettings(inputs=_build_chat_settings_inputs()).send()
 
     # ThreadDict's typing carries Dict[Unknown, Unknown] for the metadata field,
@@ -1487,6 +1882,20 @@ def _persisted_user_id() -> str | None:
 @cl.on_message  # pyright: ignore[reportUnknownMemberType]
 async def on_message(message: cl.Message) -> None:
     """Send a prompt to vibe-acp and stream the response back into the UI."""
+    # The "Save workflow" composer command distills the current chat instead of
+    # being forwarded to the agent.
+    if message.command == SAVE_WORKFLOW_COMMAND:
+        await _handle_save_workflow_command()
+        return
+    if message.command == MANAGE_WORKFLOWS_COMMAND:
+        await _handle_manage_workflows_command()
+        return
+
+    # A pending Rename/Refine (set by clicking those buttons) consumes this
+    # message as its input value instead of forwarding it to the agent.
+    if await _consume_pending_workflow_input(message.content):
+        return
+
     session_id = _get_session_id()
     stack_reload = _vibe_restart_needed and session_id is not None
     if session_id is None or _vibe_restart_needed:
@@ -1500,20 +1909,39 @@ async def on_message(message: cl.Message) -> None:
             await cl.Message(content="Internal error: session was not initialized.").send()
             return
 
-    # Persist the chainlit-thread → vibe-session mapping on the first message
-    # of this chat. Done lazily so refreshes that never produce a conversation
-    # don't leave empty threads in the sidebar. Idempotent: gated by a flag.
+    # Persist the chainlit-thread → vibe-session mapping on the first message of
+    # this chat. Done lazily so refreshes that never produce a conversation don't
+    # leave empty threads in the sidebar. This mapping is what lets the UI find
+    # and purge the session's logs on delete, so the "persisted" flag is only set
+    # once the mapping is actually written — otherwise a chat whose thread_id was
+    # not ready yet (or whose write failed) would lose its logs forever. We retry
+    # on the next message until it sticks.
     if not cl.user_session.get("vibe_session_persisted"):  # pyright: ignore[reportUnknownMemberType]
         thread_id = cl_context.session.thread_id
         data_layer = cast("Any", cl_get_data_layer())
+        mapping_saved = False
         if thread_id and data_layer is not None:
-            with contextlib.suppress(Exception):
+            try:
                 await data_layer.update_thread(
                     thread_id=thread_id,
                     user_id=_persisted_user_id(),
                     metadata={"vibe_session_id": session_id},
                 )
-        cl.user_session.set("vibe_session_persisted", True)  # pyright: ignore[reportUnknownMemberType]
+                mapping_saved = True
+            except Exception:
+                _audit.warning(
+                    "could not persist thread→session mapping for %s; will retry", session_id
+                )
+        if mapping_saved:
+            # Write the Tier-1 provenance manifest only now that the mapping
+            # exists, so provenance is never created for a session the UI can't
+            # later find and purge on delete.
+            if _is_provenance_enabled():
+                with contextlib.suppress(Exception):
+                    provenance.write_manifest(
+                        session_id, servers=_active_servers(), model_name=OLLAMA_MODEL
+                    )
+            cl.user_session.set("vibe_session_persisted", True)  # pyright: ignore[reportUnknownMemberType]
 
     queue = _client.get_session_queue(session_id)
     if queue is None:
@@ -1717,6 +2145,44 @@ async def _update_tool_summary(
     await step.update()
 
 
+def _record_tool_event(session_id: str, tc_id: str, info: JsonDict) -> None:
+    """Append a normalized run-log event for a completed tool call (best-effort).
+
+    Idempotent per call via the ``_logged`` marker, since ``tool_call_update``
+    can fire more than once. Never raises — provenance must not break a chat.
+    """
+    if info.get("_logged"):
+        return
+    info["_logged"] = True
+    started = info.get("_started")
+    duration = time.monotonic() - started if isinstance(started, (int, float)) else None
+    title = info.get("title")
+    title_str = title if isinstance(title, str) else None
+    server, tool = provenance.split_tool_name(
+        title_str or tc_id, [str(s["name"]) for s in _active_servers()]
+    )
+    risks = info.get("risks")
+    decision = info.get("decision")
+    human_readable = info.get("humanReadable")
+    output_text = info.get("outputText")
+    event = provenance.normalize_tool_event(
+        tool_call_id=tc_id,
+        title=title_str,
+        server=server,
+        tool=tool,
+        raw_input=info.get("rawInput"),
+        raw_output=info.get("rawOutput"),
+        output_text=output_text if isinstance(output_text, str) else None,
+        status=str(info.get("status") or ""),
+        decision=str(decision) if decision is not None else None,
+        risks=cast("list[str]", risks) if isinstance(risks, list) else None,
+        human_readable=human_readable if isinstance(human_readable, str) else None,
+        duration_sec=duration,
+    )
+    with contextlib.suppress(Exception):
+        provenance.append_run_event(session_id, event)
+
+
 async def _process_session_frame(
     msg: JsonDict,
     *,
@@ -1790,11 +2256,13 @@ async def _process_session_frame(
                     tool_call_info[tc_id]["status"] = status
             await _handle_tool_call_update(update, tool_steps)
             # Refresh the summary step after each tool completion.
-            if "step" in tool_summary_holder and update.get("status") in (
-                "completed",
-                "failed",
-            ):
-                await _update_tool_summary(tool_summary_holder, tool_call_info)
+            if update.get("status") in ("completed", "failed"):
+                if "step" in tool_summary_holder:
+                    await _update_tool_summary(tool_summary_holder, tool_call_info)
+                # Record the normalized run-log event (Tier-1 provenance).
+                sid = _get_session_id()
+                if sid and tc_id in tool_call_info and _is_provenance_enabled():
+                    _record_tool_event(sid, tc_id, tool_call_info[tc_id])
 
     elif method == "session/request_permission":
         req_id_raw = msg.get("id")
@@ -1834,6 +2302,21 @@ async def _process_session_frame(
                 await _update_tool_summary(tool_summary_holder, tool_call_info)
 
         outcome = await _ask_user_for_permission(tc, options)
+        # Persist the decision: stash it on tool_call_info so the run-log event
+        # carries it, and mirror it to the on-disk permissions log.
+        decision = (
+            outcome.get("optionId")
+            if outcome.get("outcome") == "selected"
+            else outcome.get("outcome")
+        )
+        if tc_id_perm in tool_call_info:
+            tool_call_info[tc_id_perm]["decision"] = decision
+        sid = _get_session_id()
+        if sid and _is_provenance_enabled():
+            with contextlib.suppress(Exception):
+                provenance.log_permission(
+                    sid, title=str(tc.get("title") or tc_id_perm), decision=str(decision)
+                )
         await _client.respond(req_id, {"outcome": outcome})
 
 
@@ -1852,6 +2335,534 @@ async def on_stop() -> None:
         await _client.notify("session/cancel", {"session_id": session_id})
 
 
+async def _send_workflow_preview(draft_dir: Path) -> None:
+    """Render a draft workflow's SKILL.md inline with the review action buttons."""
+    skill_md = (draft_dir / "SKILL.md").read_text(encoding="utf-8")
+    await cl.Message(
+        content=(
+            f"**Draft workflow `{draft_dir.name}`** — review below, then **Test** it in this "
+            f"chat, **Refine**/**Rename** it, **Promote** to keep it, or **Discard** it.\n\n"
+            f"```markdown\n{skill_md}\n```"
+        ),
+        actions=[
+            cl.Action(
+                name=TEST_WORKFLOW_ACTION,
+                payload={"name": draft_dir.name},
+                label="Test",
+                tooltip="Load the draft so you can try it in this chat before promoting",
+            ),
+            cl.Action(
+                name=PROMOTE_WORKFLOW_ACTION,
+                payload={"name": draft_dir.name},
+                label="Promote",
+                tooltip="Keep this workflow permanently as a reusable skill",
+            ),
+            cl.Action(
+                name=REFINE_WORKFLOW_ACTION,
+                payload={"name": draft_dir.name},
+                label="Refine",
+                tooltip="Describe a change and regenerate the workflow",
+            ),
+            cl.Action(
+                name=RENAME_WORKFLOW_ACTION,
+                payload={"name": draft_dir.name},
+                label="Rename",
+                tooltip="Give the workflow a different name",
+            ),
+            cl.Action(
+                name=DISCARD_WORKFLOW_ACTION,
+                payload={"name": draft_dir.name},
+                label="Discard",
+                tooltip="Delete this draft",
+            ),
+        ],
+    ).send()
+
+
+def _action_name(action: cl.Action) -> str | None:
+    """Extract the ``name`` from an action payload, or ``None`` if absent."""
+    payload = cast("dict[str, Any]", action.payload or {})  # pyright: ignore[reportUnknownMemberType]
+    name = payload.get("name")
+    return name if isinstance(name, str) else None
+
+
+async def _handle_save_workflow_command() -> None:
+    """Distill the current chat into a draft workflow and preview it in chat.
+
+    Triggered by the "Save workflow" composer command. Runs the (hybrid,
+    LLM-assisted) distillation off the event loop, then shows the draft with
+    review controls. Distillation reads vibe-acp's own transcript, so it works
+    regardless of whether provenance recording is enabled.
+    """
+    session_id = _get_session_id()
+    if session_id is None:
+        await cl.Message(content="There's nothing to save yet — send a message first.").send()
+        return
+
+    progress = cl.Message(content="Distilling this chat into a workflow…")
+    await progress.send()
+    try:
+        draft_dir = await asyncio.to_thread(distill.distill_session, session_id, use_llm=True)
+    except Exception as exc:
+        await progress.remove()
+        await cl.Message(content=f"Could not distill a workflow: {exc}").send()
+        return
+    await progress.remove()
+    await _send_workflow_preview(draft_dir)
+
+
+def _manage_actions(name: str) -> list[cl.Action]:
+    """Build the per-workflow buttons for the Manage list.
+
+    Every workflow offers Run, Edit and Delete. Run replays the workflow
+    deterministically on new inputs (no LLM); Edit opens the full editable preview
+    (Test / Promote / Rename / Refine / Discard); for a promoted workflow Edit first
+    unpromotes it back to a draft. Activate/deactivate stays in the settings gear.
+    """
+    return [
+        cl.Action(
+            name=RUN_WORKFLOW_ACTION,
+            payload={"name": name},
+            label="Run",
+            tooltip="Replay this workflow on new inputs — runs the exact tools, no LLM",
+        ),
+        cl.Action(
+            name=EDIT_WORKFLOW_ACTION,
+            payload={"name": name},
+            label="Edit",
+            tooltip="Open editing controls (test, promote, rename, refine, discard)",
+        ),
+        cl.Action(
+            name=DELETE_WORKFLOW_ACTION,
+            payload={"name": name},
+            label="Delete",
+            tooltip="Delete this workflow from disk",
+        ),
+    ]
+
+
+async def _handle_manage_workflows_command() -> None:
+    """List all personal workflows with per-item Test / Promote / Delete buttons.
+
+    Triggered by the "Manage workflows" composer command. This is the persistent
+    place to act on a workflow after its Save-time preview has scrolled away —
+    e.g. to promote a draft once you've tested it, or to delete any workflow.
+    """
+    workflows = await asyncio.to_thread(_discover_workflows)
+    if not workflows:
+        await cl.Message(
+            content="You have no workflows yet. Use **Save workflow** to distill this chat."
+        ).send()
+        return
+    active_names = await asyncio.to_thread(_load_active_workflow_names)
+    await cl.Message(content=f"**Your workflows ({len(workflows)})**").send()
+    for wf in workflows:
+        name = str(wf["name"])
+        kind = str(wf["kind"])
+        is_active = name in active_names
+        status = "draft" if kind == "draft" else ("active" if is_active else "inactive")
+        description = str(wf["description"]) or "_no description_"
+        await cl.Message(
+            content=f"**`{name}`** · {status}\n\n{description}",
+            actions=_manage_actions(name),
+        ).send()
+
+
+# ── Deterministic replay (Run) ────────────────────────────────────────────────
+
+
+def _workflow_dir(name: str) -> Path | None:
+    """Return the on-disk dir for workflow *name* (active wins over draft), or None."""
+    for kind in ("active", "draft"):
+        d = VIBE_HOME / "workflows" / kind / name
+        if (d / "recipe.yaml").exists():
+            return d
+    return None
+
+
+def _input_prompt(name: str, example: str, description: str) -> str:
+    """Build the message asking the user for one replay input value."""
+    desc = f" — {description}" if description else ""
+    return f"**`{name}`**{desc}\n(e.g. `{example}`)"
+
+
+def _format_replay_preview(recipe: Recipe, inputs: dict[str, str]) -> str:
+    """Render the resolved steps a replay will run, for the confirm prompt."""
+    lines: list[str] = [f"**Replay `{recipe.name}`** will run these steps, no LLM:\n"]
+    if recipe.inputs:
+        lines.append("**Inputs**")
+        for wf_input in recipe.inputs:
+            desc = f" — {wf_input.description}" if wf_input.description else ""
+            lines.append(f"- `{wf_input.name}`{desc} = `{inputs.get(wf_input.name, '?')}`")
+        lines.append("")
+    lines.append(f"**Steps ({len(recipe.steps)})**")
+    bindings: dict[str, Any] = dict(inputs)
+    for i, step in enumerate(recipe.steps, start=1):
+        # Inputs are known now; cross-step refs ({{stepM.*}}) resolve at runtime,
+        # so they intentionally still show as placeholders here.
+        args = replay.resolve_arguments(step.arguments, bindings)
+        rendered = json.dumps(args, default=str)
+        lines.append(f"{i}. `{step.server}:{step.tool}` — `{rendered}`")
+    return "\n".join(lines)
+
+
+async def _send_replay_preview(recipe: Recipe, inputs: dict[str, str]) -> None:
+    """Show the resolved steps and a Run-now button carrying the bound inputs."""
+    await cl.Message(
+        content=_format_replay_preview(recipe, inputs),
+        actions=[
+            cl.Action(
+                name=CONFIRM_REPLAY_ACTION,
+                payload={"name": recipe.name, "inputs": inputs},
+                label="Run now",
+                tooltip="Execute the steps above on the inputs shown",
+            )
+        ],
+    ).send()
+
+
+async def _run_replay_and_report(name: str, inputs: dict[str, str]) -> None:
+    """Execute a workflow replay, streaming per-step status, then report the outcome."""
+    draft_dir = _workflow_dir(name)
+    if draft_dir is None:
+        await cl.Message(content=f"Could not find a recipe for `{name}`.").send()
+        return
+    recipe = await asyncio.to_thread(distill.load_recipe, draft_dir)
+    servers = _active_servers()
+
+    progress = cl.Message(content=f"▶️ Replaying **`{name}`**…")
+    await progress.send()
+    log_lines: list[str] = []
+
+    async def _on_step(step_result: replay.StepResult) -> None:
+        icon = "✅" if step_result.ok else "❌"
+        line = f"{icon} {step_result.index}. `{step_result.server}:{step_result.tool}`"
+        if step_result.produced:
+            produced = ", ".join(f"`{v}`" for v in step_result.produced.values())
+            line += f" → {produced}"
+        if not step_result.ok and step_result.error:
+            line += f"\n   ↳ {step_result.error}"
+        log_lines.append(line)
+        progress.content = f"▶️ Replaying **`{name}`**…\n\n" + "\n".join(log_lines)
+        await progress.update()
+
+    result = await replay.run(recipe, inputs, servers=servers, cwd=PROJECT_ROOT, on_step=_on_step)
+
+    if result.ok:
+        outputs: list[str] = []
+        for step_result in result.steps:
+            outputs.extend(step_result.produced.values())
+        summary = f"✅ **Replay of `{name}` complete** — {len(result.steps)} step(s) ran."
+        if outputs:
+            summary += "\n\n**Outputs**\n" + "\n".join(f"- `{o}`" for o in outputs)
+    else:
+        summary = f"❌ **Replay of `{name}` failed.** {result.error or ''}".rstrip()
+    progress.content = f"Replayed **`{name}`**\n\n" + "\n".join(log_lines)
+    await progress.update()
+    await cl.Message(content=summary).send()
+
+
+@cl.action_callback(RUN_WORKFLOW_ACTION)  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
+async def _on_run_workflow(action: cl.Action) -> None:  # pyright: ignore[reportUnusedFunction]
+    """Start a deterministic replay: collect new inputs, then preview and confirm."""
+    name = _action_name(action)
+    if name is None:
+        await cl.Message(content="Could not determine which workflow to run.").send()
+        return
+    draft_dir = _workflow_dir(name)
+    if draft_dir is None:
+        await cl.Message(content=f"Could not find a recipe for `{name}`.").send()
+        return
+    recipe = await asyncio.to_thread(distill.load_recipe, draft_dir)
+
+    # Surface non-input problems (built-in steps, uninstalled stacks) up front by
+    # validating with the recorded examples standing in for the inputs.
+    examples = {i.name: i.example for i in recipe.inputs}
+    structural = replay.validate(recipe, examples, _active_servers())
+    if structural is not None:
+        await cl.Message(content=f"Can't replay `{name}`: {structural}").send()
+        return
+
+    if not recipe.inputs:
+        await _send_replay_preview(recipe, {})
+        return
+
+    # Collect each input as a normal message (same pattern as Rename/Refine).
+    descriptions = {i.name: i.description for i in recipe.inputs}
+    cl.user_session.set(  # pyright: ignore[reportUnknownMemberType]
+        "pending_workflow",
+        {
+            "action": "run",
+            "name": name,
+            "input_names": [i.name for i in recipe.inputs],
+            "examples": examples,
+            "descriptions": descriptions,
+            "collected": {},
+        },
+    )
+    first = recipe.inputs[0]
+    await cl.Message(
+        content=(
+            f"Replaying **`{name}`** on new data. Provide a value for each input "
+            f"(send `-` at any point to cancel).\n\n"
+            + _input_prompt(first.name, first.example, first.description)
+        )
+    ).send()
+
+
+@cl.action_callback(CONFIRM_REPLAY_ACTION)  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
+async def _on_confirm_replay(action: cl.Action) -> None:  # pyright: ignore[reportUnusedFunction]
+    """Execute a previewed replay when the user clicks Run now."""
+    payload = cast("dict[str, Any]", action.payload or {})  # pyright: ignore[reportUnknownMemberType]
+    name = payload.get("name")
+    raw_inputs: object = payload.get("inputs") or {}
+    if not isinstance(name, str) or not isinstance(raw_inputs, dict):
+        await cl.Message(content="Could not start the replay (missing parameters).").send()
+        return
+    inputs = {str(k): str(v) for k, v in cast("JsonDict", raw_inputs).items()}
+    await _run_replay_and_report(name, inputs)
+
+
+@cl.action_callback(TEST_WORKFLOW_ACTION)  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
+async def _on_test_workflow(action: cl.Action) -> None:  # pyright: ignore[reportUnusedFunction]
+    """Make a draft loadable so the user can try it in this chat before promoting."""
+    name = _action_name(action)
+    if name is None:
+        await cl.Message(content="Could not determine which workflow to test.").send()
+        return
+    # Draft dirs are already in skill_paths; flag a vibe-acp restart so the next
+    # message respawns the subprocess, which re-scans and loads the draft skill.
+    # The reload preserves the conversation (session/load).
+    global _vibe_restart_needed
+    _vibe_restart_needed = True
+    await cl.Message(
+        content=(
+            f"Draft **`{name}`** is ready to test. On your next message, run it with "
+            f"`/{name}` (optionally add your own inputs after it), e.g. "
+            f"`/{name} on data/your_scan.nii.gz`. When it works, **Promote** to keep it "
+            f"(or **Delete** to remove it)."
+        ),
+        actions=[
+            cl.Action(
+                name=PROMOTE_WORKFLOW_ACTION,
+                payload={"name": name},
+                label="Promote",
+                tooltip="Keep this workflow permanently as a reusable skill",
+            ),
+            cl.Action(
+                name=DELETE_WORKFLOW_ACTION,
+                payload={"name": name},
+                label="Delete",
+                tooltip="Delete this workflow from disk",
+            ),
+        ],
+    ).send()
+
+
+@cl.action_callback(PROMOTE_WORKFLOW_ACTION)  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
+async def _on_promote_workflow(action: cl.Action) -> None:  # pyright: ignore[reportUnusedFunction]
+    """Promote a reviewed draft workflow into the active (reusable) set."""
+    name = _action_name(action)
+    if name is None:
+        await cl.Message(content="Could not determine which workflow to promote.").send()
+        return
+    try:
+        dst = await asyncio.to_thread(distill.promote_draft, name)
+    except Exception as exc:
+        await cl.Message(content=f"Could not promote the workflow: {exc}").send()
+        return
+    # Make the new skill available without restarting the UI: flag a vibe-acp
+    # restart so the next message respawns the subprocess, which re-reads
+    # skill_paths (the active workflows dir) and re-scans for the new SKILL.md.
+    # The restart is transparent and preserves the conversation (session/load).
+    global _vibe_restart_needed
+    _vibe_restart_needed = True
+    await cl.Message(
+        content=(
+            f"Promoted **`{name}`**. It now lives in your active workflows "
+            f"(`{dst}`) and will be loaded as a skill on your next message — "
+            f"no UI restart needed."
+        )
+    ).send()
+
+
+@cl.action_callback(DISCARD_WORKFLOW_ACTION)  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
+async def _on_discard_workflow(action: cl.Action) -> None:  # pyright: ignore[reportUnusedFunction]
+    """Delete a draft workflow."""
+    name = _action_name(action)
+    if name is None:
+        await cl.Message(content="Could not determine which workflow to discard.").send()
+        return
+    try:
+        await asyncio.to_thread(distill.discard_draft, name)
+    except Exception as exc:
+        await cl.Message(content=f"Could not discard the workflow: {exc}").send()
+        return
+    await cl.Message(content=f"Discarded draft workflow **`{name}`**.").send()
+
+
+@cl.action_callback(DELETE_WORKFLOW_ACTION)  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
+async def _on_delete_workflow(action: cl.Action) -> None:  # pyright: ignore[reportUnusedFunction]
+    """Delete a personal workflow (draft or promoted) from disk."""
+    name = _action_name(action)
+    if name is None:
+        await cl.Message(content="Could not determine which workflow to delete.").send()
+        return
+    try:
+        await asyncio.to_thread(distill.delete_workflow, name)
+    except Exception as exc:
+        await cl.Message(content=f"Could not delete the workflow: {exc}").send()
+        return
+    # Drop it from the loaded skill set on the next message.
+    global _vibe_restart_needed
+    _vibe_restart_needed = True
+    await cl.Message(content=f"Deleted workflow **`{name}`** from disk.").send()
+
+
+@cl.action_callback(EDIT_WORKFLOW_ACTION)  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
+async def _on_edit_workflow(action: cl.Action) -> None:  # pyright: ignore[reportUnusedFunction]
+    """Open a workflow's editing controls.
+
+    For a draft this just re-opens its preview. For a promoted workflow it first
+    unpromotes it back to a draft (and reloads so it leaves the active skill set).
+    """
+    global _vibe_restart_needed
+    name = _action_name(action)
+    if name is None:
+        await cl.Message(content="Could not determine which workflow to edit.").send()
+        return
+
+    draft_dir = VIBE_HOME / "workflows" / "draft" / name
+    active_dir = VIBE_HOME / "workflows" / "active" / name
+
+    if active_dir.is_dir() and not draft_dir.is_dir():
+        # Promoted → unpromote back to a draft before editing.
+        try:
+            draft_dir = await asyncio.to_thread(distill.unpromote_workflow, name)
+        except Exception as exc:
+            await cl.Message(content=f"Could not edit the workflow: {exc}").send()
+            return
+        _vibe_restart_needed = True
+        await cl.Message(
+            content=(
+                f"Moved **`{name}`** back to drafts for editing. Make your changes below, "
+                f"then **Promote** again to keep it."
+            )
+        ).send()
+
+    if not (draft_dir / "SKILL.md").exists():
+        await cl.Message(content=f"Could not find a workflow named `{name}` to edit.").send()
+        return
+    await _send_workflow_preview(draft_dir)
+
+
+@cl.action_callback(RENAME_WORKFLOW_ACTION)  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
+async def _on_rename_workflow(action: cl.Action) -> None:  # pyright: ignore[reportUnusedFunction]
+    """Arm a rename: the user's next message becomes the new name."""
+    name = _action_name(action)
+    if name is None:
+        await cl.Message(content="Could not determine which workflow to rename.").send()
+        return
+    cl.user_session.set("pending_workflow", {"action": "rename", "name": name})  # pyright: ignore[reportUnknownMemberType]
+    await cl.Message(
+        content=f"Type the new name for **`{name}`** and send it (or send `-` to cancel)."
+    ).send()
+
+
+@cl.action_callback(REFINE_WORKFLOW_ACTION)  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
+async def _on_refine_workflow(action: cl.Action) -> None:  # pyright: ignore[reportUnusedFunction]
+    """Arm a refine: the user's next message becomes the adjustment instruction."""
+    name = _action_name(action)
+    if name is None:
+        await cl.Message(content="Could not determine which workflow to refine.").send()
+        return
+    cl.user_session.set("pending_workflow", {"action": "refine", "name": name})  # pyright: ignore[reportUnknownMemberType]
+    await cl.Message(
+        content=(
+            f"How should I adjust **`{name}`**? Send an instruction "
+            f"(e.g. 'make it generic for any MRI', 'drop the first step'), or `-` to cancel."
+        )
+    ).send()
+
+
+async def _consume_pending_workflow_input(text: str) -> bool:
+    """Apply a pending Rename/Refine to *text*; return True if one was consumed.
+
+    Clicking Rename/Refine stores a pending action in the user session and asks
+    the user to type the value as a normal message. Consuming it through the
+    standard ``on_message`` path (rather than a blocking ``AskUserMessage`` inside
+    an action callback) keeps the flow on Chainlit's well-tested message channel.
+    """
+    pending = cast(
+        "JsonDict | None",
+        cl.user_session.get("pending_workflow"),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+    )
+    if not pending:
+        return False
+    cl.user_session.set("pending_workflow", None)  # pyright: ignore[reportUnknownMemberType]  # consume regardless of outcome
+
+    name = str(pending.get("name") or "")
+    action = str(pending.get("action") or "")
+    value = text.strip()
+    if value in ("", "-"):
+        await cl.Message(content=f"{action.capitalize()} cancelled — `{name}` is unchanged.").send()
+        return True
+
+    if action == "run":
+        input_names = [str(n) for n in cast("list[Any]", pending.get("input_names") or [])]
+        examples = cast("JsonDict", pending.get("examples") or {})
+        descriptions = cast("JsonDict", pending.get("descriptions") or {})
+        collected = {
+            str(k): str(v) for k, v in cast("JsonDict", pending.get("collected") or {}).items()
+        }
+        # Record this answer for the next unfilled input.
+        remaining = [n for n in input_names if n not in collected]
+        if remaining:
+            collected[remaining[0]] = value
+        still = [n for n in input_names if n not in collected]
+        if still:
+            # More inputs to gather — re-arm and prompt for the next one.
+            cl.user_session.set(  # pyright: ignore[reportUnknownMemberType]
+                "pending_workflow", {**pending, "collected": collected}
+            )
+            nxt = still[0]
+            await cl.Message(
+                content=_input_prompt(
+                    nxt, str(examples.get(nxt, "")), str(descriptions.get(nxt, ""))
+                )
+            ).send()
+            return True
+        draft_dir = _workflow_dir(name)
+        if draft_dir is None:
+            await cl.Message(content=f"Could not find a recipe for `{name}`.").send()
+            return True
+        recipe = await asyncio.to_thread(distill.load_recipe, draft_dir)
+        await _send_replay_preview(recipe, collected)
+        return True
+
+    if action == "refine":
+        progress = cl.Message(content="Refining the workflow… (this can take up to a minute)")
+        await progress.send()
+        try:
+            draft_dir = await asyncio.to_thread(distill.refine_draft, name, value)
+        except Exception as exc:
+            await progress.remove()
+            await cl.Message(content=f"Could not refine the workflow: {exc}").send()
+            return True
+        await progress.remove()
+        await _send_workflow_preview(draft_dir)
+        return True
+
+    # Default: rename.
+    try:
+        draft_dir = await asyncio.to_thread(distill.rename_draft, name, value)
+    except Exception as exc:
+        await cl.Message(content=f"Could not rename the workflow: {exc}").send()
+        return True
+    await _send_workflow_preview(draft_dir)
+    return True
+
+
 @cl.on_chat_end  # pyright: ignore[reportUnknownMemberType]
 async def on_chat_end() -> None:
     """Detach the chat from its vibe-acp session queue.
@@ -1864,3 +2875,16 @@ async def on_chat_end() -> None:
     session_id = _get_session_id()
     if session_id is not None:
         _client.unregister_session(session_id)
+        # A session that was eagerly created (to warm MCP servers) but never
+        # received a message has no thread mapping, so it can never be deleted
+        # from the UI. Purge its on-disk logs here so abandoned chats — page
+        # refreshes, opened-and-closed tabs — don't leak transcripts/provenance.
+        if not cl.user_session.get("vibe_session_persisted"):  # pyright: ignore[reportUnknownMemberType]
+            with contextlib.suppress(Exception):
+                provenance.purge_session(session_id)
+            _audit.info("purged logs for abandoned (unsent) session %s", session_id)
+            return
+        # Render the human-readable provenance report for this session.
+        if _is_provenance_enabled():
+            with contextlib.suppress(Exception):
+                provenance.write_report(session_id)

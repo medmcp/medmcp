@@ -17,6 +17,7 @@ MedMCP runs entirely on-premise and is designed to meet the data governance and 
 - [Vision](#vision)
 - [Architecture](#architecture)
 - [Imaging Stacks](#imaging-stacks)
+- [Provenance & Reusable Workflows](#provenance--reusable-workflows)
 - [Security](#security)
 - [Contributing](#contributing)
 - [License](#license)
@@ -102,6 +103,20 @@ just install-stack "git+ssh://git@github.com/medmcp/medmcp-neuro.git"
 ```
 
 Once installed, the stack is auto-discovered via its `[medmcp.stacks]` entry point and appears as a toggle in the UI's **ChatSettings panel** — no manual edits to `.vibe/config.toml` needed. Toggle changes take effect on the next conversation. Restart the UI after installing or removing a stack.
+
+---
+
+## Provenance & Reusable Workflows
+
+Beyond running one-off analyses, MedMCP records what it does and lets you turn a successful session into a repeatable pipeline.
+
+- **Provenance** — every session is recorded to `.vibe/provenance/<session>/`: the environment (git commit, active stacks + versions, model), one normalized entry per tool call (resolved arguments, structured outputs, permission decision, duration), a mirror of the approval log, and a documentation-grade `report.md`. Recording is on by default and can be turned off per session with the **Record provenance** switch in settings. Deleting a chat in the UI removes its logs; you never need the CLI for cleanup.
+
+- **Save a workflow** — the **Save workflow** button in the message box distills the current chat into a reusable workflow. MedMCP keeps only the steps that mattered (dropping exploratory, failed, and rejected tool calls) and lifts concrete file paths into named inputs, producing a human-readable `SKILL.md` and a machine-readable `recipe.yaml`. Review, rename, refine, and **Promote** it to keep it as a permanent skill.
+
+- **Replay on new data (no LLM)** — the **Run** button replays a saved workflow deterministically: it asks for the new inputs (each labelled with what it is, e.g. *the input_path for `medmcp-neuro:skull_strip`*), shows you the exact steps it will run, and on confirmation calls the same tools in the same order — no model reasoning involved. Step outputs are fed forward automatically, and a failed step aborts the run.
+
+Personal workflows can be toggled on/off individually, or disabled entirely with the **Personal workflows** master switch in settings. The same operations are available from the `medmcp` CLI (`medmcp list`, `report`, `distill`, `promote`, …) and the matching `just` recipes for scripted use.
 
 ---
 

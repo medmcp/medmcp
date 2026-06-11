@@ -32,10 +32,12 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.49,<3",
     "aiosqlite>=0.20",
     "tomli-w>=1.0",
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
 medmcp-ui = "medmcp.cli:main"
+medmcp = "medmcp.provcli:main"
 
 [dependency-groups]
 test = [
@@ -45,7 +47,8 @@ test = [
 quality = [
     "ruff>=0.15.11",
     "pyright>=1.1.400",
-    "pre-commit>=4.6.0"
+    "pre-commit>=4.6.0",
+    "types-pyyaml>=6.0"
 ]
 dev = [
     { include-group = "test" },

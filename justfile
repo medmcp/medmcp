@@ -20,12 +20,21 @@ clean:
     rm -f .coverage
     rm -f coverage.*
 
-# Remove local chat/session state under .vibe/
+# Promoted workflows under .vibe/workflows/active/ are preserved; use
+# clean-workflows to remove those too.
+
+# Remove local chat/session state under .vibe/ (logs, DB, history, provenance, drafts)
 clean-chats:
     rm -rf .vibe/logs
     rm -f .vibe/medmcp_threads.db
     rm -f .vibe/trusted_folders.toml
     rm -rf .vibe/vibehistory
+    rm -rf .vibe/provenance
+    rm -rf .vibe/workflows/draft
+
+# Remove ALL distilled workflows, including promoted ones under active/
+clean-workflows:
+    rm -rf .vibe/workflows
 
 # Install uv (only if just is installed via package manager)
 @install-uv:
@@ -108,6 +117,34 @@ pull-model:
 # Launch mistral-vibe CLI (reads .vibe/config.toml)
 vibe *ARGS:
     uv run vibe {{ARGS}}
+
+# List sessions that have a provenance record
+provenance-list:
+    uv run medmcp list
+
+# Render the human-readable provenance report for a session
+# Usage: just report <session-id>
+report SESSION:
+    uv run medmcp report {{SESSION}}
+
+# Distill a reusable workflow (recipe.yaml + SKILL.md) from a session's raw log
+# Usage: just distill <session-id>   (add --no-llm to skip the narrative pass)
+distill SESSION *ARGS:
+    uv run medmcp distill {{SESSION}} {{ARGS}}
+
+# Promote a reviewed draft workflow into active/ so it loads as a skill
+# Usage: just promote <workflow-name>
+promote NAME:
+    uv run medmcp promote {{NAME}}
+
+# List personal workflows (draft + promoted)
+workflows:
+    uv run medmcp workflows
+
+# Delete a personal workflow (draft or active) by name
+# Usage: just delete-workflow <workflow-name>
+delete-workflow NAME:
+    uv run medmcp delete {{NAME}}
 
 # Launch the Chainlit web UI
 ui:

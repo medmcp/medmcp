@@ -9,35 +9,48 @@ const VOLUME_EXT = /\.(nii|nii\.gz|mgz|mgh|nrrd|nhdr|mha|mhd|hdr|img|v16|dcm)$/
 const IMAGE_EXT = /\.(png|jpe?g|gif|svg|webp|bmp)$/
 const TEXT_EXT = /\.(md|txt|py|json|yaml|yml|toml|csv|tsv|log|sh|js|ts|html|css|xml)$/
 
-/** Mask color palette: each entry registers a solid-color Niivue colormap so a
- * mask renders in that hue (transparent where the mask is zero). */
-const MASK_COLORS: { name: string; label: string; rgb: [number, number, number] }[] = [
-  { name: 'medmcp-red', label: 'Red', rgb: [230, 60, 60] },
-  { name: 'medmcp-orange', label: 'Orange', rgb: [235, 140, 50] },
-  { name: 'medmcp-yellow', label: 'Yellow', rgb: [235, 210, 70] },
-  { name: 'medmcp-green', label: 'Green', rgb: [70, 200, 110] },
-  { name: 'medmcp-cyan', label: 'Cyan', rgb: [70, 200, 220] },
-  { name: 'medmcp-blue', label: 'Blue', rgb: [80, 140, 240] },
-  { name: 'medmcp-magenta', label: 'Magenta', rgb: [210, 90, 200] },
-  { name: 'medmcp-white', label: 'White', rgb: [235, 235, 235] },
+/** Distinct, pleasant hues cycled across integer labels of a segmentation. */
+const LABEL_HUES: [number, number, number][] = [
+  [230, 60, 60],
+  [235, 140, 50],
+  [235, 210, 70],
+  [70, 200, 110],
+  [70, 200, 220],
+  [80, 140, 240],
+  [160, 110, 230],
+  [210, 90, 200],
+  [240, 160, 170],
+  [120, 200, 140],
+  [150, 160, 255],
+  [200, 200, 120],
+  [90, 210, 200],
+  [230, 120, 90],
+  [180, 180, 235],
+  [140, 225, 90],
 ]
 
-const DEFAULT_MASK_COLOR = MASK_COLORS[0].name
-
-/** Register the solid-color overlay colormaps on a fresh Niivue instance. */
-function registerMaskColormaps(nv: Niivue): void {
-  for (const { name, rgb } of MASK_COLORS) {
-    // Ramp transparent-black → solid color so a binary mask shows as that hue
-    // and its zero background stays invisible.
-    nv.addColormap(name, {
-      R: [0, rgb[0]],
-      G: [0, rgb[1]],
-      B: [0, rgb[2]],
-      A: [0, 255],
-      I: [0, 255],
-    })
+/** Build a discrete label colormap: index 0 transparent (background), then a
+ * distinct hue per label, cycling the palette to cover up to ``n`` labels. So a
+ * binary mask renders in one color and a multi-label segmentation gets a
+ * distinct color per region. */
+function labelColorMap(n = 64): { R: number[]; G: number[]; B: number[]; A: number[]; I: number[] } {
+  const R = [0]
+  const G = [0]
+  const B = [0]
+  const A = [0]
+  const I = [0]
+  for (let i = 1; i <= n; i++) {
+    const [r, g, b] = LABEL_HUES[(i - 1) % LABEL_HUES.length]
+    R.push(r)
+    G.push(g)
+    B.push(b)
+    A.push(255)
+    I.push(i)
   }
+  return { R, G, B, A, I }
 }
+
+const LABEL_COLORMAP = labelColorMap()
 
 type FileKind = 'volume' | 'pdf' | 'image' | 'text' | 'other'
 
@@ -65,8 +78,9 @@ function collectVolumePaths(nodes: TreeNode[], out: string[] = []): string[] {
 /**
  * Niivue-backed volume view: multiplanar slices + 3D render, wheel scrolls
  * slices. A second volume (e.g. a segmentation mask) can be overlaid — picked
- * from the dropdown or dragged from the file explorer onto the image — with a
- * choice of mask color and adjustable opacity.
+ * from the dropdown or dragged from the file explorer onto the image. The
+ * overlay is rendered with a label colormap (distinct color per integer label)
+ * and adjustable opacity.
  */
 function VolumeView({ path }: { path: string }) {
   const url = rawUrl(path)
@@ -75,7 +89,6 @@ function VolumeView({ path }: { path: string }) {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [volumePaths, setVolumePaths] = useState<string[]>([])
   const [overlayPath, setOverlayPath] = useState<string>('')
-  const [overlayColormap, setOverlayColormap] = useState<string>(DEFAULT_MASK_COLOR)
   const [overlayOpacity, setOverlayOpacity] = useState(0.5)
   const [dragOver, setDragOver] = useState(false)
 
@@ -97,7 +110,6 @@ function VolumeView({ path }: { path: string }) {
     const load = async () => {
       try {
         await nv.attachToCanvas(canvas)
-        registerMaskColormaps(nv)
         nv.setSliceType(SLICE_TYPE.MULTIPLANAR)
         await nv.loadVolumes([{ url }])
       } catch (e) {
@@ -128,25 +140,18 @@ function VolumeView({ path }: { path: string }) {
       }
       setOverlayPath(newPath)
       if (newPath) {
-        await nv.addVolumeFromUrl({
-          url: rawUrl(newPath),
-          colormap: overlayColormap,
-          opacity: overlayOpacity,
-        })
+        await nv.addVolumeFromUrl({ url: rawUrl(newPath), opacity: overlayOpacity })
+        // Render as discrete labels: each integer value gets a distinct color,
+        // value 0 stays transparent. Nicer than a single-hue ramp for masks
+        // and segmentations alike.
+        const overlay = nv.volumes[nv.volumes.length - 1]
+        overlay.setColormapLabel(LABEL_COLORMAP)
+        nv.updateGLVolume()
       }
       setLoadError(null)
     } catch (e) {
       setOverlayPath('')
       setLoadError(`Could not load overlay: ${String(e)}`)
-    }
-  }
-
-  const setColormap = (cmap: string) => {
-    setOverlayColormap(cmap)
-    const nv = nvRef.current
-    if (nv && nv.volumes.length > 1) {
-      nv.volumes[1].colormap = cmap
-      nv.updateGLVolume()
     }
   }
 
@@ -206,18 +211,7 @@ function VolumeView({ path }: { path: string }) {
         </select>
         {overlayPath && (
           <>
-            <span className="overlay-swatches">
-              {MASK_COLORS.map((c) => (
-                <button
-                  key={c.name}
-                  className={`swatch${overlayColormap === c.name ? ' selected' : ''}`}
-                  style={{ background: `rgb(${c.rgb[0]}, ${c.rgb[1]}, ${c.rgb[2]})` }}
-                  title={c.label}
-                  aria-label={`${c.label} mask`}
-                  onClick={() => setColormap(c.name)}
-                />
-              ))}
-            </span>
+            <span className="overlay-opacity-label">Opacity</span>
             <input
               className="overlay-opacity"
               type="range"

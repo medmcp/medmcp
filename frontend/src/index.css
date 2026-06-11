@@ -381,32 +381,13 @@ button:hover {
   border-color: rgba(127, 168, 245, 0.4);
 }
 
-.overlay-swatches {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.swatch {
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  border-radius: 50%;
-  border: 1px solid var(--border2);
-  cursor: pointer;
-  transition:
-    transform 0.12s,
-    box-shadow 0.12s;
-}
-
-.swatch:hover {
-  transform: scale(1.15);
-}
-
-.swatch.selected {
-  box-shadow:
-    0 0 0 2px var(--dark2),
-    0 0 0 3px #fff;
+.overlay-opacity-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-left: 4px;
 }
 
 .overlay-opacity {

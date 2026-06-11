@@ -87,6 +87,10 @@ function VolumeView({ path }: { path: string }) {
     const nv = new Niivue({
       multiplanarShowRender: SHOW_RENDER.ALWAYS,
       backColor: [0.051, 0.059, 0.078, 1],
+      // Niivue's own canvas drop handler stopPropagation()s every drop (to load
+      // OS files as a new base image). We handle overlay drops ourselves in the
+      // capture phase, so disable Niivue's to avoid it hijacking the base image.
+      dragAndDropEnabled: false,
     })
     nvRef.current = nv
     let cancelled = false
@@ -158,6 +162,10 @@ function VolumeView({ path }: { path: string }) {
   const isOverlayCandidate = (p: string | null): p is string =>
     !!p && p !== path && VOLUME_EXT.test(p.toLowerCase())
 
+  // These run in the CAPTURE phase (see the JSX): the wrapper is an ancestor of
+  // Niivue's canvas, whose own bubble-phase drop listener stopPropagation()s, so
+  // a bubble-phase handler here would never fire. Capture runs first.
+  //
   // Resolve the dragged path from dataTransfer, falling back to the module-level
   // channel (react-dnd can strip dataTransfer for tree drags). dataTransfer data
   // is only readable on drop, not during dragover — hence the fallback there too.
@@ -174,6 +182,7 @@ function VolumeView({ path }: { path: string }) {
     const p = isOverlayCandidate(fromData) ? fromData : getDraggedFilePath()
     if (isOverlayCandidate(p)) {
       e.preventDefault()
+      e.stopPropagation()
       void setOverlay(p)
     }
   }
@@ -228,9 +237,9 @@ function VolumeView({ path }: { path: string }) {
       {loadError && <div className="panel-error">{loadError}</div>}
       <div
         className={`niivue-dropzone${dragOver ? ' drag-over' : ''}`}
-        onDragOver={onDragOver}
+        onDragOverCapture={onDragOver}
         onDragLeave={() => setDragOver(false)}
-        onDrop={onDrop}
+        onDropCapture={onDrop}
       >
         <canvas ref={canvasRef} className="niivue-canvas" />
         {dragOver && <div className="dropzone-hint">Drop to overlay</div>}

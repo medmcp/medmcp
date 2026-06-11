@@ -33,11 +33,15 @@ dependencies = [
     "aiosqlite>=0.20",
     "tomli-w>=1.0",
     "pyyaml>=6.0",
+    # TODO: declare fastapi/uvicorn/python-multipart (used directly by
+    # server.py) once PyPI resolution works again; currently satisfied as
+    # chainlit transitives.
 ]
 
 [project.scripts]
 medmcp-ui = "medmcp.cli:main"
 medmcp = "medmcp.provcli:main"
+medmcp-workspace = "medmcp.server:main"
 
 [dependency-groups]
 test = [

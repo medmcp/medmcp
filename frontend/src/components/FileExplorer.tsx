@@ -3,6 +3,17 @@ import { Tree } from 'react-arborist'
 import type { NodeApi, NodeRendererProps } from 'react-arborist'
 import { deletePath, fetchTree, mkdir, renamePath, uploadFile } from '../api'
 import type { TreeNode } from '../types'
+import {
+  FileIcon,
+  FileTextIcon,
+  FolderIcon,
+  FolderOpenIcon,
+  FolderPlusIcon,
+  ImageIcon,
+  LayersIcon,
+  RefreshIcon,
+  UploadIcon,
+} from './icons'
 
 interface FileExplorerProps {
   onOpenFile: (path: string) => void
@@ -15,6 +26,14 @@ function parentDir(path: string): string {
 
 function joinPath(dir: string, name: string): string {
   return dir ? `${dir}/${name}` : name
+}
+
+function FileTypeIcon({ name }: { name: string }) {
+  const lower = name.toLowerCase()
+  if (/\.(nii|nii\.gz|mgz|mgh|nrrd|nhdr|mha|mhd|dcm)$/.test(lower)) return <LayersIcon />
+  if (/\.(pdf|md|txt|log)$/.test(lower)) return <FileTextIcon />
+  if (/\.(png|jpe?g|gif|svg|webp|bmp)$/.test(lower)) return <ImageIcon />
+  return <FileIcon />
 }
 
 function NodeRow({ node, style, dragHandle }: NodeRendererProps<TreeNode>) {
@@ -31,7 +50,9 @@ function NodeRow({ node, style, dragHandle }: NodeRendererProps<TreeNode>) {
         if (!isDir) node.activate()
       }}
     >
-      <span className="tree-icon">{isDir ? (node.isOpen ? '📂' : '📁') : fileIcon(node.data.name)}</span>
+      <span className="tree-icon">
+        {isDir ? node.isOpen ? <FolderOpenIcon /> : <FolderIcon /> : <FileTypeIcon name={node.data.name} />}
+      </span>
       {node.isEditing ? (
         <input
           autoFocus
@@ -49,15 +70,6 @@ function NodeRow({ node, style, dragHandle }: NodeRendererProps<TreeNode>) {
       )}
     </div>
   )
-}
-
-function fileIcon(name: string): string {
-  const lower = name.toLowerCase()
-  if (lower.endsWith('.nii') || lower.endsWith('.nii.gz') || lower.endsWith('.mgz') || lower.endsWith('.nrrd')) return '🧠'
-  if (lower.endsWith('.dcm')) return '🩻'
-  if (lower.endsWith('.pdf')) return '📄'
-  if (/\.(png|jpe?g|gif|svg|webp)$/.test(lower)) return '🖼️'
-  return '📃'
 }
 
 /** Workspace file tree with open/rename/move/delete/upload. */
@@ -103,14 +115,22 @@ export function FileExplorer({ onOpenFile }: FileExplorerProps) {
       <div className="panel-header">
         <span>Files</span>
         <span className="panel-actions">
-          <button title="New folder" onClick={() => {
-            const name = window.prompt('New folder name')
-            if (name) run(mkdir(name))
-          }}>
-            📁+
+          <button
+            className="btn-icon"
+            title="New folder"
+            onClick={() => {
+              const name = window.prompt('New folder name')
+              if (name) run(mkdir(name))
+            }}
+          >
+            <FolderPlusIcon />
           </button>
-          <button title="Upload file" onClick={() => fileInputRef.current?.click()}>⬆️</button>
-          <button title="Refresh" onClick={reload}>↻</button>
+          <button className="btn-icon" title="Upload file" onClick={() => fileInputRef.current?.click()}>
+            <UploadIcon />
+          </button>
+          <button className="btn-icon" title="Refresh" onClick={reload}>
+            <RefreshIcon />
+          </button>
         </span>
         <input
           ref={fileInputRef}
@@ -129,7 +149,7 @@ export function FileExplorer({ onOpenFile }: FileExplorerProps) {
           data={data}
           width={size.width}
           height={size.height}
-          rowHeight={26}
+          rowHeight={27}
           indent={14}
           openByDefault={false}
           disableMultiSelection

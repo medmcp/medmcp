@@ -14,9 +14,13 @@ export default function App() {
         <span className="app-logo">MedMCP</span>
         <span className="app-subtitle">workspace</span>
       </header>
-      <Group orientation="vertical" className="app-main">
+      <Group
+        orientation="vertical"
+        className="app-main"
+        resizeTargetMinimumSize={{ fine: 8, coarse: 24 }}
+      >
         <Panel defaultSize="60%" minSize="20%">
-          <Group orientation="horizontal">
+          <Group orientation="horizontal" resizeTargetMinimumSize={{ fine: 8, coarse: 24 }}>
             <Panel defaultSize="25%" minSize="12%">
               <FileExplorer onOpenFile={setOpenPath} />
             </Panel>

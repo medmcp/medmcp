@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import { rawUrl } from '../api'
+import { DownloadIcon } from './icons'
 
 const VOLUME_EXT = /\.(nii|nii\.gz|mgz|mgh|nrrd|nhdr|mha|mhd|hdr|img|v16|dcm)$/
 const IMAGE_EXT = /\.(png|jpe?g|gif|svg|webp|bmp)$/
@@ -27,7 +28,7 @@ function VolumeView({ url }: { url: string }) {
     if (!canvas) return
     const nv = new Niivue({
       multiplanarShowRender: SHOW_RENDER.ALWAYS,
-      backColor: [0.06, 0.07, 0.09, 1],
+      backColor: [0.075, 0.078, 0.086, 1],
     })
     let cancelled = false
     const load = async () => {
@@ -77,7 +78,9 @@ export function Viewer({ path }: { path: string | null }) {
       <div className="panel-header">
         <span className="viewer-title" title={path}>{path}</span>
         <span className="panel-actions">
-          <a href={url} download title="Download">⬇️</a>
+          <a href={url} download title="Download">
+            <DownloadIcon />
+          </a>
         </span>
       </div>
       <div className="panel-body viewer-body">

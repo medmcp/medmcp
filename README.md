@@ -99,7 +99,7 @@ just workspace-build  # build the React frontend (requires node + npm; one-time 
 just workspace        # launch the workspace UI at http://localhost:8100
 ```
 
-By default the explorer is rooted at the repository directory; point it at a data folder with `MEDMCP_WORKSPACE=/path/to/data just workspace`. Like the chat UI, the server binds to localhost only and gates every tool call behind explicit approval.
+The explorer and the agent's working directory are rooted at the repository's `data/` directory by default (created on first launch); point them at another folder with `MEDMCP_WORKSPACE=/path/to/data just workspace`. Like the chat UI, the server binds to localhost only and gates every tool call behind explicit approval.
 
 > [!NOTE]
 > The workspace UI is under active development. Chat history/resume and in-UI workflow management are not yet available there — use the [Chainlit UI](#architecture) (`just ui`) for those.

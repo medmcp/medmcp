@@ -57,9 +57,12 @@ from medmcp.acp import PROJECT_ROOT, JsonDict, VibeAcpClient
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
 
-# Directory shown in the file explorer. Defaults to the repo root (where the
-# agent's own tools operate); override with MEDMCP_WORKSPACE for a data dir.
-WORKSPACE_ROOT: Path = Path(os.environ.get("MEDMCP_WORKSPACE", PROJECT_ROOT)).resolve()
+# Directory shown in the file explorer AND the agent's working directory (its
+# tools run here, so it sees the same files as the explorer/viewer). Defaults
+# to the repo's data/ directory; override with MEDMCP_WORKSPACE.
+WORKSPACE_ROOT: Path = Path(
+    os.environ.get("MEDMCP_WORKSPACE", str(Path(PROJECT_ROOT) / "data"))
+).resolve()
 FRONTEND_DIST: Path = Path(PROJECT_ROOT) / "frontend" / "dist"
 DEFAULT_PORT: int = 8100
 
@@ -83,7 +86,9 @@ _TREE_MAX_ENTRIES_PER_DIR: int = 500
 app = FastAPI(title="MedMCP Workspace")
 
 # One vibe-acp subprocess shared by every websocket connection, exactly like
-# the Chainlit app shares one across browser tabs.
+# the Chainlit app shares one across browser tabs. The subprocess cwd must
+# stay PROJECT_ROOT — `uv run` resolves the project from it; the agent's
+# working directory is set per session via session/new's cwd instead.
 _client: VibeAcpClient = VibeAcpClient()
 
 # Live websocket connections, so a settings-triggered vibe restart can close
@@ -636,7 +641,7 @@ async def ws_chat(ws: WebSocket) -> None:
     try:
         await asyncio.to_thread(settings.sync_servers_to_vibe_config, settings.active_servers())
         await _client.ensure_started()
-        resp = await _client.request("session/new", {"cwd": PROJECT_ROOT, "mcpServers": []})
+        resp = await _client.request("session/new", {"cwd": str(WORKSPACE_ROOT), "mcpServers": []})
         if "error" in resp:
             await ws.send_json({"type": "error", "message": str(resp["error"])})
             await ws.close()
@@ -677,6 +682,7 @@ else:
 
 def main() -> None:
     """Run the workspace server on localhost (no auth — do not expose)."""
+    WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
     port = int(os.environ.get("MEDMCP_WORKSPACE_PORT", str(DEFAULT_PORT)))
     uvicorn.run(app, host="127.0.0.1", port=port)
 

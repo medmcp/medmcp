@@ -52,6 +52,11 @@ function labelColorMap(n = 64): { R: number[]; G: number[]; B: number[]; A: numb
 
 const LABEL_COLORMAP = labelColorMap()
 
+// Niivue COLORMAP_TYPE.ZERO_TO_MAX_TRANSPARENT_BELOW_MIN — voxels below cal_min
+// are fully transparent in the 3D volume render. The enum isn't exported, so we
+// use its numeric value.
+const COLORMAP_TYPE_TRANSPARENT_BELOW_MIN = 1
+
 type FileKind = 'volume' | 'pdf' | 'image' | 'text' | 'other'
 
 function classify(path: string): FileKind {
@@ -146,6 +151,12 @@ function VolumeView({ path }: { path: string }) {
         // and segmentations alike.
         const overlay = nv.volumes[nv.volumes.length - 1]
         overlay.setColormapLabel(LABEL_COLORMAP)
+        // The label LUT's zero-alpha hides the background only in the 2D slices.
+        // In the 3D volume render, transparency is driven by colormapType +
+        // cal_min: mark sub-min voxels transparent and put the threshold just
+        // above 0 so the background label (0) drops out there too.
+        overlay.colormapType = COLORMAP_TYPE_TRANSPARENT_BELOW_MIN
+        overlay.cal_min = 0.5
         nv.updateGLVolume()
       }
       setLoadError(null)

@@ -31,12 +31,18 @@ export class ChatSocket {
     const ws = new WebSocket(`${proto}://${location.host}/ws/chat`)
     this.ws = ws
     ws.onopen = () => {
-      this.retryDelay = 1000
       this.handlers.onStatusChange('open')
     }
     ws.onmessage = (ev: MessageEvent<string>) => {
       try {
-        this.handlers.onFrame(JSON.parse(ev.data) as ServerFrame)
+        const frame = JSON.parse(ev.data) as ServerFrame
+        // Reset the backoff only once the server confirms a working session;
+        // the socket is accepted before session setup, so onopen fires even
+        // when setup is about to fail and would otherwise defeat the backoff.
+        if (frame.type === 'ready') {
+          this.retryDelay = 1000
+        }
+        this.handlers.onFrame(frame)
       } catch {
         /* ignore malformed frames */
       }

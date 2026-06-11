@@ -1,11 +1,13 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { ChatSocket } from '../chatSocket'
 import type { ChatSocketStatus } from '../chatSocket'
 import type { ChatItem, PermissionRequest, ServerFrame, ToolCallState } from '../types'
 import { ShieldIcon } from './icons'
 
-function ToolCard({ tc }: { tc: ToolCallState }) {
+// Memoized so a streaming update to the newest message doesn't re-render
+// (and re-parse the markdown of) every earlier row in the transcript.
+const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
   const statusClass =
     tc.status === 'completed' ? 'ok' : tc.status === 'failed' ? 'fail' : 'busy'
   return (
@@ -29,7 +31,18 @@ function ToolCard({ tc }: { tc: ToolCallState }) {
       )}
     </div>
   )
-}
+})
+
+const AssistantMessage = memo(function AssistantMessage({ text }: { text: string }) {
+  return (
+    <div className="msg msg-ai">
+      <div className="msg-avatar avatar-ai">AI</div>
+      <div className="msg-bubble bubble-ai">
+        <ReactMarkdown>{text}</ReactMarkdown>
+      </div>
+    </div>
+  )
+})
 
 function PermissionCard({
   perm,
@@ -90,16 +103,37 @@ export function Chat() {
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
+    // Chunks arrive near per-token; buffer them and flush into state on a
+    // short timer so a long answer doesn't trigger thousands of re-renders
+    // (each re-parsing the accumulated markdown).
+    let chunkBuffer = ''
+    let flushTimer: number | null = null
+    const flushChunks = () => {
+      if (flushTimer != null) {
+        clearTimeout(flushTimer)
+        flushTimer = null
+      }
+      if (!chunkBuffer) return
+      const text = chunkBuffer
+      chunkBuffer = ''
+      setItems((prev) => {
+        const last = prev[prev.length - 1]
+        if (last && last.kind === 'assistant') {
+          return [...prev.slice(0, -1), { kind: 'assistant', text: last.text + text }]
+        }
+        return [...prev, { kind: 'assistant', text }]
+      })
+    }
     const onFrame = (frame: ServerFrame) => {
+      // Any non-chunk frame that appends to the transcript must flush first,
+      // or buffered text would land after the item it preceded.
+      if (frame.type !== 'chunk') flushChunks()
       switch (frame.type) {
         case 'chunk':
-          setItems((prev) => {
-            const last = prev[prev.length - 1]
-            if (last && last.kind === 'assistant') {
-              return [...prev.slice(0, -1), { kind: 'assistant', text: last.text + frame.text }]
-            }
-            return [...prev, { kind: 'assistant', text: frame.text }]
-          })
+          chunkBuffer += frame.text
+          if (flushTimer == null) {
+            flushTimer = window.setTimeout(flushChunks, 50)
+          }
           break
         case 'tool_call':
           setToolCalls((prev) => {
@@ -156,14 +190,29 @@ export function Chat() {
           break
       }
     }
-    const socket = new ChatSocket({ onFrame, onStatusChange: setStatus })
+    const onStatusChange = (s: ChatSocketStatus) => {
+      setStatus(s)
+      if (s === 'closed') {
+        // The in-flight prompt and any pending approval died with the socket
+        // (the server's final `done` frame is lost on close, and the next
+        // session knows nothing about the old requestId) — reset, or the UI
+        // is stuck on a dead Stop button after every reconnect.
+        setBusy(false)
+        setPermission(null)
+      }
+    }
+    const socket = new ChatSocket({ onFrame, onStatusChange })
     socketRef.current = socket
-    return () => socket.close()
+    return () => {
+      socket.close()
+      if (flushTimer != null) clearTimeout(flushTimer)
+    }
   }, [])
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [items, permission])
+    // Smooth scrolling per streamed flush is janky; only ease when idle.
+    bottomRef.current?.scrollIntoView({ behavior: busy ? 'auto' : 'smooth' })
+  }, [items, permission, busy])
 
   const send = () => {
     const text = input.trim()
@@ -214,14 +263,7 @@ export function Chat() {
               </div>
             )
           }
-          return (
-            <div key={i} className="msg msg-ai">
-              <div className="msg-avatar avatar-ai">AI</div>
-              <div className="msg-bubble bubble-ai">
-                <ReactMarkdown>{item.text}</ReactMarkdown>
-              </div>
-            </div>
-          )
+          return <AssistantMessage key={i} text={item.text} />
         })}
         {permission && <PermissionCard perm={permission} onDecide={decide} />}
         {busy && !permission && <div className="thinking">●●●</div>}

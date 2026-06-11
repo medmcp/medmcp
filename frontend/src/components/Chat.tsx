@@ -42,6 +42,16 @@ function PermissionCard({
       <div className="permission-title">
         Permission required: <strong>{perm.toolCall.title ?? 'tool call'}</strong>
       </div>
+      {perm.explanation && <div className="permission-explanation">{perm.explanation}</div>}
+      {perm.risks && perm.risks.length > 0 && (
+        <div className="risk-chips">
+          {perm.risks.map((r) => (
+            <span key={r.key} className={`risk-chip risk-${r.severity}`} title={r.key}>
+              {r.label}
+            </span>
+          ))}
+        </div>
+      )}
       {perm.toolCall.rawInput != null && (
         <pre className="permission-input">{JSON.stringify(perm.toolCall.rawInput, null, 2)}</pre>
       )}
@@ -127,6 +137,8 @@ export function Chat() {
             requestId: frame.requestId,
             toolCall: frame.toolCall,
             options: frame.options,
+            explanation: frame.explanation,
+            risks: frame.risks,
           })
           break
         case 'done':

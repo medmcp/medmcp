@@ -2,18 +2,29 @@ import { useState } from 'react'
 import { Group, Panel, Separator } from 'react-resizable-panels'
 import { Chat } from './components/Chat'
 import { FileExplorer } from './components/FileExplorer'
+import { SettingsDrawer } from './components/SettingsDrawer'
 import { Viewer } from './components/Viewer'
+import { GearIcon } from './components/icons'
 
 /** Three-panel workspace: explorer (top left), viewer (top right), chat (bottom). */
 export default function App() {
   const [openPath, setOpenPath] = useState<string | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   return (
     <div className="app-shell">
       <header className="app-header">
         <span className="app-logo">MedMCP</span>
         <span className="app-subtitle">workspace</span>
+        <button
+          className="btn-icon app-header-gear"
+          title="Settings"
+          onClick={() => setSettingsOpen(true)}
+        >
+          <GearIcon />
+        </button>
       </header>
+      <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <Group
         orientation="vertical"
         className="app-main"

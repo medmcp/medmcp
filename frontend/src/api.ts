@@ -1,4 +1,4 @@
-import type { TreeNode } from './types'
+import type { SettingsState, TreeNode } from './types'
 
 /** Thin client for the workspace filesystem API. */
 
@@ -58,4 +58,28 @@ export async function uploadFile(file: File, dir: string): Promise<void> {
     body: form,
   })
   await check(res)
+}
+
+export async function fetchSettings(): Promise<SettingsState> {
+  const res = await check(await fetch('/api/settings'))
+  return (await res.json()) as SettingsState
+}
+
+/** Persist the full settings state; returns whether the agent was restarted. */
+export async function saveSettings(state: SettingsState): Promise<boolean> {
+  const res = await check(
+    await fetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        explain_tools: state.explain_tools,
+        record_provenance: state.record_provenance,
+        workflows_enabled: state.workflows_enabled,
+        active_stacks: state.stacks.filter((s) => s.active).map((s) => s.name),
+        active_workflows: state.workflows.filter((w) => w.active).map((w) => w.name),
+      }),
+    }),
+  )
+  const body = (await res.json()) as { restarted: boolean }
+  return body.restarted
 }

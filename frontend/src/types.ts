@@ -18,6 +18,13 @@ export interface ToolCallState {
   output?: string | null
 }
 
+/** A risk tag resolved by the server from the fixed taxonomy. */
+export interface RiskTag {
+  key: string
+  label: string
+  severity: 'low' | 'medium' | 'high'
+}
+
 /** A permission request awaiting the user's decision. */
 export interface PermissionRequest {
   requestId: number
@@ -28,6 +35,30 @@ export interface PermissionRequest {
     [key: string]: unknown
   }
   options: { optionId: string; name?: string; kind?: string }[]
+  explanation?: string | null
+  risks?: RiskTag[]
+}
+
+/** One stack/workflow row plus the feature toggles, as served by /api/settings. */
+export interface StackInfo {
+  name: string
+  version?: string | null
+  active: boolean
+}
+
+export interface WorkflowInfo {
+  name: string
+  description: string
+  kind: 'active' | 'draft'
+  active: boolean
+}
+
+export interface SettingsState {
+  explain_tools: boolean
+  record_provenance: boolean
+  workflows_enabled: boolean
+  stacks: StackInfo[]
+  workflows: WorkflowInfo[]
 }
 
 /** Ordered chat transcript entries. Tool calls render as inline cards. */
@@ -51,6 +82,13 @@ export type ServerFrame =
     }
   | { type: 'tool_call_update'; toolCallId: string; status?: string | null; output?: string | null }
   | { type: 'usage'; used: number }
-  | { type: 'permission_request'; requestId: number; toolCall: PermissionRequest['toolCall']; options: PermissionRequest['options'] }
+  | {
+      type: 'permission_request'
+      requestId: number
+      toolCall: PermissionRequest['toolCall']
+      options: PermissionRequest['options']
+      explanation?: string | null
+      risks?: RiskTag[]
+    }
   | { type: 'done' }
   | { type: 'error'; message: string }

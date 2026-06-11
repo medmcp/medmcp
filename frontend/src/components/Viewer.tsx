@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import { fetchTree, rawUrl } from '../api'
-import type { TreeNode } from '../types'
+import { DRAG_PATH_MIME, type TreeNode } from '../types'
 import { DownloadIcon, XIcon } from './icons'
 
 const VOLUME_EXT = /\.(nii|nii\.gz|mgz|mgh|nrrd|nhdr|mha|mhd|hdr|img|v16|dcm)$/
@@ -48,6 +48,7 @@ function VolumeView({ path }: { path: string }) {
   const [overlayPath, setOverlayPath] = useState<string>('')
   const [overlayColormap, setOverlayColormap] = useState<string>('red')
   const [overlayOpacity, setOverlayOpacity] = useState(0.5)
+  const [dragOver, setDragOver] = useState(false)
 
   // Base volume: one Niivue instance per mounted view (remounted via key on
   // path change), so overlay state always starts clean for a new image.
@@ -123,6 +124,28 @@ function VolumeView({ path }: { path: string }) {
     }
   }
 
+  // A dragged tree file is a valid overlay if it's a volume other than the base.
+  const draggedPath = (e: React.DragEvent): string | null => {
+    const p = e.dataTransfer.getData(DRAG_PATH_MIME)
+    return p && p !== path && VOLUME_EXT.test(p.toLowerCase()) ? p : null
+  }
+
+  const onDragOver = (e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes(DRAG_PATH_MIME)) {
+      e.preventDefault()
+      setDragOver(true)
+    }
+  }
+
+  const onDrop = (e: React.DragEvent) => {
+    setDragOver(false)
+    const p = draggedPath(e)
+    if (p) {
+      e.preventDefault()
+      void setOverlay(p)
+    }
+  }
+
   return (
     <div className="volume-view">
       <div className="overlay-bar">
@@ -130,9 +153,10 @@ function VolumeView({ path }: { path: string }) {
         <select
           className="overlay-select"
           value={overlayPath}
+          title="Pick a volume, or drag one from the file explorer onto the image"
           onChange={(e) => void setOverlay(e.target.value)}
         >
-          <option value="">none</option>
+          <option value="">none — or drag a file here</option>
           {volumePaths.map((p) => (
             <option key={p} value={p}>
               {p}
@@ -169,7 +193,15 @@ function VolumeView({ path }: { path: string }) {
         )}
       </div>
       {loadError && <div className="panel-error">{loadError}</div>}
-      <canvas ref={canvasRef} className="niivue-canvas" />
+      <div
+        className={`niivue-dropzone${dragOver ? ' drag-over' : ''}`}
+        onDragOver={onDragOver}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={onDrop}
+      >
+        <canvas ref={canvasRef} className="niivue-canvas" />
+        {dragOver && <div className="dropzone-hint">Drop to overlay</div>}
+      </div>
     </div>
   )
 }

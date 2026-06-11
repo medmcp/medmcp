@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Tree } from 'react-arborist'
 import type { NodeApi, NodeRendererProps } from 'react-arborist'
 import { deletePath, fetchTree, mkdir, renamePath, uploadFile } from '../api'
-import type { TreeNode } from '../types'
+import { DRAG_PATH_MIME, type TreeNode } from '../types'
 import {
   FileIcon,
   FileTextIcon,
@@ -48,6 +48,12 @@ function NodeRow({ node, style, dragHandle }: NodeRendererProps<TreeNode>) {
       }}
       onDoubleClick={() => {
         if (!isDir) node.activate()
+      }}
+      onDragStart={(e) => {
+        // Carry the workspace-relative path so drop targets outside the tree
+        // (e.g. the viewer's overlay drop zone) can read it. This coexists
+        // with react-arborist's own react-dnd move handling.
+        if (!isDir) e.dataTransfer.setData(DRAG_PATH_MIME, node.data.id)
       }}
     >
       <span className="tree-icon">

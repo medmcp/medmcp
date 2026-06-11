@@ -1,5 +1,8 @@
 /** Shared types for the workspace UI and its wire protocols. */
 
+/** dataTransfer MIME carrying a workspace-relative path when dragging a file. */
+export const DRAG_PATH_MIME = 'application/medmcp-path'
+
 /** One node of the explorer tree (mirrors /api/tree). Directories have `children`. */
 export interface TreeNode {
   id: string

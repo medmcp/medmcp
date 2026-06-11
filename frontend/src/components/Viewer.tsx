@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import { fetchTree, rawUrl } from '../api'
+import { getDraggedFilePath } from '../dragState'
 import { DRAG_PATH_MIME, type TreeNode } from '../types'
 import { DownloadIcon, XIcon } from './icons'
 
@@ -8,8 +9,35 @@ const VOLUME_EXT = /\.(nii|nii\.gz|mgz|mgh|nrrd|nhdr|mha|mhd|hdr|img|v16|dcm)$/
 const IMAGE_EXT = /\.(png|jpe?g|gif|svg|webp|bmp)$/
 const TEXT_EXT = /\.(md|txt|py|json|yaml|yml|toml|csv|tsv|log|sh|js|ts|html|css|xml)$/
 
-/** Colormaps offered for segmentation overlays (subset of Niivue's list). */
-const OVERLAY_COLORMAPS = ['red', 'green', 'blue', 'warm', 'cool', 'plasma'] as const
+/** Mask color palette: each entry registers a solid-color Niivue colormap so a
+ * mask renders in that hue (transparent where the mask is zero). */
+const MASK_COLORS: { name: string; label: string; rgb: [number, number, number] }[] = [
+  { name: 'medmcp-red', label: 'Red', rgb: [230, 60, 60] },
+  { name: 'medmcp-orange', label: 'Orange', rgb: [235, 140, 50] },
+  { name: 'medmcp-yellow', label: 'Yellow', rgb: [235, 210, 70] },
+  { name: 'medmcp-green', label: 'Green', rgb: [70, 200, 110] },
+  { name: 'medmcp-cyan', label: 'Cyan', rgb: [70, 200, 220] },
+  { name: 'medmcp-blue', label: 'Blue', rgb: [80, 140, 240] },
+  { name: 'medmcp-magenta', label: 'Magenta', rgb: [210, 90, 200] },
+  { name: 'medmcp-white', label: 'White', rgb: [235, 235, 235] },
+]
+
+const DEFAULT_MASK_COLOR = MASK_COLORS[0].name
+
+/** Register the solid-color overlay colormaps on a fresh Niivue instance. */
+function registerMaskColormaps(nv: Niivue): void {
+  for (const { name, rgb } of MASK_COLORS) {
+    // Ramp transparent-black → solid color so a binary mask shows as that hue
+    // and its zero background stays invisible.
+    nv.addColormap(name, {
+      R: [0, rgb[0]],
+      G: [0, rgb[1]],
+      B: [0, rgb[2]],
+      A: [0, 255],
+      I: [0, 255],
+    })
+  }
+}
 
 type FileKind = 'volume' | 'pdf' | 'image' | 'text' | 'other'
 
@@ -36,8 +64,9 @@ function collectVolumePaths(nodes: TreeNode[], out: string[] = []): string[] {
 
 /**
  * Niivue-backed volume view: multiplanar slices + 3D render, wheel scrolls
- * slices. A second volume (e.g. a segmentation mask) can be overlaid with a
- * chosen colormap and adjustable opacity.
+ * slices. A second volume (e.g. a segmentation mask) can be overlaid — picked
+ * from the dropdown or dragged from the file explorer onto the image — with a
+ * choice of mask color and adjustable opacity.
  */
 function VolumeView({ path }: { path: string }) {
   const url = rawUrl(path)
@@ -46,7 +75,7 @@ function VolumeView({ path }: { path: string }) {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [volumePaths, setVolumePaths] = useState<string[]>([])
   const [overlayPath, setOverlayPath] = useState<string>('')
-  const [overlayColormap, setOverlayColormap] = useState<string>('red')
+  const [overlayColormap, setOverlayColormap] = useState<string>(DEFAULT_MASK_COLOR)
   const [overlayOpacity, setOverlayOpacity] = useState(0.5)
   const [dragOver, setDragOver] = useState(false)
 
@@ -64,6 +93,7 @@ function VolumeView({ path }: { path: string }) {
     const load = async () => {
       try {
         await nv.attachToCanvas(canvas)
+        registerMaskColormaps(nv)
         nv.setSliceType(SLICE_TYPE.MULTIPLANAR)
         await nv.loadVolumes([{ url }])
       } catch (e) {
@@ -124,14 +154,15 @@ function VolumeView({ path }: { path: string }) {
     }
   }
 
-  // A dragged tree file is a valid overlay if it's a volume other than the base.
-  const draggedPath = (e: React.DragEvent): string | null => {
-    const p = e.dataTransfer.getData(DRAG_PATH_MIME)
-    return p && p !== path && VOLUME_EXT.test(p.toLowerCase()) ? p : null
-  }
+  // A path is a valid overlay if it's a volume other than the base image.
+  const isOverlayCandidate = (p: string | null): p is string =>
+    !!p && p !== path && VOLUME_EXT.test(p.toLowerCase())
 
+  // Resolve the dragged path from dataTransfer, falling back to the module-level
+  // channel (react-dnd can strip dataTransfer for tree drags). dataTransfer data
+  // is only readable on drop, not during dragover — hence the fallback there too.
   const onDragOver = (e: React.DragEvent) => {
-    if (e.dataTransfer.types.includes(DRAG_PATH_MIME)) {
+    if (e.dataTransfer.types.includes(DRAG_PATH_MIME) || isOverlayCandidate(getDraggedFilePath())) {
       e.preventDefault()
       setDragOver(true)
     }
@@ -139,8 +170,9 @@ function VolumeView({ path }: { path: string }) {
 
   const onDrop = (e: React.DragEvent) => {
     setDragOver(false)
-    const p = draggedPath(e)
-    if (p) {
+    const fromData = e.dataTransfer.getData(DRAG_PATH_MIME)
+    const p = isOverlayCandidate(fromData) ? fromData : getDraggedFilePath()
+    if (isOverlayCandidate(p)) {
       e.preventDefault()
       void setOverlay(p)
     }
@@ -165,17 +197,18 @@ function VolumeView({ path }: { path: string }) {
         </select>
         {overlayPath && (
           <>
-            <select
-              className="overlay-select overlay-select-cmap"
-              value={overlayColormap}
-              onChange={(e) => setColormap(e.target.value)}
-            >
-              {OVERLAY_COLORMAPS.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
+            <span className="overlay-swatches">
+              {MASK_COLORS.map((c) => (
+                <button
+                  key={c.name}
+                  className={`swatch${overlayColormap === c.name ? ' selected' : ''}`}
+                  style={{ background: `rgb(${c.rgb[0]}, ${c.rgb[1]}, ${c.rgb[2]})` }}
+                  title={c.label}
+                  aria-label={`${c.label} mask`}
+                  onClick={() => setColormap(c.name)}
+                />
               ))}
-            </select>
+            </span>
             <input
               className="overlay-opacity"
               type="range"

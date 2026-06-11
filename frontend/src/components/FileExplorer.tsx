@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Tree } from 'react-arborist'
 import type { NodeApi, NodeRendererProps } from 'react-arborist'
 import { deletePath, fetchTree, mkdir, renamePath, uploadFile } from '../api'
+import { setDraggedFilePath } from '../dragState'
 import { DRAG_PATH_MIME, type TreeNode } from '../types'
 import {
   FileIcon,
@@ -52,9 +53,14 @@ function NodeRow({ node, style, dragHandle }: NodeRendererProps<TreeNode>) {
       onDragStart={(e) => {
         // Carry the workspace-relative path so drop targets outside the tree
         // (e.g. the viewer's overlay drop zone) can read it. This coexists
-        // with react-arborist's own react-dnd move handling.
-        if (!isDir) e.dataTransfer.setData(DRAG_PATH_MIME, node.data.id)
+        // with react-arborist's own react-dnd move handling. The module-level
+        // fallback covers the case where react-dnd intercepts dataTransfer.
+        if (!isDir) {
+          e.dataTransfer.setData(DRAG_PATH_MIME, node.data.id)
+          setDraggedFilePath(node.data.id)
+        }
       }}
+      onDragEnd={() => setDraggedFilePath(null)}
     >
       <span className="tree-icon">
         {isDir ? node.isOpen ? <FolderOpenIcon /> : <FolderIcon /> : <FileTypeIcon name={node.data.name} />}

@@ -117,23 +117,28 @@ class VibeAcpClient:
         receive a ``RuntimeError`` via their futures.
         """
         async with self._init_lock:
-            if self.proc is not None:
+            await self._stop_locked()
+
+    async def _stop_locked(self) -> None:
+        """Tear down the process and reset state; caller holds ``_init_lock``."""
+        if self.proc is not None:
+            with contextlib.suppress(ProcessLookupError):
                 self.proc.terminate()
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(self.proc.wait(), timeout=5.0)
-                self.proc = None
-            if self._reader_task is not None:
-                self._reader_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self._reader_task
-                self._reader_task = None
-            for fut in self._pending.values():
-                if not fut.done():
-                    fut.set_exception(RuntimeError("vibe-acp restarted"))
-            self._pending.clear()
-            self._sessions.clear()
-            self._limbo.clear()
-            self._initialized = False
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self.proc.wait(), timeout=5.0)
+            self.proc = None
+        if self._reader_task is not None:
+            self._reader_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._reader_task
+            self._reader_task = None
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.set_exception(RuntimeError("vibe-acp restarted"))
+        self._pending.clear()
+        self._sessions.clear()
+        self._limbo.clear()
+        self._initialized = False
 
     async def ensure_started(self) -> None:
         """Spawn vibe-acp on first use and run the ACP ``initialize`` handshake.
@@ -144,24 +149,31 @@ class VibeAcpClient:
         async with self._init_lock:
             if self._initialized:
                 return
-            self.proc = await asyncio.create_subprocess_exec(
-                "uv",
-                "run",
-                "vibe-acp",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=None,  # inherit parent stderr so logs appear in terminal
-                limit=16 * 1024 * 1024,  # 16 MB; default 64 KB overflows with large LLM responses
-                cwd=self._cwd,
-                env={**os.environ, "VIBE_HOME": str(self._vibe_home)},
-            )
-            self._reader_task = asyncio.create_task(self._read_loop())
-            resp = await self.request(
-                "initialize",
-                {"protocol_version": 1, "client_capabilities": {}},
-            )
-            if "error" in resp:
-                raise RuntimeError(f"vibe-acp initialize failed: {resp['error']}")
+            try:
+                self.proc = await asyncio.create_subprocess_exec(
+                    "uv",
+                    "run",
+                    "vibe-acp",
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=None,  # inherit parent stderr so logs appear in terminal
+                    limit=16 * 1024 * 1024,  # 16 MB; default 64 KB overflows with LLM responses
+                    cwd=self._cwd,
+                    env={**os.environ, "VIBE_HOME": str(self._vibe_home)},
+                )
+                self._reader_task = asyncio.create_task(self._read_loop())
+                resp = await self.request(
+                    "initialize",
+                    {"protocol_version": 1, "client_capabilities": {}},
+                )
+                if "error" in resp:
+                    raise RuntimeError(f"vibe-acp initialize failed: {resp['error']}")
+            except BaseException:
+                # A failed handshake must not leak the live process/reader:
+                # the next ensure_started() would overwrite self.proc with a
+                # fresh spawn while the old one keeps running.
+                await self._stop_locked()
+                raise
             self._initialized = True
 
     async def _read_loop(self) -> None:

@@ -19,11 +19,14 @@ same state:
 from __future__ import annotations
 
 import configparser
+import contextlib
 import json
 import logging
 import os
 import re
 import subprocess
+import tempfile
+import threading
 import tomllib
 from functools import lru_cache
 from pathlib import Path
@@ -345,6 +348,12 @@ def save_explain_enabled(enabled: bool) -> None:
     _save_flag(EXPLAIN_ENABLED_PATH, enabled)
 
 
+# Serializes the config.toml read-modify-write within this process: the
+# workspace server runs the sync from a worker thread per websocket connect,
+# and several connects race after a settings-triggered restart.
+_config_write_lock = threading.Lock()
+
+
 def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
     """Overwrite the ``[[mcp_servers]]`` section of ``.vibe/config.toml``.
 
@@ -359,6 +368,12 @@ def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
     preserved; only ``command`` and ``args`` are updated from the discovery
     result.
     """
+    with _config_write_lock:
+        _sync_servers_to_vibe_config_locked(servers)
+
+
+def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
+    """Body of :func:`sync_servers_to_vibe_config`; caller holds the lock."""
     config_path = VIBE_HOME / "config.toml"
     cfg: dict[str, Any] = {}
     existing_by_name: dict[str, JsonDict] = {}
@@ -447,7 +462,15 @@ def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
     cfg["disabled_skills"] = sorted(set(preserved) | deactivated)
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = config_path.with_suffix(".tmp")
-    with tmp.open("wb") as fh:
-        tomli_w.dump(cfg, fh)
-    os.replace(tmp, config_path)
+    # A unique temp name (not a fixed .tmp path) so a concurrent writer in
+    # another process (Chainlit UI vs workspace server) can never interleave
+    # into the same file; os.replace then makes last-complete-writer win.
+    fd, tmp_name = tempfile.mkstemp(dir=config_path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            tomli_w.dump(cfg, fh)
+        os.replace(tmp_name, config_path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise

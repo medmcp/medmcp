@@ -140,7 +140,9 @@ async def get_workspace() -> JsonDict:
 @app.get("/api/tree")
 async def get_tree() -> JsonDict:
     """Return the full explorer tree for the workspace."""
-    root = _tree_node(WORKSPACE_ROOT, 0)
+    # The recursive walk stats every file; run it off the event loop so a
+    # large (or network-mounted) workspace can't stall the chat websockets.
+    root = await asyncio.to_thread(_tree_node, WORKSPACE_ROOT, 0)
     return {"tree": root.get("children", [])}
 
 
@@ -197,7 +199,7 @@ async def delete_file(path: str) -> JsonDict:
     if not target.exists():
         raise HTTPException(status_code=404, detail="not found")
     if target.is_dir():
-        shutil.rmtree(target)
+        await asyncio.to_thread(shutil.rmtree, target)
     else:
         target.unlink()
     return {"ok": True}
@@ -212,7 +214,7 @@ async def post_upload(file: UploadFile, dir: str = "") -> JsonDict:
     target = target_dir / name
     with target.open("wb") as fh:
         while chunk := await file.read(1024 * 1024):
-            fh.write(chunk)
+            await asyncio.to_thread(fh.write, chunk)
     return {"ok": True, "path": str(target.relative_to(WORKSPACE_ROOT))}
 
 
@@ -407,10 +409,6 @@ class _ChatConnection:
                 await task
             with contextlib.suppress(Exception):
                 await _client.notify("session/cancel", {"session_id": self.session_id})
-        for fut in self._pending_perms.values():
-            if not fut.done():
-                fut.set_result(None)
-        self._pending_perms.clear()
 
     async def _send(self, msg: JsonDict) -> None:
         """Send one frame to the browser, ignoring a just-closed socket."""
@@ -429,10 +427,11 @@ class _ChatConnection:
             if settings.load_provenance_enabled():
                 with contextlib.suppress(Exception):
                     await asyncio.to_thread(
-                        provenance.write_manifest,
-                        self.session_id,
-                        servers=settings.active_servers(),
-                        model_name=settings.OLLAMA_MODEL,
+                        lambda: provenance.write_manifest(
+                            self.session_id,
+                            servers=settings.active_servers(),
+                            model_name=settings.OLLAMA_MODEL,
+                        )
                     )
         prompt_fut = asyncio.create_task(
             _client.request(
@@ -534,14 +533,15 @@ class _ChatConnection:
                     and info is not None
                     and settings.load_provenance_enabled()
                 ):
-                    server_names = [str(s["name"]) for s in settings.active_servers()]
+                    event_info = info
                     with contextlib.suppress(Exception):
                         await asyncio.to_thread(
-                            provenance.record_tool_event,
-                            self.session_id,
-                            tc_id,
-                            info,
-                            server_names,
+                            lambda: provenance.record_tool_event(
+                                self.session_id,
+                                tc_id,
+                                event_info,
+                                [str(s["name"]) for s in settings.active_servers()],
+                            )
                         )
             elif update_type == "usage_update":
                 used = update.get("used")
@@ -568,7 +568,7 @@ class _ChatConnection:
         options = cast("list[JsonDict]", params.get("options") or [])
         tc_id = str(tool_call.get("toolCallId") or "")
         cached = self._tool_calls.get(tc_id, {})
-        for key in ("title", "rawInput"):
+        for key in ("title", "rawInput", "humanReadable", "risks"):
             if tool_call.get(key) is None and cached.get(key) is not None:
                 tool_call[key] = cached[key]
         title = tool_call.get("title") or tc_id or "<unknown>"
@@ -578,9 +578,12 @@ class _ChatConnection:
             await _client.respond(req_id_raw, {"outcome": {"outcome": "cancelled"}})
             return
 
-        explanation: str | None = None
-        risk_keys: list[str] = []
-        if settings.load_explain_enabled():
+        # Reuse a previously generated explanation (vibe-acp can re-request
+        # permission for the same tool call); only pay the LLM round-trip
+        # when none exists yet.
+        explanation = cast("str | None", tool_call.get("humanReadable"))
+        risk_keys: list[str] = cast("list[str]", tool_call.get("risks") or [])
+        if explanation is None and settings.load_explain_enabled():
             with contextlib.suppress(Exception):
                 result = await explain.generate_explanation(tool_call)
                 if result is not None:
@@ -609,9 +612,24 @@ class _ChatConnection:
             option_id = await asyncio.wait_for(fut, timeout=300)
         except TimeoutError:
             option_id = None
+        except asyncio.CancelledError:
+            # Stop / disconnect / a new prompt cancelled the prompt task while
+            # the approval box was open. vibe-acp is still blocked awaiting
+            # this JSON-RPC response; answer "cancelled" before propagating or
+            # its agent loop hangs and rejects every later prompt. The shield
+            # keeps a second cancel from abandoning the write mid-flight.
+            with contextlib.suppress(Exception):
+                await asyncio.shield(self._resolve_permission(req_id_raw, title, cached, None))
+            raise
         finally:
             self._pending_perms.pop(req_id_raw, None)
 
+        await self._resolve_permission(req_id_raw, title, cached, option_id)
+
+    async def _resolve_permission(
+        self, req_id: int, title: object, cached: JsonDict, option_id: str | None
+    ) -> None:
+        """Audit, mirror to provenance, and answer one permission request."""
         if option_id is None:
             _audit.warning("permission cancelled/timed out: %s", title)
             decision = "cancelled"
@@ -625,7 +643,7 @@ class _ChatConnection:
         if settings.load_provenance_enabled():
             with contextlib.suppress(Exception):
                 provenance.log_permission(self.session_id, title=str(title), decision=decision)
-        await _client.respond(req_id_raw, {"outcome": outcome})
+        await _client.respond(req_id, {"outcome": outcome})
 
 
 @app.websocket("/ws/chat")
@@ -639,7 +657,12 @@ async def ws_chat(ws: WebSocket) -> None:
     await ws.accept()
     conn: _ChatConnection | None = None
     try:
-        await asyncio.to_thread(settings.sync_servers_to_vibe_config, settings.active_servers())
+        # Evaluate active_servers() inside the thread too: the first call runs
+        # uv-tool stack discovery (one subprocess per stack) and must not
+        # block the event loop.
+        await asyncio.to_thread(
+            lambda: settings.sync_servers_to_vibe_config(settings.active_servers())
+        )
         await _client.ensure_started()
         resp = await _client.request("session/new", {"cwd": str(WORKSPACE_ROOT), "mcpServers": []})
         if "error" in resp:

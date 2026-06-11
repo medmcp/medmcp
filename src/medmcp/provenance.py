@@ -22,12 +22,14 @@ break a chat.
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import platform
 import re
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -241,6 +243,45 @@ def log_permission(session_id: str, *, title: str, decision: str) -> None:
     d = _ensure_dir(session_id)
     with (d / "permissions.log").open("a", encoding="utf-8") as f:
         f.write(f"{_utc_now_iso()}\t{decision}\t{title}\n")
+
+
+def record_tool_event(session_id: str, tc_id: str, info: JsonDict, server_names: list[str]) -> None:
+    """Append a normalized run-log event for a completed tool call (best-effort).
+
+    ``info`` is the UI's accumulated tool-call state (title, rawInput, status,
+    rawOutput/outputText, decision, risks, humanReadable, ``_started`` monotonic
+    timestamp). Idempotent per call via the ``_logged`` marker, since
+    ``tool_call_update`` can fire more than once. Never raises — provenance
+    must not break a chat.
+    """
+    if info.get("_logged"):
+        return
+    info["_logged"] = True
+    started = info.get("_started")
+    duration = time.monotonic() - started if isinstance(started, (int, float)) else None
+    title = info.get("title")
+    title_str = title if isinstance(title, str) else None
+    server, tool = split_tool_name(title_str or tc_id, server_names)
+    risks = info.get("risks")
+    decision = info.get("decision")
+    human_readable = info.get("humanReadable")
+    output_text = info.get("outputText")
+    event = normalize_tool_event(
+        tool_call_id=tc_id,
+        title=title_str,
+        server=server,
+        tool=tool,
+        raw_input=info.get("rawInput"),
+        raw_output=info.get("rawOutput"),
+        output_text=output_text if isinstance(output_text, str) else None,
+        status=str(info.get("status") or ""),
+        decision=str(decision) if decision is not None else None,
+        risks=cast("list[str]", risks) if isinstance(risks, list) else None,
+        human_readable=human_readable if isinstance(human_readable, str) else None,
+        duration_sec=duration,
+    )
+    with contextlib.suppress(Exception):
+        append_run_event(session_id, event)
 
 
 # ── Vibe session lookup ──────────────────────────────────────────────────────

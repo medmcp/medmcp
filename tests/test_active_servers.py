@@ -8,18 +8,18 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from medmcp.app import (
-    _active_servers,  # pyright: ignore[reportPrivateUsage]
-    _discover_workflows,  # pyright: ignore[reportPrivateUsage]
-    _load_active_server_names,  # pyright: ignore[reportPrivateUsage]
-    _load_mcp_servers,  # pyright: ignore[reportPrivateUsage]
-    _load_provenance_enabled,  # pyright: ignore[reportPrivateUsage]
-    _load_workflows_enabled,  # pyright: ignore[reportPrivateUsage]
-    _save_active_server_names,  # pyright: ignore[reportPrivateUsage]
-    _save_provenance_enabled,  # pyright: ignore[reportPrivateUsage]
-    _save_workflows_enabled,  # pyright: ignore[reportPrivateUsage]
-    _sync_servers_to_vibe_config,  # pyright: ignore[reportPrivateUsage]
-    _workflow_commands,  # pyright: ignore[reportPrivateUsage]
+from medmcp.app import _workflow_commands  # pyright: ignore[reportPrivateUsage]
+from medmcp.settings import (
+    active_servers,
+    discover_workflows,
+    load_active_server_names,
+    load_mcp_servers,
+    load_provenance_enabled,
+    load_workflows_enabled,
+    save_active_server_names,
+    save_provenance_enabled,
+    save_workflows_enabled,
+    sync_servers_to_vibe_config,
 )
 
 JsonDict = dict[str, Any]
@@ -31,14 +31,14 @@ _TWO_SERVERS: list[JsonDict] = [
 
 
 def _clear_cache() -> None:
-    _load_mcp_servers.cache_clear()
+    load_mcp_servers.cache_clear()
 
 
-# ── _load_active_server_names ─────────────────────────────────────────────────
+# ── load_active_server_names ─────────────────────────────────────────────────
 
 
 class TestLoadActiveServerNames:
-    """_load_active_server_names falls back to all-active when file is absent."""
+    """load_active_server_names falls back to all-active when file is absent."""
 
     def setup_method(self) -> None:
         """Clear the lru_cache before each test."""
@@ -47,9 +47,9 @@ class TestLoadActiveServerNames:
     def test_no_file_returns_all_discovered(self, tmp_path: Path) -> None:
         """Without active_stacks.json every discovered server is active."""
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=None),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
-            patch("medmcp.app._ACTIVE_STACKS_PATH", tmp_path / "active_stacks.json"),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.ACTIVE_STACKS_PATH", tmp_path / "active_stacks.json"),
         ):
             # Two servers in config.toml, no active_stacks.json → both active.
             cfg = tmp_path / "config.toml"
@@ -57,7 +57,7 @@ class TestLoadActiveServerNames:
                 '[[mcp_servers]]\nname = "medmcp-neuro"\ncommand = "uvx"\n'
                 '[[mcp_servers]]\nname = "medmcp-cardiac"\ncommand = "uvx"\n'
             )
-            names = _load_active_server_names()
+            names = load_active_server_names()
 
         assert names == {"medmcp-neuro", "medmcp-cardiac"}
 
@@ -67,16 +67,16 @@ class TestLoadActiveServerNames:
         stacks_file.write_text(json.dumps({"active": ["medmcp-neuro"]}))
 
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=None),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
-            patch("medmcp.app._ACTIVE_STACKS_PATH", stacks_file),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.ACTIVE_STACKS_PATH", stacks_file),
         ):
             cfg = tmp_path / "config.toml"
             cfg.write_text(
                 '[[mcp_servers]]\nname = "medmcp-neuro"\ncommand = "uvx"\n'
                 '[[mcp_servers]]\nname = "medmcp-cardiac"\ncommand = "uvx"\n'
             )
-            names = _load_active_server_names()
+            names = load_active_server_names()
 
         assert names == {"medmcp-neuro"}
 
@@ -86,28 +86,28 @@ class TestLoadActiveServerNames:
         stacks_file.write_text("not valid json{{{")
 
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=None),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
-            patch("medmcp.app._ACTIVE_STACKS_PATH", stacks_file),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.ACTIVE_STACKS_PATH", stacks_file),
         ):
             cfg = tmp_path / "config.toml"
             cfg.write_text('[[mcp_servers]]\nname = "medmcp-neuro"\ncommand = "uvx"\n')
-            names = _load_active_server_names()
+            names = load_active_server_names()
 
         assert "medmcp-neuro" in names
 
 
-# ── _save_active_server_names ─────────────────────────────────────────────────
+# ── save_active_server_names ─────────────────────────────────────────────────
 
 
 class TestSaveActiveServerNames:
-    """_save_active_server_names writes a round-trippable JSON file."""
+    """save_active_server_names writes a round-trippable JSON file."""
 
     def test_writes_sorted_json(self, tmp_path: Path) -> None:
         """Names are stored as a sorted list under the 'active' key."""
         path = tmp_path / "active_stacks.json"
-        with patch("medmcp.app._ACTIVE_STACKS_PATH", path):
-            _save_active_server_names({"medmcp-cardiac", "medmcp-neuro"})
+        with patch("medmcp.settings.ACTIVE_STACKS_PATH", path):
+            save_active_server_names({"medmcp-cardiac", "medmcp-neuro"})
 
         data = json.loads(path.read_text())
         assert data == {"active": ["medmcp-cardiac", "medmcp-neuro"]}
@@ -115,8 +115,8 @@ class TestSaveActiveServerNames:
     def test_creates_parent_dirs(self, tmp_path: Path) -> None:
         """Parent directories are created if they don't exist."""
         path = tmp_path / "nested" / "dir" / "active_stacks.json"
-        with patch("medmcp.app._ACTIVE_STACKS_PATH", path):
-            _save_active_server_names({"medmcp-neuro"})
+        with patch("medmcp.settings.ACTIVE_STACKS_PATH", path):
+            save_active_server_names({"medmcp-neuro"})
 
         assert path.exists()
 
@@ -125,54 +125,54 @@ class TestSaveActiveServerNames:
 
 
 class TestProvenanceEnabled:
-    """_load/_save_provenance_enabled round-trip and default to on."""
+    """_load/save_provenance_enabled round-trip and default to on."""
 
     def test_defaults_to_true_when_absent(self, tmp_path: Path) -> None:
         """Without the file, provenance is enabled by default."""
-        with patch("medmcp.app._PROVENANCE_ENABLED_PATH", tmp_path / "provenance_enabled.json"):
-            assert _load_provenance_enabled() is True
+        with patch("medmcp.settings.PROVENANCE_ENABLED_PATH", tmp_path / "provenance_enabled.json"):
+            assert load_provenance_enabled() is True
 
     def test_round_trip_false(self, tmp_path: Path) -> None:
         """A saved disabled preference reads back as False."""
         path = tmp_path / "provenance_enabled.json"
-        with patch("medmcp.app._PROVENANCE_ENABLED_PATH", path):
-            _save_provenance_enabled(False)
-            assert _load_provenance_enabled() is False
+        with patch("medmcp.settings.PROVENANCE_ENABLED_PATH", path):
+            save_provenance_enabled(False)
+            assert load_provenance_enabled() is False
         assert json.loads(path.read_text()) == {"enabled": False}
 
     def test_corrupt_file_defaults_to_true(self, tmp_path: Path) -> None:
         """A corrupt preference file falls back to enabled."""
         path = tmp_path / "provenance_enabled.json"
         path.write_text("not json{{{")
-        with patch("medmcp.app._PROVENANCE_ENABLED_PATH", path):
-            assert _load_provenance_enabled() is True
+        with patch("medmcp.settings.PROVENANCE_ENABLED_PATH", path):
+            assert load_provenance_enabled() is True
 
 
 # ── personal-workflows master toggle ──────────────────────────────────────────
 
 
 class TestWorkflowsEnabled:
-    """_load/_save_workflows_enabled round-trip and default to on."""
+    """_load/save_workflows_enabled round-trip and default to on."""
 
     def test_defaults_to_true_when_absent(self, tmp_path: Path) -> None:
         """Without the file, the workflows feature is enabled by default."""
-        with patch("medmcp.app._WORKFLOWS_ENABLED_PATH", tmp_path / "workflows_enabled.json"):
-            assert _load_workflows_enabled() is True
+        with patch("medmcp.settings.WORKFLOWS_ENABLED_PATH", tmp_path / "workflows_enabled.json"):
+            assert load_workflows_enabled() is True
 
     def test_round_trip_false(self, tmp_path: Path) -> None:
         """A saved disabled preference reads back as False."""
         path = tmp_path / "workflows_enabled.json"
-        with patch("medmcp.app._WORKFLOWS_ENABLED_PATH", path):
-            _save_workflows_enabled(False)
-            assert _load_workflows_enabled() is False
+        with patch("medmcp.settings.WORKFLOWS_ENABLED_PATH", path):
+            save_workflows_enabled(False)
+            assert load_workflows_enabled() is False
         assert json.loads(path.read_text()) == {"enabled": False}
 
     def test_corrupt_file_defaults_to_true(self, tmp_path: Path) -> None:
         """A corrupt preference file falls back to enabled."""
         path = tmp_path / "workflows_enabled.json"
         path.write_text("not json{{{")
-        with patch("medmcp.app._WORKFLOWS_ENABLED_PATH", path):
-            assert _load_workflows_enabled() is True
+        with patch("medmcp.settings.WORKFLOWS_ENABLED_PATH", path):
+            assert load_workflows_enabled() is True
 
 
 class TestWorkflowCommands:
@@ -180,20 +180,20 @@ class TestWorkflowCommands:
 
     def test_returns_buttons_when_enabled(self, tmp_path: Path) -> None:
         """With the feature on, both Save and Manage buttons are offered."""
-        with patch("medmcp.app._WORKFLOWS_ENABLED_PATH", tmp_path / "workflows_enabled.json"):
+        with patch("medmcp.settings.WORKFLOWS_ENABLED_PATH", tmp_path / "workflows_enabled.json"):
             ids = {cmd["id"] for cmd in _workflow_commands()}
         assert ids == {"save-workflow", "manage-workflows"}
 
     def test_empty_when_disabled(self, tmp_path: Path) -> None:
         """With the feature off, no composer buttons are rendered."""
         path = tmp_path / "workflows_enabled.json"
-        with patch("medmcp.app._WORKFLOWS_ENABLED_PATH", path):
-            _save_workflows_enabled(False)
+        with patch("medmcp.settings.WORKFLOWS_ENABLED_PATH", path):
+            save_workflows_enabled(False)
             assert _workflow_commands() == []
 
 
 class TestWorkflowSkillPathsGating:
-    """_sync_servers_to_vibe_config honors the workflows master toggle."""
+    """sync_servers_to_vibe_config honors the workflows master toggle."""
 
     def test_enabled_adds_skill_paths(self, tmp_path: Path) -> None:
         """With the feature on, workflow dirs are added to skill_paths."""
@@ -201,11 +201,11 @@ class TestWorkflowSkillPathsGating:
         _make_workflow(tmp_path, "draft", "wf-draft")
         cfg_path = tmp_path / "config.toml"
         with (
-            patch("medmcp.app.VIBE_HOME", tmp_path),
-            patch("medmcp.app._WORKFLOWS_ENABLED_PATH", tmp_path / "workflows_enabled.json"),
-            patch("medmcp.app._ACTIVE_WORKFLOWS_PATH", tmp_path / "active_workflows.json"),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.WORKFLOWS_ENABLED_PATH", tmp_path / "workflows_enabled.json"),
+            patch("medmcp.settings.ACTIVE_WORKFLOWS_PATH", tmp_path / "active_workflows.json"),
         ):
-            _sync_servers_to_vibe_config([])
+            sync_servers_to_vibe_config([])
         cfg = tomllib.loads(cfg_path.read_text())
         skill_paths = cfg["skill_paths"]
         assert str(tmp_path / "workflows" / "active") in skill_paths
@@ -219,12 +219,12 @@ class TestWorkflowSkillPathsGating:
         _make_workflow(tmp_path, "draft", "wf-draft")
         cfg_path = tmp_path / "config.toml"
         with (
-            patch("medmcp.app.VIBE_HOME", tmp_path),
-            patch("medmcp.app._WORKFLOWS_ENABLED_PATH", tmp_path / "workflows_enabled.json"),
-            patch("medmcp.app._ACTIVE_WORKFLOWS_PATH", tmp_path / "active_workflows.json"),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.WORKFLOWS_ENABLED_PATH", tmp_path / "workflows_enabled.json"),
+            patch("medmcp.settings.ACTIVE_WORKFLOWS_PATH", tmp_path / "active_workflows.json"),
         ):
-            _save_workflows_enabled(False)
-            _sync_servers_to_vibe_config([])
+            save_workflows_enabled(False)
+            sync_servers_to_vibe_config([])
         cfg = tomllib.loads(cfg_path.read_text())
         skill_paths = cfg["skill_paths"]
         assert str(tmp_path / "workflows" / "active") not in skill_paths
@@ -232,11 +232,11 @@ class TestWorkflowSkillPathsGating:
         assert cfg["disabled_skills"] == ["wf-draft", "wf-promoted"]
 
 
-# ── _active_servers ───────────────────────────────────────────────────────────
+# ── active_servers ───────────────────────────────────────────────────────────
 
 
 class TestActiveServers:
-    """_active_servers returns only the enabled subset."""
+    """active_servers returns only the enabled subset."""
 
     def setup_method(self) -> None:
         """Clear the lru_cache before each test."""
@@ -248,16 +248,16 @@ class TestActiveServers:
         stacks_file.write_text(json.dumps({"active": ["medmcp-neuro"]}))
 
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=None),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
-            patch("medmcp.app._ACTIVE_STACKS_PATH", stacks_file),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.ACTIVE_STACKS_PATH", stacks_file),
         ):
             cfg = tmp_path / "config.toml"
             cfg.write_text(
                 '[[mcp_servers]]\nname = "medmcp-neuro"\ncommand = "uvx"\n'
                 '[[mcp_servers]]\nname = "medmcp-cardiac"\ncommand = "uvx"\n'
             )
-            servers = _active_servers()
+            servers = active_servers()
 
         assert len(servers) == 1
         assert servers[0]["name"] == "medmcp-neuro"
@@ -265,31 +265,31 @@ class TestActiveServers:
     def test_all_active_when_no_file(self, tmp_path: Path) -> None:
         """Without active_stacks.json all discovered servers are returned."""
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=None),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
-            patch("medmcp.app._ACTIVE_STACKS_PATH", tmp_path / "active_stacks.json"),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.ACTIVE_STACKS_PATH", tmp_path / "active_stacks.json"),
         ):
             cfg = tmp_path / "config.toml"
             cfg.write_text(
                 '[[mcp_servers]]\nname = "medmcp-neuro"\ncommand = "uvx"\n'
                 '[[mcp_servers]]\nname = "medmcp-cardiac"\ncommand = "uvx"\n'
             )
-            servers = _active_servers()
+            servers = active_servers()
 
         assert {s["name"] for s in servers} == {"medmcp-neuro", "medmcp-cardiac"}
 
 
-# ── _sync_servers_to_vibe_config ──────────────────────────────────────────────
+# ── sync_servers_to_vibe_config ──────────────────────────────────────────────
 
 
 class TestSyncServersToVibeConfig:
-    """_sync_servers_to_vibe_config writes mcp_servers into config.toml."""
+    """sync_servers_to_vibe_config writes mcp_servers into config.toml."""
 
     def test_writes_active_servers(self, tmp_path: Path) -> None:
         """Active servers appear in the written config.toml."""
         cfg_path = tmp_path / "config.toml"
-        with patch("medmcp.app.VIBE_HOME", tmp_path):
-            _sync_servers_to_vibe_config(_TWO_SERVERS)
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
+            sync_servers_to_vibe_config(_TWO_SERVERS)
 
         with cfg_path.open("rb") as f:
             result = tomllib.load(f)
@@ -301,8 +301,8 @@ class TestSyncServersToVibeConfig:
         """Passing an empty list removes all mcp_servers entries."""
         cfg_path = tmp_path / "config.toml"
         cfg_path.write_text('[[mcp_servers]]\nname = "medmcp-neuro"\ncommand = "uvx"\n')
-        with patch("medmcp.app.VIBE_HOME", tmp_path):
-            _sync_servers_to_vibe_config([])
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
+            sync_servers_to_vibe_config([])
 
         with cfg_path.open("rb") as f:
             result = tomllib.load(f)
@@ -325,8 +325,8 @@ class TestSyncServersToVibeConfig:
             "args": ["medmcp-neuro"],
             "env": [],
         }
-        with patch("medmcp.app.VIBE_HOME", tmp_path):
-            _sync_servers_to_vibe_config([new_srv])
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
+            sync_servers_to_vibe_config([new_srv])
 
         with cfg_path.open("rb") as f:
             result = tomllib.load(f)
@@ -340,8 +340,8 @@ class TestSyncServersToVibeConfig:
         """Non-mcp_servers settings in config.toml are not disturbed."""
         cfg_path = tmp_path / "config.toml"
         cfg_path.write_text('active_model = "local"\nauto_approve = false\n')
-        with patch("medmcp.app.VIBE_HOME", tmp_path):
-            _sync_servers_to_vibe_config(_TWO_SERVERS)
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
+            sync_servers_to_vibe_config(_TWO_SERVERS)
 
         with cfg_path.open("rb") as f:
             result = tomllib.load(f)
@@ -351,8 +351,8 @@ class TestSyncServersToVibeConfig:
 
     def test_new_server_from_entry_point_gets_minimal_fields(self, tmp_path: Path) -> None:
         """A server not previously in config.toml is written with transport=stdio."""
-        with patch("medmcp.app.VIBE_HOME", tmp_path):
-            _sync_servers_to_vibe_config(
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
+            sync_servers_to_vibe_config(
                 [{"name": "medmcp-new", "command": "uvx", "args": ["medmcp-new"], "env": []}]
             )
 
@@ -369,8 +369,8 @@ class TestSyncServersToVibeConfig:
         cfg_path = tmp_path / "config.toml"
         assert not cfg_path.exists()
 
-        with patch("medmcp.app.VIBE_HOME", tmp_path):
-            _sync_servers_to_vibe_config(_TWO_SERVERS)
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
+            sync_servers_to_vibe_config(_TWO_SERVERS)
 
         assert cfg_path.exists()
         with cfg_path.open("rb") as f:
@@ -390,8 +390,8 @@ class TestSyncServersToVibeConfig:
                 "skills_path": "/opt/neuro/skills",
             },
         ]
-        with patch("medmcp.app.VIBE_HOME", tmp_path):
-            _sync_servers_to_vibe_config(servers)
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
+            sync_servers_to_vibe_config(servers)
 
         with (tmp_path / "config.toml").open("rb") as f:
             result = tomllib.load(f)
@@ -403,8 +403,8 @@ class TestSyncServersToVibeConfig:
         cfg_path = tmp_path / "config.toml"
         cfg_path.write_text('skill_paths = ["/opt/neuro/skills"]\n')
 
-        with patch("medmcp.app.VIBE_HOME", tmp_path):
-            _sync_servers_to_vibe_config([])
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
+            sync_servers_to_vibe_config([])
 
         with cfg_path.open("rb") as f:
             result = tomllib.load(f)
@@ -414,8 +414,8 @@ class TestSyncServersToVibeConfig:
     def test_active_workflows_dir_added_to_skill_paths(self, tmp_path: Path) -> None:
         """A promoted-workflows active/ dir is included in skill_paths."""
         (tmp_path / "workflows" / "active").mkdir(parents=True)
-        with patch("medmcp.app.VIBE_HOME", tmp_path):
-            _sync_servers_to_vibe_config(_TWO_SERVERS)
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
+            sync_servers_to_vibe_config(_TWO_SERVERS)
 
         with (tmp_path / "config.toml").open("rb") as f:
             result = tomllib.load(f)
@@ -425,8 +425,8 @@ class TestSyncServersToVibeConfig:
     def test_draft_workflows_dir_added_to_skill_paths(self, tmp_path: Path) -> None:
         """The draft/ dir is included in skill_paths so drafts can be tested."""
         (tmp_path / "workflows" / "draft").mkdir(parents=True)
-        with patch("medmcp.app.VIBE_HOME", tmp_path):
-            _sync_servers_to_vibe_config(_TWO_SERVERS)
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
+            sync_servers_to_vibe_config(_TWO_SERVERS)
 
         with (tmp_path / "config.toml").open("rb") as f:
             result = tomllib.load(f)
@@ -447,8 +447,8 @@ class TestSyncServersToVibeConfig:
             },
         ]
 
-        with patch("medmcp.app.VIBE_HOME", tmp_path):
-            _sync_servers_to_vibe_config(active)
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
+            sync_servers_to_vibe_config(active)
 
         with cfg_path.open("rb") as f:
             result = tomllib.load(f)
@@ -468,14 +468,14 @@ def _make_workflow(root: Path, kind: str, name: str, description: str = "") -> N
 
 
 class TestDiscoverWorkflows:
-    """_discover_workflows scans draft/ and active/ for SKILL.md entries."""
+    """discover_workflows scans draft/ and active/ for SKILL.md entries."""
 
     def test_finds_active_and_draft(self, tmp_path: Path) -> None:
         """Both promoted and draft workflows are discovered with their kind."""
         _make_workflow(tmp_path, "active", "brain-mri", "skull strip")
         _make_workflow(tmp_path, "draft", "spine-seg", "segment spine")
-        with patch("medmcp.app.VIBE_HOME", tmp_path):
-            found = {w["name"]: w for w in _discover_workflows()}
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
+            found = {w["name"]: w for w in discover_workflows()}
         assert found["brain-mri"]["kind"] == "active"
         assert found["brain-mri"]["description"] == "skull strip"
         assert found["spine-seg"]["kind"] == "draft"
@@ -484,8 +484,8 @@ class TestDiscoverWorkflows:
         """A name present in both dirs resolves to the active entry."""
         _make_workflow(tmp_path, "active", "dup")
         _make_workflow(tmp_path, "draft", "dup")
-        with patch("medmcp.app.VIBE_HOME", tmp_path):
-            found = [w for w in _discover_workflows() if w["name"] == "dup"]
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
+            found = [w for w in discover_workflows() if w["name"] == "dup"]
         assert len(found) == 1
         assert found[0]["kind"] == "active"
 
@@ -501,10 +501,10 @@ class TestWorkflowDisabledSkills:
         active_path.write_text(json.dumps({"active": ["keep-me"]}))
 
         with (
-            patch("medmcp.app.VIBE_HOME", tmp_path),
-            patch("medmcp.app._ACTIVE_WORKFLOWS_PATH", active_path),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.ACTIVE_WORKFLOWS_PATH", active_path),
         ):
-            _sync_servers_to_vibe_config([])
+            sync_servers_to_vibe_config([])
 
         with (tmp_path / "config.toml").open("rb") as f:
             result = tomllib.load(f)
@@ -515,10 +515,10 @@ class TestWorkflowDisabledSkills:
         _make_workflow(tmp_path, "active", "a")
         _make_workflow(tmp_path, "draft", "b")
         with (
-            patch("medmcp.app.VIBE_HOME", tmp_path),
-            patch("medmcp.app._ACTIVE_WORKFLOWS_PATH", tmp_path / "active_workflows.json"),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.ACTIVE_WORKFLOWS_PATH", tmp_path / "active_workflows.json"),
         ):
-            _sync_servers_to_vibe_config([])
+            sync_servers_to_vibe_config([])
         with (tmp_path / "config.toml").open("rb") as f:
             result = tomllib.load(f)
         assert result["disabled_skills"] == []
@@ -532,10 +532,10 @@ class TestWorkflowDisabledSkills:
         active_path.write_text(json.dumps({"active": []}))  # wf-a deactivated
 
         with (
-            patch("medmcp.app.VIBE_HOME", tmp_path),
-            patch("medmcp.app._ACTIVE_WORKFLOWS_PATH", active_path),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.ACTIVE_WORKFLOWS_PATH", active_path),
         ):
-            _sync_servers_to_vibe_config([])
+            sync_servers_to_vibe_config([])
 
         with cfg.open("rb") as f:
             result = tomllib.load(f)

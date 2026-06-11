@@ -44,25 +44,18 @@ Chats are persisted in two places:
 from __future__ import annotations
 
 import asyncio
-import configparser
 import contextlib
 import json
 import logging
-import os
-import re
 import sqlite3
-import subprocess
 import threading
 import time
-import tomllib
 from collections.abc import Awaitable, Callable
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
 
 import chainlit as cl
 import httpx
-import tomli_w
 from chainlit.context import context as cl_context
 from chainlit.data import get_data_layer as cl_get_data_layer
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
@@ -75,6 +68,23 @@ from fastapi.routing import APIRoute
 
 from medmcp import distill, provenance, replay
 from medmcp.acp import JsonDict, VibeAcpClient
+from medmcp.explain import RISK_CATEGORIES
+from medmcp.explain import SEVERITY_ICON as _SEVERITY_ICON
+from medmcp.explain import generate_explanation as _generate_explanation
+from medmcp.explain import raw_input_to_str as _raw_input_to_str
+from medmcp.settings import OLLAMA_BASE_URL, OLLAMA_MODEL
+from medmcp.settings import active_servers as _active_servers
+from medmcp.settings import discover_workflows as _discover_workflows
+from medmcp.settings import load_active_server_names as _load_active_server_names
+from medmcp.settings import load_active_workflow_names as _load_active_workflow_names
+from medmcp.settings import load_mcp_servers as _load_mcp_servers
+from medmcp.settings import load_provenance_enabled as _load_provenance_enabled
+from medmcp.settings import load_workflows_enabled as _load_workflows_enabled
+from medmcp.settings import save_active_server_names as _save_active_server_names
+from medmcp.settings import save_active_workflow_names as _save_active_workflow_names
+from medmcp.settings import save_provenance_enabled as _save_provenance_enabled
+from medmcp.settings import save_workflows_enabled as _save_workflows_enabled
+from medmcp.settings import sync_servers_to_vibe_config as _sync_servers_to_vibe_config
 from medmcp.workflow import Recipe
 
 # ── Audit logger ───────────────────────────────────────────
@@ -89,14 +99,6 @@ _audit: logging.Logger = logging.getLogger("medmcp.audit")
 PROJECT_ROOT: str = str(Path(__file__).resolve().parent.parent.parent)
 VIBE_HOME: Path = Path(PROJECT_ROOT) / ".vibe"
 THREADS_DB_PATH: Path = VIBE_HOME / "medmcp_threads.db"
-# Tracks which discovered stacks are enabled; defaults to all when absent.
-_ACTIVE_STACKS_PATH: Path = VIBE_HOME / "active_stacks.json"
-# Tracks which personal workflows are enabled (loaded as skills); all when absent.
-_ACTIVE_WORKFLOWS_PATH: Path = VIBE_HOME / "active_workflows.json"
-# Persists the provenance-capture on/off preference; defaults to on when absent.
-_PROVENANCE_ENABLED_PATH: Path = VIBE_HOME / "provenance_enabled.json"
-# Master on/off for the personal-workflows feature; defaults to on when absent.
-_WORKFLOWS_ENABLED_PATH: Path = VIBE_HOME / "workflows_enabled.json"
 
 # Single fixed user identity used by the data layer. There is no auth: this
 # exists only so chainlit's per-user thread scoping has a stable key.
@@ -118,399 +120,6 @@ CONFIRM_REPLAY_ACTION: str = "confirm_replay"
 
 
 _stack_log: logging.Logger = logging.getLogger(__name__)
-
-
-def _get_uv_tool_dir() -> Path | None:
-    """Return the uv tool installation directory, or ``None`` if unavailable."""
-    try:
-        result = subprocess.run(["uv", "tool", "dir"], capture_output=True, text=True, timeout=5)
-        return Path(result.stdout.strip()) if result.returncode == 0 else None
-    except Exception:
-        return None
-
-
-def _call_entry_point(python: Path, module: str, attr: str) -> object:
-    """Call ``module.attr()`` inside *python*'s environment and return the result.
-
-    Raises ``RuntimeError`` on non-zero exit and ``ValueError`` on JSON-decode
-    failure; both are caught by the caller so broken stacks are skipped cleanly.
-    """
-    result = subprocess.run(
-        [str(python), "-c", f"import json,{module};print(json.dumps({module}.{attr}()))"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip())
-    return json.loads(result.stdout)
-
-
-@lru_cache(maxsize=1)
-def _load_mcp_servers() -> list[JsonDict]:
-    """Discover MCP servers from uv tool environments and ``.vibe/config.toml``.
-
-    Server configs are collected from two sources:
-
-    1. **Installed uv tools** (authoritative) — any package installed via
-       ``uv tool install`` that registers a ``[medmcp.stacks]`` entry point in
-       its dist-info is auto-discovered.  The entry point must be a zero-argument
-       callable returning a dict with at least ``name`` and ``command`` keys.
-       The executable is resolved to its absolute path inside the isolated tool
-       env, so PATH ordering never causes the wrong binary to be picked up.
-
-    2. **Manual ``[[mcp_servers]]`` entries in ``.vibe/config.toml``** — only
-       entries whose ``name`` is *not* already registered by a uv tool are
-       accepted.  This covers stacks that have not yet been installed via
-       ``just install-stack``.
-
-    Returns a list of server-config dicts ready for ``_sync_servers_to_vibe_config``.
-    """
-    servers: dict[str, JsonDict] = {}
-
-    # ── 1. Scan uv tool environments ─────────────────────────────────────────
-    tool_dir = _get_uv_tool_dir()
-    if tool_dir is not None:
-        cp = configparser.ConfigParser()
-        cp.optionxform = lambda optionstr: optionstr  # preserve case
-        for ep_file in tool_dir.glob("*/lib/python*/site-packages/*.dist-info/entry_points.txt"):
-            cp.clear()
-            cp.read(ep_file)
-            if not cp.has_section("medmcp.stacks"):
-                continue
-            # tool env root: entry_points.txt → dist-info → site-packages →
-            #                python3.x → lib → <tool-env>
-            tool_env = ep_file.parents[4]
-            python = tool_env / "bin" / "python"
-            if not python.exists():
-                continue
-            for ep_name, ep_value in cp.items("medmcp.stacks"):
-                parts = ep_value.strip().split(":")
-                if len(parts) != 2:
-                    continue
-                module, attr = parts
-                # Reject non-identifier strings before passing to a subprocess.
-                if not re.fullmatch(r"[\w.]+", module) or not re.fullmatch(r"\w+", attr):
-                    _stack_log.warning("Skipping malformed entry point %r = %r", ep_name, ep_value)
-                    continue
-                try:
-                    raw = _call_entry_point(python, module, attr)
-                except Exception as exc:
-                    _stack_log.warning("medmcp.stacks entry point %r failed: %s", ep_name, exc)
-                    continue
-                if not isinstance(raw, dict) or "name" not in raw:
-                    _stack_log.warning(
-                        "medmcp.stacks entry point %r returned an invalid config "
-                        "(expected dict with 'name' key); skipping",
-                        ep_name,
-                    )
-                    continue
-                srv = cast("JsonDict", raw)
-                name = str(srv.get("name", ""))
-                if not name:
-                    continue
-                # Resolve command to the absolute executable inside the tool env
-                # so vibe-acp always uses the fully-dep-installed binary.
-                # Guard: an empty command must not be resolved — Path / "" collapses
-                # to the parent dir, which exists, corrupting command to a dir path.
-                command = str(srv.get("command", ""))
-                if command:
-                    candidate = tool_env / "bin" / command
-                    if candidate.exists():
-                        command = str(candidate)
-                dist_info = ep_file.parent.name  # e.g. "medmcp_dicom-0.1.0.dist-info"
-                version = dist_info.removesuffix(".dist-info").rsplit("-", 1)[-1]
-                entry: JsonDict = {
-                    "name": name,
-                    "command": command,
-                    "args": list(cast("list[Any]", srv.get("args", []))),
-                    "env": dict(cast("dict[str, str]", srv.get("env", {}))),
-                    "version": version,
-                }
-                for key in ("skills_path", "tool_timeout_sec", "startup_timeout_sec"):
-                    if srv.get(key) is not None:
-                        entry[key] = srv[key]
-                servers[name] = entry
-
-    # ── 2. Manual config.toml entries ────────────────────────────────────────
-    # Only accepted for names NOT already claimed by an installed uv tool.
-    # This prevents a feedback loop where servers written to config.toml by
-    # _sync_servers_to_vibe_config shadow the live tool-env definitions.
-    config_path = VIBE_HOME / "config.toml"
-    if config_path.exists():
-        try:
-            with config_path.open("rb") as f:
-                cfg = tomllib.load(f)
-        except Exception as exc:
-            _stack_log.warning("Could not parse %s; skipping manual entries: %s", config_path, exc)
-            return list(servers.values())
-
-        tool_names = set(servers)
-        for srv in cfg.get("mcp_servers", []):
-            name = cast("str", srv.get("name", ""))
-            if not name or name in tool_names:
-                continue
-            command = cast("str", srv.get("command", ""))
-            # Skip stale entries written by _sync_servers_to_vibe_config for
-            # tools that have since been uninstalled: absolute paths that no
-            # longer exist on disk indicate a removed uv tool environment.
-            if command and Path(command).is_absolute() and not Path(command).exists():
-                _stack_log.debug(
-                    "Skipping stale config.toml entry %r (command not found: %s)", name, command
-                )
-                continue
-            servers[name] = {
-                "name": name,
-                "command": command,
-                "args": cast("list[Any]", srv.get("args", [])),
-                "env": {},
-            }
-
-    return list(servers.values())
-
-
-def _load_active_server_names() -> set[str]:
-    """Return the set of server names currently marked active.
-
-    When ``.vibe/active_stacks.json`` is absent (first run) every discovered
-    server is considered active so behaviour is identical to the previous
-    all-servers-always-on model.
-    """
-    all_names = {s["name"] for s in _load_mcp_servers()}
-    if not _ACTIVE_STACKS_PATH.exists():
-        return all_names
-    try:
-        data = cast("dict[str, Any]", json.loads(_ACTIVE_STACKS_PATH.read_text()))
-        return set(cast("list[str]", data.get("active", list(all_names))))
-    except (json.JSONDecodeError, OSError):
-        return all_names
-
-
-def _save_active_server_names(names: set[str]) -> None:
-    """Persist the active server set to ``.vibe/active_stacks.json``."""
-    _ACTIVE_STACKS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _ACTIVE_STACKS_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"active": sorted(names)}))
-    os.replace(tmp, _ACTIVE_STACKS_PATH)
-
-
-def _read_skill_description(skill_md: Path) -> str:
-    """Return the ``description:`` frontmatter value from a SKILL.md, or ``''``."""
-    try:
-        lines = skill_md.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return ""
-    for line in lines[:15]:
-        if line.startswith("description:"):
-            return line.split(":", 1)[1].strip()
-    return ""
-
-
-def _discover_workflows() -> list[JsonDict]:
-    """Discover personal workflows from ``draft/`` and ``active/``.
-
-    Returns ``{name, description, kind}`` dicts, deduplicated by name (an active
-    workflow shadows a draft of the same name). ``kind`` is ``"active"`` for
-    promoted workflows and ``"draft"`` for unpromoted ones.
-    """
-    found: dict[str, JsonDict] = {}
-    for kind in ("active", "draft"):
-        base = VIBE_HOME / "workflows" / kind
-        if not base.is_dir():
-            continue
-        for d in sorted(base.iterdir()):
-            skill = d / "SKILL.md"
-            if not d.is_dir() or not skill.is_file() or d.name in found:
-                continue
-            found[d.name] = {
-                "name": d.name,
-                "description": _read_skill_description(skill),
-                "kind": kind,
-            }
-    return list(found.values())
-
-
-def _load_active_workflow_names() -> set[str]:
-    """Return the set of workflow names currently enabled (loaded as skills).
-
-    When ``.vibe/active_workflows.json`` is absent every discovered workflow is
-    active, so a freshly distilled/promoted workflow is on by default.
-    """
-    all_names = {w["name"] for w in _discover_workflows()}
-    if not _ACTIVE_WORKFLOWS_PATH.exists():
-        return all_names
-    try:
-        data = cast("dict[str, Any]", json.loads(_ACTIVE_WORKFLOWS_PATH.read_text()))
-        return set(cast("list[str]", data.get("active", list(all_names))))
-    except (json.JSONDecodeError, OSError):
-        return all_names
-
-
-def _save_active_workflow_names(names: set[str]) -> None:
-    """Persist the active workflow set to ``.vibe/active_workflows.json``."""
-    _ACTIVE_WORKFLOWS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _ACTIVE_WORKFLOWS_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"active": sorted(names)}))
-    os.replace(tmp, _ACTIVE_WORKFLOWS_PATH)
-
-
-def _load_provenance_enabled() -> bool:
-    """Return whether provenance capture is enabled (default ``True`` when unset)."""
-    if not _PROVENANCE_ENABLED_PATH.exists():
-        return True
-    try:
-        data = cast("dict[str, Any]", json.loads(_PROVENANCE_ENABLED_PATH.read_text()))
-        return bool(data.get("enabled", True))
-    except (json.JSONDecodeError, OSError):
-        return True
-
-
-def _save_provenance_enabled(enabled: bool) -> None:
-    """Persist the provenance-capture on/off preference to disk."""
-    _PROVENANCE_ENABLED_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _PROVENANCE_ENABLED_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"enabled": enabled}))
-    os.replace(tmp, _PROVENANCE_ENABLED_PATH)
-
-
-def _load_workflows_enabled() -> bool:
-    """Return whether the personal-workflows feature is enabled (default ``True``).
-
-    The master switch: when off, the Save/Manage composer buttons are hidden and
-    no personal workflow is loaded as a skill (see ``_workflow_commands`` and
-    ``_sync_servers_to_vibe_config``).
-    """
-    if not _WORKFLOWS_ENABLED_PATH.exists():
-        return True
-    try:
-        data = cast("dict[str, Any]", json.loads(_WORKFLOWS_ENABLED_PATH.read_text()))
-        return bool(data.get("enabled", True))
-    except (json.JSONDecodeError, OSError):
-        return True
-
-
-def _save_workflows_enabled(enabled: bool) -> None:
-    """Persist the personal-workflows master on/off preference to disk."""
-    _WORKFLOWS_ENABLED_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _WORKFLOWS_ENABLED_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"enabled": enabled}))
-    os.replace(tmp, _WORKFLOWS_ENABLED_PATH)
-
-
-def _active_servers() -> list[JsonDict]:
-    """Return only the active subset of all discovered servers."""
-    active_names = _load_active_server_names()
-    return [s for s in _load_mcp_servers() if s["name"] in active_names]
-
-
-def _sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
-    """Overwrite the ``[[mcp_servers]]`` section of ``.vibe/config.toml``.
-
-    This is the mechanism that makes entry-point discovery actually take effect:
-    vibe-acp reads its server list directly from the TOML file and ignores the
-    ``mcpServers`` field in JSON-RPC calls, so we must write the desired set
-    here before each ``session/new`` or ``session/load``.
-
-    Only the ``mcp_servers`` array is replaced.  All other keys (model config,
-    tool permissions, etc.) are left untouched.  For servers already present in
-    the file, vibe-acp-specific fields such as ``startup_timeout_sec`` are
-    preserved; only ``command`` and ``args`` are updated from the discovery
-    result.
-    """
-    config_path = VIBE_HOME / "config.toml"
-    cfg: dict[str, Any] = {}
-    existing_by_name: dict[str, JsonDict] = {}
-
-    if config_path.exists():
-        try:
-            with config_path.open("rb") as fh:
-                cfg = tomllib.load(fh)
-        except Exception as exc:
-            _stack_log.warning(
-                "Could not parse %s; skipping mcp_servers sync: %s", config_path, exc
-            )
-            return
-        for raw in cast("list[JsonDict]", cfg.get("mcp_servers", [])):
-            name = cast("str", raw.get("name", ""))
-            if name:
-                existing_by_name[name] = raw
-
-    new_entries: list[JsonDict] = []
-    for srv in servers:
-        name = srv["name"]
-        if name in existing_by_name:
-            # Preserve vibe-acp-specific fields (timeouts, transport, etc.)
-            # and overwrite discovery-owned fields (command, args).
-            entry = dict(existing_by_name[name])
-            entry["command"] = srv["command"]
-            if srv.get("args"):
-                entry["args"] = srv["args"]
-            else:
-                entry.pop("args", None)
-            new_entries.append(entry)
-        else:
-            # Brand-new server from an entry point. Copy vibe-acp fields that
-            # packages may supply (e.g. tool_timeout_sec for long-running tools),
-            # then ensure required fields are set.
-            passthrough = {
-                "tool_timeout_sec",
-                "startup_timeout_sec",
-                "transport",
-                "env",
-                "skills_path",
-            }
-            entry = {"transport": "stdio"}
-            for key in passthrough:
-                if key in srv:
-                    entry[key] = srv[key]
-            entry["name"] = name
-            entry["command"] = srv["command"]
-            if srv.get("args"):
-                entry["args"] = srv["args"]
-            else:
-                entry.pop("args", None)
-            new_entries.append(entry)
-
-    cfg["mcp_servers"] = new_entries
-
-    # Collect skills_path values from discovered servers and write them to
-    # skill_paths so vibe-acp loads the bundled skill docs automatically.
-    skill_paths = [srv["skills_path"] for srv in servers if srv.get("skills_path")]
-    # The personal-workflows feature can be turned off entirely by the master
-    # toggle; when off, no workflow dir is added to skill_paths and every workflow
-    # is listed in disabled_skills, so nothing personal is loaded.
-    workflows_enabled = _load_workflows_enabled()
-    if workflows_enabled:
-        # Promoted, reusable workflows live here as <name>/SKILL.md; include the
-        # directory so distilled workflows are discoverable as skills (Tier 3).
-        workflows_active = VIBE_HOME / "workflows" / "active"
-        if workflows_active.is_dir():
-            skill_paths.append(str(workflows_active))
-        # Draft workflows are loaded too, so a draft can be tested (invoked as
-        # `/<name>`) before it is promoted. Promotion just moves the draft into
-        # active/ to keep it permanently; both dirs hold <name>/SKILL.md entries.
-        workflows_draft = VIBE_HOME / "workflows" / "draft"
-        if workflows_draft.is_dir():
-            skill_paths.append(str(workflows_draft))
-    cfg["skill_paths"] = skill_paths
-
-    # Personal workflows toggled off in the gear are disabled by name so vibe-acp
-    # skips loading them, without removing them from disk. With the master toggle
-    # off, all of them are disabled. Non-workflow entries in disabled_skills (if
-    # any were set manually) are preserved.
-    all_workflows = {w["name"] for w in _discover_workflows()}
-    deactivated = (
-        all_workflows if not workflows_enabled else (all_workflows - _load_active_workflow_names())
-    )
-    existing_disabled = cast("list[str]", cfg.get("disabled_skills", []))
-    preserved = [s for s in existing_disabled if s not in all_workflows]
-    cfg["disabled_skills"] = sorted(set(preserved) | deactivated)
-
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = config_path.with_suffix(".tmp")
-    with tmp.open("wb") as fh:
-        tomli_w.dump(cfg, fh)
-    os.replace(tmp, config_path)
 
 
 def _build_chat_settings_inputs() -> list[Any]:
@@ -630,8 +239,6 @@ def _workflow_commands() -> list[CommandDict]:
 # The explanation is produced by the same local Ollama model that powers the
 # agent, via a lightweight direct API call.
 
-OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "gemma4-medmcp")
 
 # Latest token count from vibe-acp usage_update frames.  Single-user app, so
 # no per-session scoping is needed — the most recent update wins.
@@ -708,30 +315,6 @@ async def _warmup_ollama() -> None:
 _chainlit_app.router.routes.insert(  # pyright: ignore[reportUnknownMemberType]
     0, APIRoute("/api/context-usage", _context_usage_api, methods=["GET"])
 )
-
-
-# Timeout for the explanation call.  Local Ollama inference is fast but the
-# model may be cold-starting; 20 s is generous without blocking the UI too long.
-EXPLAIN_TIMEOUT: float = 20.0
-
-# ── Risk taxonomy ──────────────────────────────────────────
-# Predefined categories for tool-call risk assessment.  The LLM is instructed
-# to pick from these keys only — it never invents new ones.
-# Each value is (display_label, severity).  severity drives the icon shown in
-# the permission dialog and the tool-call summary.
-RISK_CATEGORIES: dict[str, tuple[str, str]] = {
-    "file_read": ("Reads existing files", "low"),
-    "file_write": ("Creates or modifies files", "medium"),
-    "file_delete": ("Deletes files — may be irreversible", "high"),
-    "network": ("Contacts an external server or website", "medium"),
-    "code_exec": ("Runs a program or shell command", "high"),
-    "data_exfil": ("Could send your data to an external service", "high"),
-    "system_config": ("Changes system or application settings", "medium"),
-    "privacy": ("Accesses personal or sensitive information", "high"),
-    "skill_load": ("Loads external instructions into the agent context", "medium"),
-}
-
-_SEVERITY_ICON: dict[str, str] = {"low": "🟢", "medium": "🟡", "high": "🔴"}
 
 
 # Module-level singleton. Chainlit imports this file once at startup, but the
@@ -1031,125 +614,6 @@ def get_data_layer() -> SQLAlchemyDataLayer:
 
 
 # ── Tool-call explanation (opt-in) ────────────────────────
-
-
-def _raw_input_to_str(raw_input_val: object) -> str:
-    """Stringify a rawInput value for inclusion in the explanation prompt."""
-    if isinstance(raw_input_val, dict):
-        try:
-            # pyright: ignore — json.dumps accepts Any-typed dict values at runtime
-            return json.dumps(raw_input_val, indent=2)  # pyright: ignore[reportUnknownArgumentType]
-        except (TypeError, ValueError):
-            return str(raw_input_val)  # pyright: ignore[reportUnknownArgumentType]
-    return str(raw_input_val)
-
-
-async def _generate_explanation(tc: JsonDict) -> tuple[str, list[str]] | None:
-    """Ask the local Ollama model to explain a tool call for a non-technical user.
-
-    Returns ``(explanation, risks)`` on success or ``None`` on failure/timeout.
-    ``explanation`` is a single plain-language sentence aimed at a physician with
-    no IT background.  ``risks`` is a (possibly empty) list of keys from
-    :data:`RISK_CATEGORIES` that the model identified as applicable.
-
-    Errors are logged but never propagated — the permission dialog renders
-    without an explanation rather than blocking the user.
-    """
-    title = tc.get("title") or ""
-    raw_input_str = _raw_input_to_str(tc.get("rawInput") or "")
-
-    # Keep the input snippet short so the prompt stays well within the model's
-    # context window.  The full raw input is already shown in the JSON fence
-    # inside the permission dialog, so truncating here is fine.
-    if len(raw_input_str) > 400:
-        raw_input_str = raw_input_str[:400] + "\n… (truncated)"
-
-    valid_keys = ", ".join(RISK_CATEGORIES)
-    prompt = (
-        "You are a security-aware assistant helping a physician review an AI action "
-        "before it runs on their computer. Your job is to explain what the action does "
-        "and flag any risks — in plain language that requires no IT knowledge.\n\n"
-        "Guidelines for the explanation:\n"
-        "- Write ONE clear sentence a doctor with no computer background can understand.\n"
-        "- Avoid all technical jargon. Translate terms like 'bash', 'stdin', 'API', "
-        "'filesystem path', 'subprocess', or 'flag' into everyday language "
-        "(e.g. 'runs a program', 'opens a file', 'contacts a website').\n"
-        "- State what the action will DO and what will CHANGE as a result.\n\n"
-        "Then select every applicable risk from this fixed list (use the exact keys):\n"
-        f"{valid_keys}\n\n"
-        "Respond with ONLY a JSON object — no markdown fences, no extra text:\n"
-        '{"explanation": "<one sentence>", "risks": ["<key>", ...]}\n\n'
-        f"Tool: {title}\n"
-        f"Input: {raw_input_str}"
-    )
-
-    try:
-        async with httpx.AsyncClient(timeout=EXPLAIN_TIMEOUT) as client:
-            # Use the native Ollama /api/chat endpoint: the OpenAI-compatible
-            # endpoint ignores think:false, causing thinking models to emit output
-            # into "reasoning" only and leave "content" empty.
-            resp = await client.post(
-                f"{OLLAMA_BASE_URL}/api/chat",
-                json={
-                    "model": OLLAMA_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False,
-                    "think": False,
-                    "options": {"temperature": 0.2, "num_predict": 1024},
-                },
-            )
-            resp.raise_for_status()
-            data = cast("JsonDict", resp.json())
-            message = cast("JsonDict", data.get("message") or {})
-            raw_text = str(message.get("content") or "").strip()
-    except Exception:
-        _audit.warning("failed to generate tool-call explanation", exc_info=True)
-        return None
-
-    return _parse_explanation_response(raw_text)
-
-
-def _parse_explanation_response(raw_text: str) -> tuple[str, list[str]] | None:
-    """Parse the LLM's JSON response into ``(explanation, risks)``.
-
-    Handles models that wrap JSON in markdown code fences.  Returns ``None`` if
-    no valid JSON object can be extracted.
-    """
-    text = raw_text.strip()
-
-    # Strip markdown code fences if present (```json ... ``` or ``` ... ```)
-    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if fence_match:
-        text = fence_match.group(1)
-    else:
-        # Greedy match is intentional: .*? would stop at the first } and break
-        # on nested objects like {"risks": ["file_read"]}.
-        brace_match = re.search(r"\{.*\}", text, re.DOTALL)
-        if brace_match:
-            text = brace_match.group(0)
-
-    try:
-        payload_raw: object = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        _audit.warning("could not parse explanation JSON: %r", raw_text[:200])
-        return None
-
-    if not isinstance(payload_raw, dict):
-        return None
-    payload = cast("JsonDict", payload_raw)
-
-    explanation = str(payload.get("explanation") or "").strip()  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-    if not explanation:
-        return None
-
-    raw_risks = payload.get("risks")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-    risks: list[str] = (
-        [k for k in cast("list[object]", raw_risks) if isinstance(k, str) and k in RISK_CATEGORIES]
-        if isinstance(raw_risks, list)
-        else []
-    )
-
-    return explanation, risks
 
 
 # ── Permission UI ──────────────────────────────────────────
@@ -1907,41 +1371,10 @@ async def _update_tool_summary(
 
 
 def _record_tool_event(session_id: str, tc_id: str, info: JsonDict) -> None:
-    """Append a normalized run-log event for a completed tool call (best-effort).
-
-    Idempotent per call via the ``_logged`` marker, since ``tool_call_update``
-    can fire more than once. Never raises — provenance must not break a chat.
-    """
-    if info.get("_logged"):
-        return
-    info["_logged"] = True
-    started = info.get("_started")
-    duration = time.monotonic() - started if isinstance(started, (int, float)) else None
-    title = info.get("title")
-    title_str = title if isinstance(title, str) else None
-    server, tool = provenance.split_tool_name(
-        title_str or tc_id, [str(s["name"]) for s in _active_servers()]
+    """Append a normalized run-log event for a completed tool call (best-effort)."""
+    provenance.record_tool_event(
+        session_id, tc_id, info, [str(s["name"]) for s in _active_servers()]
     )
-    risks = info.get("risks")
-    decision = info.get("decision")
-    human_readable = info.get("humanReadable")
-    output_text = info.get("outputText")
-    event = provenance.normalize_tool_event(
-        tool_call_id=tc_id,
-        title=title_str,
-        server=server,
-        tool=tool,
-        raw_input=info.get("rawInput"),
-        raw_output=info.get("rawOutput"),
-        output_text=output_text if isinstance(output_text, str) else None,
-        status=str(info.get("status") or ""),
-        decision=str(decision) if decision is not None else None,
-        risks=cast("list[str]", risks) if isinstance(risks, list) else None,
-        human_readable=human_readable if isinstance(human_readable, str) else None,
-        duration_sec=duration,
-    )
-    with contextlib.suppress(Exception):
-        provenance.append_run_event(session_id, event)
 
 
 async def _process_session_frame(

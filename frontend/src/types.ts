@@ -96,6 +96,8 @@ export interface ReplayPreviewStep {
 export type ReplayFrame =
   | {
       type: 'step'
+      /** Batch item index this step belongs to (0 for single runs). */
+      item?: number
       index: number
       server: string
       tool: string
@@ -103,6 +105,7 @@ export type ReplayFrame =
       error?: string | null
       produced: Record<string, string>
     }
+  | { type: 'item_result'; item: number; ok: boolean; error?: string | null; outputs: string[] }
   | { type: 'result'; ok: boolean; error?: string | null; outputs?: string[] }
 
 /** Ordered chat transcript entries. Tool calls render as inline cards. */

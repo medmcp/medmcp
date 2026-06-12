@@ -21,6 +21,8 @@ interface FileExplorerProps {
   onOpenFile: (path: string) => void
   /** Bumped by the app when the workspace may have changed (agent/replay writes). */
   refreshSignal?: number
+  /** Reports the selected file paths (multi-select via ctrl/shift-click). */
+  onSelectionChange?: (paths: string[]) => void
 }
 
 function parentDir(path: string): string {
@@ -96,7 +98,7 @@ function NodeRow({
 }
 
 /** Workspace file tree with open/rename/move/delete/upload. */
-export function FileExplorer({ onOpenFile, refreshSignal }: FileExplorerProps) {
+export function FileExplorer({ onOpenFile, refreshSignal, onSelectionChange }: FileExplorerProps) {
   const [data, setData] = useState<TreeNode[]>([])
   const [error, setError] = useState<string | null>(null)
   const [size, setSize] = useState({ width: 280, height: 400 })
@@ -232,8 +234,10 @@ export function FileExplorer({ onOpenFile, refreshSignal }: FileExplorerProps) {
           rowHeight={27}
           indent={14}
           openByDefault={false}
-          disableMultiSelection
           onActivate={onActivate}
+          onSelect={(nodes) =>
+            onSelectionChange?.(nodes.filter((n) => n.isLeaf).map((n) => n.data.id))
+          }
           onRename={({ node, name }) => {
             run(renamePath(node.data.id, joinPath(parentDir(node.data.id), name)))
           }}

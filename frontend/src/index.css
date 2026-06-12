@@ -1274,6 +1274,74 @@ textarea.wf-input {
   font-size: 12px;
 }
 
+.wf-runitem {
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.wf-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.wf-progress-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 4px;
+  background: var(--card2);
+  overflow: hidden;
+}
+
+.wf-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--blue-l);
+  transition: width 0.25s ease;
+}
+
+.wf-progress-label {
+  font-size: 11.5px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.wf-batch-selection {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wf-batch-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.wf-batch-chips code {
+  font-family: var(--mono);
+  font-size: 11px;
+  word-break: break-all;
+  padding: 2px 6px;
+  border: 1px solid var(--border2);
+  border-radius: 5px;
+  background: var(--card);
+}
+
+.wf-batch-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
 .wf-runstep {
   display: flex;
   align-items: baseline;

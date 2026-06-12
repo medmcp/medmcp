@@ -13,6 +13,8 @@ import { GearIcon } from './components/icons'
  */
 export default function App() {
   const [openPath, setOpenPath] = useState<string | null>(null)
+  // Files multi-selected in the explorer — feeds the workflow batch editor.
+  const [selectedPaths, setSelectedPaths] = useState<string[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
   // The vibe session that received the last prompt — what "Save chat as
   // workflow" distills. Survives a reconnect (which starts an empty session).
@@ -44,7 +46,11 @@ export default function App() {
         <Panel defaultSize="60%" minSize="20%">
           <Group orientation="horizontal" resizeTargetMinimumSize={{ fine: 8, coarse: 24 }}>
             <Panel defaultSize="25%" minSize="12%">
-              <FileExplorer onOpenFile={setOpenPath} refreshSignal={fsVersion} />
+              <FileExplorer
+                onOpenFile={setOpenPath}
+                refreshSignal={fsVersion}
+                onSelectionChange={setSelectedPaths}
+              />
             </Panel>
             <Separator className="sep sep-v" />
             <Panel minSize="30%">
@@ -59,6 +65,7 @@ export default function App() {
               <WorkflowPanel
                 distillSessionId={distillSessionId}
                 onWorkspaceChanged={notifyFsChanged}
+                selectedPaths={selectedPaths}
               />
             </Panel>
             <Separator className="sep sep-v" />

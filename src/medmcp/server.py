@@ -495,11 +495,16 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
 
 @app.websocket("/ws/replay")
 async def ws_replay(ws: WebSocket) -> None:
-    """Run one deterministic replay, streaming per-step status frames.
+    """Run a deterministic replay — single or batch — streaming status frames.
 
-    First client message: ``{"name": str, "inputs": {in_N: value}}``. The
-    server streams one ``{"type": "step", ...}`` frame per executed step and a
-    final ``{"type": "result", "ok": bool, "error": str|null, "outputs": [...]}``.
+    First client message: ``{"name": str, "runs": [{in_N: value}, ...]}``;
+    each entry is one full input binding and the recipe runs once per entry,
+    sequentially (legacy ``{"inputs": {...}}`` is accepted as a single-item
+    batch). A failed item does not stop the remaining items. The server
+    streams ``{"type": "step", "item": int, ...}`` per executed step,
+    ``{"type": "item_result", "item": int, "ok": bool, "error": str|null,
+    "outputs": [...]}`` per finished item, and a final ``{"type": "result",
+    "ok": bool, "error": str|null, "outputs": [...]}`` over all items.
     Closing the socket aborts the run (the engine's exit stack shuts the
     spawned MCP servers down).
 
@@ -511,38 +516,66 @@ async def ws_replay(ws: WebSocket) -> None:
     try:
         first = cast("JsonDict", await ws.receive_json())
         name = str(first.get("name") or "")
-        inputs = {str(k): str(v) for k, v in cast("JsonDict", first.get("inputs") or {}).items()}
+        runs_raw = first.get("runs")
+        if isinstance(runs_raw, list):
+            runs = [
+                {str(k): str(v) for k, v in cast("JsonDict", r).items()}
+                for r in cast("list[object]", runs_raw)
+                if isinstance(r, dict)
+            ]
+        else:
+            runs = [
+                {str(k): str(v) for k, v in cast("JsonDict", first.get("inputs") or {}).items()}
+            ]
         d = _workflow_dir(name)
-        if d is None:
-            await ws.send_json(
-                {"type": "result", "ok": False, "error": f"no workflow named {name!r}"}
-            )
+        if d is None or not runs:
+            error = f"no workflow named {name!r}" if d is None else "no inputs to run"
+            await ws.send_json({"type": "result", "ok": False, "error": error})
             return
         recipe = await asyncio.to_thread(distill.load_recipe, d)
         servers = await asyncio.to_thread(settings.active_servers)
-        _audit.info("replay started: %s (%d steps)", name, len(recipe.steps))
+        _audit.info(
+            "replay started: %s (%d item(s) x %d steps)", name, len(runs), len(recipe.steps)
+        )
 
-        async def _on_step(sr: replay.StepResult) -> None:
+        all_outputs: list[str] = []
+        failed = 0
+        for item, inputs in enumerate(runs):
+
+            async def _on_step(sr: replay.StepResult, item: int = item) -> None:
+                await ws.send_json(
+                    {
+                        "type": "step",
+                        "item": item,
+                        "index": sr.index,
+                        "server": sr.server,
+                        "tool": sr.tool,
+                        "ok": sr.ok,
+                        "error": sr.error,
+                        "produced": sr.produced,
+                    }
+                )
+
+            result = await replay.run(
+                recipe, inputs, servers=servers, cwd=str(WORKSPACE_ROOT), on_step=_on_step
+            )
+            outputs = [v for sr in result.steps for v in sr.produced.values()]
+            all_outputs.extend(outputs)
+            if not result.ok:
+                failed += 1
             await ws.send_json(
                 {
-                    "type": "step",
-                    "index": sr.index,
-                    "server": sr.server,
-                    "tool": sr.tool,
-                    "ok": sr.ok,
-                    "error": sr.error,
-                    "produced": sr.produced,
+                    "type": "item_result",
+                    "item": item,
+                    "ok": result.ok,
+                    "error": result.error,
+                    "outputs": outputs,
                 }
             )
-
-        result = await replay.run(
-            recipe, inputs, servers=servers, cwd=str(WORKSPACE_ROOT), on_step=_on_step
-        )
-        outputs = [v for sr in result.steps for v in sr.produced.values()]
-        _audit.info("replay finished: %s ok=%s", name, result.ok)
-        await ws.send_json(
-            {"type": "result", "ok": result.ok, "error": result.error, "outputs": outputs}
-        )
+        ok = failed == 0
+        error = None if ok else f"{failed} of {len(runs)} item(s) failed"
+        _audit.info("replay finished: %s ok=%s", name, ok)
+        await ws.send_json({"type": "result", "ok": ok, "error": error, "outputs": all_outputs})
     except WebSocketDisconnect:
         _audit.info("replay socket closed by client; run aborted")
     finally:

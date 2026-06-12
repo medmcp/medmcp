@@ -6,7 +6,7 @@ and exposes:
 - a small filesystem API rooted at ``WORKSPACE_ROOT`` (tree listing, raw file
   content for the viewer, rename/delete/mkdir/upload),
 - a settings API (``/api/settings``) for the stack/workflow/feature toggles
-  shared with the Chainlit UI via ``medmcp.settings``,
+  (persisted via ``medmcp.settings``),
 - a WebSocket chat endpoint that relays the vibe-acp agent loop to the browser
   (text chunks, tool calls, usage updates, and interactive permission
   requests, optionally enriched with LLM explanations and risk tags).
@@ -15,8 +15,6 @@ Run with:  medmcp-workspace  (or ``just workspace``)
 
 SECURITY MODEL
 ==============
-Same threat model as the Chainlit app (``app.py``):
-
 1. The server binds to localhost only. There is no authentication — do NOT
    expose the port over a network.
 2. Every tool call is gated by an interactive permission request forwarded to
@@ -28,11 +26,8 @@ Same threat model as the Chainlit app (``app.py``):
 
 PROVENANCE
 ==========
-When "Record provenance" is on, each chat session gets the same Tier-1 record
-as in the Chainlit UI (manifest on first prompt, run.jsonl per tool call,
-permissions.log). Caveat: workspace sessions are not registered in the
-Chainlit threads DB, so the Chainlit app's orphaned-provenance GC will treat
-their records as orphans and delete them at its next startup.
+When "Record provenance" is on, each chat session gets a Tier-1 record
+(manifest on first prompt, run.jsonl per tool call, permissions.log).
 """
 
 from __future__ import annotations
@@ -85,10 +80,9 @@ _TREE_MAX_ENTRIES_PER_DIR: int = 500
 
 app = FastAPI(title="MedMCP Workspace")
 
-# One vibe-acp subprocess shared by every websocket connection, exactly like
-# the Chainlit app shares one across browser tabs. The subprocess cwd must
-# stay PROJECT_ROOT — `uv run` resolves the project from it; the agent's
-# working directory is set per session via session/new's cwd instead.
+# One vibe-acp subprocess shared by every websocket connection. The subprocess
+# cwd must stay PROJECT_ROOT — `uv run` resolves the project from it; the
+# agent's working directory is set per session via session/new's cwd instead.
 _client: VibeAcpClient = VibeAcpClient()
 
 # Live websocket connections, so a settings-triggered vibe restart can close
@@ -717,8 +711,7 @@ class _ChatConnection:
                     continue
                 viewed = data.get("viewedPath")
                 viewed_path = viewed if isinstance(viewed, str) and viewed else None
-                # A new prompt while one is streaming cancels the old one,
-                # matching the Chainlit UI's behaviour.
+                # A new prompt while one is streaming cancels the old one.
                 await self._cancel_prompt()
                 self._prompt_task = asyncio.create_task(self._run_prompt(text, viewed_path))
             elif kind == "permission":
@@ -739,8 +732,7 @@ class _ChatConnection:
         """Abort any in-flight prompt and drop the session queue.
 
         A session that never received a prompt is purged (transcript +
-        provenance), mirroring the Chainlit ``on_chat_end`` cleanup for
-        abandoned tabs/refreshes.
+        provenance) so abandoned tabs/refreshes don't leak session state.
         """
         await self._cancel_prompt()
         for task in list(self._explain_tasks):
@@ -795,9 +787,9 @@ class _ChatConnection:
         block (not sent as a separate content block) so it survives any
         prompt handling downstream.
 
-        Mirrors the race loop in ``app.py``'s ``on_message``: wait for either
-        the next inbound session frame or the prompt response, then drain
-        whatever is left in the queue once the response lands.
+        Race loop: wait for either the next inbound session frame or the
+        prompt response, then drain whatever is left in the queue once the
+        response lands.
         """
         if not self._prompted:
             self._prompted = True
@@ -941,8 +933,8 @@ class _ChatConnection:
                 if isinstance(used, int):
                     # No-I/O accessor: an inline fetch_context_window() here
                     # would stall the relay of every queued frame behind an
-                    # Ollama round-trip (mirrors app.py's emit path). The
-                    # cache is warmed at connect time in ws_chat.
+                    # Ollama round-trip. The cache is warmed at connect time
+                    # in ws_chat.
                     size = settings.cached_context_window()
                     await self._send({"type": "usage", "used": used, "size": size})
         elif method == "session/request_permission":

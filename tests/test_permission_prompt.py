@@ -1,4 +1,4 @@
-"""Tests for the permission-prompt formatting and explanation generation in app.py."""
+"""Tests for tool-call explanation generation and parsing (medmcp.explain)."""
 
 from __future__ import annotations
 
@@ -9,135 +9,12 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from medmcp.app import _format_permission_prompt  # pyright: ignore[reportPrivateUsage]
 from medmcp.explain import (
     RISK_CATEGORIES,
     generate_explanation,
     parse_explanation_response,
 )
 from medmcp.settings import OLLAMA_BASE_URL, OLLAMA_MODEL
-
-# ── _format_permission_prompt ─────────────────────────────
-
-
-class TestFormatPermissionPrompt:
-    """Verify that _format_permission_prompt renders the expected markdown."""
-
-    def test_title_only(self) -> None:
-        """Minimal tool call with just a title."""
-        result = _format_permission_prompt({"title": "bash: echo hi"})
-        assert "`bash: echo hi`" in result
-        assert "Approve tool call?" in result
-
-    def test_with_raw_input(self) -> None:
-        """Raw input should appear inside a json code fence."""
-        result = _format_permission_prompt(
-            {
-                "title": "bash: ls",
-                "rawInput": {"command": "ls -la"},
-            }
-        )
-        assert "```json" in result
-        assert '"command"' in result
-
-    def test_with_human_readable(self) -> None:
-        """Human-readable description should render as a blockquote."""
-        result = _format_permission_prompt(
-            {
-                "title": "bash: find . -name '*.log' -delete",
-                "humanReadable": "Delete all .log files in the current directory tree.",
-            }
-        )
-        assert "> Delete all .log files" in result
-
-    def test_human_readable_before_raw_input(self) -> None:
-        """The human-readable line must appear before the raw input block."""
-        result = _format_permission_prompt(
-            {
-                "title": "bash: rm -rf /tmp/old",
-                "rawInput": {"command": "rm -rf /tmp/old"},
-                "humanReadable": "Remove the /tmp/old directory.",
-            }
-        )
-        hr_pos = result.index("> Remove the /tmp/old directory.")
-        raw_pos = result.index("```json")
-        assert hr_pos < raw_pos
-
-    def test_missing_human_readable(self) -> None:
-        """When humanReadable is absent the output should not contain a blockquote."""
-        result = _format_permission_prompt(
-            {
-                "title": "bash: ls",
-                "rawInput": "ls",
-            }
-        )
-        assert "> " not in result
-
-    def test_empty_human_readable_ignored(self) -> None:
-        """An empty humanReadable string should be treated as absent."""
-        result = _format_permission_prompt(
-            {
-                "title": "bash: ls",
-                "humanReadable": "",
-            }
-        )
-        assert result.count(">") == 0
-
-    def test_fallback_title(self) -> None:
-        """When title is missing, fall back to 'tool call'."""
-        result = _format_permission_prompt({})
-        assert "`tool call`" in result
-
-    def test_risks_rendered_as_badges(self) -> None:
-        """Known risk keys should render as labelled badge lines."""
-        result = _format_permission_prompt(
-            {
-                "title": "bash: rm -rf /data",
-                "humanReadable": "Permanently deletes the /data folder.",
-                "risks": ["file_delete", "code_exec"],
-            }
-        )
-        label_delete, _ = RISK_CATEGORIES["file_delete"]
-        label_exec, _ = RISK_CATEGORIES["code_exec"]
-        assert label_delete in result
-        assert label_exec in result
-
-    def test_risks_appear_after_human_readable(self) -> None:
-        """Risk badges must follow the blockquote explanation, before the JSON fence."""
-        result = _format_permission_prompt(
-            {
-                "title": "bash: curl http://example.com",
-                "rawInput": {"url": "http://example.com"},
-                "humanReadable": "Downloads a file from the internet.",
-                "risks": ["network"],
-            }
-        )
-        hr_pos = result.index("> Downloads")
-        label_network, _ = RISK_CATEGORIES["network"]
-        risk_pos = result.index(label_network)
-        raw_pos = result.index("```json")
-        assert hr_pos < risk_pos < raw_pos
-
-    def test_unknown_risk_keys_ignored(self) -> None:
-        """Risk keys not in RISK_CATEGORIES should be silently dropped."""
-        result = _format_permission_prompt(
-            {
-                "title": "bash: ls",
-                "risks": ["not_a_real_risk", "file_read"],
-            }
-        )
-        assert "not_a_real_risk" not in result
-        label_read, _ = RISK_CATEGORIES["file_read"]
-        assert label_read in result
-
-    def test_no_risks_no_badge_line(self) -> None:
-        """An empty risks list should not add any badge output."""
-        result_with = _format_permission_prompt({"title": "bash: ls", "risks": ["file_read"]})
-        result_without = _format_permission_prompt({"title": "bash: ls", "risks": []})
-        assert len(result_with) > len(result_without)
-
-
-# ── parse_explanation_response ───────────────────────────
 
 
 class TestParseExplanationResponse:

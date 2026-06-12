@@ -1,7 +1,7 @@
 """Shared MedMCP configuration: stack discovery, user toggles, vibe config sync.
 
-Everything here is UI-agnostic (no Chainlit/FastAPI dependency) so both the
-Chainlit app (``app.py``) and the workspace server (``server.py``) drive the
+Everything here is UI-agnostic (no FastAPI dependency) so the workspace
+server (``server.py``) and the ``medmcp`` CLI can both drive the
 same state:
 
 - **Stack discovery** (:func:`load_mcp_servers`) — uv tool environments with a
@@ -272,9 +272,9 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     """Write a small JSON state file atomically, safe across processes.
 
     A unique temp name (not a fixed ``.tmp`` path) so a concurrent writer in
-    the other frontend process (Chainlit UI vs workspace server) can never
-    consume or interleave into this writer's temp file; ``os.replace`` makes
-    the last-complete-writer win.
+    another process (a second server instance, the CLI) can never consume or
+    interleave into this writer's temp file; ``os.replace`` makes the
+    last-complete-writer win.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
@@ -521,8 +521,8 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     # A unique temp name (not a fixed .tmp path) so a concurrent writer in
-    # another process (Chainlit UI vs workspace server) can never interleave
-    # into the same file; os.replace then makes last-complete-writer win.
+    # another process can never interleave into the same file; os.replace
+    # then makes last-complete-writer win.
     fd, tmp_name = tempfile.mkstemp(dir=config_path.parent, suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as fh:

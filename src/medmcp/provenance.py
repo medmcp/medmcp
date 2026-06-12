@@ -12,11 +12,10 @@ session into ``.vibe/provenance/<session_id>/``:
 - ``report.md``      — a documentation-grade Markdown rendering, generated on
   demand from the manifest + run log.
 
-This module is deliberately free of any Chainlit/vibe-acp dependency so it can
+This module is deliberately free of any UI/vibe-acp dependency so it can
 also be driven from the CLI (:mod:`medmcp.provcli`). Callers pass in the data
-they already have (active servers, model name); nothing here reaches back into
-``app.py``. Every write is best-effort at the call site — provenance must never
-break a chat.
+they already have (active servers, model name). Every write is best-effort at
+the call site — provenance must never break a chat.
 """
 
 from __future__ import annotations
@@ -37,7 +36,7 @@ from typing import Any, cast
 
 JsonDict = dict[str, Any]
 
-# Resolve the repo root the same way app.py does: src/medmcp/provenance.py →
+# Resolve the repo root from this file: src/medmcp/provenance.py →
 # src/medmcp → src → <root>. VIBE_HOME is module-level so tests can monkeypatch
 # it; all path helpers read it at call time rather than caching a derived path.
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
@@ -237,8 +236,8 @@ def read_run_events(session_id: str) -> list[JsonDict]:
 def log_permission(session_id: str, *, title: str, decision: str) -> None:
     """Append a permission decision to ``permissions.log`` for *session_id*.
 
-    This is a persisted mirror of the ``medmcp.audit`` stderr trail; the stderr
-    handler in ``app.py`` is unchanged and must not be silenced.
+    This is a persisted mirror of the ``medmcp.audit`` stderr trail; the
+    stderr handler is unchanged and must not be silenced.
     """
     d = _ensure_dir(session_id)
     with (d / "permissions.log").open("a", encoding="utf-8") as f:

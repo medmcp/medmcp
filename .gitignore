@@ -206,10 +206,9 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# medmcp / chainlit / vibe runtime artifacts
+# medmcp / vibe runtime artifacts
 # These are generated locally at runtime and may contain conversation
 # transcripts, local file paths, or other PII. Never commit them.
-.chainlit/translations/
 .files/
 .vibe/logs/
 .vibe/vibehistory

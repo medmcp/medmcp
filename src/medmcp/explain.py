@@ -4,8 +4,8 @@ When the user enables "Explain tool calls", each permission prompt is preceded
 by a short explanation of what the tool call does, produced by the same local
 Ollama model that powers the agent, via a lightweight direct API call.
 
-UI-agnostic: both the Chainlit app and the workspace server call
-:func:`generate_explanation` and render the result their own way.
+UI-agnostic: callers invoke :func:`generate_explanation` and render the
+result their own way.
 """
 
 from __future__ import annotations

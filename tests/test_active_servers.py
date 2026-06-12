@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from medmcp.app import _workflow_commands  # pyright: ignore[reportPrivateUsage]
 from medmcp.settings import (
     active_servers,
     discover_workflows,
@@ -173,23 +172,6 @@ class TestWorkflowsEnabled:
         path.write_text("not json{{{")
         with patch("medmcp.settings.WORKFLOWS_ENABLED_PATH", path):
             assert load_workflows_enabled() is True
-
-
-class TestWorkflowCommands:
-    """_workflow_commands gates the composer buttons on the master toggle."""
-
-    def test_returns_buttons_when_enabled(self, tmp_path: Path) -> None:
-        """With the feature on, both Save and Manage buttons are offered."""
-        with patch("medmcp.settings.WORKFLOWS_ENABLED_PATH", tmp_path / "workflows_enabled.json"):
-            ids = {cmd["id"] for cmd in _workflow_commands()}
-        assert ids == {"save-workflow", "manage-workflows"}
-
-    def test_empty_when_disabled(self, tmp_path: Path) -> None:
-        """With the feature off, no composer buttons are rendered."""
-        path = tmp_path / "workflows_enabled.json"
-        with patch("medmcp.settings.WORKFLOWS_ENABLED_PATH", path):
-            save_workflows_enabled(False)
-            assert _workflow_commands() == []
 
 
 class TestWorkflowSkillPathsGating:

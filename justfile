@@ -146,10 +146,6 @@ workflows:
 delete-workflow NAME:
     uv run medmcp delete {{NAME}}
 
-# Launch the Chainlit web UI
-ui:
-    @./scripts/run_ui.sh
-
 # Launch the workspace UI (explorer + viewer + chat) at http://localhost:8100
 workspace:
     uv run medmcp-workspace
@@ -167,9 +163,9 @@ serve-ollama:
     ollama serve
 
 # One-shot: install everything, pull Gemma 4 model, start Ollama, launch the UI
-medmcp: setup pull-model
+medmcp: setup pull-model workspace-build
     @echo "Starting Ollama server..."
     @ollama serve &
     @sleep 2
-    @echo "Launching MedMCP UI..."
-    @./scripts/run_ui.sh
+    @echo "Launching the MedMCP workspace..."
+    uv run medmcp-workspace

@@ -2,8 +2,8 @@
 
 Owns the JSON-RPC 2.0 framing over stdin/stdout and the demultiplexing of
 server-initiated frames into per-session queues. This module carries **no
-Chainlit dependency** so it can back any frontend (the Chainlit app in
-``app.py`` and the workspace server in ``server.py``).
+UI dependency** so it can back any frontend (currently the workspace server
+in ``server.py``).
 
 The security model lives with the callers: every UI built on this client must
 gate ``session/request_permission`` on an interactive user decision — there is

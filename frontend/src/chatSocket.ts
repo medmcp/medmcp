@@ -19,6 +19,7 @@ export class ChatSocket {
   private handlers: ChatSocketHandlers
   private closedByUser = false
   private retryDelay = 1000
+  private retryTimer: number | null = null
 
   constructor(handlers: ChatSocketHandlers) {
     this.handlers = handlers
@@ -26,6 +27,10 @@ export class ChatSocket {
   }
 
   private connect(): void {
+    // A pending reconnect timer can fire after close(); without this guard it
+    // would open a zombie socket nothing ever closes (and the server would
+    // allocate a session for it).
+    if (this.closedByUser) return
     this.handlers.onStatusChange('connecting')
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     const ws = new WebSocket(`${proto}://${location.host}/ws/chat`)
@@ -50,7 +55,7 @@ export class ChatSocket {
     ws.onclose = () => {
       this.handlers.onStatusChange('closed')
       if (!this.closedByUser) {
-        setTimeout(() => this.connect(), this.retryDelay)
+        this.retryTimer = window.setTimeout(() => this.connect(), this.retryDelay)
         this.retryDelay = Math.min(this.retryDelay * 2, 15000)
       }
     }
@@ -76,6 +81,10 @@ export class ChatSocket {
 
   close(): void {
     this.closedByUser = true
+    if (this.retryTimer != null) {
+      clearTimeout(this.retryTimer)
+      this.retryTimer = null
+    }
     this.ws?.close()
   }
 }

@@ -153,7 +153,9 @@ function VolumeView({ path, refreshSignal }: { path: string; refreshSignal?: num
         if (!cancelled) setLoadError(String(e))
       }
     }
-    void load()
+    // Seed the overlay-op chain with the base load so an overlay dropped
+    // before the base image finished loading can't race it.
+    overlayOpRef.current = load()
     return () => {
       cancelled = true
       nvRef.current = null
@@ -168,13 +170,27 @@ function VolumeView({ path, refreshSignal }: { path: string; refreshSignal?: num
       .catch(() => setVolumePaths([]))
   }, [path, refreshSignal])
 
-  const setOverlay = async (newPath: string) => {
+  // Overlay operations are serialized on a promise chain, seeded with the
+  // base-volume load: a switch while the previous add was still in flight
+  // would otherwise skip the removal (volumes.length is still 1) and stack a
+  // phantom overlay that the opacity slider and remove button can no longer
+  // address.
+  const overlayOpRef = useRef<Promise<void>>(Promise.resolve())
+
+  const setOverlay = (newPath: string) => {
+    // Only ever called from event handlers (drop/select/remove), where ref
+    // writes are fine — the lint rule just can't see the call sites.
+    // eslint-disable-next-line react-hooks/immutability
+    overlayOpRef.current = overlayOpRef.current.then(() => applyOverlay(newPath))
+  }
+
+  const applyOverlay = async (newPath: string) => {
     const nv = nvRef.current
     if (!nv) return
     try {
-      // Drop the previous overlay (index 1) before adding the new one.
-      if (overlayPath && nv.volumes.length > 1) {
-        nv.removeVolumeByUrl(rawUrl(overlayPath))
+      // Drop every overlay, whatever got stacked (index 0 is the base image).
+      while (nv.volumes.length > 1) {
+        nv.removeVolume(nv.volumes[nv.volumes.length - 1])
       }
       setOverlayPath(newPath)
       if (newPath) {
@@ -232,7 +248,7 @@ function VolumeView({ path, refreshSignal }: { path: string; refreshSignal?: num
     if (isOverlayCandidate(p)) {
       e.preventDefault()
       e.stopPropagation()
-      void setOverlay(p)
+      setOverlay(p)
     }
   }
 
@@ -244,7 +260,7 @@ function VolumeView({ path, refreshSignal }: { path: string; refreshSignal?: num
           className="overlay-select"
           value={overlayPath}
           title="Pick a volume, or drag one from the file explorer onto the image"
-          onChange={(e) => void setOverlay(e.target.value)}
+          onChange={(e) => setOverlay(e.target.value)}
         >
           <option value="">none — or drag a file here</option>
           {volumePaths.map((p) => (
@@ -266,7 +282,7 @@ function VolumeView({ path, refreshSignal }: { path: string; refreshSignal?: num
               title={`Opacity ${Math.round(overlayOpacity * 100)}%`}
               onChange={(e) => setOpacity(Number(e.target.value))}
             />
-            <button className="btn-icon" title="Remove overlay" onClick={() => void setOverlay('')}>
+            <button className="btn-icon" title="Remove overlay" onClick={() => setOverlay('')}>
               <XIcon size={13} />
             </button>
           </>
@@ -293,7 +309,11 @@ function TextView({ url }: { url: string }) {
   const [text, setText] = useState<string>('loading…')
   useEffect(() => {
     fetch(url)
-      .then((r) => r.text())
+      .then((r) => {
+        // Without this, a 404's JSON body would render as the file's content.
+        if (!r.ok) throw new Error(`could not load file (HTTP ${r.status})`)
+        return r.text()
+      })
       .then((t) => setText(t.length > 200_000 ? t.slice(0, 200_000) + '\n… (truncated)' : t))
       .catch((e: unknown) => setText(String(e)))
   }, [url])

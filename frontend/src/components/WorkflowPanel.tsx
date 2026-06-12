@@ -251,21 +251,32 @@ export function WorkflowPanel({
     return () => runWs.current?.close()
   }, [reload])
 
+  // The workflow whose detail the panel currently wants. Guards against a
+  // slow response for a previously clicked row overwriting the current one —
+  // the detail's action buttons (Run/Promote/Delete) act on detail.name, so a
+  // stale detail under another row's header would target the wrong workflow.
+  const detailForRef = useRef<string | null>(null)
+
   const openDetail = async (name: string) => {
     runWs.current?.close()
     setMode({ kind: 'view' })
     if (expanded === name) {
+      detailForRef.current = null
       setExpanded(null)
       setDetail(null)
       return
     }
+    detailForRef.current = name
     setExpanded(name)
     setDetail(null)
     try {
-      setDetail(await fetchWorkflowDetail(name))
+      const d = await fetchWorkflowDetail(name)
+      if (detailForRef.current === name) setDetail(d)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-      setExpanded(null)
+      if (detailForRef.current === name) {
+        setError(e instanceof Error ? e.message : String(e))
+        setExpanded(null)
+      }
     }
   }
 
@@ -286,6 +297,7 @@ export function WorkflowPanel({
       if (!distillSessionId) return
       const draft = await distillSession(distillSessionId)
       await reload()
+      detailForRef.current = draft.name
       setExpanded(draft.name)
       setDetail(draft)
       setMode({ kind: 'view' })
@@ -309,6 +321,7 @@ export function WorkflowPanel({
     if (!window.confirm(`Delete workflow "${name}"? This cannot be undone.`)) return
     void withBusy('Deleting…', async () => {
       await deleteWorkflow(name)
+      detailForRef.current = null
       setExpanded(null)
       setDetail(null)
       await reload()
@@ -319,6 +332,7 @@ export function WorkflowPanel({
     withBusy('Renaming…', async () => {
       const slug = await renameWorkflow(name, newName)
       await reload()
+      detailForRef.current = slug
       setExpanded(slug)
       setDetail(await fetchWorkflowDetail(slug))
       setMode({ kind: 'view' })

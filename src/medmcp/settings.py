@@ -268,12 +268,29 @@ def load_active_server_names() -> set[str]:
         return all_names
 
 
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Write a small JSON state file atomically, safe across processes.
+
+    A unique temp name (not a fixed ``.tmp`` path) so a concurrent writer in
+    the other frontend process (Chainlit UI vs workspace server) can never
+    consume or interleave into this writer's temp file; ``os.replace`` makes
+    the last-complete-writer win.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+
+
 def save_active_server_names(names: set[str]) -> None:
     """Persist the active server set to ``.vibe/active_stacks.json``."""
-    ACTIVE_STACKS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = ACTIVE_STACKS_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"active": sorted(names)}))
-    os.replace(tmp, ACTIVE_STACKS_PATH)
+    _atomic_write_json(ACTIVE_STACKS_PATH, {"active": sorted(names)})
 
 
 def active_servers() -> list[JsonDict]:
@@ -336,10 +353,7 @@ def load_active_workflow_names() -> set[str]:
 
 def save_active_workflow_names(names: set[str]) -> None:
     """Persist the active workflow set to ``.vibe/active_workflows.json``."""
-    ACTIVE_WORKFLOWS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = ACTIVE_WORKFLOWS_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"active": sorted(names)}))
-    os.replace(tmp, ACTIVE_WORKFLOWS_PATH)
+    _atomic_write_json(ACTIVE_WORKFLOWS_PATH, {"active": sorted(names)})
 
 
 def _load_flag(path: Path) -> bool:
@@ -355,10 +369,7 @@ def _load_flag(path: Path) -> bool:
 
 def _save_flag(path: Path, enabled: bool) -> None:
     """Persist an ``{"enabled": bool}`` preference file atomically."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"enabled": enabled}))
-    os.replace(tmp, path)
+    _atomic_write_json(path, {"enabled": enabled})
 
 
 def load_provenance_enabled() -> bool:

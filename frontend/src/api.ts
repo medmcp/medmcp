@@ -77,12 +77,14 @@ export async function saveSettings(state: SettingsState): Promise<boolean> {
     await fetch('/api/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
+      // Send the full known lists (not just the active names) so the server
+      // can preserve entries this drawer never saw (created after it fetched).
       body: JSON.stringify({
         explain_tools: state.explain_tools,
         record_provenance: state.record_provenance,
         workflows_enabled: state.workflows_enabled,
-        active_stacks: state.stacks.filter((s) => s.active).map((s) => s.name),
-        active_workflows: state.workflows.filter((w) => w.active).map((w) => w.name),
+        stacks: state.stacks.map((s) => ({ name: s.name, active: s.active })),
+        workflows: state.workflows.map((w) => ({ name: w.name, active: w.active })),
       }),
     }),
   )

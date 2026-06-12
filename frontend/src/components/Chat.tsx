@@ -155,6 +155,9 @@ export function Chat({
   }, [onToolActivity])
 
   useEffect(() => {
+    // Tool-call ids that already have a transcript row (ids are unique across
+    // sessions, so this only ever grows by one entry per tool call).
+    const seenToolIds = new Set<string>()
     // Chunks arrive near per-token; buffer them and flush into state on a
     // short timer so a long answer doesn't trigger thousands of re-renders
     // (each re-parsing the accumulated markdown).
@@ -188,22 +191,24 @@ export function Chat({
           }
           break
         case 'tool_call':
-          setToolCalls((prev) => {
-            if (!(frame.toolCallId in prev)) {
-              setItems((items) => [...items, { kind: 'tool', toolCallId: frame.toolCallId }])
-            }
-            return {
-              ...prev,
-              [frame.toolCallId]: {
-                toolCallId: frame.toolCallId,
-                title: frame.title,
-                status: frame.status,
-                kind: frame.kind,
-                rawInput: frame.rawInput,
-                output: prev[frame.toolCallId]?.output,
-              },
-            }
-          })
+          // Track first-seen ids outside the updater — calling setItems from
+          // inside the setToolCalls updater would make it impure, and React
+          // may re-invoke updaters (appending duplicate transcript rows).
+          if (!seenToolIds.has(frame.toolCallId)) {
+            seenToolIds.add(frame.toolCallId)
+            setItems((items) => [...items, { kind: 'tool', toolCallId: frame.toolCallId }])
+          }
+          setToolCalls((prev) => ({
+            ...prev,
+            [frame.toolCallId]: {
+              toolCallId: frame.toolCallId,
+              title: frame.title,
+              status: frame.status,
+              kind: frame.kind,
+              rawInput: frame.rawInput,
+              output: prev[frame.toolCallId]?.output,
+            },
+          }))
           break
         case 'tool_call_update':
           setToolCalls((prev) => {

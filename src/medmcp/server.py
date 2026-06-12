@@ -95,6 +95,9 @@ _client: VibeAcpClient = VibeAcpClient()
 # them (each client auto-reconnects into a fresh session on the new process).
 _connections: set[_ChatConnection] = set()
 
+# Strong refs to fire-and-forget background tasks (asyncio only keeps weak ones).
+_background_tasks: set[asyncio.Task[Any]] = set()
+
 
 # ── Filesystem API ─────────────────────────────────────────
 
@@ -221,14 +224,27 @@ async def post_upload(file: UploadFile, dir: str = "") -> JsonDict:
 # ── Settings API ───────────────────────────────────────────
 
 
+class ToggleEntry(BaseModel):
+    """One named on/off switch as shown in the settings drawer."""
+
+    name: str
+    active: bool
+
+
 class SettingsPayload(BaseModel):
-    """Full settings state as submitted by the UI's settings drawer."""
+    """Full settings state as submitted by the UI's settings drawer.
+
+    ``stacks``/``workflows`` carry every entry the drawer knew about (name +
+    active), so the server can tell "deactivated" apart from "unknown to this
+    drawer" and preserve the state of entries created after the drawer
+    fetched (e.g. a draft distilled while it was open).
+    """
 
     explain_tools: bool
     record_provenance: bool
     workflows_enabled: bool
-    active_stacks: list[str]
-    active_workflows: list[str]
+    stacks: list[ToggleEntry]
+    workflows: list[ToggleEntry]
 
 
 def _settings_state() -> JsonDict:
@@ -280,12 +296,20 @@ async def put_settings(payload: SettingsPayload) -> JsonDict:
         settings.save_explain_enabled(payload.explain_tools)
         settings.save_provenance_enabled(payload.record_provenance)
         settings.save_workflows_enabled(payload.workflows_enabled)
-        settings.save_active_server_names(set(payload.active_stacks))
-        settings.save_active_workflow_names(set(payload.active_workflows))
+        # Merge instead of overwrite: entries the drawer never saw keep their
+        # current active state instead of being silently deactivated.
+        known_stacks = {t.name for t in payload.stacks}
+        new_stacks = {t.name for t in payload.stacks if t.active} | (old_stacks - known_stacks)
+        known_workflows = {t.name for t in payload.workflows}
+        new_workflows = {t.name for t in payload.workflows if t.active} | (
+            old_workflows - known_workflows
+        )
+        settings.save_active_server_names(new_stacks)
+        settings.save_active_workflow_names(new_workflows)
 
         restart = (
-            set(payload.active_stacks) != old_stacks
-            or set(payload.active_workflows) != old_workflows
+            new_stacks != old_stacks
+            or new_workflows != old_workflows
             or payload.workflows_enabled != old_wf_enabled
         )
         if restart:
@@ -505,8 +529,10 @@ async def ws_replay(ws: WebSocket) -> None:
     ``{"type": "item_result", "item": int, "ok": bool, "error": str|null,
     "outputs": [...]}`` per finished item, and a final ``{"type": "result",
     "ok": bool, "error": str|null, "outputs": [...]}`` over all items.
-    Closing the socket aborts the run (the engine's exit stack shuts the
-    spawned MCP servers down).
+    Closing the socket aborts the run immediately: a concurrent watcher task
+    observes the disconnect and cancels the batch, unwinding the engine's
+    exit stack — which shuts down the spawned MCP servers, killing the
+    in-flight tool step.
 
     SECURITY: the replay engine calls MCP tools directly, bypassing the
     vibe-acp permission flow — the client must show the resolved-steps preview
@@ -538,44 +564,76 @@ async def ws_replay(ws: WebSocket) -> None:
             "replay started: %s (%d item(s) x %d steps)", name, len(runs), len(recipe.steps)
         )
 
-        all_outputs: list[str] = []
-        failed = 0
-        for item, inputs in enumerate(runs):
+        async def _run_batch() -> None:
+            all_outputs: list[str] = []
+            failed = 0
+            for item, inputs in enumerate(runs):
 
-            async def _on_step(sr: replay.StepResult, item: int = item) -> None:
+                async def _on_step(sr: replay.StepResult, item: int = item) -> None:
+                    await ws.send_json(
+                        {
+                            "type": "step",
+                            "item": item,
+                            "index": sr.index,
+                            "server": sr.server,
+                            "tool": sr.tool,
+                            "ok": sr.ok,
+                            "error": sr.error,
+                            "produced": sr.produced,
+                        }
+                    )
+
+                result = await replay.run(
+                    recipe, inputs, servers=servers, cwd=str(WORKSPACE_ROOT), on_step=_on_step
+                )
+                outputs = [v for sr in result.steps for v in sr.produced.values()]
+                all_outputs.extend(outputs)
+                if not result.ok:
+                    failed += 1
                 await ws.send_json(
                     {
-                        "type": "step",
+                        "type": "item_result",
                         "item": item,
-                        "index": sr.index,
-                        "server": sr.server,
-                        "tool": sr.tool,
-                        "ok": sr.ok,
-                        "error": sr.error,
-                        "produced": sr.produced,
+                        "ok": result.ok,
+                        "error": result.error,
+                        "outputs": outputs,
                     }
                 )
-
-            result = await replay.run(
-                recipe, inputs, servers=servers, cwd=str(WORKSPACE_ROOT), on_step=_on_step
-            )
-            outputs = [v for sr in result.steps for v in sr.produced.values()]
-            all_outputs.extend(outputs)
-            if not result.ok:
-                failed += 1
+            ok = failed == 0
+            batch_error = None if ok else f"{failed} of {len(runs)} item(s) failed"
+            _audit.info("replay finished: %s ok=%s", name, ok)
             await ws.send_json(
-                {
-                    "type": "item_result",
-                    "item": item,
-                    "ok": result.ok,
-                    "error": result.error,
-                    "outputs": outputs,
-                }
+                {"type": "result", "ok": ok, "error": batch_error, "outputs": all_outputs}
             )
-        ok = failed == 0
-        error = None if ok else f"{failed} of {len(runs)} item(s) failed"
-        _audit.info("replay finished: %s ok=%s", name, ok)
-        await ws.send_json({"type": "result", "ok": ok, "error": error, "outputs": all_outputs})
+
+        # Race the batch against a socket watcher. The client sends nothing
+        # after the first message, so anything receive returns — and above all
+        # a disconnect — means "abort". Cancelling the batch task unwinds
+        # replay.run's exit stack, killing the in-flight MCP server and its
+        # running tool; without the watcher, Stop would only take effect at
+        # the next frame send, after the current step finished.
+        batch_task = asyncio.create_task(_run_batch())
+        watch_task = asyncio.create_task(ws.receive_text())
+        try:
+            done, _pending = await asyncio.wait(
+                {batch_task, watch_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if batch_task in done:
+                watch_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect):
+                    await watch_task
+                batch_task.result()  # propagate batch errors (e.g. send on closed socket)
+            else:
+                batch_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await batch_task
+                _audit.info("replay aborted by client; in-flight step cancelled")
+                with contextlib.suppress(WebSocketDisconnect):
+                    await watch_task
+        except asyncio.CancelledError:
+            batch_task.cancel()
+            watch_task.cancel()
+            raise
     except WebSocketDisconnect:
         _audit.info("replay socket closed by client; run aborted")
     finally:
@@ -667,6 +725,10 @@ class _ChatConnection:
                         fut.set_result(option_id if isinstance(option_id, str) else None)
             elif kind == "cancel":
                 await self._cancel_prompt()
+                # A cancelled task no longer emits its own `done` (a stale one
+                # would clobber a newer turn's state), so an intentional Stop
+                # resets the client explicitly.
+                await self._send({"type": "done"})
 
     async def close(self) -> None:
         """Abort any in-flight prompt and drop the session queue.
@@ -693,6 +755,26 @@ class _ChatConnection:
                 await task
             with contextlib.suppress(Exception):
                 await _client.notify("session/cancel", {"session_id": self.session_id})
+            await self._drain_stale_frames()
+
+    async def _drain_stale_frames(self) -> None:
+        """Discard queued frames left over from a cancelled turn.
+
+        Without this, chunks (or even a permission request) from the old turn
+        would be forwarded into the next prompt's stream. A drained permission
+        request must still be answered, or vibe-acp's agent loop would hang
+        awaiting the JSON-RPC response.
+        """
+        while not self.queue.empty():
+            try:
+                msg = self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if msg.get("method") == "session/request_permission":
+                req_id = msg.get("id")
+                if isinstance(req_id, int):
+                    with contextlib.suppress(Exception):
+                        await _client.respond(req_id, {"outcome": {"outcome": "cancelled"}})
 
     async def _send(self, msg: JsonDict) -> None:
         """Send one frame to the browser, ignoring a just-closed socket."""
@@ -723,6 +805,10 @@ class _ChatConnection:
                             model_name=settings.OLLAMA_MODEL,
                         )
                     )
+        # Frames can still trickle in between a cancel and this prompt
+        # (vibe-acp processes session/cancel asynchronously); drop them now so
+        # the old turn can't bleed into this one.
+        await self._drain_stale_frames()
         prompt_text = text
         if viewed_path is not None:
             prompt_text += (
@@ -758,7 +844,12 @@ class _ChatConnection:
                     err = cast("JsonDict", resp["error"])
                     await self._send({"type": "error", "message": str(err.get("message", err))})
                 break
+            await self._send({"type": "done"})
         except asyncio.CancelledError:
+            # Deliberately no `done` frame: when a new prompt superseded this
+            # one, a stale done would reset the client's busy/permission state
+            # for the wrong turn. An intentional Stop gets its done from the
+            # `cancel` branch in run().
             if not prompt_fut.done():
                 prompt_fut.cancel()
             raise
@@ -768,7 +859,6 @@ class _ChatConnection:
             with contextlib.suppress(Exception):
                 await _client.notify("session/cancel", {"session_id": self.session_id})
             await self._send({"type": "error", "message": str(exc)})
-        finally:
             await self._send({"type": "done"})
 
     async def _forward_frame(self, msg: JsonDict) -> None:
@@ -842,7 +932,11 @@ class _ChatConnection:
             elif update_type == "usage_update":
                 used = update.get("used")
                 if isinstance(used, int):
-                    size = await settings.fetch_context_window()
+                    # No-I/O accessor: an inline fetch_context_window() here
+                    # would stall the relay of every queued frame behind an
+                    # Ollama round-trip (mirrors app.py's emit path). The
+                    # cache is warmed at connect time in ws_chat.
+                    size = settings.cached_context_window()
                     await self._send({"type": "usage", "used": used, "size": size})
         elif method == "session/request_permission":
             await self._handle_permission(msg)
@@ -988,6 +1082,11 @@ async def ws_chat(ws: WebSocket) -> None:
         await asyncio.to_thread(
             lambda: settings.sync_servers_to_vibe_config(settings.active_servers())
         )
+        # Warm the context-window cache off the frame path; usage frames read
+        # the cached value only (the badge corrects itself once this lands).
+        prefetch = asyncio.create_task(settings.fetch_context_window())
+        _background_tasks.add(prefetch)
+        prefetch.add_done_callback(_background_tasks.discard)
         await _client.ensure_started()
         resp = await _client.request("session/new", {"cwd": str(WORKSPACE_ROOT), "mcpServers": []})
         if "error" in resp:

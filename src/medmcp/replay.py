@@ -7,7 +7,7 @@ is captured from the tool's structured result and substituted into later steps'
 ``{{stepM.<key>}}`` placeholders, so a multi-step pipeline chains exactly as it
 did when it was recorded.
 
-This module has no Chainlit/vibe-acp dependency: callers pass in the resolved
+This module has no UI/vibe-acp dependency: callers pass in the resolved
 MCP server launch configs (``command``/``args``/``env`` as produced by
 ``app._load_mcp_servers``), so it can be driven from the UI or a CLI alike.
 

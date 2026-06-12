@@ -67,7 +67,6 @@ _SKIP_DIRS: frozenset[str] = frozenset(
         ".git",
         ".venv",
         ".vibe",
-        ".chainlit",
         "node_modules",
         "__pycache__",
         ".pytest_cache",

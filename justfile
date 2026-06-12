@@ -23,10 +23,9 @@ clean:
 # Promoted workflows under .vibe/workflows/active/ are preserved; use
 # clean-workflows to remove those too.
 
-# Remove local chat/session state under .vibe/ (logs, DB, history, provenance, drafts)
+# Remove local chat/session state under .vibe/ (logs, history, provenance, drafts)
 clean-chats:
     rm -rf .vibe/logs
-    rm -f .vibe/medmcp_threads.db
     rm -f .vibe/trusted_folders.toml
     rm -rf .vibe/vibehistory
     rm -rf .vibe/provenance

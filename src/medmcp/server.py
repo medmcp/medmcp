@@ -523,8 +523,7 @@ async def ws_replay(ws: WebSocket) -> None:
 
     First client message: ``{"name": str, "runs": [{in_N: value}, ...]}``;
     each entry is one full input binding and the recipe runs once per entry,
-    sequentially (legacy ``{"inputs": {...}}`` is accepted as a single-item
-    batch). A failed item does not stop the remaining items. The server
+    sequentially. A failed item does not stop the remaining items. The server
     streams ``{"type": "step", "item": int, ...}`` per executed step,
     ``{"type": "item_result", "item": int, "ok": bool, "error": str|null,
     "outputs": [...]}`` per finished item, and a final ``{"type": "result",
@@ -542,17 +541,11 @@ async def ws_replay(ws: WebSocket) -> None:
     try:
         first = cast("JsonDict", await ws.receive_json())
         name = str(first.get("name") or "")
-        runs_raw = first.get("runs")
-        if isinstance(runs_raw, list):
-            runs = [
-                {str(k): str(v) for k, v in cast("JsonDict", r).items()}
-                for r in cast("list[object]", runs_raw)
-                if isinstance(r, dict)
-            ]
-        else:
-            runs = [
-                {str(k): str(v) for k, v in cast("JsonDict", first.get("inputs") or {}).items()}
-            ]
+        runs = [
+            {str(k): str(v) for k, v in cast("JsonDict", r).items()}
+            for r in cast("list[object]", first.get("runs") or [])
+            if isinstance(r, dict)
+        ]
         d = _workflow_dir(name)
         if d is None or not runs:
             error = f"no workflow named {name!r}" if d is None else "no inputs to run"
@@ -687,11 +680,23 @@ def _extract_text(content: object) -> str:
 class _ChatConnection:
     """State for one browser websocket: one vibe-acp session, one prompt at a time."""
 
-    def __init__(self, ws: WebSocket, session_id: str, queue: asyncio.Queue[JsonDict]) -> None:
-        """Bind the websocket to its registered session queue."""
+    def __init__(
+        self,
+        ws: WebSocket,
+        session_id: str,
+        queue: asyncio.Queue[JsonDict],
+        servers: list[JsonDict],
+    ) -> None:
+        """Bind the websocket to its registered session queue.
+
+        ``servers`` is the active-server list captured at connect time; a
+        stack change restarts vibe-acp and closes every connection, so it
+        cannot go stale within a connection's lifetime.
+        """
         self.ws = ws
         self.session_id = session_id
         self.queue = queue
+        self.servers = servers
         self._pending_perms: dict[int, asyncio.Future[str | None]] = {}
         self._prompt_task: asyncio.Task[None] | None = None
         # Tool-call state accumulated across frames, keyed by toolCallId; feeds
@@ -801,7 +806,7 @@ class _ChatConnection:
                     await asyncio.to_thread(
                         lambda: provenance.write_manifest(
                             self.session_id,
-                            servers=settings.active_servers(),
+                            servers=self.servers,
                             model_name=settings.OLLAMA_MODEL,
                         )
                     )
@@ -914,21 +919,23 @@ class _ChatConnection:
                         "output": output[:2000] if output else None,
                     }
                 )
-                if (
-                    status in ("completed", "failed")
-                    and info is not None
-                    and settings.load_provenance_enabled()
-                ):
-                    event_info = info
-                    with contextlib.suppress(Exception):
-                        await asyncio.to_thread(
-                            lambda: provenance.record_tool_event(
-                                self.session_id,
-                                tc_id,
-                                event_info,
-                                [str(s["name"]) for s in settings.active_servers()],
+                if status in ("completed", "failed") and info is not None:
+                    if settings.load_provenance_enabled():
+                        event_info = info
+                        with contextlib.suppress(Exception):
+                            await asyncio.to_thread(
+                                lambda: provenance.record_tool_event(
+                                    self.session_id,
+                                    tc_id,
+                                    event_info,
+                                    [str(s["name"]) for s in self.servers],
+                                )
                             )
-                        )
+                    # A settled call's state (incl. its full rawOutput) is no
+                    # longer needed — permission requests always precede
+                    # completion — so drop it rather than letting it grow with
+                    # the session.
+                    self._tool_calls.pop(tc_id, None)
             elif update_type == "usage_update":
                 used = update.get("used")
                 if isinstance(used, int):
@@ -1059,9 +1066,13 @@ class _ChatConnection:
             outcome = {"outcome": "selected", "optionId": option_id}
         if cached:
             cached["decision"] = decision
-        if settings.load_provenance_enabled():
-            with contextlib.suppress(Exception):
+
+        def _mirror() -> None:
+            if settings.load_provenance_enabled():
                 provenance.log_permission(self.session_id, title=str(title), decision=decision)
+
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(_mirror)
         await _client.respond(req_id, {"outcome": outcome})
 
 
@@ -1078,10 +1089,14 @@ async def ws_chat(ws: WebSocket) -> None:
     try:
         # Evaluate active_servers() inside the thread too: the first call runs
         # uv-tool stack discovery (one subprocess per stack) and must not
-        # block the event loop.
-        await asyncio.to_thread(
-            lambda: settings.sync_servers_to_vibe_config(settings.active_servers())
-        )
+        # block the event loop. The list is captured for the connection so
+        # per-frame provenance writes don't re-derive it.
+        def _sync_config() -> list[JsonDict]:
+            servers = settings.active_servers()
+            settings.sync_servers_to_vibe_config(servers)
+            return servers
+
+        servers = await asyncio.to_thread(_sync_config)
         # Warm the context-window cache off the frame path; usage frames read
         # the cached value only (the badge corrects itself once this lands).
         prefetch = asyncio.create_task(settings.fetch_context_window())
@@ -1100,7 +1115,7 @@ async def ws_chat(ws: WebSocket) -> None:
             await ws.close()
             return
         queue = _client.register_session(session_id)
-        conn = _ChatConnection(ws, session_id, queue)
+        conn = _ChatConnection(ws, session_id, queue, servers)
         _connections.add(conn)
         await ws.send_json(
             {"type": "ready", "sessionId": session_id, "model": settings.OLLAMA_MODEL}

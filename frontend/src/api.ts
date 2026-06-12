@@ -22,6 +22,20 @@ async function check(res: Response): Promise<Response> {
   return res
 }
 
+async function sendJson(method: 'POST' | 'PUT', url: string, body: object): Promise<Response> {
+  return check(
+    await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  )
+}
+
+async function postJson(url: string, body: object): Promise<Response> {
+  return sendJson('POST', url, body)
+}
+
 export async function fetchTree(): Promise<TreeNode[]> {
   const res = await check(await fetch('/api/tree'))
   const body = (await res.json()) as { tree: TreeNode[] }
@@ -33,23 +47,11 @@ export function rawUrl(path: string): string {
 }
 
 export async function mkdir(path: string): Promise<void> {
-  await check(
-    await fetch('/api/files/mkdir', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path }),
-    }),
-  )
+  await postJson('/api/files/mkdir', { path })
 }
 
 export async function renamePath(path: string, newPath: string): Promise<void> {
-  await check(
-    await fetch('/api/files/rename', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path, new_path: newPath }),
-    }),
-  )
+  await postJson('/api/files/rename', { path, new_path: newPath })
 }
 
 export async function deletePath(path: string): Promise<void> {
@@ -73,36 +75,20 @@ export async function fetchSettings(): Promise<SettingsState> {
 
 /** Persist the full settings state; returns whether the agent was restarted. */
 export async function saveSettings(state: SettingsState): Promise<boolean> {
-  const res = await check(
-    await fetch('/api/settings', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      // Send the full known lists (not just the active names) so the server
-      // can preserve entries this drawer never saw (created after it fetched).
-      body: JSON.stringify({
-        explain_tools: state.explain_tools,
-        record_provenance: state.record_provenance,
-        workflows_enabled: state.workflows_enabled,
-        stacks: state.stacks.map((s) => ({ name: s.name, active: s.active })),
-        workflows: state.workflows.map((w) => ({ name: w.name, active: w.active })),
-      }),
-    }),
-  )
+  // Send the full known lists (not just the active names) so the server
+  // can preserve entries this drawer never saw (created after it fetched).
+  const res = await sendJson('PUT', '/api/settings', {
+    explain_tools: state.explain_tools,
+    record_provenance: state.record_provenance,
+    workflows_enabled: state.workflows_enabled,
+    stacks: state.stacks.map((s) => ({ name: s.name, active: s.active })),
+    workflows: state.workflows.map((w) => ({ name: w.name, active: w.active })),
+  })
   const body = (await res.json()) as { restarted: boolean }
   return body.restarted
 }
 
 // ── Workflows ────────────────────────────────────────────────
-
-async function postJson(url: string, body: object): Promise<Response> {
-  return check(
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    }),
-  )
-}
 
 export async function fetchWorkflows(): Promise<{
   enabled: boolean

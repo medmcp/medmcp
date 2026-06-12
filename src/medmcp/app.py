@@ -79,11 +79,13 @@ from medmcp.settings import discover_workflows as _discover_workflows
 from medmcp.settings import fetch_context_window as _fetch_context_window
 from medmcp.settings import load_active_server_names as _load_active_server_names
 from medmcp.settings import load_active_workflow_names as _load_active_workflow_names
+from medmcp.settings import load_explain_enabled as _load_explain_enabled
 from medmcp.settings import load_mcp_servers as _load_mcp_servers
 from medmcp.settings import load_provenance_enabled as _load_provenance_enabled
 from medmcp.settings import load_workflows_enabled as _load_workflows_enabled
 from medmcp.settings import save_active_server_names as _save_active_server_names
 from medmcp.settings import save_active_workflow_names as _save_active_workflow_names
+from medmcp.settings import save_explain_enabled as _save_explain_enabled
 from medmcp.settings import save_provenance_enabled as _save_provenance_enabled
 from medmcp.settings import save_workflows_enabled as _save_workflows_enabled
 from medmcp.settings import sync_servers_to_vibe_config as _sync_servers_to_vibe_config
@@ -130,7 +132,7 @@ def _build_chat_settings_inputs() -> list[Any]:
             cl.input_widget.Switch(
                 id="explain_tools",
                 label="Explain tool calls",
-                initial=True,
+                initial=_load_explain_enabled(),
                 description=(
                     "Enable this option to add a plain-language explanation to each tool call."
                 ),
@@ -790,8 +792,14 @@ async def _handle_tool_call_update(update: JsonDict, tool_steps: dict[str, cl.St
 
 
 def _is_explain_enabled() -> bool:
-    """Check whether the user has opted in to tool-call explanations."""
+    """Check whether the user has opted in to tool-call explanations.
+
+    Falls back to the persisted preference (shared with the workspace UI)
+    when the per-chat value is unset.
+    """
     val = cl.user_session.get("explain_tools")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    if val is None:
+        return _load_explain_enabled()
     return bool(val)  # pyright: ignore[reportUnknownArgumentType]
 
 
@@ -812,7 +820,8 @@ async def on_settings_update(settings: dict[str, Any]) -> None:
     """Persist chat-settings changes into the user session.
 
     Handles four setting types:
-    - ``explain_tools`` — stored in the Chainlit user session for the current chat.
+    - ``explain_tools`` — persisted to ``.vibe/explain_enabled.json`` (shared
+      with the workspace UI) and mirrored into the user session.
     - ``record_provenance`` — persisted to ``.vibe/provenance_enabled.json`` and
       mirrored into the user session; takes effect immediately.
     - ``stack_<name>`` — updates the persistent active-stack set in
@@ -829,7 +838,9 @@ async def on_settings_update(settings: dict[str, Any]) -> None:
 
     new_value = bool(settings.get("explain_tools", False))
     cl.user_session.set("explain_tools", new_value)  # pyright: ignore[reportUnknownMemberType]
-    _audit.info("explain_tools set to %s via settings", new_value)
+    if new_value != _load_explain_enabled():
+        _save_explain_enabled(new_value)
+        _audit.info("explain_tools set to %s via settings", new_value)
 
     prov_value = bool(settings.get("record_provenance", True))
     cl.user_session.set("record_provenance", prov_value)  # pyright: ignore[reportUnknownMemberType]
@@ -956,7 +967,7 @@ async def on_chat_start() -> None:
     If the user changes stack settings before typing, ``on_settings_update`` sets
     ``_vibe_restart_needed`` and ``on_message`` recreates the session then.
     """
-    cl.user_session.set("explain_tools", True)  # pyright: ignore[reportUnknownMemberType]
+    cl.user_session.set("explain_tools", _load_explain_enabled())  # pyright: ignore[reportUnknownMemberType]
     cl.user_session.set("record_provenance", _load_provenance_enabled())  # pyright: ignore[reportUnknownMemberType]
     await cl.context.emitter.set_commands(_workflow_commands())  # pyright: ignore[reportUnknownMemberType]
     # Start vibe-acp and build the settings widget concurrently — both involve
@@ -985,7 +996,7 @@ async def on_chat_resume(thread: ThreadDict) -> None:
     history at us via ``session/update`` events; we drain and discard them
     because chainlit's persistence is the source of truth for the UI.
     """
-    cl.user_session.set("explain_tools", True)  # pyright: ignore[reportUnknownMemberType]
+    cl.user_session.set("explain_tools", _load_explain_enabled())  # pyright: ignore[reportUnknownMemberType]
     cl.user_session.set("record_provenance", _load_provenance_enabled())  # pyright: ignore[reportUnknownMemberType]
     await cl.context.emitter.set_commands(_workflow_commands())  # pyright: ignore[reportUnknownMemberType]
     await cl.ChatSettings(inputs=_build_chat_settings_inputs()).send()

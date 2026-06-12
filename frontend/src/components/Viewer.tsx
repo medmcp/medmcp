@@ -163,11 +163,16 @@ function VolumeView({ path, refreshSignal }: { path: string; refreshSignal?: num
   }, [url])
 
   // Candidate overlays: every other volume in the workspace. refreshSignal
-  // picks up volumes the agent or a replay just produced.
+  // picks up volumes the agent or a replay just produced; the trailing
+  // debounce collapses a turn's burst of signals into one tree fetch
+  // (matching FileExplorer's reload).
   useEffect(() => {
-    fetchTree()
-      .then((tree) => setVolumePaths(collectVolumePaths(tree).filter((p) => p !== path)))
-      .catch(() => setVolumePaths([]))
+    const timer = window.setTimeout(() => {
+      fetchTree()
+        .then((tree) => setVolumePaths(collectVolumePaths(tree).filter((p) => p !== path)))
+        .catch(() => setVolumePaths([]))
+    }, 300)
+    return () => window.clearTimeout(timer)
   }, [path, refreshSignal])
 
   // Overlay operations are serialized on a promise chain, seeded with the

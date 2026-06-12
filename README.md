@@ -86,11 +86,12 @@ The UI spawns a single vibe-acp subprocess and demultiplexes sessions over it. E
 
 ## Workspace UI
 
-In addition to the chat-only Chainlit interface, MedMCP ships an experimental **workspace UI** — a three-panel layout built for working *with* imaging data, not just chatting about it:
+In addition to the chat-only Chainlit interface, MedMCP ships an experimental **workspace UI** — a four-panel layout built for working *with* imaging data, not just chatting about it:
 
 - **File explorer** (top-left) — browse, rename, move, delete, and upload files in your workspace.
 - **Image viewer** (top-right) — view medical images directly in the browser: NIfTI/NRRD/MGZ volumes render with multiplanar slices and a 3D view (scroll to move through slices), and PDFs, images, and text files open inline. **Drag a segmentation from the explorer onto an image** to overlay it — each label is drawn in a distinct color over the anatomy, with an adjustable opacity, and the background stays transparent in both the slices and the 3D render.
-- **Chat** (bottom) — the same agent as the Chainlit UI, with streamed responses, per-tool-call approval prompts (with plain-language explanations and risk tags), and a settings drawer for the stack/workflow/feature toggles.
+- **Workflows** (bottom-left) — save the current chat as a reusable workflow (the bookmark button distills it into a recipe + skill), then review, rename, refine, promote, or delete it. **Run** replays a saved recipe deterministically on new inputs — no LLM involved: fill in the inputs (drag files in from the explorer), review the resolved steps, and watch each step stream its result.
+- **Chat** (bottom-right) — the same agent as the Chainlit UI, with streamed responses, per-tool-call approval prompts (with plain-language explanations and risk tags), and a settings drawer for the stack/workflow/feature toggles.
 
 The workspace UI is served by a separate local server on `http://localhost:8100` and shares all of MedMCP's machinery below the interface (agent loop, tool approval, provenance) with the Chainlit UI — the two are parallel frontends.
 
@@ -102,7 +103,7 @@ just workspace        # launch the workspace UI at http://localhost:8100
 The explorer and the agent's working directory are rooted at the repository's `data/` directory by default (created on first launch); point them at another folder with `MEDMCP_WORKSPACE=/path/to/data just workspace`. Like the chat UI, the server binds to localhost only and gates every tool call behind explicit approval.
 
 > [!NOTE]
-> The workspace UI is under active development. Chat history/resume and in-UI workflow management are not yet available there — use the [Chainlit UI](#architecture) (`just ui`) for those.
+> The workspace UI is under active development. Chat history/resume is not yet available there — use the [Chainlit UI](#architecture) (`just ui`) for that.
 
 ---
 

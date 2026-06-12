@@ -145,3 +145,37 @@ export function XIcon(props: IconProps) {
     </Icon>
   )
 }
+
+export function PlayIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M7 5l12 7-12 7z" />
+    </Icon>
+  )
+}
+
+export function StopSquareIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="6" y="6" width="12" height="12" rx="1" />
+    </Icon>
+  )
+}
+
+export function BookmarkPlusIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+      <line x1="12" y1="7" x2="12" y2="13" />
+      <line x1="9" y1="10" x2="15" y2="10" />
+    </Icon>
+  )
+}
+
+export function ChevronRightIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M9 18l6-6-6-6" />
+    </Icon>
+  )
+}

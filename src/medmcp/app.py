@@ -74,7 +74,9 @@ from medmcp.explain import generate_explanation as _generate_explanation
 from medmcp.explain import raw_input_to_str as _raw_input_to_str
 from medmcp.settings import OLLAMA_BASE_URL, OLLAMA_MODEL
 from medmcp.settings import active_servers as _active_servers
+from medmcp.settings import cached_context_window as _cached_context_window
 from medmcp.settings import discover_workflows as _discover_workflows
+from medmcp.settings import fetch_context_window as _fetch_context_window
 from medmcp.settings import load_active_server_names as _load_active_server_names
 from medmcp.settings import load_active_workflow_names as _load_active_workflow_names
 from medmcp.settings import load_mcp_servers as _load_mcp_servers
@@ -117,9 +119,6 @@ DELETE_WORKFLOW_ACTION: str = "delete_workflow"
 EDIT_WORKFLOW_ACTION: str = "edit_workflow"
 RUN_WORKFLOW_ACTION: str = "run_workflow"
 CONFIRM_REPLAY_ACTION: str = "confirm_replay"
-
-
-_stack_log: logging.Logger = logging.getLogger(__name__)
 
 
 def _build_chat_settings_inputs() -> list[Any]:
@@ -242,41 +241,8 @@ def _workflow_commands() -> list[CommandDict]:
 
 # Latest token count from vibe-acp usage_update frames.  Single-user app, so
 # no per-session scoping is needed — the most recent update wins.
+# The window size itself comes from medmcp.settings (fetch_context_window).
 _latest_context_used: int = 0
-
-# Cached context window size fetched from Ollama /api/show.  None = not yet
-# fetched.  Populated lazily on the first /api/context-usage request.
-_context_window_tokens: int | None = None
-
-
-async def _fetch_context_window() -> int:
-    """Return the active model's num_ctx by querying Ollama /api/show.
-
-    The result is cached for the process lifetime.  Falls back to 131 072
-    (the value set in Modelfile.gemma4) if Ollama is unreachable or the
-    parameter is absent from the response.
-    """
-    global _context_window_tokens
-    if _context_window_tokens is not None:
-        return _context_window_tokens
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
-                f"{OLLAMA_BASE_URL}/api/show",
-                json={"model": OLLAMA_MODEL},
-            )
-            resp.raise_for_status()
-            data = cast("JsonDict", resp.json())
-            params_str = str(data.get("parameters") or "")
-            for line in params_str.splitlines():
-                parts = line.strip().split()
-                if len(parts) == 2 and parts[0] == "num_ctx":
-                    _context_window_tokens = int(parts[1])
-                    return _context_window_tokens
-    except Exception:
-        _stack_log.warning("could not fetch context window size from Ollama; using fallback")
-    _context_window_tokens = 131_072
-    return _context_window_tokens
 
 
 async def _context_usage_api() -> dict[str, int]:  # pyright: ignore[reportUnusedFunction]
@@ -1429,7 +1395,7 @@ async def _process_session_frame(
             used = update.get("used")
             if isinstance(used, int):
                 _latest_context_used = used
-                size = _context_window_tokens if _context_window_tokens is not None else 131_072
+                size = _cached_context_window()
                 await cl.context.emitter.emit(  # pyright: ignore[reportUnknownMemberType]
                     "ctx_update", {"used": used, "size": size}
                 )

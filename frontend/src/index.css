@@ -260,6 +260,9 @@ button:hover {
   align-items: center;
   gap: 7px;
   padding: 0 10px;
+  /* react-arborist overrides padding-left inline (depth indent, 0 at root);
+     the margin keeps root rows off the panel edge. */
+  margin-left: 8px;
   height: 100%;
   cursor: pointer;
   white-space: nowrap;
@@ -292,6 +295,41 @@ button:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: 13px;
+}
+
+.ctx-menu {
+  position: fixed;
+  z-index: 30;
+  min-width: 150px;
+  padding: 5px;
+  background: var(--card);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+}
+
+.ctx-menu button {
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  color: var(--muted2);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ctx-menu button:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+
+.ctx-menu button.danger:hover {
+  background: rgba(210, 34, 41, 0.15);
+  color: var(--red-tint);
 }
 
 .tree-row input {
@@ -395,10 +433,15 @@ button:hover {
   accent-color: var(--blue-l);
 }
 
-.niivue-dropzone {
-  position: relative;
+.niivue-sizer {
   flex: 1;
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.niivue-dropzone {
+  position: relative;
   display: flex;
 }
 
@@ -619,6 +662,11 @@ button:hover {
   font-variant-numeric: tabular-nums;
 }
 
+.model-name {
+  color: var(--muted);
+  font-family: var(--mono);
+}
+
 .conn {
   display: inline-flex;
   align-items: center;
@@ -804,6 +852,14 @@ button:hover {
   font-size: 12.5px;
   line-height: 1.6;
   margin: 0 0 8px;
+}
+
+.approval-pending {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: italic;
+  margin: 0 0 8px;
+  animation: blink 2s infinite;
 }
 
 .approval-input {
@@ -1009,4 +1065,295 @@ button:hover {
 .toggle.on .toggle-knob {
   transform: translateX(15px);
   background: #fff;
+}
+
+/* ── Workflow panel ─────────────────────────────────────── */
+
+.wf-body {
+  padding: 6px;
+}
+
+.wf-item {
+  border-bottom: 1px solid var(--border);
+}
+
+.wf-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-weight: 500;
+}
+
+.wf-chevron {
+  color: var(--muted);
+  flex-shrink: 0;
+  transition: transform 0.15s;
+}
+
+.wf-chevron.open {
+  transform: rotate(90deg);
+}
+
+.wf-name {
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-chip {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 7px;
+  border-radius: 99px;
+  border: 1px solid;
+}
+
+.wf-chip-draft {
+  color: var(--warn);
+  border-color: rgba(251, 191, 36, 0.4);
+}
+
+.wf-chip-active {
+  color: var(--ok);
+  border-color: rgba(74, 222, 128, 0.4);
+}
+
+.wf-detail {
+  padding: 2px 8px 12px 27px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wf-desc {
+  color: var(--muted2);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.wf-steps {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--muted2);
+}
+
+.wf-steps code,
+.wf-name + code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.wf-args {
+  margin: 2px 0 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.wf-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.wf-actions button {
+  padding: 3px 10px;
+  font-size: 11.5px;
+}
+
+.wf-run-btn,
+.wf-actions .btn-danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.wf-delete {
+  color: var(--red-tint);
+  margin-left: auto;
+}
+
+.wf-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wf-hint {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.wf-input-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.wf-input-label {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 11.5px;
+}
+
+.wf-input-label code {
+  font-family: var(--mono);
+  color: var(--blue-xl);
+}
+
+.wf-input-desc {
+  color: var(--muted);
+}
+
+.wf-input {
+  font: inherit;
+  font-size: 12px;
+  font-family: var(--mono);
+  background: var(--dark2);
+  color: var(--text);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  padding: 6px 9px;
+  width: 100%;
+}
+
+.wf-input:focus {
+  outline: none;
+  border-color: var(--blue-l);
+}
+
+.wf-input.drop-ready {
+  border-color: var(--blue-xl);
+  box-shadow: 0 0 0 2px rgba(127, 168, 245, 0.25);
+}
+
+textarea.wf-input {
+  font-family: var(--sans);
+  resize: vertical;
+}
+
+.wf-busy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  font-size: 12px;
+  color: var(--muted2);
+}
+
+.wf-notice {
+  font-size: 12px;
+  color: var(--warn);
+  line-height: 1.45;
+}
+
+.wf-runlog {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.wf-runstep {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.wf-runstep code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.wf-produced {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.wf-step-error {
+  color: var(--red-tint);
+}
+
+.wf-result {
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.wf-result.ok {
+  color: var(--ok);
+}
+
+.wf-result.fail {
+  color: var(--red-tint);
+}
+
+.wf-outputs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--muted2);
+}
+
+.wf-outputs code {
+  font-family: var(--mono);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+/* ── Context meter (chat header) ────────────────────────── */
+
+.ctx-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.ctx-bar {
+  width: 64px;
+  height: 5px;
+  border-radius: 99px;
+  background: var(--card2);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.ctx-fill {
+  display: block;
+  height: 100%;
+  border-radius: 99px;
+  transition: width 0.3s ease;
+}
+
+.ctx-fill.ctx-low {
+  background: var(--blue-l);
+}
+
+.ctx-fill.ctx-mid {
+  background: var(--warn);
+}
+
+.ctx-fill.ctx-high {
+  background: var(--red);
 }

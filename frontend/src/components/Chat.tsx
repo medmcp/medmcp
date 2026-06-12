@@ -33,6 +33,35 @@ const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
   )
 })
 
+/** Render a token count compactly, e.g. 131072 → "131k". */
+function fmtTokens(n: number): string {
+  if (n < 1000) return String(n)
+  const k = n / 1000
+  return `${k >= 100 ? Math.round(k) : k.toFixed(1)}k`
+}
+
+/** Compact context meter: fill bar + "used / window" label. */
+function ContextMeter({ used, size }: { used: number; size: number | null }) {
+  if (size == null || size <= 0) {
+    return <span className="usage">{used.toLocaleString()} tokens</span>
+  }
+  const frac = Math.min(used / size, 1)
+  const level = frac > 0.9 ? 'high' : frac > 0.7 ? 'mid' : 'low'
+  return (
+    <span
+      className="ctx-meter"
+      title={`Context: ${used.toLocaleString()} of ${size.toLocaleString()} tokens (${Math.round(frac * 100)}%)`}
+    >
+      <span className="ctx-bar">
+        <span className={`ctx-fill ctx-${level}`} style={{ width: `${frac * 100}%` }} />
+      </span>
+      <span className="usage">
+        {fmtTokens(used)} / {fmtTokens(size)}
+      </span>
+    </span>
+  )
+}
+
 const AssistantMessage = memo(function AssistantMessage({ text }: { text: string }) {
   return (
     <div className="msg msg-ai">
@@ -58,7 +87,11 @@ function PermissionCard({
         Action requires your approval
       </div>
       <div className="approval-title">{perm.toolCall.title ?? 'tool call'}</div>
-      {perm.explanation && <div className="approval-explanation">{perm.explanation}</div>}
+      {perm.explanation ? (
+        <div className="approval-explanation">{perm.explanation}</div>
+      ) : perm.explaining ? (
+        <div className="approval-pending">Generating explanation…</div>
+      ) : null}
       {perm.risks && perm.risks.length > 0 && (
         <div className="risk-chips">
           {perm.risks.map((r) => (
@@ -91,16 +124,35 @@ function PermissionCard({
 }
 
 /** The agent chat: streaming transcript, tool-call cards, permission prompts. */
-export function Chat() {
+export function Chat({
+  onPromptedSession,
+  viewedPath,
+  onToolActivity,
+}: {
+  /** Called with the vibe session id whenever a prompt is sent into it. */
+  onPromptedSession?: (id: string) => void
+  /** Workspace-relative file open in the viewer, sent as prompt context. */
+  viewedPath?: string | null
+  /** Called when a tool call completes / a turn ends (may have written files). */
+  onToolActivity?: () => void
+}) {
   const [items, setItems] = useState<ChatItem[]>([])
   const [toolCalls, setToolCalls] = useState<Record<string, ToolCallState>>({})
   const [status, setStatus] = useState<ChatSocketStatus>('connecting')
   const [busy, setBusy] = useState(false)
-  const [usage, setUsage] = useState<number | null>(null)
+  const [model, setModel] = useState<string | null>(null)
+  const [usage, setUsage] = useState<{ used: number; size: number | null } | null>(null)
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
   const [input, setInput] = useState('')
   const socketRef = useRef<ChatSocket | null>(null)
+  const sessionIdRef = useRef<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+  // The frame handler below is a mount-once closure; route the callback
+  // through a ref so it always sees the latest prop.
+  const onToolActivityRef = useRef(onToolActivity)
+  useEffect(() => {
+    onToolActivityRef.current = onToolActivity
+  }, [onToolActivity])
 
   useEffect(() => {
     // Chunks arrive near per-token; buffer them and flush into state on a
@@ -166,9 +218,10 @@ export function Chat() {
               },
             }
           })
+          if (frame.status === 'completed') onToolActivityRef.current?.()
           break
         case 'usage':
-          setUsage(frame.used)
+          setUsage({ used: frame.used, size: frame.size ?? null })
           break
         case 'permission_request':
           setPermission({
@@ -176,17 +229,30 @@ export function Chat() {
             toolCall: frame.toolCall,
             options: frame.options,
             explanation: frame.explanation,
+            explaining: frame.explaining,
             risks: frame.risks,
           })
+          break
+        case 'permission_update':
+          // The explanation arrives after the box is shown; ignore it if the
+          // user already decided (the box for that requestId is gone).
+          setPermission((p) =>
+            p && p.requestId === frame.requestId
+              ? { ...p, explanation: frame.explanation, risks: frame.risks, explaining: false }
+              : p,
+          )
           break
         case 'done':
           setBusy(false)
           setPermission(null)
+          onToolActivityRef.current?.()
           break
         case 'error':
           setItems((prev) => [...prev, { kind: 'error', text: frame.message }])
           break
         case 'ready':
+          sessionIdRef.current = frame.sessionId
+          if (frame.model) setModel(frame.model)
           break
       }
     }
@@ -220,7 +286,8 @@ export function Chat() {
     setItems((prev) => [...prev, { kind: 'user', text }])
     setInput('')
     setBusy(true)
-    socketRef.current?.sendPrompt(text)
+    socketRef.current?.sendPrompt(text, viewedPath)
+    if (sessionIdRef.current) onPromptedSession?.(sessionIdRef.current)
   }
 
   const decide = (optionId: string | null) => {
@@ -235,8 +302,9 @@ export function Chat() {
       <div className="panel-header">
         <span>Chat</span>
         <span className="panel-actions chat-meta">
-          {usage != null && <span className="usage">{usage.toLocaleString()} tokens</span>}
-          <span className={`conn conn-${status}`}>{status}</span>
+          {model != null && <span className="model-name">{model}</span>}
+          {usage != null && <ContextMeter used={usage.used} size={usage.size} />}
+          <span className={`conn conn-${status}`}>{status === 'open' ? 'running' : status}</span>
         </span>
       </div>
       <div className="panel-body chat-scroll">

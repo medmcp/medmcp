@@ -44,7 +44,7 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -52,8 +52,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from medmcp import explain, provenance, settings
-from medmcp.acp import PROJECT_ROOT, JsonDict, VibeAcpClient
+from medmcp import distill, explain, provenance, replay, settings
+from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict, VibeAcpClient
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
 
@@ -307,12 +307,255 @@ async def _restart_vibe() -> None:
             await conn.ws.close()
 
 
+# ── Workflow API ───────────────────────────────────────────
+#
+# Drives the provenance→distill→replay pipeline (Tier 2/3) from the workspace
+# UI: save the current chat as a draft workflow, review/promote/refine it, and
+# replay its recipe deterministically (no LLM) on new inputs.
+
+
+def _workflow_dir(name: str) -> Path | None:
+    """Return the on-disk dir for workflow *name* (active wins over draft)."""
+    for kind in ("active", "draft"):
+        d = VIBE_HOME / "workflows" / kind / name
+        if (d / "recipe.yaml").exists():
+            return d
+    return None
+
+
+def _workflow_detail(name: str) -> JsonDict:
+    """Load a workflow's recipe and replayability state (blocking; run in a thread)."""
+    d = _workflow_dir(name)
+    if d is None:
+        raise FileNotFoundError(f"no workflow named {name!r}")
+    recipe = distill.load_recipe(d)
+    examples = {i.name: i.example for i in recipe.inputs}
+    replay_error = replay.validate(recipe, examples, settings.active_servers())
+    return {
+        "name": recipe.name,
+        "kind": d.parent.name,
+        "description": recipe.description,
+        "inputs": [i.to_dict() for i in recipe.inputs],
+        "steps": [
+            {"server": s.server, "tool": s.tool, "arguments": s.arguments} for s in recipe.steps
+        ],
+        "replayable": replay_error is None,
+        "replay_error": replay_error,
+    }
+
+
+@app.get("/api/workflows")
+async def get_workflows() -> JsonDict:
+    """List personal workflows plus the master-toggle state."""
+
+    def _state() -> JsonDict:
+        return {
+            "enabled": settings.load_workflows_enabled(),
+            "workflows": settings.discover_workflows(),
+        }
+
+    return await asyncio.to_thread(_state)
+
+
+class DistillPayload(BaseModel):
+    """Request body for distilling a chat session into a draft workflow."""
+
+    session_id: str
+
+
+@app.post("/api/workflows/distill")
+async def post_distill(payload: DistillPayload) -> JsonDict:
+    """Distill a chat session into a draft workflow and return its detail.
+
+    Runs the hybrid prose pass against the local model, so this can take a
+    while; distillation itself never hard-fails on a model outage.
+    """
+    try:
+        draft_dir = await asyncio.to_thread(distill.distill_session, payload.session_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _audit.info("workflow distilled: %s", draft_dir.name)
+    return await asyncio.to_thread(_workflow_detail, draft_dir.name)
+
+
+@app.get("/api/workflows/{name}")
+async def get_workflow(name: str) -> JsonDict:
+    """Return one workflow's recipe detail (inputs, steps, replayability)."""
+    try:
+        return await asyncio.to_thread(_workflow_detail, name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/workflows/{name}/promote")
+async def post_promote_workflow(name: str) -> JsonDict:
+    """Promote a draft to active/ (loaded as a skill for new sessions)."""
+    try:
+        await asyncio.to_thread(distill.promote_draft, name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _audit.info("workflow promoted: %s", name)
+    return {"ok": True}
+
+
+@app.post("/api/workflows/{name}/unpromote")
+async def post_unpromote_workflow(name: str) -> JsonDict:
+    """Move a promoted workflow back to draft/ for editing."""
+    try:
+        await asyncio.to_thread(distill.unpromote_workflow, name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+class WorkflowRenamePayload(BaseModel):
+    """Request body for renaming a draft workflow."""
+
+    new_name: str
+
+
+@app.post("/api/workflows/{name}/rename")
+async def post_rename_workflow(name: str, payload: WorkflowRenamePayload) -> JsonDict:
+    """Rename a draft workflow; returns the new (slugified) name."""
+    try:
+        new_dir = await asyncio.to_thread(distill.rename_draft, name, payload.new_name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True, "name": new_dir.name}
+
+
+class WorkflowRefinePayload(BaseModel):
+    """Request body for refining a draft's narrative."""
+
+    instruction: str
+
+
+@app.post("/api/workflows/{name}/refine")
+async def post_refine_workflow(name: str, payload: WorkflowRefinePayload) -> JsonDict:
+    """Regenerate a draft's narrative from a plain-language instruction (LLM)."""
+    try:
+        await asyncio.to_thread(distill.refine_draft, name, payload.instruction)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@app.delete("/api/workflows/{name}")
+async def delete_workflow(name: str) -> JsonDict:
+    """Delete a personal workflow (draft or active). The UI confirms first."""
+    try:
+        await asyncio.to_thread(distill.delete_workflow, name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _audit.info("workflow deleted: %s", name)
+    return {"ok": True}
+
+
+class ReplayPreviewPayload(BaseModel):
+    """Request body for previewing a replay's resolved steps."""
+
+    inputs: dict[str, str]
+
+
+@app.post("/api/workflows/{name}/replay-preview")
+async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonDict:
+    """Validate a replay and return its resolved steps for user confirmation.
+
+    Inputs are bound now; cross-step refs (``{{stepM.*}}``) resolve at runtime,
+    so they intentionally still show as placeholders in the preview.
+    """
+
+    def _preview() -> JsonDict:
+        d = _workflow_dir(name)
+        if d is None:
+            raise FileNotFoundError(f"no workflow named {name!r}")
+        recipe = distill.load_recipe(d)
+        error = replay.validate(recipe, dict(payload.inputs), settings.active_servers())
+        if error is not None:
+            return {"ok": False, "error": error, "steps": []}
+        bindings: dict[str, Any] = dict(payload.inputs)
+        steps = [
+            {
+                "index": i,
+                "server": s.server,
+                "tool": s.tool,
+                "arguments": replay.resolve_arguments(s.arguments, bindings),
+            }
+            for i, s in enumerate(recipe.steps, start=1)
+        ]
+        return {"ok": True, "error": None, "steps": steps}
+
+    try:
+        return await asyncio.to_thread(_preview)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.websocket("/ws/replay")
+async def ws_replay(ws: WebSocket) -> None:
+    """Run one deterministic replay, streaming per-step status frames.
+
+    First client message: ``{"name": str, "inputs": {in_N: value}}``. The
+    server streams one ``{"type": "step", ...}`` frame per executed step and a
+    final ``{"type": "result", "ok": bool, "error": str|null, "outputs": [...]}``.
+    Closing the socket aborts the run (the engine's exit stack shuts the
+    spawned MCP servers down).
+
+    SECURITY: the replay engine calls MCP tools directly, bypassing the
+    vibe-acp permission flow — the client must show the resolved-steps preview
+    (``/replay-preview``) and get an explicit confirmation before connecting.
+    """
+    await ws.accept()
+    try:
+        first = cast("JsonDict", await ws.receive_json())
+        name = str(first.get("name") or "")
+        inputs = {str(k): str(v) for k, v in cast("JsonDict", first.get("inputs") or {}).items()}
+        d = _workflow_dir(name)
+        if d is None:
+            await ws.send_json(
+                {"type": "result", "ok": False, "error": f"no workflow named {name!r}"}
+            )
+            return
+        recipe = await asyncio.to_thread(distill.load_recipe, d)
+        servers = await asyncio.to_thread(settings.active_servers)
+        _audit.info("replay started: %s (%d steps)", name, len(recipe.steps))
+
+        async def _on_step(sr: replay.StepResult) -> None:
+            await ws.send_json(
+                {
+                    "type": "step",
+                    "index": sr.index,
+                    "server": sr.server,
+                    "tool": sr.tool,
+                    "ok": sr.ok,
+                    "error": sr.error,
+                    "produced": sr.produced,
+                }
+            )
+
+        result = await replay.run(
+            recipe, inputs, servers=servers, cwd=str(WORKSPACE_ROOT), on_step=_on_step
+        )
+        outputs = [v for sr in result.steps for v in sr.produced.values()]
+        _audit.info("replay finished: %s ok=%s", name, result.ok)
+        await ws.send_json(
+            {"type": "result", "ok": result.ok, "error": result.error, "outputs": outputs}
+        )
+    except WebSocketDisconnect:
+        _audit.info("replay socket closed by client; run aborted")
+    finally:
+        with contextlib.suppress(Exception):
+            await ws.close()
+
+
 # ── WebSocket chat ─────────────────────────────────────────
 #
 # Wire protocol (JSON messages):
 #
 #   server → client
-#     {"type": "ready", "sessionId": str}
+#     {"type": "ready", "sessionId": str, "model": str}
 #     {"type": "chunk", "text": str}
 #     {"type": "tool_call", "toolCallId": str, "title": str, "status": str,
 #      "kind": str | None, "rawInput": object}
@@ -321,12 +564,14 @@ async def _restart_vibe() -> None:
 #     {"type": "usage", "used": int}
 #     {"type": "permission_request", "requestId": int, "toolCall": {...},
 #      "options": [{"optionId": str, "name": str, "kind": str}],
-#      "explanation": str | None,
+#      "explanation": str | None, "explaining": bool,
 #      "risks": [{"key": str, "label": str, "severity": str}]}
+#     {"type": "permission_update", "requestId": int,
+#      "explanation": str | None, "risks": [...]}
 #     {"type": "done"} | {"type": "error", "message": str}
 #
 #   client → server
-#     {"type": "prompt", "text": str}
+#     {"type": "prompt", "text": str, "viewedPath": str | null}
 #     {"type": "permission", "requestId": int, "optionId": str | null}
 #     {"type": "cancel"}
 
@@ -361,6 +606,8 @@ class _ChatConnection:
         # Tool-call state accumulated across frames, keyed by toolCallId; feeds
         # the permission dialog backfill and the provenance run log.
         self._tool_calls: dict[str, JsonDict] = {}
+        # In-flight explanation tasks, kept so they aren't GC'd mid-run.
+        self._explain_tasks: set[asyncio.Task[None]] = set()
         self._prompted: bool = False
 
     async def run(self) -> None:
@@ -372,10 +619,12 @@ class _ChatConnection:
                 text = str(data.get("text") or "")
                 if not text:
                     continue
+                viewed = data.get("viewedPath")
+                viewed_path = viewed if isinstance(viewed, str) and viewed else None
                 # A new prompt while one is streaming cancels the old one,
                 # matching the Chainlit UI's behaviour.
                 await self._cancel_prompt()
-                self._prompt_task = asyncio.create_task(self._run_prompt(text))
+                self._prompt_task = asyncio.create_task(self._run_prompt(text, viewed_path))
             elif kind == "permission":
                 req_id = data.get("requestId")
                 if isinstance(req_id, int):
@@ -394,6 +643,8 @@ class _ChatConnection:
         abandoned tabs/refreshes.
         """
         await self._cancel_prompt()
+        for task in list(self._explain_tasks):
+            task.cancel()
         _client.unregister_session(self.session_id)
         if not self._prompted:
             with contextlib.suppress(Exception):
@@ -415,8 +666,14 @@ class _ChatConnection:
         with contextlib.suppress(Exception):
             await self.ws.send_json(msg)
 
-    async def _run_prompt(self, text: str) -> None:
+    async def _run_prompt(self, text: str, viewed_path: str | None = None) -> None:
         """Send one ``session/prompt`` and stream its frames to the browser.
+
+        ``viewed_path`` is the workspace-relative file currently open in the
+        viewer; it is appended to the prompt as a context note so the agent
+        can resolve references like "this image". Appended to the user's text
+        block (not sent as a separate content block) so it survives any
+        prompt handling downstream.
 
         Mirrors the race loop in ``app.py``'s ``on_message``: wait for either
         the next inbound session frame or the prompt response, then drain
@@ -433,12 +690,18 @@ class _ChatConnection:
                             model_name=settings.OLLAMA_MODEL,
                         )
                     )
+        prompt_text = text
+        if viewed_path is not None:
+            prompt_text += (
+                f'\n\n[workspace context: the file "{viewed_path}" is currently open in the '
+                'viewer; references like "this image" or "the current image" mean that file]'
+            )
         prompt_fut = asyncio.create_task(
             _client.request(
                 "session/prompt",
                 {
                     "session_id": self.session_id,
-                    "prompt": [{"type": "text", "text": text}],
+                    "prompt": [{"type": "text", "text": prompt_text}],
                 },
             )
         )
@@ -546,7 +809,8 @@ class _ChatConnection:
             elif update_type == "usage_update":
                 used = update.get("used")
                 if isinstance(used, int):
-                    await self._send({"type": "usage", "used": used})
+                    size = await settings.fetch_context_window()
+                    await self._send({"type": "usage", "used": used, "size": size})
         elif method == "session/request_permission":
             await self._handle_permission(msg)
 
@@ -579,20 +843,13 @@ class _ChatConnection:
             return
 
         # Reuse a previously generated explanation (vibe-acp can re-request
-        # permission for the same tool call); only pay the LLM round-trip
-        # when none exists yet.
+        # permission for the same tool call); otherwise generate one
+        # concurrently after showing the dialog — the approval box must never
+        # wait on the Ollama round-trip, which can take seconds while the
+        # model is still busy with the agent's own generation.
         explanation = cast("str | None", tool_call.get("humanReadable"))
         risk_keys: list[str] = cast("list[str]", tool_call.get("risks") or [])
-        if explanation is None and settings.load_explain_enabled():
-            with contextlib.suppress(Exception):
-                result = await explain.generate_explanation(tool_call)
-                if result is not None:
-                    explanation, risk_keys = result
-        if explanation is not None and cached:
-            # Persist into the accumulated state so the provenance run log
-            # carries the explanation and risks alongside the decision.
-            cached["humanReadable"] = explanation
-            cached["risks"] = risk_keys
+        explaining = explanation is None and settings.load_explain_enabled()
 
         _audit.info("permission requested: %s", title)
         loop = asyncio.get_running_loop()
@@ -605,9 +862,14 @@ class _ChatConnection:
                 "toolCall": tool_call,
                 "options": options,
                 "explanation": explanation,
+                "explaining": explaining,
                 "risks": explain.resolve_risks(risk_keys),
             }
         )
+        if explaining:
+            task = asyncio.create_task(self._explain_permission(req_id_raw, tool_call, cached))
+            self._explain_tasks.add(task)
+            task.add_done_callback(self._explain_tasks.discard)
         try:
             option_id = await asyncio.wait_for(fut, timeout=300)
         except TimeoutError:
@@ -625,6 +887,36 @@ class _ChatConnection:
             self._pending_perms.pop(req_id_raw, None)
 
         await self._resolve_permission(req_id_raw, title, cached, option_id)
+
+    async def _explain_permission(self, req_id: int, tool_call: JsonDict, cached: JsonDict) -> None:
+        """Generate the LLM explanation for an already-shown permission dialog.
+
+        Runs concurrently with the open approval box; the result is pushed as
+        a ``permission_update`` frame while the request is still pending. On
+        failure the frame carries a null explanation so the client clears its
+        pending hint. The result is also persisted into the accumulated
+        tool-call state so the provenance run log carries the explanation and
+        risks alongside the decision (best effort — a fast decision can land
+        before the explanation does).
+        """
+        explanation: str | None = None
+        risk_keys: list[str] = []
+        with contextlib.suppress(Exception):
+            result = await explain.generate_explanation(tool_call)
+            if result is not None:
+                explanation, risk_keys = result
+        if explanation is not None and cached:
+            cached["humanReadable"] = explanation
+            cached["risks"] = risk_keys
+        if req_id in self._pending_perms:
+            await self._send(
+                {
+                    "type": "permission_update",
+                    "requestId": req_id,
+                    "explanation": explanation,
+                    "risks": explain.resolve_risks(risk_keys),
+                }
+            )
 
     async def _resolve_permission(
         self, req_id: int, title: object, cached: JsonDict, option_id: str | None
@@ -678,7 +970,9 @@ async def ws_chat(ws: WebSocket) -> None:
         queue = _client.register_session(session_id)
         conn = _ChatConnection(ws, session_id, queue)
         _connections.add(conn)
-        await ws.send_json({"type": "ready", "sessionId": session_id})
+        await ws.send_json(
+            {"type": "ready", "sessionId": session_id, "model": settings.OLLAMA_MODEL}
+        )
         await conn.run()
     except WebSocketDisconnect:
         pass

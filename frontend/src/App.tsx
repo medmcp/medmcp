@@ -1,15 +1,26 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { Group, Panel, Separator } from 'react-resizable-panels'
 import { Chat } from './components/Chat'
 import { FileExplorer } from './components/FileExplorer'
 import { SettingsDrawer } from './components/SettingsDrawer'
 import { Viewer } from './components/Viewer'
+import { WorkflowPanel } from './components/WorkflowPanel'
 import { GearIcon } from './components/icons'
 
-/** Three-panel workspace: explorer (top left), viewer (top right), chat (bottom). */
+/**
+ * Four-panel workspace: explorer (top left), viewer (top right),
+ * workflows (bottom left), chat (bottom right).
+ */
 export default function App() {
   const [openPath, setOpenPath] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // The vibe session that received the last prompt — what "Save chat as
+  // workflow" distills. Survives a reconnect (which starts an empty session).
+  const [distillSessionId, setDistillSessionId] = useState<string | null>(null)
+  // Bumped whenever something may have written to the workspace (agent tool
+  // calls, replay steps) so the explorer/viewer reload their file tree.
+  const [fsVersion, setFsVersion] = useState(0)
+  const notifyFsChanged = useCallback(() => setFsVersion((v) => v + 1), [])
 
   return (
     <div className="app-shell">
@@ -33,17 +44,32 @@ export default function App() {
         <Panel defaultSize="60%" minSize="20%">
           <Group orientation="horizontal" resizeTargetMinimumSize={{ fine: 8, coarse: 24 }}>
             <Panel defaultSize="25%" minSize="12%">
-              <FileExplorer onOpenFile={setOpenPath} />
+              <FileExplorer onOpenFile={setOpenPath} refreshSignal={fsVersion} />
             </Panel>
             <Separator className="sep sep-v" />
             <Panel minSize="30%">
-              <Viewer path={openPath} />
+              <Viewer path={openPath} refreshSignal={fsVersion} />
             </Panel>
           </Group>
         </Panel>
         <Separator className="sep sep-h" />
         <Panel minSize="15%">
-          <Chat />
+          <Group orientation="horizontal" resizeTargetMinimumSize={{ fine: 8, coarse: 24 }}>
+            <Panel defaultSize="25%" minSize="12%">
+              <WorkflowPanel
+                distillSessionId={distillSessionId}
+                onWorkspaceChanged={notifyFsChanged}
+              />
+            </Panel>
+            <Separator className="sep sep-v" />
+            <Panel minSize="30%">
+              <Chat
+                onPromptedSession={setDistillSessionId}
+                viewedPath={openPath}
+                onToolActivity={notifyFsChanged}
+              />
+            </Panel>
+          </Group>
         </Panel>
       </Group>
     </div>

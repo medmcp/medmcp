@@ -87,15 +87,47 @@ function collectVolumePaths(nodes: TreeNode[], out: string[] = []): string[] {
  * overlay is rendered with a label colormap (distinct color per integer label)
  * and adjustable opacity.
  */
-function VolumeView({ path }: { path: string }) {
+function VolumeView({ path, refreshSignal }: { path: string; refreshSignal?: number }) {
   const url = rawUrl(path)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const sizerRef = useRef<HTMLDivElement>(null)
+  const dropRef = useRef<HTMLDivElement>(null)
   const nvRef = useRef<Niivue | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [volumePaths, setVolumePaths] = useState<string[]>([])
   const [overlayPath, setOverlayPath] = useState<string>('')
   const [overlayOpacity, setOverlayOpacity] = useState(0.5)
   const [dragOver, setDragOver] = useState(false)
+
+  // Decouple the canvas box from the panel layout: Niivue's own ResizeObserver
+  // does a full WebGL redraw (multiplanar + 3D ray cast) on every resize tick,
+  // which makes separator drags janky whenever a volume is loaded. The sizer
+  // div tracks the panel; the dropzone (Niivue's observed parent) gets an
+  // explicit pixel size that only syncs on a trailing debounce, so the canvas
+  // stays frozen during the drag and redraws once when it settles.
+  useEffect(() => {
+    const sizer = sizerRef.current
+    const drop = dropRef.current
+    if (!sizer || !drop) return
+    let timer: number | null = null
+    const sync = () => {
+      drop.style.width = `${sizer.clientWidth}px`
+      drop.style.height = `${sizer.clientHeight}px`
+    }
+    sync()
+    const obs = new ResizeObserver(() => {
+      if (timer != null) window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        timer = null
+        sync()
+      }, 120)
+    })
+    obs.observe(sizer)
+    return () => {
+      obs.disconnect()
+      if (timer != null) window.clearTimeout(timer)
+    }
+  }, [])
 
   // Base volume: one Niivue instance per mounted view (remounted via key on
   // path change), so overlay state always starts clean for a new image.
@@ -128,12 +160,13 @@ function VolumeView({ path }: { path: string }) {
     }
   }, [url])
 
-  // Candidate overlays: every other volume in the workspace.
+  // Candidate overlays: every other volume in the workspace. refreshSignal
+  // picks up volumes the agent or a replay just produced.
   useEffect(() => {
     fetchTree()
       .then((tree) => setVolumePaths(collectVolumePaths(tree).filter((p) => p !== path)))
       .catch(() => setVolumePaths([]))
-  }, [path])
+  }, [path, refreshSignal])
 
   const setOverlay = async (newPath: string) => {
     const nv = nvRef.current
@@ -240,14 +273,17 @@ function VolumeView({ path }: { path: string }) {
         )}
       </div>
       {loadError && <div className="panel-error">{loadError}</div>}
-      <div
-        className={`niivue-dropzone${dragOver ? ' drag-over' : ''}`}
-        onDragOverCapture={onDragOver}
-        onDragLeave={() => setDragOver(false)}
-        onDropCapture={onDrop}
-      >
-        <canvas ref={canvasRef} className="niivue-canvas" />
-        {dragOver && <div className="dropzone-hint">Drop to overlay</div>}
+      <div className="niivue-sizer" ref={sizerRef}>
+        <div
+          ref={dropRef}
+          className={`niivue-dropzone${dragOver ? ' drag-over' : ''}`}
+          onDragOverCapture={onDragOver}
+          onDragLeave={() => setDragOver(false)}
+          onDropCapture={onDrop}
+        >
+          <canvas ref={canvasRef} className="niivue-canvas" />
+          {dragOver && <div className="dropzone-hint">Drop to overlay</div>}
+        </div>
       </div>
     </div>
   )
@@ -265,7 +301,14 @@ function TextView({ url }: { url: string }) {
 }
 
 /** Routes the selected file to the right renderer (volume / PDF / image / text). */
-export function Viewer({ path }: { path: string | null }) {
+export function Viewer({
+  path,
+  refreshSignal,
+}: {
+  path: string | null
+  /** Bumped when the workspace may have changed; refreshes the overlay list. */
+  refreshSignal?: number
+}) {
   if (!path) {
     return (
       <div className="panel">
@@ -291,7 +334,7 @@ export function Viewer({ path }: { path: string | null }) {
         </span>
       </div>
       <div className="panel-body viewer-body">
-        {kind === 'volume' && <VolumeView key={path} path={path} />}
+        {kind === 'volume' && <VolumeView key={path} path={path} refreshSignal={refreshSignal} />}
         {kind === 'pdf' && <iframe className="pdf-frame" src={url} title={path} />}
         {kind === 'image' && <img className="image-view" src={url} alt={path} />}
         {kind === 'text' && <TextView key={url} url={url} />}

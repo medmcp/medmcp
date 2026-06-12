@@ -39,6 +39,8 @@ export interface PermissionRequest {
   }
   options: { optionId: string; name?: string; kind?: string }[]
   explanation?: string | null
+  /** True while the server is still generating the LLM explanation. */
+  explaining?: boolean
   risks?: RiskTag[]
 }
 
@@ -64,6 +66,45 @@ export interface SettingsState {
   workflows: WorkflowInfo[]
 }
 
+/** One workflow row from GET /api/workflows. */
+export interface WorkflowListEntry {
+  name: string
+  description: string
+  kind: 'active' | 'draft'
+}
+
+/** Full recipe detail from GET /api/workflows/{name}. */
+export interface WorkflowDetail {
+  name: string
+  kind: 'active' | 'draft'
+  description: string
+  inputs: { name: string; example: string; description: string }[]
+  steps: { server: string; tool: string; arguments: Record<string, unknown> }[]
+  replayable: boolean
+  replay_error: string | null
+}
+
+/** One resolved step from POST /api/workflows/{name}/replay-preview. */
+export interface ReplayPreviewStep {
+  index: number
+  server: string
+  tool: string
+  arguments: Record<string, unknown>
+}
+
+/** Frames the server sends over /ws/replay. */
+export type ReplayFrame =
+  | {
+      type: 'step'
+      index: number
+      server: string
+      tool: string
+      ok: boolean
+      error?: string | null
+      produced: Record<string, string>
+    }
+  | { type: 'result'; ok: boolean; error?: string | null; outputs?: string[] }
+
 /** Ordered chat transcript entries. Tool calls render as inline cards. */
 export type ChatItem =
   | { kind: 'user'; text: string }
@@ -73,7 +114,7 @@ export type ChatItem =
 
 /** Frames the server sends over /ws/chat. */
 export type ServerFrame =
-  | { type: 'ready'; sessionId: string }
+  | { type: 'ready'; sessionId: string; model?: string }
   | { type: 'chunk'; text: string }
   | {
       type: 'tool_call'
@@ -84,12 +125,19 @@ export type ServerFrame =
       rawInput?: unknown
     }
   | { type: 'tool_call_update'; toolCallId: string; status?: string | null; output?: string | null }
-  | { type: 'usage'; used: number }
+  | { type: 'usage'; used: number; size?: number }
   | {
       type: 'permission_request'
       requestId: number
       toolCall: PermissionRequest['toolCall']
       options: PermissionRequest['options']
+      explanation?: string | null
+      explaining?: boolean
+      risks?: RiskTag[]
+    }
+  | {
+      type: 'permission_update'
+      requestId: number
       explanation?: string | null
       risks?: RiskTag[]
     }

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import type { MouseEvent as ReactMouseEvent } from 'react'
 import { Tree } from 'react-arborist'
 import type { NodeApi, NodeRendererProps } from 'react-arborist'
 import { deletePath, fetchTree, mkdir, renamePath, uploadFile } from '../api'
@@ -18,6 +19,8 @@ import {
 
 interface FileExplorerProps {
   onOpenFile: (path: string) => void
+  /** Bumped by the app when the workspace may have changed (agent/replay writes). */
+  refreshSignal?: number
 }
 
 function parentDir(path: string): string {
@@ -37,7 +40,14 @@ function FileTypeIcon({ name }: { name: string }) {
   return <FileIcon />
 }
 
-function NodeRow({ node, style, dragHandle }: NodeRendererProps<TreeNode>) {
+function NodeRow({
+  node,
+  style,
+  dragHandle,
+  onMenu,
+}: NodeRendererProps<TreeNode> & {
+  onMenu: (e: ReactMouseEvent, node: NodeApi<TreeNode>) => void
+}) {
   const isDir = !node.isLeaf
   return (
     <div
@@ -47,6 +57,7 @@ function NodeRow({ node, style, dragHandle }: NodeRendererProps<TreeNode>) {
       onClick={() => {
         if (isDir) node.toggle()
       }}
+      onContextMenu={(e) => onMenu(e, node)}
       onDoubleClick={() => {
         if (!isDir) node.activate()
       }}
@@ -85,10 +96,11 @@ function NodeRow({ node, style, dragHandle }: NodeRendererProps<TreeNode>) {
 }
 
 /** Workspace file tree with open/rename/move/delete/upload. */
-export function FileExplorer({ onOpenFile }: FileExplorerProps) {
+export function FileExplorer({ onOpenFile, refreshSignal }: FileExplorerProps) {
   const [data, setData] = useState<TreeNode[]>([])
   const [error, setError] = useState<string | null>(null)
   const [size, setSize] = useState({ width: 280, height: 400 })
+  const [menu, setMenu] = useState<{ x: number; y: number; node: NodeApi<TreeNode> } | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -103,12 +115,38 @@ export function FileExplorer({ onOpenFile }: FileExplorerProps) {
 
   useEffect(reload, [])
 
+  // Tool calls / replay steps bump refreshSignal; reload shortly after. The
+  // cleanup-timer pattern collapses a burst of signals into one fetch.
+  useEffect(() => {
+    if (!refreshSignal) return
+    const timer = window.setTimeout(reload, 300)
+    return () => window.clearTimeout(timer)
+  }, [refreshSignal])
+
+  // Catch changes made outside the app (terminal, scripts) on tab focus.
+  useEffect(() => {
+    window.addEventListener('focus', reload)
+    return () => window.removeEventListener('focus', reload)
+  }, [])
+
+  // Trailing debounce: re-rendering the tree on every observer tick adds
+  // React work to each frame of a separator drag; once it settles is enough.
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
-    const obs = new ResizeObserver(() => setSize({ width: el.clientWidth, height: el.clientHeight }))
+    let timer: number | null = null
+    const obs = new ResizeObserver(() => {
+      if (timer != null) window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        timer = null
+        setSize({ width: el.clientWidth, height: el.clientHeight })
+      }, 120)
+    })
     obs.observe(el)
-    return () => obs.disconnect()
+    return () => {
+      obs.disconnect()
+      if (timer != null) window.clearTimeout(timer)
+    }
   }, [])
 
   const run = (op: Promise<void>) => {
@@ -118,8 +156,38 @@ export function FileExplorer({ onOpenFile }: FileExplorerProps) {
     })
   }
 
+  // Any click/Escape outside the menu dismisses it; the menu itself stops
+  // mousedown propagation so its buttons still receive their click.
+  useEffect(() => {
+    if (!menu) return
+    const close = () => setMenu(null)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenu(null)
+    }
+    window.addEventListener('mousedown', close)
+    window.addEventListener('blur', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('mousedown', close)
+      window.removeEventListener('blur', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [menu])
+
   const onActivate = (node: NodeApi<TreeNode>) => {
     if (node.isLeaf) onOpenFile(node.data.id)
+  }
+
+  const openMenu = (e: ReactMouseEvent, node: NodeApi<TreeNode>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    node.select()
+    setMenu({ x: e.clientX, y: e.clientY, node })
+  }
+
+  const menuAction = (fn: () => void) => () => {
+    setMenu(null)
+    fn()
   }
 
   return (
@@ -182,8 +250,43 @@ export function FileExplorer({ onOpenFile }: FileExplorerProps) {
             }
           }}
         >
-          {NodeRow}
+          {(props) => <NodeRow {...props} onMenu={openMenu} />}
         </Tree>
+        {menu && (
+          <div
+            className="ctx-menu"
+            style={{
+              left: Math.min(menu.x, window.innerWidth - 170),
+              top: Math.min(menu.y, window.innerHeight - 150),
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            {menu.node.isLeaf ? (
+              <button onClick={menuAction(() => onOpenFile(menu.node.data.id))}>Open</button>
+            ) : (
+              <button
+                onClick={menuAction(() => {
+                  const name = window.prompt('New folder name')
+                  if (name) run(mkdir(joinPath(menu.node.data.id, name)))
+                })}
+              >
+                New folder inside
+              </button>
+            )}
+            <button onClick={menuAction(() => void menu.node.edit())}>Rename</button>
+            <button
+              className="danger"
+              onClick={menuAction(() => {
+                if (window.confirm(`Delete ${menu.node.data.name}?`)) {
+                  run(deletePath(menu.node.data.id))
+                }
+              })}
+            >
+              Delete
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )

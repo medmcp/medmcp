@@ -62,8 +62,8 @@ export class ChatSocket {
     }
   }
 
-  sendPrompt(text: string): void {
-    this.send({ type: 'prompt', text })
+  sendPrompt(text: string, viewedPath?: string | null): void {
+    this.send({ type: 'prompt', text, viewedPath: viewedPath ?? null })
   }
 
   sendPermission(requestId: number, optionId: string | null): void {

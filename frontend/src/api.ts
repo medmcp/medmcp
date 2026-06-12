@@ -1,4 +1,10 @@
-import type { SettingsState, TreeNode } from './types'
+import type {
+  ReplayPreviewStep,
+  SettingsState,
+  TreeNode,
+  WorkflowDetail,
+  WorkflowListEntry,
+} from './types'
 
 /** Thin client for the workspace filesystem API. */
 
@@ -82,4 +88,70 @@ export async function saveSettings(state: SettingsState): Promise<boolean> {
   )
   const body = (await res.json()) as { restarted: boolean }
   return body.restarted
+}
+
+// ── Workflows ────────────────────────────────────────────────
+
+async function postJson(url: string, body: object): Promise<Response> {
+  return check(
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  )
+}
+
+export async function fetchWorkflows(): Promise<{
+  enabled: boolean
+  workflows: WorkflowListEntry[]
+}> {
+  const res = await check(await fetch('/api/workflows'))
+  return (await res.json()) as { enabled: boolean; workflows: WorkflowListEntry[] }
+}
+
+export async function fetchWorkflowDetail(name: string): Promise<WorkflowDetail> {
+  const res = await check(await fetch(`/api/workflows/${encodeURIComponent(name)}`))
+  return (await res.json()) as WorkflowDetail
+}
+
+/** Distill a chat session into a draft workflow; returns the new draft's detail. */
+export async function distillSession(sessionId: string): Promise<WorkflowDetail> {
+  const res = await postJson('/api/workflows/distill', { session_id: sessionId })
+  return (await res.json()) as WorkflowDetail
+}
+
+export async function promoteWorkflow(name: string): Promise<void> {
+  await postJson(`/api/workflows/${encodeURIComponent(name)}/promote`, {})
+}
+
+export async function unpromoteWorkflow(name: string): Promise<void> {
+  await postJson(`/api/workflows/${encodeURIComponent(name)}/unpromote`, {})
+}
+
+/** Rename a draft; returns the new (slugified) name. */
+export async function renameWorkflow(name: string, newName: string): Promise<string> {
+  const res = await postJson(`/api/workflows/${encodeURIComponent(name)}/rename`, {
+    new_name: newName,
+  })
+  const body = (await res.json()) as { name: string }
+  return body.name
+}
+
+export async function refineWorkflow(name: string, instruction: string): Promise<void> {
+  await postJson(`/api/workflows/${encodeURIComponent(name)}/refine`, { instruction })
+}
+
+export async function deleteWorkflow(name: string): Promise<void> {
+  await check(await fetch(`/api/workflows/${encodeURIComponent(name)}`, { method: 'DELETE' }))
+}
+
+export async function replayPreview(
+  name: string,
+  inputs: Record<string, string>,
+): Promise<{ ok: boolean; error: string | null; steps: ReplayPreviewStep[] }> {
+  const res = await postJson(`/api/workflows/${encodeURIComponent(name)}/replay-preview`, {
+    inputs,
+  })
+  return (await res.json()) as { ok: boolean; error: string | null; steps: ReplayPreviewStep[] }
 }

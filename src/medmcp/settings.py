@@ -32,6 +32,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
 
+import httpx
 import tomli_w
 
 from medmcp.acp import VIBE_HOME, JsonDict
@@ -42,6 +43,52 @@ log: logging.Logger = logging.getLogger(__name__)
 # (tool-call explanations, distillation prose) and the provenance manifest.
 OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "gemma4-medmcp")
+
+# Context window size used when Ollama hasn't been queried (yet) — the value
+# set in Modelfile.gemma4.
+DEFAULT_CONTEXT_WINDOW: int = 131_072
+
+# Cached context window size fetched from Ollama /api/show. None = not yet
+# fetched; populated lazily by fetch_context_window().
+_context_window_tokens: int | None = None
+
+
+async def fetch_context_window() -> int:
+    """Return the active model's num_ctx by querying Ollama ``/api/show``.
+
+    The result is cached for the process lifetime. Falls back to
+    :data:`DEFAULT_CONTEXT_WINDOW` if Ollama is unreachable or the parameter
+    is absent from the response.
+    """
+    global _context_window_tokens
+    if _context_window_tokens is not None:
+        return _context_window_tokens
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                f"{OLLAMA_BASE_URL}/api/show",
+                json={"model": OLLAMA_MODEL},
+            )
+            resp.raise_for_status()
+            data = cast("JsonDict", resp.json())
+            params_str = str(data.get("parameters") or "")
+            for line in params_str.splitlines():
+                parts = line.strip().split()
+                if len(parts) == 2 and parts[0] == "num_ctx":
+                    _context_window_tokens = int(parts[1])
+                    return _context_window_tokens
+    except Exception:
+        log.warning("could not fetch context window size from Ollama; using fallback")
+    _context_window_tokens = DEFAULT_CONTEXT_WINDOW
+    return _context_window_tokens
+
+
+def cached_context_window() -> int:
+    """Return the cached window size without I/O (fallback when unfetched)."""
+    return (
+        _context_window_tokens if _context_window_tokens is not None else (DEFAULT_CONTEXT_WINDOW)
+    )
+
 
 # Tracks which discovered stacks are enabled; defaults to all when absent.
 ACTIVE_STACKS_PATH: Path = VIBE_HOME / "active_stacks.json"

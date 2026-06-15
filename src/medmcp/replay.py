@@ -180,8 +180,17 @@ def _result_failed(result: mcp_types.CallToolResult) -> bool:
     """Detect a failed tool call (protocol error flag or known failure markers)."""
     if result.isError:
         return True
+    # Defense-in-depth for stacks that report a failure as a non-error result
+    # (text only). FastMCP wraps a raised exception as "Error executing tool …";
+    # "(exit N)" catches an embedded non-zero subprocess code. Mirrors
+    # ``distill._is_failed_result`` so a recipe and its replay agree on failure.
     text = _result_text(result)
-    return "ok: False" in text or "returncode: 1" in text
+    return (
+        "ok: False" in text
+        or "returncode: 1" in text
+        or "Error executing tool" in text
+        or re.search(r"\(exit ([1-9]\d*)\)", text) is not None
+    )
 
 
 # ── MCP transport ─────────────────────────────────────────────────────────────

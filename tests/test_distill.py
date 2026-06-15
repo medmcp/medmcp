@@ -145,6 +145,34 @@ class TestBuildRecipe:
         )
         assert [s.tool for s in recipe.steps] == ["bash"]
 
+    def test_drops_tool_error_rendered_as_ok_true(self) -> None:
+        """A wrapped tool exception (vibe renders ``ok: True``) is dropped as failed.
+
+        This is the real-world skull_strip crash: HD-BET exits non-zero, the tool
+        raises, FastMCP returns it as an error result, but vibe-acp's transcript
+        renders ``ok: True`` with the error only in the ``text:`` field.
+        """
+        failed = (
+            "ok: True\n"
+            "server: stdio:/path/to/medmcp-neuro\n"
+            "tool: skull_strip\n"
+            "text: Error executing tool skull_strip: HD-BET failed (exit 1): \n"
+            "structured: None"
+        )
+        messages: list[JsonDict] = [
+            _assistant_call(
+                "f1",
+                "medmcp-neuro_skull_strip",
+                {"device": "cuda", "input_path": "data/x/t1.nii.gz"},
+            ),
+            _tool_result("f1", failed),
+            *_MESSAGES[3:7],  # the two real neuro steps that did succeed
+        ]
+        recipe = distill.build_recipe(
+            messages, server_names=["medmcp-neuro"], name="t", description="d"
+        )
+        assert [s.tool for s in recipe.steps] == ["skull_strip", "register_to_template"]
+
 
 class TestProseParsing:
     """_parse_prose_response handles fenced and inline JSON."""

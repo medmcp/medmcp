@@ -128,6 +128,9 @@ export function Chat({
   onPromptedSession,
   viewedPath,
   onToolActivity,
+  resumeSessionId,
+  onSessionEstablished,
+  onNewChat,
 }: {
   /** Called with the vibe session id whenever a prompt is sent into it. */
   onPromptedSession?: (id: string) => void
@@ -135,6 +138,12 @@ export function Chat({
   viewedPath?: string | null
   /** Called when a tool call completes / a turn ends (may have written files). */
   onToolActivity?: () => void
+  /** Session to resume on connect; the server reloads it and replays history. */
+  resumeSessionId?: string | null
+  /** Called with the live session id once the server reports `ready`. */
+  onSessionEstablished?: (id: string) => void
+  /** Start a fresh chat (parent remounts this component with no resume id). */
+  onNewChat?: () => void
 }) {
   const [items, setItems] = useState<ChatItem[]>([])
   const [toolCalls, setToolCalls] = useState<Record<string, ToolCallState>>({})
@@ -153,6 +162,13 @@ export function Chat({
   useEffect(() => {
     onToolActivityRef.current = onToolActivity
   }, [onToolActivity])
+  const onSessionEstablishedRef = useRef(onSessionEstablished)
+  useEffect(() => {
+    onSessionEstablishedRef.current = onSessionEstablished
+  }, [onSessionEstablished])
+  // Captured once: the socket is created in a mount-only effect, and the parent
+  // remounts this component (new key) when switching/starting sessions.
+  const resumeIdRef = useRef(resumeSessionId)
 
   useEffect(() => {
     // Tool-call ids that already have a transcript row (ids are unique across
@@ -255,9 +271,28 @@ export function Chat({
         case 'error':
           setItems((prev) => [...prev, { kind: 'error', text: frame.message }])
           break
+        case 'user':
+          // A replayed user turn from a resumed session (live sends are added
+          // locally in send(), so this only fires during history replay).
+          setItems((prev) => [...prev, { kind: 'user', text: frame.text }])
+          break
         case 'ready':
+          // (Re)connect: the server is the transcript's source of truth — a
+          // resume replays history, a reconnect reloads it — so rebuild from
+          // scratch and drop any buffered/partial state from the old socket.
+          seenToolIds.clear()
+          chunkBuffer = ''
+          if (flushTimer != null) {
+            clearTimeout(flushTimer)
+            flushTimer = null
+          }
           sessionIdRef.current = frame.sessionId
+          setItems([])
+          setToolCalls({})
+          setBusy(false)
+          setPermission(null)
           if (frame.model) setModel(frame.model)
+          onSessionEstablishedRef.current?.(frame.sessionId)
           break
       }
     }
@@ -272,7 +307,7 @@ export function Chat({
         setPermission(null)
       }
     }
-    const socket = new ChatSocket({ onFrame, onStatusChange })
+    const socket = new ChatSocket({ onFrame, onStatusChange }, resumeIdRef.current)
     socketRef.current = socket
     return () => {
       socket.close()
@@ -305,7 +340,14 @@ export function Chat({
   return (
     <div className="panel">
       <div className="panel-header">
-        <span>Chat</span>
+        <span className="chat-head-left">
+          <span>Chat</span>
+          {onNewChat && (
+            <button className="btn-plain chat-new-btn" onClick={onNewChat} title="Start a new chat">
+              ＋ New chat
+            </button>
+          )}
+        </span>
         <span className="panel-actions chat-meta">
           {model != null && <span className="model-name">{model}</span>}
           {usage != null && <ContextMeter used={usage.used} size={usage.size} />}

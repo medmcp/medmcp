@@ -11,8 +11,11 @@ export type ChatSocketStatus = 'connecting' | 'open' | 'closed'
 /**
  * WebSocket wrapper for /ws/chat with automatic reconnect.
  *
- * Each (re)connection creates a fresh vibe-acp session server-side; the UI
- * keeps its transcript client-side across reconnects.
+ * A connection resumes an existing session when given a `resumeId` (the server
+ * reloads it and replays its transcript); otherwise it opens a fresh one. Once
+ * the server reports the live session id in `ready`, that id becomes the resume
+ * target, so a dropped connection reattaches to the same session rather than
+ * starting over — the server is the source of truth for the transcript.
  */
 export class ChatSocket {
   private ws: WebSocket | null = null
@@ -20,9 +23,11 @@ export class ChatSocket {
   private closedByUser = false
   private retryDelay = 1000
   private retryTimer: number | null = null
+  private resumeId: string | null
 
-  constructor(handlers: ChatSocketHandlers) {
+  constructor(handlers: ChatSocketHandlers, resumeId?: string | null) {
     this.handlers = handlers
+    this.resumeId = resumeId ?? null
     this.connect()
   }
 
@@ -33,7 +38,8 @@ export class ChatSocket {
     if (this.closedByUser) return
     this.handlers.onStatusChange('connecting')
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    const ws = new WebSocket(`${proto}://${location.host}/ws/chat`)
+    const query = this.resumeId ? `?resume=${encodeURIComponent(this.resumeId)}` : ''
+    const ws = new WebSocket(`${proto}://${location.host}/ws/chat${query}`)
     this.ws = ws
     ws.onopen = () => {
       this.handlers.onStatusChange('open')
@@ -46,6 +52,8 @@ export class ChatSocket {
         // when setup is about to fail and would otherwise defeat the backoff.
         if (frame.type === 'ready') {
           this.retryDelay = 1000
+          // Reattach to this exact session if the socket later drops.
+          this.resumeId = frame.sessionId
         }
         this.handlers.onFrame(frame)
       } catch {

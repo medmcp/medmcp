@@ -119,6 +119,9 @@ export type ChatItem =
 export type ServerFrame =
   | { type: 'ready'; sessionId: string; model?: string }
   | { type: 'chunk'; text: string }
+  // Replayed user turn from a resumed session (session/load); live prompts are
+  // rendered locally on send and are not echoed by the server.
+  | { type: 'user'; text: string }
   | {
       type: 'tool_call'
       toolCallId: string

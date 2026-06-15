@@ -221,6 +221,20 @@ button:hover {
   color: var(--muted);
 }
 
+.chat-head-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.chat-new-btn {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+}
+
 .panel-actions {
   display: flex;
   align-items: center;

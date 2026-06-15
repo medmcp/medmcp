@@ -196,3 +196,89 @@ class TestSettingsMerge:
         assert harness["stacks"] == {"alpha", "beta"}
         assert harness["workflows"] == {"wf-keep"}
         assert result["restarted"] is False
+
+
+# ── Session resume helpers ───────────────────────────────────────────────────
+
+
+class TestStripWorkspaceNote:
+    """The viewer-context note is removed from replayed user messages."""
+
+    def test_strips_appended_note(self) -> None:
+        """The trailing ``[workspace context: …]`` block is removed."""
+        text = (
+            "segment this scan\n\n"
+            '[workspace context: the file "a/b.nii.gz" is currently open in the '
+            'viewer; references like "this image" or "the current image" mean that file]'
+        )
+        assert server._strip_workspace_note(text) == "segment this scan"
+
+    def test_leaves_plain_message_untouched(self) -> None:
+        """A message without the note is returned verbatim."""
+        assert server._strip_workspace_note("just a question") == "just a question"
+
+    def test_only_strips_the_trailing_note(self) -> None:
+        """A bracketed mention that isn't the appended note is left alone."""
+        text = "see [workspace context: x] mid-sentence"
+        assert server._strip_workspace_note(text) == text
+
+    def test_strips_truncated_note(self) -> None:
+        """A note cut off mid-way (no closing ``]``, as in a title) is removed."""
+        text = 'Hi\n\n[workspace context: the file "test_data/2014…'
+        assert server._strip_workspace_note(text) == "Hi"
+
+
+class TestSessionsApi:
+    """GET /api/sessions maps vibe-acp's session/list to the UI shape."""
+
+    @staticmethod
+    def _stub_client(monkeypatch: pytest.MonkeyPatch, response: dict[str, object]) -> None:
+        async def _ensure() -> None:
+            return None
+
+        async def _request(method: str, params: dict[str, object]) -> dict[str, object]:
+            assert method == "session/list"
+            return response
+
+        monkeypatch.setattr(server._client, "ensure_started", _ensure)
+        monkeypatch.setattr(server._client, "request", _request)
+
+    def test_maps_and_drops_idless_entries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Each session is reshaped to {id,title,updatedAt}; idless rows are dropped."""
+        self._stub_client(
+            monkeypatch,
+            {
+                "result": {
+                    "sessions": [
+                        {
+                            "sessionId": "s1",
+                            "title": "Skull strip",
+                            "updatedAt": "2026-06-15T10:00:00Z",
+                        },
+                        {"sessionId": "s2", "title": None, "updatedAt": None},
+                        {
+                            "sessionId": "s3",
+                            "title": 'Hi\n\n[workspace context: the file "scan…',
+                            "updatedAt": None,
+                        },
+                        {"title": "no id — dropped"},
+                    ]
+                }
+            },
+        )
+        client = TestClient(server.app)
+        resp = client.get("/api/sessions")
+        assert resp.status_code == 200
+        sessions = resp.json()["sessions"]
+        assert [s["id"] for s in sessions] == ["s1", "s2", "s3"]
+        assert sessions[0]["title"] == "Skull strip"
+        assert sessions[0]["updatedAt"] == "2026-06-15T10:00:00Z"
+        # The leaked viewer-context note is stripped from the title, even truncated.
+        assert sessions[2]["title"] == "Hi"
+
+    def test_vibe_error_maps_to_502(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A vibe-acp error surfaces as a 502, not a 500."""
+        self._stub_client(monkeypatch, {"error": {"message": "boom"}})
+        client = TestClient(server.app)
+        resp = client.get("/api/sessions")
+        assert resp.status_code == 502

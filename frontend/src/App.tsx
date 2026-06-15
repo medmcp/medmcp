@@ -7,6 +7,9 @@ import { Viewer } from './components/Viewer'
 import { WorkflowPanel } from './components/WorkflowPanel'
 import { GearIcon } from './components/icons'
 
+/** localStorage key holding the last active chat session id (for auto-resume). */
+const ACTIVE_SESSION_KEY = 'medmcp.activeSession'
+
 /**
  * Four-panel workspace: explorer (top left), viewer (top right),
  * workflows (bottom left), chat (bottom right).
@@ -31,6 +34,24 @@ export default function App() {
   const [resizing, setResizing] = useState(false)
   const startResize = useCallback(() => setResizing(true), [])
   const endResize = useCallback(() => setResizing(false), [])
+  // Chat session continuity: on load resume the last session (auto), and let
+  // the user start a fresh one. `resumeId` is what the next Chat mount should
+  // resume (stored id, or null for new); bumping `chatKey` remounts <Chat/> so
+  // it drops its socket and reconnects with that target. Chat captures the
+  // resume id at mount, so updating it here only takes effect on the next mount.
+  const [resumeId, setResumeId] = useState<string | null>(() =>
+    localStorage.getItem(ACTIVE_SESSION_KEY),
+  )
+  const [chatKey, setChatKey] = useState(0)
+  const handleSessionEstablished = useCallback((id: string) => {
+    localStorage.setItem(ACTIVE_SESSION_KEY, id)
+    setResumeId(id)
+  }, [])
+  const startNewChat = useCallback(() => {
+    localStorage.removeItem(ACTIVE_SESSION_KEY)
+    setResumeId(null)
+    setChatKey((k) => k + 1)
+  }, [])
 
   return (
     <div className={`app-shell${resizing ? ' is-resizing' : ''}`}>
@@ -86,9 +107,13 @@ export default function App() {
             <Separator className="sep sep-v" />
             <Panel minSize="30%">
               <Chat
+                key={chatKey}
                 onPromptedSession={setDistillSessionId}
                 viewedPath={openPath}
                 onToolActivity={notifyFsChanged}
+                resumeSessionId={resumeId}
+                onSessionEstablished={handleSessionEstablished}
+                onNewChat={startNewChat}
               />
             </Panel>
           </Group>

@@ -36,6 +36,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -670,6 +671,21 @@ def _extract_text(content: object) -> str:
     return "\n".join(p for p in parts if p)
 
 
+# The viewer-context note appended to a prompt in _run_prompt. On transcript
+# replay (session/load) the stored user message still carries it, and vibe-acp
+# derives a session's title from that first message too, so we strip it before
+# showing either to the user. The note is always appended last, so we cut from
+# its marker to the end — this also handles a title truncated mid-note (no
+# closing ``]``). The ``\n\n`` anchor avoids touching a bracketed phrase a user
+# happened to type inline.
+_WORKSPACE_NOTE_RE = re.compile(r"\n\n\[workspace context:.*$", re.DOTALL)
+
+
+def _strip_workspace_note(text: str) -> str:
+    """Remove the appended ``[workspace context: …]`` note from text."""
+    return _WORKSPACE_NOTE_RE.sub("", text).strip()
+
+
 class _ChatConnection:
     """State for one browser websocket: one vibe-acp session, one prompt at a time."""
 
@@ -679,17 +695,22 @@ class _ChatConnection:
         session_id: str,
         queue: asyncio.Queue[JsonDict],
         servers: list[JsonDict],
+        *,
+        resumed: bool = False,
     ) -> None:
         """Bind the websocket to its registered session queue.
 
         ``servers`` is the active-server list captured at connect time; a
         stack change restarts vibe-acp and closes every connection, so it
-        cannot go stale within a connection's lifetime.
+        cannot go stale within a connection's lifetime. ``resumed`` marks a
+        session reattached via ``session/load`` — it already has a transcript,
+        so it must not be purged as an abandoned empty session on close.
         """
         self.ws = ws
         self.session_id = session_id
         self.queue = queue
         self.servers = servers
+        self._resumed = resumed
         self._pending_perms: dict[int, asyncio.Future[str | None]] = {}
         self._prompt_task: asyncio.Task[None] | None = None
         # Tool-call state accumulated across frames, keyed by toolCallId; feeds
@@ -730,14 +751,16 @@ class _ChatConnection:
     async def close(self) -> None:
         """Abort any in-flight prompt and drop the session queue.
 
-        A session that never received a prompt is purged (transcript +
-        provenance) so abandoned tabs/refreshes don't leak session state.
+        A fresh session that never received a prompt is purged (transcript +
+        provenance) so abandoned tabs/refreshes don't leak session state. A
+        resumed session is never purged on close — it already has history the
+        user came back to view.
         """
         await self._cancel_prompt()
         for task in list(self._explain_tasks):
             task.cancel()
         _client.unregister_session(self.session_id)
-        if not self._prompted:
+        if not self._prompted and not self._resumed:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(provenance.purge_session, self.session_id)
 
@@ -776,6 +799,23 @@ class _ChatConnection:
         """Send one frame to the browser, ignoring a just-closed socket."""
         with contextlib.suppress(Exception):
             await self.ws.send_json(msg)
+
+    async def replay_history(self) -> None:
+        """Relay the transcript frames vibe re-emitted during ``session/load``.
+
+        Those ``session/update`` notifications are written before the load
+        response resolves, so by the time we get here they are already sitting
+        in the session queue. Draining it non-blockingly yields exactly the
+        historical conversation, which we forward through the normal translator
+        in ``replay`` mode (no provenance re-writes, no permission prompts —
+        replayed tool calls are already settled).
+        """
+        while True:
+            try:
+                msg = self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            await self._forward_frame(msg, replay=True)
 
     async def _run_prompt(self, text: str, viewed_path: str | None = None) -> None:
         """Send one ``session/prompt`` and stream its frames to the browser.
@@ -857,8 +897,13 @@ class _ChatConnection:
             await self._send({"type": "error", "message": str(exc)})
             await self._send({"type": "done"})
 
-    async def _forward_frame(self, msg: JsonDict) -> None:
-        """Translate one inbound vibe-acp frame into a browser message."""
+    async def _forward_frame(self, msg: JsonDict, *, replay: bool = False) -> None:
+        """Translate one inbound vibe-acp frame into a browser message.
+
+        ``replay`` is set while relaying the transcript vibe re-emits during
+        ``session/load`` — those tool calls already ran, so their provenance was
+        recorded the first time and must not be written again.
+        """
         method = msg.get("method")
         if method == "session/update":
             params = cast("JsonDict", msg.get("params") or {})
@@ -868,6 +913,13 @@ class _ChatConnection:
                 content = cast("JsonDict", update.get("content") or {})
                 if content.get("type") == "text":
                     await self._send({"type": "chunk", "text": str(content.get("text") or "")})
+            elif update_type == "user_message_chunk":
+                # Replayed user turns (session/load); live prompts are not echoed.
+                content = cast("JsonDict", update.get("content") or {})
+                if content.get("type") == "text":
+                    text = _strip_workspace_note(str(content.get("text") or ""))
+                    if text:
+                        await self._send({"type": "user", "text": text})
             elif update_type == "tool_call":
                 tc_id = str(update.get("toolCallId") or "")
                 title = str(update.get("title") or "tool")
@@ -911,7 +963,7 @@ class _ChatConnection:
                     }
                 )
                 if status in ("completed", "failed") and info is not None:
-                    if settings.load_provenance_enabled():
+                    if not replay and settings.load_provenance_enabled():
                         event_info = info
                         with contextlib.suppress(Exception):
                             await asyncio.to_thread(
@@ -1067,13 +1119,58 @@ class _ChatConnection:
         await _client.respond(req_id, {"outcome": outcome})
 
 
-@app.websocket("/ws/chat")
-async def ws_chat(ws: WebSocket) -> None:
-    """Create a vibe-acp session for this socket and run the chat loop.
+# ── Sessions API ───────────────────────────────────────────
 
-    The config sync before ``session/new`` is mandatory: vibe-acp reads its
-    MCP server list and skill paths from ``.vibe/config.toml``, not from the
-    JSON-RPC call.
+
+@app.get("/api/sessions")
+async def get_sessions() -> JsonDict:
+    """List prior chat sessions for this workspace (vibe-acp ``session/list``).
+
+    vibe-acp persists every session's transcript and can reload it; this surfaces
+    the ones whose cwd is the current workspace so the UI can offer to resume them.
+    """
+    await _client.ensure_started()
+    resp = await _client.request("session/list", {"cwd": str(WORKSPACE_ROOT)})
+    if "error" in resp:
+        raise HTTPException(status_code=502, detail=str(resp["error"]))
+    result = cast("JsonDict", resp.get("result") or {})
+    sessions: list[JsonDict] = []
+    for s in cast("list[JsonDict]", result.get("sessions") or []):
+        sid = s.get("sessionId") or s.get("session_id")
+        if isinstance(sid, str) and sid:
+            raw_title = s.get("title")
+            title = _strip_workspace_note(str(raw_title)) if raw_title else None
+            sessions.append(
+                {
+                    "id": sid,
+                    "title": title or None,
+                    "updatedAt": s.get("updatedAt") or s.get("updated_at"),
+                }
+            )
+    return {"sessions": sessions}
+
+
+# ── WebSocket chat ─────────────────────────────────────────
+
+
+async def _new_session() -> str:
+    """Open a fresh vibe-acp session and return its id (``""`` on failure)."""
+    resp = await _client.request("session/new", {"cwd": str(WORKSPACE_ROOT), "mcpServers": []})
+    if "error" in resp:
+        return ""
+    result = cast("JsonDict", resp.get("result") or {})
+    return str(result.get("sessionId") or "")
+
+
+@app.websocket("/ws/chat")
+async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
+    """Create or resume a vibe-acp session for this socket and run the chat loop.
+
+    With ``?resume=<id>`` the socket reattaches to an existing session via
+    ``session/load`` (which restores the agent's context and re-emits the
+    transcript); otherwise it opens a fresh one. The config sync before either
+    call is mandatory: vibe-acp reads its MCP server list and skill paths from
+    ``.vibe/config.toml``, not from the JSON-RPC call.
     """
     await ws.accept()
     conn: _ChatConnection | None = None
@@ -1094,23 +1191,41 @@ async def ws_chat(ws: WebSocket) -> None:
         _background_tasks.add(prefetch)
         prefetch.add_done_callback(_background_tasks.discard)
         await _client.ensure_started()
-        resp = await _client.request("session/new", {"cwd": str(WORKSPACE_ROOT), "mcpServers": []})
-        if "error" in resp:
-            await ws.send_json({"type": "error", "message": str(resp["error"])})
-            await ws.close()
-            return
-        result = cast("JsonDict", resp.get("result") or {})
-        session_id = str(result.get("sessionId") or "")
+
+        # Resume: register the queue under the known id *before* session/load so
+        # the transcript frames it re-emits are captured, not lost. Fall back to
+        # a fresh session if the id is gone/unloadable.
+        replayed = False
+        session_id = ""
+        queue: asyncio.Queue[JsonDict] | None = None
+        if resume:
+            queue = _client.register_session(resume)
+            load = await _client.request(
+                "session/load",
+                {"cwd": str(WORKSPACE_ROOT), "mcpServers": [], "sessionId": resume},
+            )
+            if "error" in load:
+                _client.unregister_session(resume)
+                queue = None
+            else:
+                session_id = resume
+                replayed = True
         if not session_id:
-            await ws.send_json({"type": "error", "message": "session/new returned no sessionId"})
-            await ws.close()
-            return
-        queue = _client.register_session(session_id)
-        conn = _ChatConnection(ws, session_id, queue, servers)
+            session_id = await _new_session()
+            if not session_id:
+                await ws.send_json({"type": "error", "message": "could not open a chat session"})
+                await ws.close()
+                return
+            queue = _client.register_session(session_id)
+
+        assert queue is not None
+        conn = _ChatConnection(ws, session_id, queue, servers, resumed=replayed)
         _connections.add(conn)
         await ws.send_json(
             {"type": "ready", "sessionId": session_id, "model": settings.OLLAMA_MODEL}
         )
+        if replayed:
+            await conn.replay_history()
         await conn.run()
     except WebSocketDisconnect:
         pass

@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import { ChatSocket } from '../chatSocket'
 import type { ChatSocketStatus } from '../chatSocket'
 import type { ChatItem, PermissionRequest, ServerFrame, ToolCallState } from '../types'
+import { ChatsMenu } from './ChatsMenu'
 import { ShieldIcon } from './icons'
 
 // Memoized so a streaming update to the newest message doesn't re-render
@@ -131,6 +132,8 @@ export function Chat({
   resumeSessionId,
   onSessionEstablished,
   onNewChat,
+  currentSessionId,
+  onSelectSession,
 }: {
   /** Called with the vibe session id whenever a prompt is sent into it. */
   onPromptedSession?: (id: string) => void
@@ -144,6 +147,10 @@ export function Chat({
   onSessionEstablished?: (id: string) => void
   /** Start a fresh chat (parent remounts this component with no resume id). */
   onNewChat?: () => void
+  /** The session currently shown — highlighted in the Chats menu. */
+  currentSessionId?: string | null
+  /** Open a previous session (parent remounts this component to resume it). */
+  onSelectSession?: (id: string) => void
 }) {
   const [items, setItems] = useState<ChatItem[]>([])
   const [toolCalls, setToolCalls] = useState<Record<string, ToolCallState>>({})
@@ -166,6 +173,10 @@ export function Chat({
   useEffect(() => {
     onSessionEstablishedRef.current = onSessionEstablished
   }, [onSessionEstablished])
+  const onPromptedSessionRef = useRef(onPromptedSession)
+  useEffect(() => {
+    onPromptedSessionRef.current = onPromptedSession
+  }, [onPromptedSession])
   // Captured once: the socket is created in a mount-only effect, and the parent
   // remounts this component (new key) when switching/starting sessions.
   const resumeIdRef = useRef(resumeSessionId)
@@ -276,6 +287,14 @@ export function Chat({
           // locally in send(), so this only fires during history replay).
           setItems((prev) => [...prev, { kind: 'user', text: frame.text }])
           break
+        case 'session_migrated':
+          // Continuing a resumed chat forked it under a new id; track the fork
+          // so resume (localStorage), the menu highlight, and "Save workflow"
+          // all point at the live, complete transcript.
+          sessionIdRef.current = frame.sessionId
+          onSessionEstablishedRef.current?.(frame.sessionId)
+          onPromptedSessionRef.current?.(frame.sessionId)
+          break
         case 'ready':
           // (Re)connect: the server is the transcript's source of truth — a
           // resume replays history, a reconnect reloads it — so rebuild from
@@ -346,6 +365,9 @@ export function Chat({
             <button className="btn-plain chat-new-btn" onClick={onNewChat} title="Start a new chat">
               ＋ New chat
             </button>
+          )}
+          {onSelectSession && (
+            <ChatsMenu currentSessionId={currentSessionId ?? null} onSelectSession={onSelectSession} />
           )}
         </span>
         <span className="panel-actions chat-meta">

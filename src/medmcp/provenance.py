@@ -346,9 +346,36 @@ def purge_session(session_id: str) -> None:
     pdir = provenance_dir(session_id)
     if pdir.exists():
         shutil.rmtree(pdir, ignore_errors=True)
+    delete_vibe_transcript(session_id)
+
+
+def delete_vibe_transcript(session_id: str) -> None:
+    """Delete only vibe-acp's transcript dir for *session_id* (keep provenance).
+
+    Used to retire a session that a fork has superseded: when continuing a
+    reloaded chat, vibe-acp logs under a new id, leaving the original transcript
+    a stale duplicate. Removing it drops the duplicate from vibe's session list
+    while the provenance is relocated to the fork via :func:`move_session_record`.
+    """
     vibe_dir = find_vibe_session_dir(session_id)
     if vibe_dir is not None and vibe_dir.exists():
         shutil.rmtree(vibe_dir, ignore_errors=True)
+
+
+def move_session_record(old_id: str, new_id: str) -> None:
+    """Relocate the provenance record from *old_id* to *new_id* (best-effort).
+
+    No-op if the source is absent; if the destination already exists the source
+    is left untouched rather than clobbering it.
+    """
+    src = provenance_dir(old_id)
+    if not src.exists():
+        return
+    dst = provenance_dir(new_id)
+    if dst.exists():
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dst))
 
 
 # ── Human-readable report ────────────────────────────────────────────────────

@@ -130,6 +130,10 @@ button:hover {
   border-color: transparent;
 }
 
+.btn-icon.danger:hover {
+  color: var(--red-tint);
+}
+
 /* ── Shell ── */
 
 .app-shell {
@@ -1058,6 +1062,143 @@ button:hover {
   color: var(--muted);
   line-height: 1.5;
   margin-top: 2px;
+}
+
+/* ── Chats menu (chat-header dropdown) ── */
+
+.chats-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.chats-menu-trigger {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+}
+
+.chats-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+}
+
+.chats-menu-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 300px;
+  max-height: 340px;
+  overflow: auto;
+  z-index: 31;
+  padding: 8px 10px;
+  background: var(--dark2);
+  border: 1px solid var(--border2);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  /* Escape the panel-header's uppercase/spaced heading style. */
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
+  color: var(--text);
+}
+
+.chats-menu-empty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 10px 4px;
+}
+
+.session-group-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 14px 0 4px;
+}
+
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.session-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.session-row.current {
+  background: rgba(43, 79, 163, 0.18);
+}
+
+.prov-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--blue-xl);
+}
+
+.prov-dot.on {
+  background: var(--blue-xl);
+}
+
+.session-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.session-title {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-time {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.session-rename-input {
+  font-size: 13px;
+  padding: 2px 6px;
+  width: 100%;
+}
+
+.session-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex-shrink: 0;
+  opacity: 0;
+}
+
+.session-row:hover .session-actions {
+  opacity: 1;
+}
+
+.show-archived-btn {
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 8px 0;
+  margin-top: 8px;
+  cursor: pointer;
+}
+
+.show-archived-btn:hover {
+  color: var(--text);
 }
 
 .toggle {

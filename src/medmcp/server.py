@@ -48,7 +48,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from medmcp import distill, explain, provenance, replay, settings
+from medmcp import distill, explain, provenance, replay, sessions, settings
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict, VibeAcpClient
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
@@ -711,6 +711,11 @@ class _ChatConnection:
         self.queue = queue
         self.servers = servers
         self._resumed = resumed
+        # Fork tracking: continuing a resumed session makes vibe-acp log under a
+        # new id (see _maybe_adopt_fork). `_known_ids` is the session set snapshot
+        # before the first continued turn; `_fork` is the adopted new id, if any.
+        self._known_ids: set[str] | None = None
+        self._fork: str | None = None
         self._pending_perms: dict[int, asyncio.Future[str | None]] = {}
         self._prompt_task: asyncio.Task[None] | None = None
         # Tool-call state accumulated across frames, keyed by toolCallId; feeds
@@ -763,6 +768,12 @@ class _ChatConnection:
         if not self._prompted and not self._resumed:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(provenance.purge_session, self.session_id)
+        elif self._fork is not None:
+            # The continuation was logged under the fork (the live transcript);
+            # move our provenance record onto it so the record and transcript
+            # live under one id.
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(provenance.move_session_record, self.session_id, self._fork)
 
     async def _cancel_prompt(self) -> None:
         """Cancel the running prompt task and tell vibe-acp to abort its loop."""
@@ -841,6 +852,12 @@ class _ChatConnection:
                             model_name=settings.OLLAMA_MODEL,
                         )
                     )
+        # Snapshot the existing session set before the first continued turn of a
+        # resumed session: vibe-acp logs the continuation under a fresh id, which
+        # _maybe_adopt_fork spots as the one new id afterwards.
+        if self._resumed and self._fork is None and self._known_ids is None:
+            with contextlib.suppress(Exception):
+                self._known_ids = await self._list_session_ids()
         # Frames can still trickle in between a cancel and this prompt
         # (vibe-acp processes session/cancel asynchronously); drop them now so
         # the old turn can't bleed into this one.
@@ -860,6 +877,7 @@ class _ChatConnection:
                 },
             )
         )
+        completed = False
         try:
             while True:
                 get_task: asyncio.Task[JsonDict] = asyncio.create_task(self.queue.get())
@@ -881,6 +899,7 @@ class _ChatConnection:
                     await self._send({"type": "error", "message": str(err.get("message", err))})
                 break
             await self._send({"type": "done"})
+            completed = True
         except asyncio.CancelledError:
             # Deliberately no `done` frame: when a new prompt superseded this
             # one, a stale done would reset the client's busy/permission state
@@ -896,6 +915,48 @@ class _ChatConnection:
                 await _client.notify("session/cancel", {"session_id": self.session_id})
             await self._send({"type": "error", "message": str(exc)})
             await self._send({"type": "done"})
+        if completed and self._resumed and self._fork is None:
+            with contextlib.suppress(Exception):
+                await self._maybe_adopt_fork()
+
+    async def _list_session_ids(self) -> set[str]:
+        """Return the set of session ids vibe-acp currently knows for this workspace."""
+        resp = await _client.request("session/list", {"cwd": str(WORKSPACE_ROOT)})
+        result = cast("JsonDict", resp.get("result") or {})
+        ids: set[str] = set()
+        for s in cast("list[JsonDict]", result.get("sessions") or []):
+            sid = s.get("sessionId") or s.get("session_id")
+            if isinstance(sid, str) and sid:
+                ids.add(sid)
+        return ids
+
+    async def _maybe_adopt_fork(self) -> None:
+        """Adopt the new session vibe-acp creates when a resumed chat is continued.
+
+        ``session/load`` logs continuations under a fresh id (the loaded session
+        is left a stale duplicate), so once exactly one new id appears we retire
+        the original transcript and point the browser at the fork. The provenance
+        record is moved onto the fork on close (see :meth:`close`).
+        """
+        if self._known_ids is None:
+            return
+        # vibe writes the fork's transcript as the turn finishes, which can lag
+        # the prompt response by a beat, so poll briefly for the one new id.
+        fork: str | None = None
+        for _ in range(6):
+            new = await self._list_session_ids() - self._known_ids - {self.session_id}
+            if len(new) == 1:
+                fork = next(iter(new))
+                break
+            if len(new) > 1:
+                return  # ambiguous (concurrent session activity) — don't guess
+            await asyncio.sleep(0.3)
+        if fork is None:
+            return  # no fork — vibe appended in place, nothing to reconcile
+        self._fork = fork
+        # Retire the original transcript so the chat shows up once, as the fork.
+        await asyncio.to_thread(provenance.delete_vibe_transcript, self.session_id)
+        await self._send({"type": "session_migrated", "sessionId": fork})
 
     async def _forward_frame(self, msg: JsonDict, *, replay: bool = False) -> None:
         """Translate one inbound vibe-acp frame into a browser message.
@@ -1122,32 +1183,91 @@ class _ChatConnection:
 # ── Sessions API ───────────────────────────────────────────
 
 
+def _merge_session_registry(raw: list[JsonDict]) -> list[JsonDict]:
+    """Overlay UI metadata (title override, archived, provenance) onto vibe's list.
+
+    Runs off the event loop: it reads the registry file and stats a provenance
+    directory per session.
+    """
+    registry = sessions.load_registry()
+    out: list[JsonDict] = []
+    for s in raw:
+        sid = s.get("sessionId") or s.get("session_id")
+        if not (isinstance(sid, str) and sid):
+            continue
+        entry = registry.get(sid, {})
+        override = entry.get("title")
+        if isinstance(override, str) and override:
+            title = override
+        else:
+            raw_title = s.get("title")
+            title = _strip_workspace_note(str(raw_title)) if raw_title else ""
+        out.append(
+            {
+                "id": sid,
+                "title": title or None,
+                "updatedAt": s.get("updatedAt") or s.get("updated_at"),
+                "archived": bool(entry.get("archived")),
+                "hasProvenance": provenance.provenance_dir(sid).is_dir(),
+            }
+        )
+    return out
+
+
 @app.get("/api/sessions")
 async def get_sessions() -> JsonDict:
     """List prior chat sessions for this workspace (vibe-acp ``session/list``).
 
     vibe-acp persists every session's transcript and can reload it; this surfaces
-    the ones whose cwd is the current workspace so the UI can offer to resume them.
+    the ones whose cwd is the current workspace, overlaid with the UI registry
+    (custom title, archived flag) so the Chats drawer can manage them.
     """
     await _client.ensure_started()
     resp = await _client.request("session/list", {"cwd": str(WORKSPACE_ROOT)})
     if "error" in resp:
         raise HTTPException(status_code=502, detail=str(resp["error"]))
     result = cast("JsonDict", resp.get("result") or {})
-    sessions: list[JsonDict] = []
-    for s in cast("list[JsonDict]", result.get("sessions") or []):
-        sid = s.get("sessionId") or s.get("session_id")
-        if isinstance(sid, str) and sid:
-            raw_title = s.get("title")
-            title = _strip_workspace_note(str(raw_title)) if raw_title else None
-            sessions.append(
-                {
-                    "id": sid,
-                    "title": title or None,
-                    "updatedAt": s.get("updatedAt") or s.get("updated_at"),
-                }
-            )
-    return {"sessions": sessions}
+    raw = cast("list[JsonDict]", result.get("sessions") or [])
+    merged = await asyncio.to_thread(_merge_session_registry, raw)
+    return {"sessions": merged}
+
+
+class RenameSessionPayload(BaseModel):
+    """Request body for setting a session's display title."""
+
+    title: str
+
+
+@app.post("/api/sessions/{session_id}/rename")
+async def rename_session(session_id: str, payload: RenameSessionPayload) -> JsonDict:
+    """Set (or clear, when blank) the user title override for a session."""
+    await asyncio.to_thread(sessions.set_title, session_id, payload.title)
+    return {"ok": True}
+
+
+class ArchiveSessionPayload(BaseModel):
+    """Request body for archiving/restoring a session."""
+
+    archived: bool
+
+
+@app.post("/api/sessions/{session_id}/archive")
+async def archive_session(session_id: str, payload: ArchiveSessionPayload) -> JsonDict:
+    """Archive a session (hide it from the default list) or restore it."""
+    await asyncio.to_thread(sessions.set_archived, session_id, payload.archived)
+    return {"ok": True}
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str) -> JsonDict:
+    """Delete a session for good: its transcript, provenance, and UI metadata."""
+
+    def _delete() -> None:
+        provenance.purge_session(session_id)
+        sessions.remove(session_id)
+
+    await asyncio.to_thread(_delete)
+    return {"ok": True}
 
 
 # ── WebSocket chat ─────────────────────────────────────────

@@ -52,6 +52,10 @@ export default function App() {
     setResumeId(null)
     setChatKey((k) => k + 1)
   }, [])
+  const openSession = useCallback((id: string) => {
+    setResumeId(id)
+    setChatKey((k) => k + 1)
+  }, [])
 
   return (
     <div className={`app-shell${resizing ? ' is-resizing' : ''}`}>
@@ -114,6 +118,8 @@ export default function App() {
                 resumeSessionId={resumeId}
                 onSessionEstablished={handleSessionEstablished}
                 onNewChat={startNewChat}
+                currentSessionId={resumeId}
+                onSelectSession={openSession}
               />
             </Panel>
           </Group>

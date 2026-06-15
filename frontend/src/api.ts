@@ -1,5 +1,6 @@
 import type {
   ReplayPreviewStep,
+  SessionInfo,
   SettingsState,
   TreeNode,
   WorkflowDetail,
@@ -86,6 +87,28 @@ export async function saveSettings(state: SettingsState): Promise<boolean> {
   })
   const body = (await res.json()) as { restarted: boolean }
   return body.restarted
+}
+
+// ── Sessions ─────────────────────────────────────────────────
+
+export async function fetchSessions(): Promise<SessionInfo[]> {
+  const res = await check(await fetch('/api/sessions'))
+  const body = (await res.json()) as { sessions: SessionInfo[] }
+  return body.sessions
+}
+
+/** Set a session's display title (empty string clears the override). */
+export async function renameSession(id: string, title: string): Promise<void> {
+  await postJson(`/api/sessions/${encodeURIComponent(id)}/rename`, { title })
+}
+
+export async function archiveSession(id: string, archived: boolean): Promise<void> {
+  await postJson(`/api/sessions/${encodeURIComponent(id)}/archive`, { archived })
+}
+
+/** Delete a session for good (transcript + provenance + UI metadata). */
+export async function deleteSession(id: string): Promise<void> {
+  await check(await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }))
 }
 
 // ── Workflows ────────────────────────────────────────────────

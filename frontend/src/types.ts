@@ -44,6 +44,15 @@ export interface PermissionRequest {
   risks?: RiskTag[]
 }
 
+/** One prior chat session, as served by GET /api/sessions. */
+export interface SessionInfo {
+  id: string
+  title: string | null
+  updatedAt: string | null
+  archived: boolean
+  hasProvenance: boolean
+}
+
 /** One stack/workflow row plus the feature toggles, as served by /api/settings. */
 export interface StackInfo {
   name: string
@@ -118,6 +127,9 @@ export type ChatItem =
 /** Frames the server sends over /ws/chat. */
 export type ServerFrame =
   | { type: 'ready'; sessionId: string; model?: string }
+  // A resumed session that vibe-acp forked under a new id when continued; the
+  // client should track this id for resume, distillation, and reconnect.
+  | { type: 'session_migrated'; sessionId: string }
   | { type: 'chunk'; text: string }
   // Replayed user turn from a resumed session (session/load); live prompts are
   // rendered locally on send and are not echoed by the server.

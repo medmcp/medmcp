@@ -16,7 +16,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 # pyright: reportPrivateUsage=false
-from medmcp import server, settings
+from medmcp import provenance, server, sessions, settings
 
 # ── _safe_path: the workspace traversal guard ────────────────────────────────
 
@@ -282,3 +282,82 @@ class TestSessionsApi:
         client = TestClient(server.app)
         resp = client.get("/api/sessions")
         assert resp.status_code == 502
+
+    def test_overlays_registry_metadata(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Title overrides, the archived flag, and provenance presence are merged in."""
+        self._stub_client(
+            monkeypatch,
+            {
+                "result": {
+                    "sessions": [
+                        {"sessionId": "s1", "title": "raw vibe title", "updatedAt": "t1"},
+                        {"sessionId": "s2", "title": "kept", "updatedAt": "t2"},
+                    ]
+                }
+            },
+        )
+
+        def _registry() -> dict[str, dict[str, object]]:
+            return {"s1": {"title": "My name"}, "s2": {"archived": True}}
+
+        (tmp_path / "s1").mkdir()  # s1 has a provenance record; s2 does not
+
+        def _prov_dir(session_id: str) -> Path:
+            return tmp_path / session_id
+
+        monkeypatch.setattr(sessions, "load_registry", _registry)
+        monkeypatch.setattr(provenance, "provenance_dir", _prov_dir)
+
+        client = TestClient(server.app)
+        rows = {s["id"]: s for s in client.get("/api/sessions").json()["sessions"]}
+        assert rows["s1"]["title"] == "My name"  # override wins over vibe's title
+        assert rows["s1"]["archived"] is False
+        assert rows["s1"]["hasProvenance"] is True
+        assert rows["s2"]["title"] == "kept"
+        assert rows["s2"]["archived"] is True
+        assert rows["s2"]["hasProvenance"] is False
+
+    def test_rename_sets_title(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """POST …/rename forwards to the registry's set_title."""
+        captured: dict[str, tuple[str, str]] = {}
+
+        def _set_title(session_id: str, title: str) -> None:
+            captured["rename"] = (session_id, title)
+
+        monkeypatch.setattr(sessions, "set_title", _set_title)
+        client = TestClient(server.app)
+        resp = client.post("/api/sessions/abc/rename", json={"title": "New name"})
+        assert resp.status_code == 200
+        assert captured["rename"] == ("abc", "New name")
+
+    def test_archive_sets_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """POST …/archive forwards to the registry's set_archived."""
+        captured: dict[str, tuple[str, bool]] = {}
+
+        def _set_archived(session_id: str, archived: bool) -> None:
+            captured["archive"] = (session_id, archived)
+
+        monkeypatch.setattr(sessions, "set_archived", _set_archived)
+        client = TestClient(server.app)
+        resp = client.post("/api/sessions/abc/archive", json={"archived": True})
+        assert resp.status_code == 200
+        assert captured["archive"] == ("abc", True)
+
+    def test_delete_purges_then_forgets(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """DELETE …/{id} purges the transcript/provenance and drops the registry entry."""
+        calls: list[tuple[str, str]] = []
+
+        def _purge(session_id: str) -> None:
+            calls.append(("purge", session_id))
+
+        def _remove(session_id: str) -> None:
+            calls.append(("remove", session_id))
+
+        monkeypatch.setattr(provenance, "purge_session", _purge)
+        monkeypatch.setattr(sessions, "remove", _remove)
+        client = TestClient(server.app)
+        resp = client.delete("/api/sessions/abc")
+        assert resp.status_code == 200
+        assert calls == [("purge", "abc"), ("remove", "abc")]

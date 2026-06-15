@@ -23,9 +23,17 @@ export default function App() {
   // calls, replay steps) so the explorer/viewer reload their file tree.
   const [fsVersion, setFsVersion] = useState(0)
   const notifyFsChanged = useCallback(() => setFsVersion((v) => v + 1), [])
+  // True while a separator that borders the viewer is being dragged. The viewer
+  // is the only WebGL/iframe panel; compositing it every frame is what makes
+  // such a drag feel heavy, so we hide its canvas (via the `is-resizing` class)
+  // until the layout settles. onLayoutChange fires per pointer move (drag in
+  // progress); onLayoutChanged fires once the drag ends.
+  const [resizing, setResizing] = useState(false)
+  const startResize = useCallback(() => setResizing(true), [])
+  const endResize = useCallback(() => setResizing(false), [])
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${resizing ? ' is-resizing' : ''}`}>
       <header className="app-header">
         <span className="app-logo">MedMCP</span>
         <span className="app-subtitle">workspace</span>
@@ -42,9 +50,16 @@ export default function App() {
         orientation="vertical"
         className="app-main"
         resizeTargetMinimumSize={{ fine: 8, coarse: 24 }}
+        onLayoutChange={startResize}
+        onLayoutChanged={endResize}
       >
         <Panel defaultSize="60%" minSize="20%">
-          <Group orientation="horizontal" resizeTargetMinimumSize={{ fine: 8, coarse: 24 }}>
+          <Group
+            orientation="horizontal"
+            resizeTargetMinimumSize={{ fine: 8, coarse: 24 }}
+            onLayoutChange={startResize}
+            onLayoutChanged={endResize}
+          >
             <Panel defaultSize="25%" minSize="12%">
               <FileExplorer
                 onOpenFile={setOpenPath}

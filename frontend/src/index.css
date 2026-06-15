@@ -199,6 +199,9 @@ button:hover {
   height: 100%;
   background: var(--dark);
   overflow: hidden;
+  /* Isolate each panel's layout/paint so a separator drag (which changes the
+   * panel's flex size every frame) reflows only this box, not its siblings. */
+  contain: layout paint;
 }
 
 .panel-header {
@@ -486,6 +489,15 @@ button:hover {
   background: #fff;
 }
 
+/* While a viewer-bordering separator is dragged (App sets `is-resizing`), skip
+ * painting the WebGL canvas and PDF frame — compositing them each frame is what
+ * makes the drag heavy. They reappear, and the viewer redraws once, on release.
+ * (Hiding the iframe also stops it swallowing the drag's pointer events.) */
+.is-resizing .niivue-canvas,
+.is-resizing .pdf-frame {
+  visibility: hidden;
+}
+
 .image-view {
   max-width: 100%;
   max-height: 100%;
@@ -514,6 +526,17 @@ button:hover {
   max-width: 860px;
   width: 100%;
   margin: 0 auto;
+}
+
+/* Skip layout/paint of transcript rows scrolled out of view: a wide chat with a
+ * long history otherwise re-wraps every message on each resize frame. The
+ * `auto` intrinsic size makes the browser remember each row's real height once
+ * rendered, so the scrollbar doesn't jump when a seen row scrolls off. */
+.chat-scroll > .msg,
+.chat-scroll > .tool-card,
+.chat-scroll > .msg-error {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 80px;
 }
 
 .msg {

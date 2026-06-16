@@ -6,6 +6,25 @@ import type { ChatItem, PermissionRequest, ServerFrame, ToolCallState } from '..
 import { ChatsMenu } from './ChatsMenu'
 import { ShieldIcon } from './icons'
 
+// vibe-acp >= 2.14 sends a tool call's rawInput as a JSON-encoded *string*
+// (read/edit/write tools) rather than an object. Parse it back so the card
+// shows a pretty object instead of an escaped-JSON blob; non-JSON strings are
+// shown as-is and objects are pretty-printed as before.
+function formatToolInput(raw: unknown): string {
+  if (typeof raw === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      if (parsed !== null && typeof parsed === 'object') {
+        return JSON.stringify(parsed, null, 2)
+      }
+    } catch {
+      // not JSON — fall through and show the raw string
+    }
+    return raw
+  }
+  return JSON.stringify(raw, null, 2)
+}
+
 // Memoized so a streaming update to the newest message doesn't re-render
 // (and re-parse the markdown of) every earlier row in the transcript.
 const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
@@ -21,7 +40,7 @@ const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
       {tc.rawInput != null && (
         <details>
           <summary>input</summary>
-          <pre>{JSON.stringify(tc.rawInput, null, 2)}</pre>
+          <pre>{formatToolInput(tc.rawInput)}</pre>
         </details>
       )}
       {tc.output && (
@@ -103,7 +122,7 @@ function PermissionCard({
         </div>
       )}
       {perm.toolCall.rawInput != null && (
-        <pre className="approval-input">{JSON.stringify(perm.toolCall.rawInput, null, 2)}</pre>
+        <pre className="approval-input">{formatToolInput(perm.toolCall.rawInput)}</pre>
       )}
       <div className="approval-btns">
         {perm.options.map((opt) => (

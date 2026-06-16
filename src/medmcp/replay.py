@@ -25,7 +25,7 @@ import ast
 import json
 import os
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -216,7 +216,7 @@ async def mcp_caller(
     *,
     cwd: str | None = None,
     tool_timeout_sec: float = DEFAULT_TOOL_TIMEOUT_SEC,
-) -> AsyncIterator[ToolCaller]:
+) -> AsyncGenerator[ToolCaller]:
     """Yield a :data:`ToolCaller` backed by lazily-spawned MCP stdio servers.
 
     Each needed stack's server is started on first use and reused for the rest of

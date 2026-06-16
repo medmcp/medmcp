@@ -91,7 +91,7 @@ The **workspace UI** is MedMCP's primary interface — a four-panel layout built
 - **File explorer** (top-left) — browse, rename, move, delete, and upload files in your workspace.
 - **Image viewer** (top-right) — view medical images directly in the browser: NIfTI/NRRD/MGZ volumes render with multiplanar slices and a 3D view (scroll to move through slices), and PDFs, images, and text files open inline. **Drag a segmentation from the explorer onto an image** to overlay it — each label is drawn in a distinct color over the anatomy, with an adjustable opacity, and the background stays transparent in both the slices and the 3D render.
 - **Workflows** (bottom-left) — save the current chat as a reusable workflow (the bookmark button distills it into a recipe + skill), then review, rename, refine, promote, or delete it. **Run** replays a saved recipe deterministically on new inputs — no LLM involved: fill in the inputs (drag files in from the explorer), review the resolved steps, and watch each step stream its result.
-- **Chat** (bottom-right) — the MedMCP agent, with streamed responses, per-tool-call approval prompts (with plain-language explanations and risk tags), and a settings drawer for the stack/workflow/feature toggles. The agent knows which file is open in the viewer, so "this image" means what you're looking at.
+- **Chat** (bottom-right) — the MedMCP agent, with streamed responses, per-tool-call approval prompts (with plain-language explanations and risk tags), and a settings drawer for the stack/workflow/feature toggles. The agent knows which file is open in the viewer, so "this image" means what you're looking at. Conversations persist: a refresh resumes your last session, and a **Chats menu** lists, renames, archives, or deletes this workspace's past sessions.
 
 The workspace UI is served by a local server on `http://localhost:8100`.
 
@@ -101,9 +101,6 @@ just workspace        # launch the workspace UI at http://localhost:8100
 ```
 
 The explorer and the agent's working directory are rooted at the repository's `data/` directory by default (created on first launch); point them at another folder with `MEDMCP_WORKSPACE=/path/to/data just workspace`. The server binds to localhost only and gates every tool call behind explicit approval.
-
-> [!NOTE]
-> Chat history/resume is not yet available in the workspace UI — a refresh starts a fresh session (saved workflows and provenance records persist).
 
 ---
 

@@ -197,6 +197,58 @@ def test_purge_session_is_safe_when_absent(tmp_path: Path) -> None:
         provenance.purge_session(SESSION_ID)  # no error
 
 
+FORK_ID = "ef567890-9999-8888-7777-666655554444"
+
+
+def test_delete_vibe_transcript_keeps_provenance(tmp_path: Path) -> None:
+    """delete_vibe_transcript drops the transcript dir but leaves provenance."""
+    vibe_dir = tmp_path / "logs" / "session" / "session_20260101_000000_abcd1234"
+    vibe_dir.mkdir(parents=True)
+    (vibe_dir / "meta.json").write_text(json.dumps({"session_id": SESSION_ID}))
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        provenance.append_run_event(SESSION_ID, {"tool": "a"})
+        prov_dir = provenance.provenance_dir(SESSION_ID)
+
+        provenance.delete_vibe_transcript(SESSION_ID)
+
+        assert not vibe_dir.exists()
+        assert prov_dir.exists()  # provenance is preserved for relocation
+
+
+def test_move_session_record_relocates(tmp_path: Path) -> None:
+    """The provenance record moves from the old id to the fork id."""
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        provenance.append_run_event(SESSION_ID, {"tool": "a"})
+        old_dir = provenance.provenance_dir(SESSION_ID)
+        new_dir = provenance.provenance_dir(FORK_ID)
+
+        provenance.move_session_record(SESSION_ID, FORK_ID)
+
+        assert not old_dir.exists()
+        assert (new_dir / "run.jsonl").exists()
+
+
+def test_move_session_record_no_clobber(tmp_path: Path) -> None:
+    """An existing destination is left intact (the source is not moved over it)."""
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        provenance.append_run_event(SESSION_ID, {"tool": "old"})
+        provenance.append_run_event(FORK_ID, {"tool": "new"})
+
+        provenance.move_session_record(SESSION_ID, FORK_ID)
+
+        # Destination kept its own record; source remains rather than overwriting.
+        assert provenance.provenance_dir(SESSION_ID).exists()
+        events = provenance.read_run_events(FORK_ID)
+        assert [e.get("tool") for e in events] == ["new"]
+
+
+def test_move_session_record_absent_source(tmp_path: Path) -> None:
+    """Moving a record that doesn't exist is a no-op, not an error."""
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        provenance.move_session_record(SESSION_ID, FORK_ID)  # no error
+        assert not provenance.provenance_dir(FORK_ID).exists()
+
+
 # ── orphan GC ────────────────────────────────────────────────────────────────
 
 

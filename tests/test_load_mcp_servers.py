@@ -1,4 +1,4 @@
-"""Tests for _load_mcp_servers() — uv tool env scanning and config.toml fallback."""
+"""Tests for load_mcp_servers() — uv tool env scanning and config.toml fallback."""
 
 from __future__ import annotations
 
@@ -6,13 +6,13 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from medmcp.app import _load_mcp_servers  # pyright: ignore[reportPrivateUsage]
+from medmcp.settings import load_mcp_servers
 
 JsonDict = dict[str, Any]
 
 
 def _clear_cache() -> None:
-    _load_mcp_servers.cache_clear()
+    load_mcp_servers.cache_clear()
 
 
 def _make_tool_env(
@@ -49,7 +49,7 @@ def _make_tool_env(
 
 
 class TestUvToolDiscovery:
-    """_load_mcp_servers scans uv tool envs for [medmcp.stacks] entry points."""
+    """load_mcp_servers scans uv tool envs for [medmcp.stacks] entry points."""
 
     def setup_method(self) -> None:
         """Clear the lru_cache before each test so patches take effect."""
@@ -61,11 +61,11 @@ class TestUvToolDiscovery:
         config: JsonDict = {"name": "medmcp-test", "command": "medmcp-test", "args": []}
 
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=tmp_path),
-            patch("medmcp.app._call_entry_point", return_value=config),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=tmp_path),
+            patch("medmcp.settings.call_entry_point", return_value=config),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
         ):
-            servers = _load_mcp_servers()
+            servers = load_mcp_servers()
 
         assert len(servers) == 1
         assert servers[0]["name"] == "medmcp-test"
@@ -76,11 +76,11 @@ class TestUvToolDiscovery:
         config = {"name": "medmcp-test", "command": "medmcp-test"}
 
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=tmp_path),
-            patch("medmcp.app._call_entry_point", return_value=config),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=tmp_path),
+            patch("medmcp.settings.call_entry_point", return_value=config),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
         ):
-            servers = _load_mcp_servers()
+            servers = load_mcp_servers()
 
         expected = str(tmp_path / "medmcp-test" / "bin" / "medmcp-test")
         assert servers[0]["command"] == expected
@@ -91,11 +91,11 @@ class TestUvToolDiscovery:
         config = {"name": "medmcp-x", "command": "medmcp-x"}
 
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=tmp_path),
-            patch("medmcp.app._call_entry_point", return_value=config),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=tmp_path),
+            patch("medmcp.settings.call_entry_point", return_value=config),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
         ):
-            servers = _load_mcp_servers()
+            servers = load_mcp_servers()
 
         assert servers[0]["env"] == {}
 
@@ -110,11 +110,11 @@ class TestUvToolDiscovery:
             return {"name": "medmcp-ok", "command": "medmcp-ok"}
 
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=tmp_path),
-            patch("medmcp.app._call_entry_point", side_effect=_side_effect),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=tmp_path),
+            patch("medmcp.settings.call_entry_point", side_effect=_side_effect),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
         ):
-            servers = _load_mcp_servers()
+            servers = load_mcp_servers()
 
         names = [s["name"] for s in servers]
         assert "medmcp-ok" in names
@@ -125,11 +125,11 @@ class TestUvToolDiscovery:
         _make_tool_env(tmp_path, "medmcp-bad")
 
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=tmp_path),
-            patch("medmcp.app._call_entry_point", return_value={"command": "uvx"}),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=tmp_path),
+            patch("medmcp.settings.call_entry_point", return_value={"command": "uvx"}),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
         ):
-            servers = _load_mcp_servers()
+            servers = load_mcp_servers()
 
         assert servers == []
 
@@ -138,20 +138,20 @@ class TestUvToolDiscovery:
         _make_tool_env(tmp_path, "medmcp-bad", ep_value="not_valid")
 
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=tmp_path),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=tmp_path),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
         ):
-            servers = _load_mcp_servers()
+            servers = load_mcp_servers()
 
         assert servers == []
 
     def test_no_uv_tool_dir_returns_empty(self, tmp_path: Path) -> None:
         """When uv is unavailable, discovery falls back to config.toml only."""
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=None),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
         ):
-            servers = _load_mcp_servers()
+            servers = load_mcp_servers()
 
         assert servers == []
 
@@ -165,11 +165,11 @@ class TestUvToolDiscovery:
         config = {"name": "medmcp-test", "command": ""}
 
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=tmp_path),
-            patch("medmcp.app._call_entry_point", return_value=config),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=tmp_path),
+            patch("medmcp.settings.call_entry_point", return_value=config),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
         ):
-            servers = _load_mcp_servers()
+            servers = load_mcp_servers()
 
         assert len(servers) == 1
         # command must stay empty, not become the bin directory path
@@ -194,10 +194,10 @@ class TestConfigTomlFallback:
             'command = "medmcp-neuro"\nargs = ["medmcp-neuro"]\n'
         )
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=None),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
         ):
-            servers = _load_mcp_servers()
+            servers = load_mcp_servers()
 
         assert len(servers) == 1
         assert servers[0]["name"] == "medmcp-neuro"
@@ -210,11 +210,11 @@ class TestConfigTomlFallback:
         cfg.write_text('[[mcp_servers]]\nname = "medmcp-neuro"\ncommand = "/stale/path"\n')
 
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=tmp_path),
-            patch("medmcp.app._call_entry_point", return_value=ep_config),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=tmp_path),
+            patch("medmcp.settings.call_entry_point", return_value=ep_config),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
         ):
-            servers = _load_mcp_servers()
+            servers = load_mcp_servers()
 
         assert len(servers) == 1
         # command is the resolved absolute path, not the stale config value
@@ -228,11 +228,11 @@ class TestConfigTomlFallback:
         cfg.write_text('[[mcp_servers]]\nname = "medmcp-neuro"\ncommand = "medmcp-neuro"\n')
 
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=tmp_path),
-            patch("medmcp.app._call_entry_point", return_value=ep_config),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=tmp_path),
+            patch("medmcp.settings.call_entry_point", return_value=ep_config),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
         ):
-            servers = _load_mcp_servers()
+            servers = load_mcp_servers()
 
         names = {s["name"] for s in servers}
         assert names == {"medmcp-neuro", "medmcp-cardiac"}
@@ -240,9 +240,9 @@ class TestConfigTomlFallback:
     def test_no_tools_no_config_returns_empty(self, tmp_path: Path) -> None:
         """Nothing installed and no config → empty list."""
         with (
-            patch("medmcp.app._get_uv_tool_dir", return_value=tmp_path),
-            patch("medmcp.app.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.get_uv_tool_dir", return_value=tmp_path),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
         ):
-            servers = _load_mcp_servers()
+            servers = load_mcp_servers()
 
         assert servers == []

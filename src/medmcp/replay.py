@@ -7,7 +7,7 @@ is captured from the tool's structured result and substituted into later steps'
 ``{{stepM.<key>}}`` placeholders, so a multi-step pipeline chains exactly as it
 did when it was recorded.
 
-This module has no Chainlit/vibe-acp dependency: callers pass in the resolved
+This module has no UI/vibe-acp dependency: callers pass in the resolved
 MCP server launch configs (``command``/``args``/``env`` as produced by
 ``app._load_mcp_servers``), so it can be driven from the UI or a CLI alike.
 
@@ -25,7 +25,7 @@ import ast
 import json
 import os
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -180,8 +180,17 @@ def _result_failed(result: mcp_types.CallToolResult) -> bool:
     """Detect a failed tool call (protocol error flag or known failure markers)."""
     if result.isError:
         return True
+    # Defense-in-depth for stacks that report a failure as a non-error result
+    # (text only). FastMCP wraps a raised exception as "Error executing tool …";
+    # "(exit N)" catches an embedded non-zero subprocess code. Mirrors
+    # ``distill._is_failed_result`` so a recipe and its replay agree on failure.
     text = _result_text(result)
-    return "ok: False" in text or "returncode: 1" in text
+    return (
+        "ok: False" in text
+        or "returncode: 1" in text
+        or "Error executing tool" in text
+        or re.search(r"\(exit ([1-9]\d*)\)", text) is not None
+    )
 
 
 # ── MCP transport ─────────────────────────────────────────────────────────────
@@ -207,7 +216,7 @@ async def mcp_caller(
     *,
     cwd: str | None = None,
     tool_timeout_sec: float = DEFAULT_TOOL_TIMEOUT_SEC,
-) -> AsyncIterator[ToolCaller]:
+) -> AsyncGenerator[ToolCaller]:
     """Yield a :data:`ToolCaller` backed by lazily-spawned MCP stdio servers.
 
     Each needed stack's server is started on first use and reused for the rest of

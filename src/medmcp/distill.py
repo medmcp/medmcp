@@ -140,9 +140,25 @@ def _structured_output_paths(result_text: str) -> dict[str, str]:
     return out
 
 
+# FastMCP wraps any exception a tool raises into a result whose text begins with
+# "Error executing tool <name>:" and sets the MCP ``isError`` flag. vibe-acp,
+# however, renders that result into ``messages.jsonl`` as ``ok: True`` (its
+# ``ok:`` tracks JSON-RPC success, not the tool's ``isError``), so by the time
+# distillation reads the transcript the wrapper text is the only failure signal
+# left. ``_NONZERO_EXIT_RE`` additionally catches "(exit N)" for tools that
+# embed a subprocess exit code in the message.
+_TOOL_ERROR_MARKER: str = "Error executing tool"
+_NONZERO_EXIT_RE = re.compile(r"\(exit ([1-9]\d*)\)")
+
+
 def _is_failed_result(result_text: str) -> bool:
     """Detect a failed tool result so dead-ends are excluded from the recipe."""
-    return "ok: False" in result_text or "returncode: 1" in result_text
+    return (
+        "ok: False" in result_text
+        or "returncode: 1" in result_text
+        or _TOOL_ERROR_MARKER in result_text
+        or _NONZERO_EXIT_RE.search(result_text) is not None
+    )
 
 
 # Markers vibe-acp writes into a tool result when the user rejected/cancelled the

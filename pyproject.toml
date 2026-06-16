@@ -27,26 +27,30 @@ classifiers = [
 keywords = ["medical", "image processing", "ai-agent"]
 requires-python = ">=3.12"
 dependencies = [
-    "chainlit>=2.11.1,<3",
-    "mistral-vibe>=2.8.1,<3",
-    "sqlalchemy[asyncio]>=2.0.49,<3",
-    "aiosqlite>=0.20",
+    "mistral-vibe>=2.14.1,<3",
     "tomli-w>=1.0",
     "pyyaml>=6.0",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    # uvicorn's WebSocket protocol needs an explicit ws library (/ws/chat,
+    # /ws/replay).
+    "websockets>=13",
+    "python-multipart>=0.0.18",
+    "httpx>=0.27",
 ]
 
 [project.scripts]
-medmcp-ui = "medmcp.cli:main"
 medmcp = "medmcp.provcli:main"
+medmcp-workspace = "medmcp.server:main"
 
 [dependency-groups]
 test = [
     "pytest>=9",
-    "pytest-asyncio>=1.2"
+    "pytest-asyncio>=1.4.0"
 ]
 quality = [
-    "ruff>=0.15.11",
-    "pyright>=1.1.400",
+    "ruff>=0.15.16",
+    "pyright>=1.1.410",
     "pre-commit>=4.6.0",
     "types-pyyaml>=6.0"
 ]

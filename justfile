@@ -23,10 +23,9 @@ clean:
 # Promoted workflows under .vibe/workflows/active/ are preserved; use
 # clean-workflows to remove those too.
 
-# Remove local chat/session state under .vibe/ (logs, DB, history, provenance, drafts)
+# Remove local chat/session state under .vibe/ (logs, history, provenance, drafts)
 clean-chats:
     rm -rf .vibe/logs
-    rm -f .vibe/medmcp_threads.db
     rm -f .vibe/trusted_folders.toml
     rm -rf .vibe/vibehistory
     rm -rf .vibe/provenance
@@ -146,18 +145,26 @@ workflows:
 delete-workflow NAME:
     uv run medmcp delete {{NAME}}
 
-# Launch the Chainlit web UI
-ui:
-    @./scripts/run_ui.sh
+# Launch the workspace UI (explorer + viewer + chat) at http://localhost:8100
+workspace:
+    uv run medmcp-workspace
+
+# Build the workspace frontend bundle (requires node/npm)
+workspace-build:
+    cd frontend && npm install && npm run build
+
+# Run the frontend dev server with hot reload (proxies to medmcp-workspace)
+workspace-dev:
+    cd frontend && npm run dev
 
 # Start the Ollama server (blocks until stopped)
 serve-ollama:
     ollama serve
 
 # One-shot: install everything, pull Gemma 4 model, start Ollama, launch the UI
-medmcp: setup pull-model
+medmcp: setup pull-model workspace-build
     @echo "Starting Ollama server..."
     @ollama serve &
     @sleep 2
-    @echo "Launching MedMCP UI..."
-    @./scripts/run_ui.sh
+    @echo "Launching the MedMCP workspace..."
+    uv run medmcp-workspace

@@ -12,22 +12,23 @@ session into ``.vibe/provenance/<session_id>/``:
 - ``report.md``      — a documentation-grade Markdown rendering, generated on
   demand from the manifest + run log.
 
-This module is deliberately free of any Chainlit/vibe-acp dependency so it can
+This module is deliberately free of any UI/vibe-acp dependency so it can
 also be driven from the CLI (:mod:`medmcp.provcli`). Callers pass in the data
-they already have (active servers, model name); nothing here reaches back into
-``app.py``. Every write is best-effort at the call site — provenance must never
-break a chat.
+they already have (active servers, model name). Every write is best-effort at
+the call site — provenance must never break a chat.
 """
 
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import platform
 import re
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,7 +36,7 @@ from typing import Any, cast
 
 JsonDict = dict[str, Any]
 
-# Resolve the repo root the same way app.py does: src/medmcp/provenance.py →
+# Resolve the repo root from this file: src/medmcp/provenance.py →
 # src/medmcp → src → <root>. VIBE_HOME is module-level so tests can monkeypatch
 # it; all path helpers read it at call time rather than caching a derived path.
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
@@ -235,12 +236,51 @@ def read_run_events(session_id: str) -> list[JsonDict]:
 def log_permission(session_id: str, *, title: str, decision: str) -> None:
     """Append a permission decision to ``permissions.log`` for *session_id*.
 
-    This is a persisted mirror of the ``medmcp.audit`` stderr trail; the stderr
-    handler in ``app.py`` is unchanged and must not be silenced.
+    This is a persisted mirror of the ``medmcp.audit`` stderr trail; the
+    stderr handler is unchanged and must not be silenced.
     """
     d = _ensure_dir(session_id)
     with (d / "permissions.log").open("a", encoding="utf-8") as f:
         f.write(f"{_utc_now_iso()}\t{decision}\t{title}\n")
+
+
+def record_tool_event(session_id: str, tc_id: str, info: JsonDict, server_names: list[str]) -> None:
+    """Append a normalized run-log event for a completed tool call (best-effort).
+
+    ``info`` is the UI's accumulated tool-call state (title, rawInput, status,
+    rawOutput/outputText, decision, risks, humanReadable, ``_started`` monotonic
+    timestamp). Idempotent per call via the ``_logged`` marker, since
+    ``tool_call_update`` can fire more than once. Never raises — provenance
+    must not break a chat.
+    """
+    if info.get("_logged"):
+        return
+    info["_logged"] = True
+    started = info.get("_started")
+    duration = time.monotonic() - started if isinstance(started, (int, float)) else None
+    title = info.get("title")
+    title_str = title if isinstance(title, str) else None
+    server, tool = split_tool_name(title_str or tc_id, server_names)
+    risks = info.get("risks")
+    decision = info.get("decision")
+    human_readable = info.get("humanReadable")
+    output_text = info.get("outputText")
+    event = normalize_tool_event(
+        tool_call_id=tc_id,
+        title=title_str,
+        server=server,
+        tool=tool,
+        raw_input=info.get("rawInput"),
+        raw_output=info.get("rawOutput"),
+        output_text=output_text if isinstance(output_text, str) else None,
+        status=str(info.get("status") or ""),
+        decision=str(decision) if decision is not None else None,
+        risks=cast("list[str]", risks) if isinstance(risks, list) else None,
+        human_readable=human_readable if isinstance(human_readable, str) else None,
+        duration_sec=duration,
+    )
+    with contextlib.suppress(Exception):
+        append_run_event(session_id, event)
 
 
 # ── Vibe session lookup ──────────────────────────────────────────────────────
@@ -306,9 +346,36 @@ def purge_session(session_id: str) -> None:
     pdir = provenance_dir(session_id)
     if pdir.exists():
         shutil.rmtree(pdir, ignore_errors=True)
+    delete_vibe_transcript(session_id)
+
+
+def delete_vibe_transcript(session_id: str) -> None:
+    """Delete only vibe-acp's transcript dir for *session_id* (keep provenance).
+
+    Used to retire a session that a fork has superseded: when continuing a
+    reloaded chat, vibe-acp logs under a new id, leaving the original transcript
+    a stale duplicate. Removing it drops the duplicate from vibe's session list
+    while the provenance is relocated to the fork via :func:`move_session_record`.
+    """
     vibe_dir = find_vibe_session_dir(session_id)
     if vibe_dir is not None and vibe_dir.exists():
         shutil.rmtree(vibe_dir, ignore_errors=True)
+
+
+def move_session_record(old_id: str, new_id: str) -> None:
+    """Relocate the provenance record from *old_id* to *new_id* (best-effort).
+
+    No-op if the source is absent; if the destination already exists the source
+    is left untouched rather than clobbering it.
+    """
+    src = provenance_dir(old_id)
+    if not src.exists():
+        return
+    dst = provenance_dir(new_id)
+    if dst.exists():
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dst))
 
 
 # ── Human-readable report ────────────────────────────────────────────────────

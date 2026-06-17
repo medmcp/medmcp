@@ -31,7 +31,8 @@ MedMCP runs entirely on-premise and is designed to meet the data governance and 
 
 - **OS:** Linux (tested on Ubuntu)
 - **Hardware:** an NVIDIA GPU; ≥ 24 GB VRAM recommended for the local Gemma 4 26B model (~18 GB loaded). CPU-only inference works but is slow.
-- **To run (recommended):** Docker (rootless is supported) + the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/) with a CDI spec (`nvidia-ctk cdi generate`); host driver ≥ R570 (CUDA 12.8); and access to the private image registry — `docker login ghcr.io` with a `read:packages` token.
+- **To run (recommended):** Docker (rootless is supported) + the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/) with a CDI spec (`nvidia-ctk cdi generate`); host driver ≥ R570 (CUDA 12.8); and access to the private image registry — `docker login ghcr.io` with a `read:packages` token. You can create one with your GitHub account by going to *"Settings" > "Developer Settings" > "Personal access tokens" > "Tokens (classic)" > "Generate new Token" > "Generate new token (classic)"* where you have to enable the option *read:packages*.
+
 - **To develop (build from source):** [uv](https://docs.astral.sh/uv/) and [just](https://github.com/casey/just) (we recommend `uv tool install rust-just`); Node 24 for the frontend.
 
 ### Run with Docker (recommended)

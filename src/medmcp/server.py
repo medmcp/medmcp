@@ -325,6 +325,67 @@ async def _restart_vibe() -> None:
             await conn.ws.close()
 
 
+class StackInstallPayload(BaseModel):
+    """Request body for installing a container stack from an image."""
+
+    image: str
+
+
+class StackUninstallPayload(BaseModel):
+    """Request body for uninstalling a container stack by name."""
+
+    name: str
+
+
+def _apply_stack_change() -> None:
+    """Re-discover stacks and re-sync vibe-acp config after an install/uninstall."""
+    settings.load_mcp_servers.cache_clear()
+    settings.sync_servers_to_vibe_config(settings.active_servers())
+
+
+@app.get("/api/stacks")
+async def get_stacks() -> JsonDict:
+    """List installed container stacks (from ``stacks.d`` manifests)."""
+    return {"stacks": await asyncio.to_thread(settings.list_installed_stacks)}
+
+
+@app.post("/api/stacks/install")
+async def post_stack_install(payload: StackInstallPayload) -> JsonDict:
+    """Install a container stack from an image, then reload vibe-acp.
+
+    Pulls the image if needed, reads its ``org.medmcp.stack`` label, extracts its
+    skills, writes the ``stacks.d`` manifest, and restarts vibe-acp so the stack
+    is available. The image is inspected, never executed, to read the label.
+    """
+    try:
+        name = await asyncio.to_thread(settings.install_stack_image, payload.image)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    await asyncio.to_thread(_apply_stack_change)
+    _audit.info("stack installed: %s (%s)", name, payload.image)
+    await _restart_vibe()
+    return {"name": name, "restarted": True}
+
+
+@app.post("/api/stacks/uninstall")
+async def post_stack_uninstall(payload: StackUninstallPayload) -> JsonDict:
+    """Uninstall a container stack by name, then reload vibe-acp."""
+    try:
+        await asyncio.to_thread(settings.uninstall_stack, payload.name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await asyncio.to_thread(_apply_stack_change)
+    _audit.info("stack uninstalled: %s", payload.name)
+    await _restart_vibe()
+    return {"ok": True, "restarted": True}
+
+
 # ── Workflow API ───────────────────────────────────────────
 #
 # Drives the provenance→distill→replay pipeline (Tier 2/3) from the workspace

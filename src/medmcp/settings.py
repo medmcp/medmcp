@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -359,6 +360,164 @@ def active_servers() -> list[JsonDict]:
     """Return only the active subset of all discovered servers."""
     active_names = load_active_server_names()
     return [s for s in load_mcp_servers() if s["name"] in active_names]
+
+
+# ── Container-stack install / uninstall (UI-driven) ──────────────────────────
+# An installed container stack is just a stacks.d/<name>.toml manifest plus its
+# extracted skills. Metadata comes from the image's OCI label (read via
+# `docker inspect` — the image is never executed to introspect it).
+
+# Label carrying a stack's launch metadata. JSON value, e.g.:
+#   {"name": "medmcp-neuro", "gpu": true, "tool_timeout_sec": 7200,
+#    "skills_path": "/app/src/medmcp_neuro/skills"}
+STACK_LABEL: str = "org.medmcp.stack"
+_STACK_NAME_RE: re.Pattern[str] = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def _run_docker(args: list[str], *, timeout: float = 600.0) -> subprocess.CompletedProcess[str]:
+    """Run a ``docker`` command (list args, no shell); raise RuntimeError on failure."""
+    try:
+        result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError as exc:
+        raise RuntimeError("docker CLI not found") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"docker {args[0]} timed out") from exc
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"docker {args[0]} failed")
+    return result
+
+
+def read_stack_label(image: str) -> JsonDict:
+    """Return the parsed ``org.medmcp.stack`` label of *image*, pulling it if absent.
+
+    Raises:
+        ValueError: invalid image ref, or malformed/incomplete label.
+        FileNotFoundError: the image carries no such label (not a medmcp stack).
+        RuntimeError: a docker command failed (e.g. image not found in any registry).
+    """
+    image = image.strip()
+    if not image or any(c.isspace() for c in image):
+        raise ValueError(f"invalid image reference: {image!r}")
+    # Ensure the image is present locally; pull from the registry only if not.
+    try:
+        _run_docker(["image", "inspect", image], timeout=30)
+    except RuntimeError:
+        _run_docker(["pull", image])
+    fmt = '{{ index .Config.Labels "' + STACK_LABEL + '" }}'
+    raw = _run_docker(["inspect", "--format", fmt, image], timeout=30).stdout.strip()
+    if not raw or raw == "<no value>":
+        raise FileNotFoundError(f"{image} has no {STACK_LABEL} label (not a medmcp stack)")
+    try:
+        meta = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"malformed {STACK_LABEL} label on {image}: {exc}") from exc
+    if not isinstance(meta, dict) or not str(cast("JsonDict", meta).get("name", "")).strip():
+        raise ValueError(f"{STACK_LABEL} label on {image} missing 'name'")
+    return cast("JsonDict", meta)
+
+
+def _extract_image_skills(image: str, in_image_path: str, into_dir: Path) -> None:
+    """Copy ``<image>:<in_image_path>`` into *into_dir* via a throwaway container.
+
+    The result is ``into_dir/<basename of in_image_path>`` (docker cp of a dir
+    drops it as a subdir of the destination).
+    """
+    into_dir.mkdir(parents=True, exist_ok=True)
+    cid = _run_docker(["create", image], timeout=60).stdout.strip()
+    try:
+        _run_docker(["cp", f"{cid}:{in_image_path}", str(into_dir)], timeout=120)
+    finally:
+        with contextlib.suppress(RuntimeError):
+            _run_docker(["rm", "-f", cid], timeout=30)
+
+
+def _write_stack_manifest(name: str, entry: JsonDict) -> None:
+    """Atomically write ``stacks.d/<name>.toml``."""
+    STACKS_D_PATH.mkdir(parents=True, exist_ok=True)
+    path = STACKS_D_PATH / f"{name}.toml"
+    fd, tmp_name = tempfile.mkstemp(dir=STACKS_D_PATH, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            tomli_w.dump(entry, fh)
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+
+
+def install_stack_image(image: str) -> str:
+    """Install a container stack from *image* and return its name.
+
+    Reads the image's ``org.medmcp.stack`` label, extracts its skills next to the
+    manifest, writes ``stacks.d/<name>.toml`` (the launch recipe), and marks the
+    stack active. Idempotent — re-installing overwrites. Raises as
+    :func:`read_stack_label` plus ValueError for a bad name in the label.
+    """
+    meta = read_stack_label(image)
+    name = str(meta["name"]).strip()
+    if not _STACK_NAME_RE.fullmatch(name):
+        raise ValueError(f"invalid stack name in label: {name!r}")
+
+    args: list[str] = ["run", "--rm", "-i"]
+    if meta.get("gpu"):
+        args += ["--device", "nvidia.com/gpu=all"]
+    args += ["-v", "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}", image]
+    entry: JsonDict = {"name": name, "command": "docker", "args": args}
+
+    timeout = meta.get("tool_timeout_sec")
+    if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+        entry["tool_timeout_sec"] = float(timeout)
+
+    # Skills live inside the image but the agent loads them from the core fs, so
+    # extract them next to the manifest and point skills_path there.
+    in_image_skills = meta.get("skills_path")
+    if isinstance(in_image_skills, str) and in_image_skills.strip():
+        skills_root = STACKS_D_PATH / name
+        shutil.rmtree(skills_root, ignore_errors=True)  # clean prior extraction
+        _extract_image_skills(image, in_image_skills.strip(), skills_root)
+        extracted = skills_root / Path(in_image_skills.strip()).name
+        if extracted.is_dir():
+            entry["skills_path"] = str(extracted)
+
+    _write_stack_manifest(name, entry)
+
+    # Make it active immediately. Only touch an explicit set if one exists;
+    # an absent active_stacks.json already means "all discovered are active".
+    if ACTIVE_STACKS_PATH.exists():
+        save_active_server_names(load_active_server_names() | {name})
+    return name
+
+
+def uninstall_stack(name: str) -> None:
+    """Remove an installed container stack's manifest and extracted skills.
+
+    Raises ValueError for a bad name, FileNotFoundError if not installed.
+    """
+    if not _STACK_NAME_RE.fullmatch(name):
+        raise ValueError(f"invalid stack name: {name!r}")
+    manifest = STACKS_D_PATH / f"{name}.toml"
+    if not manifest.exists():
+        raise FileNotFoundError(f"no installed stack named {name!r}")
+    manifest.unlink()
+    shutil.rmtree(STACKS_D_PATH / name, ignore_errors=True)
+    if ACTIVE_STACKS_PATH.exists():
+        save_active_server_names(load_active_server_names() - {name})
+
+
+def list_installed_stacks() -> list[JsonDict]:
+    """Return installed container stacks (from stacks.d manifests): name, image, gpu."""
+    out: list[JsonDict] = []
+    for m in _load_stack_manifests():
+        args = cast("list[str]", m.get("args", []))
+        out.append(
+            {
+                "name": m["name"],
+                "image": args[-1] if args else "",
+                "gpu": "--device" in args,
+            }
+        )
+    return out
 
 
 def read_skill_description(skill_md: Path) -> str:

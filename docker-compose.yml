@@ -62,8 +62,8 @@ services:
       - "${XDG_RUNTIME_DIR}/docker.sock:/var/run/docker.sock"
       # Workspace at an identical absolute path (path parity for nested run -v).
       - "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}"
-      # Container-stack manifests (read-only); edit without rebuilding the image.
-      - "./stacks.d:/app/stacks.d:ro"
+      # Container-stack manifests (read-write so UI install/uninstall can persist).
+      - "./stacks.d:/app/stacks.d"
     restart: unless-stopped
 
 volumes:

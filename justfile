@@ -198,6 +198,13 @@ compose-up:
     OLLAMA_MODELS_DIR="${OLLAMA_MODELS_DIR:-$HOME/.ollama}" \
     docker compose up -d --build
 
+# Bring up the stack from the PUBLISHED GHCR images (pulls core, builds nothing).
+# Run `docker login ghcr.io` first. Pin a release with MEDMCP_TAG=<git-sha>.
+compose-up-ghcr:
+    MEDMCP_WORKSPACE="${MEDMCP_WORKSPACE:-$(pwd)/data}" \
+    OLLAMA_MODELS_DIR="${OLLAMA_MODELS_DIR:-$HOME/.ollama}" \
+    docker compose -f docker-compose.ghcr.yml up -d --pull always
+
 # Tear down the stack.
 compose-down:
     MEDMCP_WORKSPACE="${MEDMCP_WORKSPACE:-$(pwd)/data}" docker compose down

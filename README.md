@@ -158,7 +158,7 @@ Once installed, the stack is auto-discovered via its `[medmcp.stacks]` entry poi
 **Private images (GHCR).** CI (`.github/workflows/images.yml`) builds and pushes the base, core, and stack images to the **private** registry `ghcr.io/medmcp/*` (packages are private by default; the base package must grant the stack repos read access). For a private fleet:
 
 1. `docker login ghcr.io` on each node (a `read:packages` token); compose mounts the host's docker credentials so the in-UI install can pull.
-2. Point the catalog at the published images: `MEDMCP_CATALOG_URL=/app/catalog.ghcr.json` (bundled), or your own catalog of `ghcr.io/medmcp/*:<sha>` refs.
+2. Run the **published** images (pulls the core, builds nothing) with the deploy compose — `just compose-up-ghcr`, i.e. `docker compose -f docker-compose.ghcr.yml up -d`. It defaults `MEDMCP_CATALOG_URL` to the bundled `/app/catalog.ghcr.json`; pin a release with `MEDMCP_TAG=<git-sha>`. A node needs only this file + `Modelfile.gemma4`.
 
 Air-gapped sites mirror the images into an internal registry and point the catalog there instead. No image data leaves the machine either way — these are inbound pulls.
 

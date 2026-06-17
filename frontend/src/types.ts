@@ -60,6 +60,13 @@ export interface StackInfo {
   active: boolean
 }
 
+/** A container-installed stack (from GET /api/stacks); uninstallable via the UI. */
+export interface InstalledStack {
+  name: string
+  image: string
+  gpu: boolean
+}
+
 export interface WorkflowInfo {
   name: string
   description: string

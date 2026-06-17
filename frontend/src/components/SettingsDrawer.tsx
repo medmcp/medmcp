@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
-import { fetchSettings, saveSettings } from '../api'
-import type { SettingsState } from '../types'
+import {
+  fetchInstalledStacks,
+  fetchSettings,
+  installStack,
+  saveSettings,
+  uninstallStack,
+} from '../api'
+import type { InstalledStack, SettingsState } from '../types'
 import { XIcon } from './icons'
 
 interface SettingsDrawerProps {
@@ -62,15 +68,19 @@ function Row({
  */
 export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [state, setState] = useState<SettingsState | null>(null)
+  const [installed, setInstalled] = useState<InstalledStack[]>([])
+  const [installImage, setInstallImage] = useState('')
+  const [installing, setInstalling] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     if (!open) return
-    fetchSettings()
-      .then((s) => {
+    Promise.all([fetchSettings(), fetchInstalledStacks()])
+      .then(([s, inst]) => {
         setState(s)
+        setInstalled(inst)
         setError(null)
         setNotice(null)
       })
@@ -89,7 +99,45 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       .finally(() => setSaving(false))
   }
 
+  const reloadStacks = async () => {
+    const [s, inst] = await Promise.all([fetchSettings(), fetchInstalledStacks()])
+    setState(s)
+    setInstalled(inst)
+  }
+
+  const doInstall = () => {
+    const image = installImage.trim()
+    if (!image || installing) return
+    setInstalling(true)
+    setError(null)
+    setNotice(null)
+    installStack(image)
+      .then(async (name) => {
+        setInstallImage('')
+        await reloadStacks()
+        setNotice(`Installed ${name} — agent restarted into a fresh session.`)
+      })
+      .catch((e: unknown) => setError(String(e)))
+      .finally(() => setInstalling(false))
+  }
+
+  const doUninstall = (name: string) => {
+    if (installing) return
+    setInstalling(true)
+    setError(null)
+    setNotice(null)
+    uninstallStack(name)
+      .then(async () => {
+        await reloadStacks()
+        setNotice(`Uninstalled ${name} — agent restarted into a fresh session.`)
+      })
+      .catch((e: unknown) => setError(String(e)))
+      .finally(() => setInstalling(false))
+  }
+
   if (!open) return null
+
+  const installedNames = new Set(installed.map((i) => i.name))
 
   return (
     <>
@@ -131,25 +179,65 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               />
 
               <div className="settings-section">Stacks</div>
-              {state.stacks.length === 0 && (
-                <div className="settings-row-hint">No stacks installed.</div>
-              )}
-              {state.stacks.map((s) => (
-                <Row
-                  key={s.name}
-                  label={s.name}
-                  hint={s.version ? `v${s.version}` : undefined}
-                  checked={s.active}
-                  onChange={(v) =>
-                    apply({
-                      ...state,
-                      stacks: state.stacks.map((x) =>
-                        x.name === s.name ? { ...x, active: v } : x,
-                      ),
-                    })
-                  }
+              <div className="stack-install">
+                <input
+                  className="wf-input"
+                  placeholder="Install from image, e.g. ghcr.io/medmcp/neuro:dev"
+                  value={installImage}
+                  disabled={installing}
+                  onChange={(e) => setInstallImage(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') doInstall()
+                  }}
                 />
-              ))}
+                <button
+                  className="btn-primary"
+                  disabled={installing || !installImage.trim()}
+                  onClick={doInstall}
+                >
+                  {installing ? 'Working…' : 'Install'}
+                </button>
+              </div>
+              {state.stacks.length === 0 && (
+                <div className="settings-row-hint">No stacks installed yet.</div>
+              )}
+              {state.stacks.map((s) => {
+                const container = installedNames.has(s.name)
+                return (
+                  <div className="settings-row" key={s.name}>
+                    <div className="settings-row-text">
+                      <div className="settings-row-label">{s.name}</div>
+                      {(s.version || container) && (
+                        <div className="settings-row-hint">
+                          {s.version ? `v${s.version}` : 'container image'}
+                        </div>
+                      )}
+                    </div>
+                    <div className="stack-row-actions">
+                      <Toggle
+                        checked={s.active}
+                        onChange={(v) =>
+                          apply({
+                            ...state,
+                            stacks: state.stacks.map((x) =>
+                              x.name === s.name ? { ...x, active: v } : x,
+                            ),
+                          })
+                        }
+                      />
+                      {container && (
+                        <button
+                          className="btn-plain stack-uninstall"
+                          disabled={installing}
+                          onClick={() => doUninstall(s.name)}
+                        >
+                          Uninstall
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
 
               {state.workflows_enabled && (
                 <>

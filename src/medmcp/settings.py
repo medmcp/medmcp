@@ -24,10 +24,12 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
 import tomllib
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
@@ -35,7 +37,7 @@ from typing import Any, cast
 import httpx
 import tomli_w
 
-from medmcp.acp import VIBE_HOME, JsonDict
+from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict
 
 log: logging.Logger = logging.getLogger(__name__)
 
@@ -101,6 +103,13 @@ WORKFLOWS_ENABLED_PATH: Path = VIBE_HOME / "workflows_enabled.json"
 # Persists the explain-tool-calls on/off preference; defaults to on when absent.
 EXPLAIN_ENABLED_PATH: Path = VIBE_HOME / "explain_enabled.json"
 
+# Directory of container-stack manifests (``stacks.d/<name>.toml``). Each manifest
+# declares a stack launched as a container (``command = "docker"``, ``args = [...]``)
+# rather than a uv-tool-installed binary — the deployment path where stacks ship as
+# images. ``${VAR}`` references in ``command``/``args``/``skills_path`` are expanded
+# against the environment at load time (e.g. ``${MEDMCP_WORKSPACE}`` for path parity).
+STACKS_D_PATH: Path = Path(PROJECT_ROOT) / "stacks.d"
+
 
 def get_uv_tool_dir() -> Path | None:
     """Return the uv tool installation directory, or ``None`` if unavailable."""
@@ -128,6 +137,49 @@ def call_entry_point(python: Path, module: str, attr: str) -> object:
     return json.loads(result.stdout)
 
 
+def _load_stack_manifests() -> list[JsonDict]:
+    """Read container-stack manifests from :data:`STACKS_D_PATH`.
+
+    Each ``stacks.d/<name>.toml`` declares a stack that is launched as a container
+    (``command = "docker"``, ``args = [...]``) instead of a uv-tool binary — the
+    deployment path where stacks ship as images. ``${VAR}`` references in
+    ``command``, ``args`` and ``skills_path`` are expanded against the environment
+    (notably ``${MEDMCP_WORKSPACE}`` so the bind-mount lands at the host path the
+    workspace server already uses). Malformed manifests are skipped with a warning
+    so one bad file never breaks discovery.
+
+    Returns a list of server-config dicts in the same shape as the uv-tool scan.
+    """
+    if not STACKS_D_PATH.is_dir():
+        return []
+    manifests: list[JsonDict] = []
+    for path in sorted(STACKS_D_PATH.glob("*.toml")):
+        try:
+            with path.open("rb") as fh:
+                raw = tomllib.load(fh)
+        except Exception as exc:
+            log.warning("Could not parse stack manifest %s; skipping: %s", path, exc)
+            continue
+        name = str(raw.get("name", "")).strip()
+        command = str(raw.get("command", "")).strip()
+        if not name or not command:
+            log.warning("Stack manifest %s missing 'name'/'command'; skipping", path)
+            continue
+        args = [os.path.expandvars(str(a)) for a in cast("list[Any]", raw.get("args", []))]
+        entry: JsonDict = {
+            "name": name,
+            "command": os.path.expandvars(command),
+            "args": args,
+            "env": dict(cast("dict[str, str]", raw.get("env", {}))),
+        }
+        if raw.get("skills_path"):
+            entry["skills_path"] = os.path.expandvars(str(raw["skills_path"]))
+        if raw.get("tool_timeout_sec") is not None:
+            entry["tool_timeout_sec"] = raw["tool_timeout_sec"]
+        manifests.append(entry)
+    return manifests
+
+
 @lru_cache(maxsize=1)
 def load_mcp_servers() -> list[JsonDict]:
     """Discover MCP servers from uv tool environments and ``.vibe/config.toml``.
@@ -141,10 +193,14 @@ def load_mcp_servers() -> list[JsonDict]:
        The executable is resolved to its absolute path inside the isolated tool
        env, so PATH ordering never causes the wrong binary to be picked up.
 
-    2. **Manual ``[[mcp_servers]]`` entries in ``.vibe/config.toml``** — only
-       entries whose ``name`` is *not* already registered by a uv tool are
-       accepted.  This covers stacks that have not yet been installed via
-       ``just install-stack``.
+    2. **Container-stack manifests** in ``stacks.d/*.toml`` (:func:`_load_stack_manifests`)
+       — stacks shipped as images and launched via ``docker run -i`` (the
+       deployment path); accepted only for names not already claimed by a uv tool.
+
+    3. **Manual ``[[mcp_servers]]`` entries in ``.vibe/config.toml``** — only
+       entries whose ``name`` is *not* already registered by a uv tool or a
+       manifest are accepted.  This covers stacks that have not yet been installed
+       via ``just install-stack``.
 
     Returns a list of server-config dicts ready for ``sync_servers_to_vibe_config``.
     """
@@ -214,8 +270,16 @@ def load_mcp_servers() -> list[JsonDict]:
                         entry[key] = srv[key]
                 servers[name] = entry
 
-    # ── 2. Manual config.toml entries ────────────────────────────────────────
-    # Only accepted for names NOT already claimed by an installed uv tool.
+    # ── 2. Container-stack manifests (stacks.d/*.toml) ───────────────────────
+    # Stacks shipped as images, launched via `docker run -i`. A uv-tool install
+    # of the same name wins (local dev against an installed stack overrides the
+    # container manifest); manifests fill in everything else.
+    for entry in _load_stack_manifests():
+        if entry["name"] not in servers:
+            servers[entry["name"]] = entry
+
+    # ── 3. Manual config.toml entries ────────────────────────────────────────
+    # Only accepted for names NOT already claimed by a uv tool or a manifest.
     # This prevents a feedback loop where servers written to config.toml by
     # sync_servers_to_vibe_config shadow the live tool-env definitions.
     config_path = VIBE_HOME / "config.toml"
@@ -297,6 +361,273 @@ def active_servers() -> list[JsonDict]:
     """Return only the active subset of all discovered servers."""
     active_names = load_active_server_names()
     return [s for s in load_mcp_servers() if s["name"] in active_names]
+
+
+# ── Container-stack install / uninstall (UI-driven) ──────────────────────────
+# An installed container stack is just a stacks.d/<name>.toml manifest plus its
+# extracted skills. Metadata comes from the image's OCI label (read via
+# `docker inspect` — the image is never executed to introspect it).
+
+# Label carrying a stack's launch metadata. JSON value, e.g.:
+#   {"name": "medmcp-neuro", "gpu": true, "tool_timeout_sec": 7200,
+#    "skills_path": "/app/src/medmcp_neuro/skills"}
+STACK_LABEL: str = "org.medmcp.stack"
+_STACK_NAME_RE: re.Pattern[str] = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def _run_docker(args: list[str], *, timeout: float = 600.0) -> subprocess.CompletedProcess[str]:
+    """Run a ``docker`` command (list args, no shell); raise RuntimeError on failure."""
+    try:
+        result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError as exc:
+        raise RuntimeError("docker CLI not found") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"docker {args[0]} timed out") from exc
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"docker {args[0]} failed")
+    return result
+
+
+def read_stack_label(image: str) -> JsonDict:
+    """Return the parsed ``org.medmcp.stack`` label of *image*, pulling it if absent.
+
+    Raises:
+        ValueError: invalid image ref, or malformed/incomplete label.
+        FileNotFoundError: the image carries no such label (not a medmcp stack).
+        RuntimeError: a docker command failed (e.g. image not found in any registry).
+    """
+    image = image.strip()
+    if not image or any(c.isspace() for c in image):
+        raise ValueError(f"invalid image reference: {image!r}")
+    # Ensure the image is present locally; pull from the registry only if not.
+    try:
+        _run_docker(["image", "inspect", image], timeout=30)
+    except RuntimeError:
+        _run_docker(["pull", image])
+    fmt = '{{ index .Config.Labels "' + STACK_LABEL + '" }}'
+    raw = _run_docker(["inspect", "--format", fmt, image], timeout=30).stdout.strip()
+    if not raw or raw == "<no value>":
+        raise FileNotFoundError(f"{image} has no {STACK_LABEL} label (not a medmcp stack)")
+    try:
+        meta = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"malformed {STACK_LABEL} label on {image}: {exc}") from exc
+    if not isinstance(meta, dict) or not str(cast("JsonDict", meta).get("name", "")).strip():
+        raise ValueError(f"{STACK_LABEL} label on {image} missing 'name'")
+    return cast("JsonDict", meta)
+
+
+def _extract_image_skills(image: str, in_image_path: str, into_dir: Path) -> None:
+    """Copy ``<image>:<in_image_path>`` into *into_dir* via a throwaway container.
+
+    The result is ``into_dir/<basename of in_image_path>`` (docker cp of a dir
+    drops it as a subdir of the destination).
+    """
+    into_dir.mkdir(parents=True, exist_ok=True)
+    cid = _run_docker(["create", image], timeout=60).stdout.strip()
+    try:
+        _run_docker(["cp", f"{cid}:{in_image_path}", str(into_dir)], timeout=120)
+    finally:
+        with contextlib.suppress(RuntimeError):
+            _run_docker(["rm", "-f", cid], timeout=30)
+
+
+# Callback for streaming install progress (one human-readable line at a time).
+ProgressFn = Callable[[str], None]
+
+
+def _image_present(image: str) -> bool:
+    """Return whether *image* is already present locally."""
+    try:
+        _run_docker(["image", "inspect", image], timeout=30)
+        return True
+    except RuntimeError:
+        return False
+
+
+def _pull_streaming(image: str, on_progress: ProgressFn | None) -> None:
+    """Run ``docker pull`` streaming its status lines to *on_progress*.
+
+    Output is a non-TTY pipe, so docker emits line-oriented status updates (not
+    in-place bars); carriage-return segments are collapsed to the last token.
+    Raises RuntimeError on a non-zero exit.
+    """
+    try:
+        proc = subprocess.Popen(
+            ["docker", "pull", image],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("docker CLI not found") from exc
+    assert proc.stdout is not None
+    for raw in proc.stdout:
+        line = raw.split("\r")[-1].strip()
+        if line and on_progress:
+            on_progress(line)
+    if proc.wait() != 0:
+        raise RuntimeError(f"docker pull {image} failed")
+
+
+def _write_stack_manifest(name: str, entry: JsonDict) -> None:
+    """Atomically write ``stacks.d/<name>.toml``."""
+    STACKS_D_PATH.mkdir(parents=True, exist_ok=True)
+    path = STACKS_D_PATH / f"{name}.toml"
+    fd, tmp_name = tempfile.mkstemp(dir=STACKS_D_PATH, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            tomli_w.dump(entry, fh)
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+
+
+def install_stack_image(image: str, on_progress: ProgressFn | None = None) -> str:
+    """Install a container stack from *image* and return its name.
+
+    Pulls the image if absent (streaming progress to *on_progress*), reads its
+    ``org.medmcp.stack`` label, extracts its skills next to the manifest, writes
+    ``stacks.d/<name>.toml`` (the launch recipe), and marks the stack active.
+    Idempotent — re-installing overwrites. Raises as :func:`read_stack_label`
+    plus ValueError for a bad name in the label.
+    """
+
+    def report(msg: str) -> None:
+        if on_progress:
+            on_progress(msg)
+
+    image = image.strip()
+    if not image or any(c.isspace() for c in image):
+        raise ValueError(f"invalid image reference: {image!r}")
+
+    report(f"Checking {image}…")
+    if not _image_present(image):
+        report(f"Pulling {image}…")
+        _pull_streaming(image, on_progress)
+
+    report("Reading stack metadata…")
+    meta = read_stack_label(image)
+    name = str(meta["name"]).strip()
+    if not _STACK_NAME_RE.fullmatch(name):
+        raise ValueError(f"invalid stack name in label: {name!r}")
+
+    args: list[str] = ["run", "--rm", "-i"]
+    if meta.get("gpu"):
+        args += ["--device", "nvidia.com/gpu=all"]
+    args += ["-v", "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}", image]
+    entry: JsonDict = {"name": name, "command": "docker", "args": args}
+
+    timeout = meta.get("tool_timeout_sec")
+    if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+        entry["tool_timeout_sec"] = float(timeout)
+
+    # Skills live inside the image but the agent loads them from the core fs, so
+    # extract them next to the manifest and point skills_path there.
+    in_image_skills = meta.get("skills_path")
+    if isinstance(in_image_skills, str) and in_image_skills.strip():
+        report("Extracting skills…")
+        skills_root = STACKS_D_PATH / name
+        shutil.rmtree(skills_root, ignore_errors=True)  # clean prior extraction
+        _extract_image_skills(image, in_image_skills.strip(), skills_root)
+        extracted = skills_root / Path(in_image_skills.strip()).name
+        if extracted.is_dir():
+            entry["skills_path"] = str(extracted)
+
+    report("Registering stack…")
+    _write_stack_manifest(name, entry)
+
+    # Make it active immediately. Only touch an explicit set if one exists;
+    # an absent active_stacks.json already means "all discovered are active".
+    if ACTIVE_STACKS_PATH.exists():
+        save_active_server_names(load_active_server_names() | {name})
+    return name
+
+
+def uninstall_stack(name: str) -> None:
+    """Remove an installed container stack's manifest and extracted skills.
+
+    Raises ValueError for a bad name, FileNotFoundError if not installed.
+    """
+    if not _STACK_NAME_RE.fullmatch(name):
+        raise ValueError(f"invalid stack name: {name!r}")
+    manifest = STACKS_D_PATH / f"{name}.toml"
+    if not manifest.exists():
+        raise FileNotFoundError(f"no installed stack named {name!r}")
+    manifest.unlink()
+    shutil.rmtree(STACKS_D_PATH / name, ignore_errors=True)
+    if ACTIVE_STACKS_PATH.exists():
+        save_active_server_names(load_active_server_names() - {name})
+
+
+def list_installed_stacks() -> list[JsonDict]:
+    """Return installed container stacks (from stacks.d manifests): name, image, gpu."""
+    out: list[JsonDict] = []
+    for m in _load_stack_manifests():
+        args = cast("list[str]", m.get("args", []))
+        out.append(
+            {
+                "name": m["name"],
+                "image": args[-1] if args else "",
+                "gpu": "--device" in args,
+            }
+        )
+    return out
+
+
+# Curated catalog of installable stacks shown in the UI (browse → install). Default
+# is the bundled catalog.json; override with MEDMCP_CATALOG_URL (an http(s) URL or
+# a file path) to point at a published or air-gapped-mirror catalog.
+CATALOG_PATH: Path = Path(PROJECT_ROOT) / "catalog.json"
+CATALOG_URL: str = os.environ.get("MEDMCP_CATALOG_URL", "")
+
+
+def load_catalog() -> list[JsonDict]:
+    """Return the curated catalog of installable stacks.
+
+    Each entry is ``{name, image, description, gpu}``. Source is
+    :data:`CATALOG_URL` (http(s) URL or file path) when set, else the bundled
+    :data:`CATALOG_PATH`. Best-effort: returns ``[]`` (and logs) on any error so
+    the UI degrades gracefully.
+    """
+    src = CATALOG_URL.strip()
+    try:
+        if src.startswith(("http://", "https://")):
+            resp = httpx.get(src, timeout=10.0)
+            resp.raise_for_status()
+            data: object = resp.json()
+        else:
+            path = Path(src) if src else CATALOG_PATH
+            if not path.is_file():
+                return []
+            data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning("could not load stack catalog from %r: %s", src or str(CATALOG_PATH), exc)
+        return []
+    if not isinstance(data, dict):
+        return []
+    raw = cast("list[Any]", cast("JsonDict", data).get("stacks", []))
+    out: list[JsonDict] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        e = cast("JsonDict", entry)
+        name = str(e.get("name", "")).strip()
+        image = str(e.get("image", "")).strip()
+        if not name or not image:
+            continue
+        out.append(
+            {
+                "name": name,
+                "image": image,
+                "description": str(e.get("description", "")),
+                "gpu": bool(e.get("gpu", False)),
+            }
+        )
+    return out
 
 
 def read_skill_description(skill_md: Path) -> str:

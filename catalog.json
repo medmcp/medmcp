@@ -1,0 +1,17 @@
+{
+  "_comment": "Curated catalog of installable MedMCP tool stacks shown in the UI (Settings -> Stacks -> Available). Override the source with MEDMCP_CATALOG_URL (an http(s) URL or a file path) to point at a published/air-gapped-mirror catalog; image refs there are typically ghcr.io/medmcp/<stack>:<tag>. The bundled defaults below use the locally built :dev images.",
+  "stacks": [
+    {
+      "name": "medmcp-dicom",
+      "image": "medmcp-dicom:dev",
+      "description": "DICOM discovery, NIfTI conversion, and BIDS organisation.",
+      "gpu": false
+    },
+    {
+      "name": "medmcp-neuro",
+      "image": "medmcp-neuro:dev",
+      "description": "Brain extraction (HD-BET) and image registration (ANTs).",
+      "gpu": true
+    }
+  ]
+}

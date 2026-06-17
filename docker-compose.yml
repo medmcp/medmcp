@@ -1,0 +1,78 @@
+# MedMCP deployment reference (also backs the devcontainer).
+#
+#   llm       — bundled Ollama, GPU via CDI, serves gemma4-medmcp.
+#   llm-init  — one-shot: ensures the custom model exists (idempotent).
+#   medmcp    — core workspace server; launches stack containers over the
+#               mounted (rootless) docker socket.
+#
+# Required: MEDMCP_WORKSPACE = an ABSOLUTE host path (bind-mounted at the same
+# path inside the core so nested `docker run -v` stays valid — path parity).
+# GPU uses CDI (`nvidia.com/gpu=all`), the rootless path. `just compose-up` sets
+# sensible local defaults (workspace = ./data, models = host ~/.ollama).
+name: medmcp
+
+services:
+  llm:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    devices:
+      - "nvidia.com/gpu=all"
+    volumes:
+      - "${OLLAMA_MODELS_DIR:-ollama-models}:/root/.ollama"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  llm-init:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    depends_on:
+      llm:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "http://llm:11434"
+    volumes:
+      - "./Modelfile.gemma4:/Modelfile.gemma4:ro"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'ollama list | grep -q gemma4-medmcp || { ollama pull gemma4:26b && ollama create gemma4-medmcp -f /Modelfile.gemma4; }'
+    restart: "no"
+
+  medmcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: "${MEDMCP_BASE_IMAGE:-medmcp-base:dev}"
+    image: medmcp-core:dev
+    depends_on:
+      llm:
+        condition: service_healthy
+      llm-init:
+        condition: service_completed_successfully
+    environment:
+      OLLAMA_BASE_URL: "http://llm:11434"
+      MEDMCP_WORKSPACE: "${MEDMCP_WORKSPACE:?set MEDMCP_WORKSPACE to an absolute host path}"
+      # Catalog source: empty = bundled catalog.json (local :dev images). For a
+      # private GHCR fleet, set MEDMCP_CATALOG_URL=/app/catalog.ghcr.json.
+      MEDMCP_CATALOG_URL: "${MEDMCP_CATALOG_URL:-}"
+    ports:
+      - "127.0.0.1:8100:8100"
+    volumes:
+      # Rootless docker socket → core spawns sibling stack containers.
+      # Rootful hosts: override XDG_RUNTIME_DIR or set the path to /var/run.
+      - "${XDG_RUNTIME_DIR}/docker.sock:/var/run/docker.sock"
+      # Workspace at an identical absolute path (path parity for nested run -v).
+      - "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}"
+      # Container-stack manifests (read-write so UI install/uninstall can persist).
+      - "./stacks.d:/app/stacks.d"
+      # Host registry credentials (read-only) so the install flow can pull private
+      # GHCR images. Run `docker login ghcr.io` on the host first. (If the host
+      # uses a credential helper rather than plain auths, pre-pull on the host
+      # instead, or mount the helper.)
+      - "${HOME}/.docker/config.json:/root/.docker/config.json:ro"
+    restart: unless-stopped
+
+volumes:
+  ollama-models:

@@ -1064,6 +1064,54 @@ button:hover {
   margin-top: 2px;
 }
 
+/* Install-a-stack field + per-stack uninstall action. */
+.stack-install {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.stack-install .wf-input {
+  flex: 1;
+}
+
+.stack-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stack-uninstall,
+.btn-sm {
+  font-size: 11.5px;
+  padding: 3px 10px;
+}
+
+.stack-uninstall:hover:not(:disabled) {
+  color: var(--red-tint);
+  border-color: rgba(210, 34, 41, 0.3);
+}
+
+.stack-badge {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  border: 1px solid var(--border2);
+  border-radius: 4px;
+  padding: 0 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.install-progress {
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ── Chats menu (chat-header dropdown) ── */
 
 .chats-menu {

@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
-import { fetchSettings, saveSettings } from '../api'
-import type { SettingsState } from '../types'
+import {
+  fetchCatalog,
+  fetchInstalledStacks,
+  fetchSettings,
+  saveSettings,
+  uninstallStack,
+} from '../api'
+import type { CatalogEntry, InstalledStack, SettingsState } from '../types'
 import { XIcon } from './icons'
 
 interface SettingsDrawerProps {
@@ -62,15 +68,22 @@ function Row({
  */
 export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [state, setState] = useState<SettingsState | null>(null)
+  const [installed, setInstalled] = useState<InstalledStack[]>([])
+  const [catalog, setCatalog] = useState<CatalogEntry[]>([])
+  const [installImage, setInstallImage] = useState('')
+  const [installing, setInstalling] = useState(false)
+  const [installProgress, setInstallProgress] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     if (!open) return
-    fetchSettings()
-      .then((s) => {
+    Promise.all([fetchSettings(), fetchInstalledStacks(), fetchCatalog()])
+      .then(([s, inst, cat]) => {
         setState(s)
+        setInstalled(inst)
+        setCatalog(cat)
         setError(null)
         setNotice(null)
       })
@@ -89,7 +102,76 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       .finally(() => setSaving(false))
   }
 
+  const reloadStacks = async () => {
+    const [s, inst, cat] = await Promise.all([
+      fetchSettings(),
+      fetchInstalledStacks(),
+      fetchCatalog(),
+    ])
+    setState(s)
+    setInstalled(inst)
+    setCatalog(cat)
+  }
+
+  const performInstall = (image: string, after?: () => void) => {
+    if (!image || installing) return
+    setInstalling(true)
+    setError(null)
+    setNotice(null)
+    setInstallProgress('Starting…')
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    const ws = new WebSocket(`${proto}://${location.host}/ws/stacks/install`)
+    ws.onopen = () => ws.send(JSON.stringify({ image }))
+    ws.onmessage = (ev: MessageEvent<string>) => {
+      const m = JSON.parse(ev.data) as {
+        type: 'progress' | 'done' | 'error'
+        line?: string
+        name?: string
+        message?: string
+      }
+      if (m.type === 'progress') {
+        setInstallProgress(m.line ?? null)
+      } else if (m.type === 'done') {
+        ws.close()
+        after?.()
+        setInstalling(false)
+        setInstallProgress(null)
+        reloadStacks().then(() =>
+          setNotice(`Installed ${m.name} — agent restarted into a fresh session.`),
+        )
+      } else {
+        ws.close()
+        setInstalling(false)
+        setInstallProgress(null)
+        setError(m.message ?? 'install failed')
+      }
+    }
+    ws.onerror = () => {
+      setInstalling(false)
+      setInstallProgress(null)
+      setError('install connection failed')
+    }
+  }
+
+  const doInstall = () => performInstall(installImage.trim(), () => setInstallImage(''))
+
+  const doUninstall = (name: string) => {
+    if (installing) return
+    setInstalling(true)
+    setError(null)
+    setNotice(null)
+    uninstallStack(name)
+      .then(async () => {
+        await reloadStacks()
+        setNotice(`Uninstalled ${name} — agent restarted into a fresh session.`)
+      })
+      .catch((e: unknown) => setError(String(e)))
+      .finally(() => setInstalling(false))
+  }
+
   if (!open) return null
+
+  const installedNames = new Set(installed.map((i) => i.name))
 
   return (
     <>
@@ -106,6 +188,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
         <div className="drawer-body">
           {error && <div className="panel-error">{error}</div>}
           {notice && <div className="drawer-notice">{notice}</div>}
+          {installProgress && <div className="drawer-notice install-progress">{installProgress}</div>}
           {!state ? (
             <div className="viewer-message">Loading…</div>
           ) : (
@@ -132,24 +215,90 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
               <div className="settings-section">Stacks</div>
               {state.stacks.length === 0 && (
-                <div className="settings-row-hint">No stacks installed.</div>
+                <div className="settings-row-hint">No stacks installed yet.</div>
               )}
-              {state.stacks.map((s) => (
-                <Row
-                  key={s.name}
-                  label={s.name}
-                  hint={s.version ? `v${s.version}` : undefined}
-                  checked={s.active}
-                  onChange={(v) =>
-                    apply({
-                      ...state,
-                      stacks: state.stacks.map((x) =>
-                        x.name === s.name ? { ...x, active: v } : x,
-                      ),
-                    })
-                  }
-                />
+              {state.stacks.map((s) => {
+                const container = installedNames.has(s.name)
+                return (
+                  <div className="settings-row" key={s.name}>
+                    <div className="settings-row-text">
+                      <div className="settings-row-label">{s.name}</div>
+                      {(s.version || container) && (
+                        <div className="settings-row-hint">
+                          {s.version ? `v${s.version}` : 'container image'}
+                        </div>
+                      )}
+                    </div>
+                    <div className="stack-row-actions">
+                      <Toggle
+                        checked={s.active}
+                        onChange={(v) =>
+                          apply({
+                            ...state,
+                            stacks: state.stacks.map((x) =>
+                              x.name === s.name ? { ...x, active: v } : x,
+                            ),
+                          })
+                        }
+                      />
+                      {container && (
+                        <button
+                          className="btn-plain stack-uninstall"
+                          disabled={installing}
+                          onClick={() => doUninstall(s.name)}
+                        >
+                          Uninstall
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+
+              <div className="settings-section">Available</div>
+              {catalog.map((c) => (
+                <div className="settings-row" key={`cat-${c.name}`}>
+                  <div className="settings-row-text">
+                    <div className="settings-row-label">
+                      {c.name}
+                      {c.gpu && <span className="stack-badge">GPU</span>}
+                    </div>
+                    {c.description && <div className="settings-row-hint">{c.description}</div>}
+                  </div>
+                  <div className="stack-row-actions">
+                    {c.installed ? (
+                      <span className="settings-row-hint">Installed</span>
+                    ) : (
+                      <button
+                        className="btn-primary btn-sm"
+                        disabled={installing}
+                        onClick={() => performInstall(c.image)}
+                      >
+                        Install
+                      </button>
+                    )}
+                  </div>
+                </div>
               ))}
+              <div className="stack-install">
+                <input
+                  className="wf-input"
+                  placeholder="Or install from an image, e.g. ghcr.io/medmcp/neuro:dev"
+                  value={installImage}
+                  disabled={installing}
+                  onChange={(e) => setInstallImage(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') doInstall()
+                  }}
+                />
+                <button
+                  className="btn-primary"
+                  disabled={installing || !installImage.trim()}
+                  onClick={doInstall}
+                >
+                  {installing ? 'Working…' : 'Install'}
+                </button>
+              </div>
 
               {state.workflows_enabled && (
                 <>

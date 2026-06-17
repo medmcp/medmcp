@@ -225,3 +225,8 @@ data/
 node_modules/
 frontend/dist/
 .vibe/explain_enabled.json
+
+# Container-stack manifests + extracted skills are runtime state written by the
+# UI install flow; keep only the directory (README) in git.
+stacks.d/*
+!stacks.d/README.md

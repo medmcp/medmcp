@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -242,6 +243,171 @@ class TestConfigTomlFallback:
         with (
             patch("medmcp.settings.get_uv_tool_dir", return_value=tmp_path),
             patch("medmcp.settings.VIBE_HOME", tmp_path),
+        ):
+            servers = load_mcp_servers()
+
+        assert servers == []
+
+
+# ── stacks.d container manifests ──────────────────────────────────────────────
+
+
+def _make_manifest(stacks_dir: Path, name: str, body: str) -> Path:
+    """Write a ``stacks.d/<name>.toml`` manifest with *body* and return its path."""
+    stacks_dir.mkdir(parents=True, exist_ok=True)
+    path = stacks_dir / f"{name}.toml"
+    path.write_text(body)
+    return path
+
+
+class TestStacksDDiscovery:
+    """load_mcp_servers reads stacks.d/*.toml container manifests."""
+
+    def setup_method(self) -> None:
+        """Clear the lru_cache before each test so patches take effect."""
+        _clear_cache()
+
+    def test_manifest_discovered(self, tmp_path: Path) -> None:
+        """A stacks.d manifest yields a docker-launched server entry."""
+        stacks = tmp_path / "stacks.d"
+        _make_manifest(
+            stacks,
+            "medmcp-dicom",
+            'name = "medmcp-dicom"\ncommand = "docker"\n'
+            'args = ["run", "--rm", "-i", "ghcr.io/medmcp/dicom:dev"]\n',
+        )
+        with (
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.STACKS_D_PATH", stacks),
+        ):
+            servers = load_mcp_servers()
+
+        assert len(servers) == 1
+        assert servers[0]["name"] == "medmcp-dicom"
+        assert servers[0]["command"] == "docker"
+        assert servers[0]["args"][-1] == "ghcr.io/medmcp/dicom:dev"
+
+    def test_env_var_expansion(self, tmp_path: Path) -> None:
+        """${VAR} references in args are expanded against the environment."""
+        stacks = tmp_path / "stacks.d"
+        _make_manifest(
+            stacks,
+            "medmcp-dicom",
+            'name = "medmcp-dicom"\ncommand = "docker"\n'
+            'args = ["run", "-v", "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}", "img"]\n',
+        )
+        with (
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.STACKS_D_PATH", stacks),
+            patch.dict(os.environ, {"MEDMCP_WORKSPACE": "/srv/data"}),
+        ):
+            servers = load_mcp_servers()
+
+        assert "/srv/data:/srv/data" in servers[0]["args"]
+
+    def test_skills_path_and_timeout_passthrough(self, tmp_path: Path) -> None:
+        """Optional skills_path (expanded) and tool_timeout_sec are carried through."""
+        stacks = tmp_path / "stacks.d"
+        _make_manifest(
+            stacks,
+            "medmcp-neuro",
+            'name = "medmcp-neuro"\ncommand = "docker"\nargs = ["run", "img"]\n'
+            'skills_path = "${MEDMCP_WORKSPACE}/skills"\ntool_timeout_sec = 7200.0\n',
+        )
+        with (
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.STACKS_D_PATH", stacks),
+            patch.dict(os.environ, {"MEDMCP_WORKSPACE": "/srv/data"}),
+        ):
+            servers = load_mcp_servers()
+
+        assert servers[0]["skills_path"] == "/srv/data/skills"
+        assert servers[0]["tool_timeout_sec"] == 7200.0
+
+    def test_uv_tool_wins_over_manifest(self, tmp_path: Path) -> None:
+        """A uv-tool install overrides a manifest of the same name (local dev)."""
+        _make_tool_env(tmp_path, "medmcp-neuro")
+        ep_config = {"name": "medmcp-neuro", "command": "medmcp-neuro"}
+        stacks = tmp_path / "stacks.d"
+        _make_manifest(
+            stacks,
+            "medmcp-neuro",
+            'name = "medmcp-neuro"\ncommand = "docker"\nargs = ["run", "img"]\n',
+        )
+        with (
+            patch("medmcp.settings.get_uv_tool_dir", return_value=tmp_path),
+            patch("medmcp.settings.call_entry_point", return_value=ep_config),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.STACKS_D_PATH", stacks),
+        ):
+            servers = load_mcp_servers()
+
+        assert len(servers) == 1
+        # the uv-tool absolute path wins, not the docker command
+        assert servers[0]["command"] != "docker"
+
+    def test_manifest_wins_over_config_toml(self, tmp_path: Path) -> None:
+        """A manifest claims a name before the config.toml fallback can."""
+        stacks = tmp_path / "stacks.d"
+        _make_manifest(
+            stacks,
+            "medmcp-neuro",
+            'name = "medmcp-neuro"\ncommand = "docker"\nargs = ["run", "img"]\n',
+        )
+        cfg = tmp_path / "config.toml"
+        cfg.write_text('[[mcp_servers]]\nname = "medmcp-neuro"\ncommand = "medmcp-neuro"\n')
+        with (
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.STACKS_D_PATH", stacks),
+        ):
+            servers = load_mcp_servers()
+
+        assert len(servers) == 1
+        assert servers[0]["command"] == "docker"
+
+    def test_malformed_manifest_skipped(self, tmp_path: Path) -> None:
+        """A manifest that fails to parse is skipped; a valid one still loads."""
+        stacks = tmp_path / "stacks.d"
+        _make_manifest(stacks, "broken", "this is = not valid = toml = [[[")
+        _make_manifest(
+            stacks,
+            "medmcp-dicom",
+            'name = "medmcp-dicom"\ncommand = "docker"\nargs = ["run", "img"]\n',
+        )
+        with (
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.STACKS_D_PATH", stacks),
+        ):
+            servers = load_mcp_servers()
+
+        names = {s["name"] for s in servers}
+        assert names == {"medmcp-dicom"}
+
+    def test_manifest_missing_required_fields_skipped(self, tmp_path: Path) -> None:
+        """A manifest without name or command is ignored."""
+        stacks = tmp_path / "stacks.d"
+        _make_manifest(stacks, "noname", 'command = "docker"\nargs = ["run"]\n')
+        _make_manifest(stacks, "nocommand", 'name = "x"\nargs = ["run"]\n')
+        with (
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.STACKS_D_PATH", stacks),
+        ):
+            servers = load_mcp_servers()
+
+        assert servers == []
+
+    def test_no_stacks_dir_is_noop(self, tmp_path: Path) -> None:
+        """A missing stacks.d directory simply contributes nothing."""
+        with (
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.STACKS_D_PATH", tmp_path / "does-not-exist"),
         ):
             servers = load_mcp_servers()
 

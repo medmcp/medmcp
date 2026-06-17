@@ -1,4 +1,6 @@
 import type {
+  CatalogEntry,
+  InstalledStack,
   ReplayPreviewStep,
   SessionInfo,
   SettingsState,
@@ -87,6 +89,34 @@ export async function saveSettings(state: SettingsState): Promise<boolean> {
   })
   const body = (await res.json()) as { restarted: boolean }
   return body.restarted
+}
+
+// ── Container stacks (install / uninstall) ───────────────────
+
+/** List container-installed stacks (those with a stacks.d manifest). */
+export async function fetchInstalledStacks(): Promise<InstalledStack[]> {
+  const res = await check(await fetch('/api/stacks'))
+  const body = (await res.json()) as { stacks: InstalledStack[] }
+  return body.stacks
+}
+
+/** Fetch the curated install catalog (each entry flagged whether it's installed). */
+export async function fetchCatalog(): Promise<CatalogEntry[]> {
+  const res = await check(await fetch('/api/catalog'))
+  const body = (await res.json()) as { catalog: CatalogEntry[] }
+  return body.catalog
+}
+
+/** Install a stack from a container image; returns its name. Restarts the agent. */
+export async function installStack(image: string): Promise<string> {
+  const res = await postJson('/api/stacks/install', { image })
+  const body = (await res.json()) as { name: string }
+  return body.name
+}
+
+/** Uninstall a container stack by name. Restarts the agent. */
+export async function uninstallStack(name: string): Promise<void> {
+  await postJson('/api/stacks/uninstall', { name })
 }
 
 // ── Sessions ─────────────────────────────────────────────────

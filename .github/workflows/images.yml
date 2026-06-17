@@ -1,0 +1,41 @@
+name: Images
+
+# On push to main: build base + core and push to the private GHCR (ghcr.io/medmcp).
+# On pull_request: build only (validates the Dockerfiles) — no login, no push.
+# Plain `docker build` on the runner's daemon so core can FROM the just-built base
+# without a registry round-trip. amd64 only — build arm64 natively on an aarch64
+# runner / the Spark (QEMU is too slow for the CUDA/torch compiles).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  CUDA_TAG: "12.8.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build base + core
+        run: |
+          docker build -f Dockerfile.base --build-arg CUDA_TAG="${CUDA_TAG}" -t medmcp-base:ci .
+          docker build --build-arg BASE_IMAGE=medmcp-base:ci -t medmcp-core:ci .
+      - name: Push to GHCR (main only)
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          for img in base core; do
+            docker tag "medmcp-$img:ci" "ghcr.io/medmcp/$img:${{ github.sha }}"
+            docker tag "medmcp-$img:ci" "ghcr.io/medmcp/$img:main"
+            docker push "ghcr.io/medmcp/$img:${{ github.sha }}"
+            docker push "ghcr.io/medmcp/$img:main"
+          done

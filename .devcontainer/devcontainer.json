@@ -1,0 +1,23 @@
+{
+  "name": "medmcp-dev",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": { "BASE_IMAGE": "medmcp-base:dev" }
+  },
+  "workspaceFolder": "/workspaces/medmcp-dev",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/medmcp-dev,type=bind",
+  "mounts": [
+    "source=${localEnv:XDG_RUNTIME_DIR}/docker.sock,target=/var/run/docker.sock,type=bind"
+  ],
+  "runArgs": [
+    "--add-host=host.docker.internal:host-gateway"
+  ],
+  "containerEnv": {
+    "OLLAMA_BASE_URL": "http://host.docker.internal:11434",
+    "MEDMCP_WORKSPACE_HOST": "0.0.0.0",
+    "UV_LINK_MODE": "copy"
+  },
+  "forwardPorts": [8100, 5173],
+  "postCreateCommand": "uv sync && (cd frontend && npm install)",
+  "remoteUser": "root"
+}

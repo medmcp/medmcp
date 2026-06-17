@@ -1,0 +1,162 @@
+# Container baseline vibe-acp config (baked into the core image at
+# /app/.vibe/config.toml). At runtime:
+#   - docker/entrypoint.sh rewrites the provider api_base from $OLLAMA_BASE_URL,
+#   - sync_servers_to_vibe_config() repopulates [[mcp_servers]] from stacks.d/*
+#     and rewrites skill_paths / disabled_skills.
+# So the host-specific paths in the dev .vibe/config.toml are intentionally absent.
+active_model = "local"
+vim_keybindings = false
+disable_welcome_banner_animation = false
+autocopy_to_clipboard = true
+file_watcher_for_autocomplete = false
+auto_compact_threshold = 200000
+context_warnings = false
+auto_approve = false
+system_prompt_id = "medmcp"
+include_commit_signature = true
+include_model_info = true
+include_project_context = true
+include_prompt_detail = true
+api_timeout = 720.0
+enable_telemetry = false
+enable_update_checks = false
+enable_auto_update = false
+enable_notifications = true
+tool_paths = []
+enabled_tools = []
+disabled_tools = [
+    "web_search",
+]
+agent_paths = []
+enabled_agents = []
+disabled_agents = []
+skill_paths = []
+enabled_skills = []
+disabled_skills = []
+applied_migrations = [
+    "bash_read_only_defaults_v1",
+]
+
+[tools.task]
+permission = "always"
+allowlist = []
+denylist = []
+
+[tools.write_file]
+permission = "ask"
+allowlist = []
+denylist = []
+max_write_bytes = 64000
+create_parent_dirs = true
+
+[tools.todo]
+permission = "always"
+allowlist = []
+denylist = []
+max_todos = 100
+
+[tools.grep]
+permission = "always"
+allowlist = []
+denylist = []
+max_output_bytes = 64000
+default_max_matches = 100
+default_timeout = 60
+exclude_patterns = [
+    ".venv/",
+    "venv/",
+    "node_modules/",
+    ".git/",
+    "__pycache__/",
+    ".pytest_cache/",
+    "dist/",
+    "build/",
+    "*.egg-info",
+    "*.pyc",
+]
+codeignore_file = ".vibeignore"
+
+[tools.ask_user_question]
+permission = "always"
+allowlist = []
+denylist = []
+
+[tools.bash]
+permission = "ask"
+allowlist = [
+    "basename",
+    "cat",
+    "cut",
+    "date",
+    "df",
+    "diff",
+    "dirname",
+    "du",
+    "echo",
+    "file",
+    "find",
+    "fold",
+    "grep",
+    "head",
+    "ls",
+    "md5sum",
+    "nl",
+    "od",
+    "ps",
+    "pwd",
+    "readlink",
+    "sha256sum",
+    "sort",
+    "stat",
+    "tail",
+    "tr",
+    "uname",
+    "uniq",
+    "wc",
+    "which",
+]
+denylist_standalone = []
+sensitive_patterns = [
+    "sudo",
+]
+
+[tools.read]
+permission = "always"
+allowlist = []
+denylist = []
+max_read_bytes = 64000
+
+[tools.edit]
+permission = "ask"
+allowlist = []
+denylist = []
+fuzzy_threshold = 0.9
+
+[[providers]]
+name = "ollama"
+api_base = "http://llm:11434/v1"
+api_key_env_var = ""
+api_style = "openai"
+backend = "generic"
+reasoning_field_name = "reasoning_content"
+project_id = ""
+region = ""
+
+[[models]]
+name = "gemma4-medmcp"
+provider = "ollama"
+alias = "local"
+temperature = 1.0
+input_price = 0.0
+output_price = 0.0
+thinking = "medium"
+
+[project_context]
+max_chars = 40000
+default_commit_count = 5
+max_doc_bytes = 32768
+truncation_buffer = 1000
+max_depth = 3
+max_files = 1000
+max_dirs_per_level = 20
+timeout_seconds = 2.0

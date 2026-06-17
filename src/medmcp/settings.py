@@ -35,7 +35,7 @@ from typing import Any, cast
 import httpx
 import tomli_w
 
-from medmcp.acp import VIBE_HOME, JsonDict
+from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict
 
 log: logging.Logger = logging.getLogger(__name__)
 
@@ -101,6 +101,13 @@ WORKFLOWS_ENABLED_PATH: Path = VIBE_HOME / "workflows_enabled.json"
 # Persists the explain-tool-calls on/off preference; defaults to on when absent.
 EXPLAIN_ENABLED_PATH: Path = VIBE_HOME / "explain_enabled.json"
 
+# Directory of container-stack manifests (``stacks.d/<name>.toml``). Each manifest
+# declares a stack launched as a container (``command = "docker"``, ``args = [...]``)
+# rather than a uv-tool-installed binary — the deployment path where stacks ship as
+# images. ``${VAR}`` references in ``command``/``args``/``skills_path`` are expanded
+# against the environment at load time (e.g. ``${MEDMCP_WORKSPACE}`` for path parity).
+STACKS_D_PATH: Path = Path(PROJECT_ROOT) / "stacks.d"
+
 
 def get_uv_tool_dir() -> Path | None:
     """Return the uv tool installation directory, or ``None`` if unavailable."""
@@ -128,6 +135,49 @@ def call_entry_point(python: Path, module: str, attr: str) -> object:
     return json.loads(result.stdout)
 
 
+def _load_stack_manifests() -> list[JsonDict]:
+    """Read container-stack manifests from :data:`STACKS_D_PATH`.
+
+    Each ``stacks.d/<name>.toml`` declares a stack that is launched as a container
+    (``command = "docker"``, ``args = [...]``) instead of a uv-tool binary — the
+    deployment path where stacks ship as images. ``${VAR}`` references in
+    ``command``, ``args`` and ``skills_path`` are expanded against the environment
+    (notably ``${MEDMCP_WORKSPACE}`` so the bind-mount lands at the host path the
+    workspace server already uses). Malformed manifests are skipped with a warning
+    so one bad file never breaks discovery.
+
+    Returns a list of server-config dicts in the same shape as the uv-tool scan.
+    """
+    if not STACKS_D_PATH.is_dir():
+        return []
+    manifests: list[JsonDict] = []
+    for path in sorted(STACKS_D_PATH.glob("*.toml")):
+        try:
+            with path.open("rb") as fh:
+                raw = tomllib.load(fh)
+        except Exception as exc:
+            log.warning("Could not parse stack manifest %s; skipping: %s", path, exc)
+            continue
+        name = str(raw.get("name", "")).strip()
+        command = str(raw.get("command", "")).strip()
+        if not name or not command:
+            log.warning("Stack manifest %s missing 'name'/'command'; skipping", path)
+            continue
+        args = [os.path.expandvars(str(a)) for a in cast("list[Any]", raw.get("args", []))]
+        entry: JsonDict = {
+            "name": name,
+            "command": os.path.expandvars(command),
+            "args": args,
+            "env": dict(cast("dict[str, str]", raw.get("env", {}))),
+        }
+        if raw.get("skills_path"):
+            entry["skills_path"] = os.path.expandvars(str(raw["skills_path"]))
+        if raw.get("tool_timeout_sec") is not None:
+            entry["tool_timeout_sec"] = raw["tool_timeout_sec"]
+        manifests.append(entry)
+    return manifests
+
+
 @lru_cache(maxsize=1)
 def load_mcp_servers() -> list[JsonDict]:
     """Discover MCP servers from uv tool environments and ``.vibe/config.toml``.
@@ -141,10 +191,14 @@ def load_mcp_servers() -> list[JsonDict]:
        The executable is resolved to its absolute path inside the isolated tool
        env, so PATH ordering never causes the wrong binary to be picked up.
 
-    2. **Manual ``[[mcp_servers]]`` entries in ``.vibe/config.toml``** — only
-       entries whose ``name`` is *not* already registered by a uv tool are
-       accepted.  This covers stacks that have not yet been installed via
-       ``just install-stack``.
+    2. **Container-stack manifests** in ``stacks.d/*.toml`` (:func:`_load_stack_manifests`)
+       — stacks shipped as images and launched via ``docker run -i`` (the
+       deployment path); accepted only for names not already claimed by a uv tool.
+
+    3. **Manual ``[[mcp_servers]]`` entries in ``.vibe/config.toml``** — only
+       entries whose ``name`` is *not* already registered by a uv tool or a
+       manifest are accepted.  This covers stacks that have not yet been installed
+       via ``just install-stack``.
 
     Returns a list of server-config dicts ready for ``sync_servers_to_vibe_config``.
     """
@@ -214,8 +268,16 @@ def load_mcp_servers() -> list[JsonDict]:
                         entry[key] = srv[key]
                 servers[name] = entry
 
-    # ── 2. Manual config.toml entries ────────────────────────────────────────
-    # Only accepted for names NOT already claimed by an installed uv tool.
+    # ── 2. Container-stack manifests (stacks.d/*.toml) ───────────────────────
+    # Stacks shipped as images, launched via `docker run -i`. A uv-tool install
+    # of the same name wins (local dev against an installed stack overrides the
+    # container manifest); manifests fill in everything else.
+    for entry in _load_stack_manifests():
+        if entry["name"] not in servers:
+            servers[entry["name"]] = entry
+
+    # ── 3. Manual config.toml entries ────────────────────────────────────────
+    # Only accepted for names NOT already claimed by a uv tool or a manifest.
     # This prevents a feedback loop where servers written to config.toml by
     # sync_servers_to_vibe_config shadow the live tool-env definitions.
     config_path = VIBE_HOME / "config.toml"

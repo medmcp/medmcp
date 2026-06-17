@@ -67,13 +67,14 @@ pull-config:
 # Install a stack package into its own isolated uv environment.
 # _load_mcp_servers() discovers it automatically by scanning uv tool envs for
 # [medmcp.stacks] entry points — no changes to config files needed.
-# --torch-backend=auto detects the host NVIDIA driver at install time and picks
-# the matching CUDA wheel for any PyTorch-ecosystem deps (or CPU wheels if no GPU),
-# so GPU support works on each user's machine regardless of their driver version.
+# Resolution is deterministic from the stack's committed lock: stacks pin their
+# own CUDA build in pyproject (e.g. medmcp-neuro pins the cu128 PyTorch index), so
+# installs match the containers. (Don't add --torch-backend=auto — it picks a
+# wheel from the host driver and would override that pin; host floor is R570.)
 # Usage: just install-stack ../medmcp-neuro
 #        just install-stack "git+ssh://git@github.com/medmcp/medmcp-neuro.git"
 install-stack STACK:
-    uv tool install --torch-backend=auto {{STACK}}
+    uv tool install {{STACK}}
 
 # Uninstall a stack package from its isolated uv environment.
 # Usage: just uninstall-stack medmcp-neuro
@@ -168,3 +169,39 @@ medmcp: setup pull-model workspace-build
     @sleep 2
     @echo "Launching the MedMCP workspace..."
     uv run medmcp-workspace
+
+# ── Containers ────────────────────────────────────────────────────────────────
+
+# Build the shared base image (medmcp-base) locally for the host arch.
+# CUDA_TAG aligns the base CUDA runtime with the deployment target (see Dockerfile.base).
+docker-base CUDA_TAG="12.8.1":
+    docker build -f Dockerfile.base --build-arg CUDA_TAG={{CUDA_TAG}} -t medmcp-base:dev .
+
+# Build the core image locally (depends on medmcp-base).
+docker-build: docker-base
+    docker build -t medmcp-core:dev .
+
+# Build a stack image from a sibling repo. Usage: just docker-build-stack ../medmcp-dicom-dev ghcr.io/medmcp/dicom:dev
+docker-build-stack DIR TAG:
+    docker build -t {{TAG}} {{DIR}}
+
+# Build the multi-arch base + push (needs a docker-container builder + registry login).
+# Usage: just docker-base-multiarch ghcr.io/medmcp/base:dev "linux/amd64,linux/arm64"
+docker-base-multiarch TAG PLATFORMS="linux/amd64,linux/arm64" CUDA_TAG="12.8.1":
+    docker buildx build -f Dockerfile.base --build-arg CUDA_TAG={{CUDA_TAG}} \
+        --platform {{PLATFORMS}} -t {{TAG}} --push .
+
+# Bring up the full stack (llm + core). Defaults: workspace=./data, models=host ~/.ollama
+# (so the bundled Ollama reuses an already-pulled gemma4-medmcp instead of a 15 GB download).
+compose-up:
+    MEDMCP_WORKSPACE="${MEDMCP_WORKSPACE:-$(pwd)/data}" \
+    OLLAMA_MODELS_DIR="${OLLAMA_MODELS_DIR:-$HOME/.ollama}" \
+    docker compose up -d --build
+
+# Tear down the stack.
+compose-down:
+    MEDMCP_WORKSPACE="${MEDMCP_WORKSPACE:-$(pwd)/data}" docker compose down
+
+# Tail core + llm logs.
+compose-logs:
+    MEDMCP_WORKSPACE="${MEDMCP_WORKSPACE:-$(pwd)/data}" docker compose logs -f --tail=100

@@ -1,0 +1,18 @@
+# medmcp-neuro as a container stack (GPU via CDI — the rootless path).
+# ${MEDMCP_WORKSPACE} is expanded by the core; bind uses the same host path on
+# both sides (path parity for the spawned container).
+name = "medmcp-neuro"
+command = "docker"
+args = [
+    "run",
+    "--rm",
+    "-i",
+    "--device",
+    "nvidia.com/gpu=all",
+    "-v",
+    "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}",
+    "medmcp-neuro:dev",
+]
+# Skills vendored next to this manifest; resolved inside the core container.
+skills_path = "/app/stacks.d/medmcp-neuro/skills"
+tool_timeout_sec = 7200.0

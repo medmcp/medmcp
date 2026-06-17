@@ -1371,10 +1371,16 @@ else:
 
 
 def main() -> None:
-    """Run the workspace server on localhost (no auth — do not expose)."""
+    """Run the workspace server on localhost (no auth — do not expose).
+
+    Binds 127.0.0.1 by default. In a container set ``MEDMCP_WORKSPACE_HOST=0.0.0.0``
+    so the published port is reachable — the no-auth posture is preserved by
+    publishing the port only to the host's loopback (``127.0.0.1:8100:8100``).
+    """
     WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+    host = os.environ.get("MEDMCP_WORKSPACE_HOST", "127.0.0.1")
     port = int(os.environ.get("MEDMCP_WORKSPACE_PORT", str(DEFAULT_PORT)))
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":

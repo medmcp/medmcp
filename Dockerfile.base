@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+#
+# medmcp-base — the single owned base image every MedMCP image derives from
+# (core, dicom, neuro, dev). Built once per arch and shared on-node, so the
+# CUDA + Python + uv layers are not rebuilt per stack.
+#
+# CUDA_TAG is a build arg so the base tracks the deployment target:
+#   - 12.8.1 (default) matches a host driver >= R570 (CUDA 12.8) — testable here.
+#   - 13.0.x for an R580+ fleet (matches torch 2.11's bundled CUDA 13; note that
+#     torch self-contains its CUDA libs, so its GPU requirement is driven by the
+#     wheel, not by this base).
+# Multi-arch: nvidia/cuda *-runtime-ubuntu24.04 publishes both amd64 and arm64.
+ARG CUDA_TAG=12.8.1
+FROM nvidia/cuda:${CUDA_TAG}-runtime-ubuntu24.04
+
+# Ubuntu 24.04 ships Python 3.12 as the system interpreter; uv builds the venvs
+# against it (no standalone Python download).
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON=python3.12 \
+    PATH=/usr/local/bin:$PATH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.12 \
+        python3.12-venv \
+        python3-pip \
+        ca-certificates \
+        curl \
+        git \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv (pinned) — a single static binary, copied from the official distroless image.
+COPY --from=ghcr.io/astral-sh/uv:0.11.6 /uv /uvx /usr/local/bin/
+
+# Reasonable default workdir; downstream images override as needed.
+WORKDIR /app

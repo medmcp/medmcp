@@ -1,0 +1,17 @@
+{
+  "_comment": "Production catalog referencing the private GHCR images (ghcr.io/medmcp). Baked into the core image at /app/catalog.ghcr.json; point MEDMCP_CATALOG_URL at it on deployments that pull from GHCR (nodes must `docker login ghcr.io`). Pin :main to a specific :<sha> for reproducible fleets.",
+  "stacks": [
+    {
+      "name": "medmcp-dicom",
+      "image": "ghcr.io/medmcp/dicom:main",
+      "description": "DICOM discovery, NIfTI conversion, and BIDS organisation.",
+      "gpu": false
+    },
+    {
+      "name": "medmcp-neuro",
+      "image": "ghcr.io/medmcp/neuro:main",
+      "description": "Brain extraction (HD-BET) and image registration (ANTs).",
+      "gpu": true
+    }
+  ]
+}

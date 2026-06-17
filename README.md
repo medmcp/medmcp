@@ -155,6 +155,13 @@ Once installed, the stack is auto-discovered via its `[medmcp.stacks]` entry poi
 
 **Containerized stacks (deployment).** A stack can instead ship as a container image and be declared in a `stacks.d/<name>.toml` manifest (`command = "docker"`, `args = [...]`); the core then launches it over stdio with `docker run -i` (GPU stacks add `--device nvidia.com/gpu=all`). This is a second discovery source alongside `uv tool` installs — a local `uv tool` install of the same name takes precedence, so you can develop against a local checkout while the fleet runs the pinned image. Each containerized stack pins its own CUDA build, so it runs on any host with driver ≥ R570 (CUDA backward-compatibility covers newer drivers).
 
+**Private images (GHCR).** CI (`.github/workflows/images.yml`) builds and pushes the base, core, and stack images to the **private** registry `ghcr.io/medmcp/*` (packages are private by default; the base package must grant the stack repos read access). For a private fleet:
+
+1. `docker login ghcr.io` on each node (a `read:packages` token); compose mounts the host's docker credentials so the in-UI install can pull.
+2. Point the catalog at the published images: `MEDMCP_CATALOG_URL=/app/catalog.ghcr.json` (bundled), or your own catalog of `ghcr.io/medmcp/*:<sha>` refs.
+
+Air-gapped sites mirror the images into an internal registry and point the catalog there instead. No image data leaves the machine either way — these are inbound pulls.
+
 ---
 
 ## Provenance & Reusable Workflows

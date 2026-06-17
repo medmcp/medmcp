@@ -349,6 +349,17 @@ async def get_stacks() -> JsonDict:
     return {"stacks": await asyncio.to_thread(settings.list_installed_stacks)}
 
 
+@app.get("/api/catalog")
+async def get_catalog() -> JsonDict:
+    """Return the curated install catalog; each entry flagged whether it's installed."""
+
+    def _build() -> list[JsonDict]:
+        installed = {s["name"] for s in settings.list_installed_stacks()}
+        return [{**e, "installed": e["name"] in installed} for e in settings.load_catalog()]
+
+    return {"catalog": await asyncio.to_thread(_build)}
+
+
 @app.post("/api/stacks/install")
 async def post_stack_install(payload: StackInstallPayload) -> JsonDict:
     """Install a container stack from an image, then reload vibe-acp.

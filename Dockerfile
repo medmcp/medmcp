@@ -35,6 +35,7 @@ COPY --from=frontend /app/frontend/dist ./frontend/dist
 COPY docker/config.toml ./.vibe/config.toml
 COPY .vibe/prompts ./.vibe/prompts
 COPY Modelfile.gemma4 ./Modelfile.gemma4
+COPY catalog.json ./catalog.json
 COPY docker/entrypoint.sh /usr/local/bin/medmcp-entrypoint
 RUN chmod +x /usr/local/bin/medmcp-entrypoint
 

@@ -1,4 +1,5 @@
 import type {
+  CatalogEntry,
   InstalledStack,
   ReplayPreviewStep,
   SessionInfo,
@@ -97,6 +98,13 @@ export async function fetchInstalledStacks(): Promise<InstalledStack[]> {
   const res = await check(await fetch('/api/stacks'))
   const body = (await res.json()) as { stacks: InstalledStack[] }
   return body.stacks
+}
+
+/** Fetch the curated install catalog (each entry flagged whether it's installed). */
+export async function fetchCatalog(): Promise<CatalogEntry[]> {
+  const res = await check(await fetch('/api/catalog'))
+  const body = (await res.json()) as { catalog: CatalogEntry[] }
+  return body.catalog
 }
 
 /** Install a stack from a container image; returns its name. Restarts the agent. */

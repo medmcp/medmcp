@@ -520,6 +520,58 @@ def list_installed_stacks() -> list[JsonDict]:
     return out
 
 
+# Curated catalog of installable stacks shown in the UI (browse → install). Default
+# is the bundled catalog.json; override with MEDMCP_CATALOG_URL (an http(s) URL or
+# a file path) to point at a published or air-gapped-mirror catalog.
+CATALOG_PATH: Path = Path(PROJECT_ROOT) / "catalog.json"
+CATALOG_URL: str = os.environ.get("MEDMCP_CATALOG_URL", "")
+
+
+def load_catalog() -> list[JsonDict]:
+    """Return the curated catalog of installable stacks.
+
+    Each entry is ``{name, image, description, gpu}``. Source is
+    :data:`CATALOG_URL` (http(s) URL or file path) when set, else the bundled
+    :data:`CATALOG_PATH`. Best-effort: returns ``[]`` (and logs) on any error so
+    the UI degrades gracefully.
+    """
+    src = CATALOG_URL.strip()
+    try:
+        if src.startswith(("http://", "https://")):
+            resp = httpx.get(src, timeout=10.0)
+            resp.raise_for_status()
+            data: object = resp.json()
+        else:
+            path = Path(src) if src else CATALOG_PATH
+            if not path.is_file():
+                return []
+            data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning("could not load stack catalog from %r: %s", src or str(CATALOG_PATH), exc)
+        return []
+    if not isinstance(data, dict):
+        return []
+    raw = cast("list[Any]", cast("JsonDict", data).get("stacks", []))
+    out: list[JsonDict] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        e = cast("JsonDict", entry)
+        name = str(e.get("name", "")).strip()
+        image = str(e.get("image", "")).strip()
+        if not name or not image:
+            continue
+        out.append(
+            {
+                "name": name,
+                "image": image,
+                "description": str(e.get("description", "")),
+                "gpu": bool(e.get("gpu", False)),
+            }
+        )
+    return out
+
+
 def read_skill_description(skill_md: Path) -> str:
     """Return the ``description:`` frontmatter value from a SKILL.md, or ``''``."""
     try:

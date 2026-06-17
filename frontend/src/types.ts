@@ -67,6 +67,15 @@ export interface InstalledStack {
   gpu: boolean
 }
 
+/** One catalog entry (from GET /api/catalog): an installable stack. */
+export interface CatalogEntry {
+  name: string
+  image: string
+  description: string
+  gpu: boolean
+  installed: boolean
+}
+
 export interface WorkflowInfo {
   name: string
   description: string

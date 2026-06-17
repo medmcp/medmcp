@@ -189,3 +189,31 @@ class TestListInstalled:
         assert settings.list_installed_stacks() == [
             {"name": "medmcp-foo", "image": "ghcr.io/x/foo:dev", "gpu": False}
         ]
+
+
+class TestCatalog:
+    """load_catalog reads the curated install catalog."""
+
+    def test_reads_file(self, tmp_path: Path) -> None:
+        """Valid entries are returned normalized; incomplete ones are dropped."""
+        cat = tmp_path / "catalog.json"
+        cat.write_text(
+            '{"stacks": [{"name": "medmcp-foo", "image": "img:dev", '
+            '"description": "d", "gpu": true}, {"name": "", "image": "x"}]}'
+        )
+        with (
+            patch("medmcp.settings.CATALOG_PATH", cat),
+            patch("medmcp.settings.CATALOG_URL", ""),
+        ):
+            entries = settings.load_catalog()
+        assert entries == [
+            {"name": "medmcp-foo", "image": "img:dev", "description": "d", "gpu": True}
+        ]
+
+    def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
+        """A missing catalog file yields an empty list (graceful)."""
+        with (
+            patch("medmcp.settings.CATALOG_PATH", tmp_path / "nope.json"),
+            patch("medmcp.settings.CATALOG_URL", ""),
+        ):
+            assert settings.load_catalog() == []

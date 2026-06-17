@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 import {
+  fetchCatalog,
   fetchInstalledStacks,
   fetchSettings,
   installStack,
   saveSettings,
   uninstallStack,
 } from '../api'
-import type { InstalledStack, SettingsState } from '../types'
+import type { CatalogEntry, InstalledStack, SettingsState } from '../types'
 import { XIcon } from './icons'
 
 interface SettingsDrawerProps {
@@ -69,6 +70,7 @@ function Row({
 export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [state, setState] = useState<SettingsState | null>(null)
   const [installed, setInstalled] = useState<InstalledStack[]>([])
+  const [catalog, setCatalog] = useState<CatalogEntry[]>([])
   const [installImage, setInstallImage] = useState('')
   const [installing, setInstalling] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -77,10 +79,11 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
   useEffect(() => {
     if (!open) return
-    Promise.all([fetchSettings(), fetchInstalledStacks()])
-      .then(([s, inst]) => {
+    Promise.all([fetchSettings(), fetchInstalledStacks(), fetchCatalog()])
+      .then(([s, inst, cat]) => {
         setState(s)
         setInstalled(inst)
+        setCatalog(cat)
         setError(null)
         setNotice(null)
       })
@@ -100,26 +103,32 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   }
 
   const reloadStacks = async () => {
-    const [s, inst] = await Promise.all([fetchSettings(), fetchInstalledStacks()])
+    const [s, inst, cat] = await Promise.all([
+      fetchSettings(),
+      fetchInstalledStacks(),
+      fetchCatalog(),
+    ])
     setState(s)
     setInstalled(inst)
+    setCatalog(cat)
   }
 
-  const doInstall = () => {
-    const image = installImage.trim()
+  const performInstall = (image: string, after?: () => void) => {
     if (!image || installing) return
     setInstalling(true)
     setError(null)
     setNotice(null)
     installStack(image)
       .then(async (name) => {
-        setInstallImage('')
+        after?.()
         await reloadStacks()
         setNotice(`Installed ${name} — agent restarted into a fresh session.`)
       })
       .catch((e: unknown) => setError(String(e)))
       .finally(() => setInstalling(false))
   }
+
+  const doInstall = () => performInstall(installImage.trim(), () => setInstallImage(''))
 
   const doUninstall = (name: string) => {
     if (installing) return
@@ -179,25 +188,6 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               />
 
               <div className="settings-section">Stacks</div>
-              <div className="stack-install">
-                <input
-                  className="wf-input"
-                  placeholder="Install from image, e.g. ghcr.io/medmcp/neuro:dev"
-                  value={installImage}
-                  disabled={installing}
-                  onChange={(e) => setInstallImage(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') doInstall()
-                  }}
-                />
-                <button
-                  className="btn-primary"
-                  disabled={installing || !installImage.trim()}
-                  onClick={doInstall}
-                >
-                  {installing ? 'Working…' : 'Install'}
-                </button>
-              </div>
               {state.stacks.length === 0 && (
                 <div className="settings-row-hint">No stacks installed yet.</div>
               )}
@@ -238,6 +228,51 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                   </div>
                 )
               })}
+
+              <div className="settings-section">Available</div>
+              {catalog.map((c) => (
+                <div className="settings-row" key={`cat-${c.name}`}>
+                  <div className="settings-row-text">
+                    <div className="settings-row-label">
+                      {c.name}
+                      {c.gpu && <span className="stack-badge">GPU</span>}
+                    </div>
+                    {c.description && <div className="settings-row-hint">{c.description}</div>}
+                  </div>
+                  <div className="stack-row-actions">
+                    {c.installed ? (
+                      <span className="settings-row-hint">Installed</span>
+                    ) : (
+                      <button
+                        className="btn-primary btn-sm"
+                        disabled={installing}
+                        onClick={() => performInstall(c.image)}
+                      >
+                        Install
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+              <div className="stack-install">
+                <input
+                  className="wf-input"
+                  placeholder="Or install from an image, e.g. ghcr.io/medmcp/neuro:dev"
+                  value={installImage}
+                  disabled={installing}
+                  onChange={(e) => setInstallImage(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') doInstall()
+                  }}
+                />
+                <button
+                  className="btn-primary"
+                  disabled={installing || !installImage.trim()}
+                  onClick={doInstall}
+                >
+                  {installing ? 'Working…' : 'Install'}
+                </button>
+              </div>
 
               {state.workflows_enabled && (
                 <>

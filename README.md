@@ -31,51 +31,60 @@ MedMCP runs entirely on-premise and is designed to meet the data governance and 
 
 - **OS:** Linux (tested on Ubuntu)
 - **Hardware:** an NVIDIA GPU; ≥ 24 GB VRAM recommended for the local Gemma 4 26B model (~18 GB loaded). CPU-only inference works but is slow.
-- **To run with Docker (recommended):** Docker (rootless is supported) + the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/) with a CDI spec (`nvidia-ctk cdi generate`); host driver ≥ R570 (CUDA 12.8).
-- **To run natively:** [uv](https://docs.astral.sh/uv/) and [just](https://github.com/casey/just) (we recommend `uv tool install rust-just`).
+- **To run (recommended):** Docker (rootless is supported) + the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/) with a CDI spec (`nvidia-ctk cdi generate`); host driver ≥ R570 (CUDA 12.8); and access to the private image registry — `docker login ghcr.io` with a `read:packages` token.
+- **To develop (build from source):** [uv](https://docs.astral.sh/uv/) and [just](https://github.com/casey/just) (we recommend `uv tool install rust-just`); Node 24 for the frontend.
 
 ### Run with Docker (recommended)
 
-The recommended way to run MedMCP is with **Docker** — a reproducible, GPU-ready
-setup: a CPU-only **core** (workspace UI + agent) plus a bundled **Ollama** GPU
-service, with imaging stacks launched as their own GPU containers. (See
-[Prerequisites](#prerequisites) for the Docker/NVIDIA requirements.)
+MedMCP ships as prebuilt images on the private registry `ghcr.io/medmcp` — a node
+**pulls** them, nothing is built locally. You only need two files from this repo:
+`docker-compose.ghcr.yml` and `Modelfile.gemma4` (clone the repo, or copy just those).
+
+1. **Authenticate** to the registry (once per node — see [Prerequisites](#prerequisites)):
+
+   ```bash
+   docker login ghcr.io   # username: your GitHub user · password: a read:packages token
+   ```
+
+2. **Start it** — set `MEDMCP_WORKSPACE` to the absolute host folder holding your imaging data:
+
+   ```bash
+   MEDMCP_WORKSPACE="$PWD/data" docker compose -f docker-compose.ghcr.yml up -d
+   # from a repo checkout you can use:  just compose-up-ghcr
+   ```
+
+   This pulls the CPU-only **core** plus a bundled **Ollama** GPU service and, on first
+   run, builds the `gemma4-medmcp` model (~18 GB pull). Open **http://localhost:8100**.
+
+3. **Add tools** — in the UI, open **Settings → Stacks → Available** and install the
+   imaging stacks you need (e.g. `dicom`, `neuro`); each pulls its GPU image on demand
+   and is then launched by the core when the agent calls it.
+
+The workspace folder is bind-mounted at the **same absolute path** inside the container,
+so the agent's outputs land back on your host. Pin a specific release with
+`MEDMCP_TAG=<git-sha>` (default `:main`). Tear down with
+`docker compose -f docker-compose.ghcr.yml down`. Air-gapped sites mirror the images
+into an internal registry — see [Imaging Stacks](#imaging-stacks).
+
+### Run from source (development)
+
+To build and run everything locally instead of pulling images:
 
 ```bash
-just compose-up    # build images, ensure the gemma4-medmcp model, start core + Ollama
-# open http://localhost:8100  —  tear down with: just compose-down
+just compose-up   # build the images, then start core + Ollama (http://localhost:8100)
 ```
 
-By default the workspace is `./data` and models are reused from the host's
-`~/.ollama` (override with `MEDMCP_WORKSPACE` / `OLLAMA_MODELS_DIR`; a fresh
-named-volume deploy pulls the ~18 GB model on first run). Imaging stacks are
-declared as container manifests under `stacks.d/` — see [Imaging Stacks](#imaging-stacks).
-
-### Run natively with `just` (alternative)
-
-Prefer a host install? A single command handles the full setup (uv, Ollama, Python
-deps, model pull) and launches the UI:
+Or run host-native (uv + Ollama, no containers):
 
 ```bash
-just medmcp       # install everything, pull model, start Ollama, launch UI
+just medmcp       # install everything, pull the model, start Ollama, launch the UI
 ```
 
-If you prefer to run each step separately:
+MedMCP's primary interface is the **workspace UI** — a four-panel layout (file
+explorer, medical-image viewer, workflows, chat). See [Workspace UI](#workspace-ui).
 
-```bash
-just setup        # installs uv, ollama, and syncs Python deps
-just pull-model   # pulls Gemma 4 26B and builds gemma4-medmcp (~18 GB, one-time)
-just serve-ollama # start the Ollama server (foreground, Ctrl-C to stop)
-just workspace-build  # build the workspace frontend (one-time; needs node + npm)
-just workspace    # launches the workspace UI at http://localhost:8100
-```
-
-MedMCP's primary interface is the **workspace UI** — a four-panel interface
-(file explorer, medical-image viewer, workflows, chat) for working with imaging
-data alongside the agent. See [Workspace UI](#workspace-ui).
-
-> **Developing MedMCP?** The recommended setup is the **dev container** (works with
-> PyCharm and VS Code) — see [CONTRIBUTING.md](CONTRIBUTING.md).
+> **Developing MedMCP?** The recommended setup is the **dev container** (PyCharm or
+> VS Code) — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 

@@ -1104,6 +1104,14 @@ button:hover {
   vertical-align: middle;
 }
 
+.install-progress {
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ── Chats menu (chat-header dropdown) ── */
 
 .chats-menu {

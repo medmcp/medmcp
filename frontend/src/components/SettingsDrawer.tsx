@@ -3,7 +3,6 @@ import {
   fetchCatalog,
   fetchInstalledStacks,
   fetchSettings,
-  installStack,
   saveSettings,
   uninstallStack,
 } from '../api'
@@ -73,6 +72,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [catalog, setCatalog] = useState<CatalogEntry[]>([])
   const [installImage, setInstallImage] = useState('')
   const [installing, setInstalling] = useState(false)
+  const [installProgress, setInstallProgress] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -118,14 +118,39 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
     setInstalling(true)
     setError(null)
     setNotice(null)
-    installStack(image)
-      .then(async (name) => {
+    setInstallProgress('Starting…')
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    const ws = new WebSocket(`${proto}://${location.host}/ws/stacks/install`)
+    ws.onopen = () => ws.send(JSON.stringify({ image }))
+    ws.onmessage = (ev: MessageEvent<string>) => {
+      const m = JSON.parse(ev.data) as {
+        type: 'progress' | 'done' | 'error'
+        line?: string
+        name?: string
+        message?: string
+      }
+      if (m.type === 'progress') {
+        setInstallProgress(m.line ?? null)
+      } else if (m.type === 'done') {
+        ws.close()
         after?.()
-        await reloadStacks()
-        setNotice(`Installed ${name} — agent restarted into a fresh session.`)
-      })
-      .catch((e: unknown) => setError(String(e)))
-      .finally(() => setInstalling(false))
+        setInstalling(false)
+        setInstallProgress(null)
+        reloadStacks().then(() =>
+          setNotice(`Installed ${m.name} — agent restarted into a fresh session.`),
+        )
+      } else {
+        ws.close()
+        setInstalling(false)
+        setInstallProgress(null)
+        setError(m.message ?? 'install failed')
+      }
+    }
+    ws.onerror = () => {
+      setInstalling(false)
+      setInstallProgress(null)
+      setError('install connection failed')
+    }
   }
 
   const doInstall = () => performInstall(installImage.trim(), () => setInstallImage(''))
@@ -163,6 +188,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
         <div className="drawer-body">
           {error && <div className="panel-error">{error}</div>}
           {notice && <div className="drawer-notice">{notice}</div>}
+          {installProgress && <div className="drawer-notice install-progress">{installProgress}</div>}
           {!state ? (
             <div className="viewer-message">Loading…</div>
           ) : (

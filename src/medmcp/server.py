@@ -397,6 +397,53 @@ async def post_stack_uninstall(payload: StackUninstallPayload) -> JsonDict:
     return {"ok": True, "restarted": True}
 
 
+@app.websocket("/ws/stacks/install")
+async def ws_stack_install(ws: WebSocket) -> None:
+    """Install a stack with streamed progress.
+
+    First client message: ``{"image": "..."}``. Streams
+    ``{"type":"progress","line":...}`` frames during the pull/extract, then a
+    final ``{"type":"done","name":...}`` or ``{"type":"error","message":...}``.
+    On success it reloads discovery and restarts vibe-acp (same as the POST path).
+    """
+    await ws.accept()
+    try:
+        first = cast("JsonDict", await ws.receive_json())
+    except WebSocketDisconnect:
+        return
+    image = str(first.get("image", "")).strip()
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[JsonDict] = asyncio.Queue()
+
+    def on_progress(line: str) -> None:
+        # Called from the install worker thread; hop back onto the event loop.
+        loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", "line": line})
+
+    async def run() -> None:
+        try:
+            name = await asyncio.to_thread(settings.install_stack_image, image, on_progress)
+            await asyncio.to_thread(_apply_stack_change)
+            _audit.info("stack installed: %s (%s)", name, image)
+            await _restart_vibe()
+            await queue.put({"type": "done", "name": name})
+        except Exception as exc:  # relayed to the client as an error frame
+            await queue.put({"type": "error", "message": str(exc)})
+
+    task = asyncio.create_task(run())
+    try:
+        while True:
+            frame = await queue.get()
+            await ws.send_json(frame)
+            if frame["type"] in ("done", "error"):
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await task
+        with contextlib.suppress(Exception):
+            await ws.close()
+
+
 # ── Workflow API ───────────────────────────────────────────
 #
 # Drives the provenance→distill→replay pipeline (Tier 2/3) from the workspace

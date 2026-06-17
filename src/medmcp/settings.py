@@ -29,6 +29,7 @@ import subprocess
 import tempfile
 import threading
 import tomllib
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
@@ -431,6 +432,45 @@ def _extract_image_skills(image: str, in_image_path: str, into_dir: Path) -> Non
             _run_docker(["rm", "-f", cid], timeout=30)
 
 
+# Callback for streaming install progress (one human-readable line at a time).
+ProgressFn = Callable[[str], None]
+
+
+def _image_present(image: str) -> bool:
+    """Return whether *image* is already present locally."""
+    try:
+        _run_docker(["image", "inspect", image], timeout=30)
+        return True
+    except RuntimeError:
+        return False
+
+
+def _pull_streaming(image: str, on_progress: ProgressFn | None) -> None:
+    """Run ``docker pull`` streaming its status lines to *on_progress*.
+
+    Output is a non-TTY pipe, so docker emits line-oriented status updates (not
+    in-place bars); carriage-return segments are collapsed to the last token.
+    Raises RuntimeError on a non-zero exit.
+    """
+    try:
+        proc = subprocess.Popen(
+            ["docker", "pull", image],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("docker CLI not found") from exc
+    assert proc.stdout is not None
+    for raw in proc.stdout:
+        line = raw.split("\r")[-1].strip()
+        if line and on_progress:
+            on_progress(line)
+    if proc.wait() != 0:
+        raise RuntimeError(f"docker pull {image} failed")
+
+
 def _write_stack_manifest(name: str, entry: JsonDict) -> None:
     """Atomically write ``stacks.d/<name>.toml``."""
     STACKS_D_PATH.mkdir(parents=True, exist_ok=True)
@@ -446,14 +486,30 @@ def _write_stack_manifest(name: str, entry: JsonDict) -> None:
         raise
 
 
-def install_stack_image(image: str) -> str:
+def install_stack_image(image: str, on_progress: ProgressFn | None = None) -> str:
     """Install a container stack from *image* and return its name.
 
-    Reads the image's ``org.medmcp.stack`` label, extracts its skills next to the
-    manifest, writes ``stacks.d/<name>.toml`` (the launch recipe), and marks the
-    stack active. Idempotent — re-installing overwrites. Raises as
-    :func:`read_stack_label` plus ValueError for a bad name in the label.
+    Pulls the image if absent (streaming progress to *on_progress*), reads its
+    ``org.medmcp.stack`` label, extracts its skills next to the manifest, writes
+    ``stacks.d/<name>.toml`` (the launch recipe), and marks the stack active.
+    Idempotent — re-installing overwrites. Raises as :func:`read_stack_label`
+    plus ValueError for a bad name in the label.
     """
+
+    def report(msg: str) -> None:
+        if on_progress:
+            on_progress(msg)
+
+    image = image.strip()
+    if not image or any(c.isspace() for c in image):
+        raise ValueError(f"invalid image reference: {image!r}")
+
+    report(f"Checking {image}…")
+    if not _image_present(image):
+        report(f"Pulling {image}…")
+        _pull_streaming(image, on_progress)
+
+    report("Reading stack metadata…")
     meta = read_stack_label(image)
     name = str(meta["name"]).strip()
     if not _STACK_NAME_RE.fullmatch(name):
@@ -473,6 +529,7 @@ def install_stack_image(image: str) -> str:
     # extract them next to the manifest and point skills_path there.
     in_image_skills = meta.get("skills_path")
     if isinstance(in_image_skills, str) and in_image_skills.strip():
+        report("Extracting skills…")
         skills_root = STACKS_D_PATH / name
         shutil.rmtree(skills_root, ignore_errors=True)  # clean prior extraction
         _extract_image_skills(image, in_image_skills.strip(), skills_root)
@@ -480,6 +537,7 @@ def install_stack_image(image: str) -> str:
         if extracted.is_dir():
             entry["skills_path"] = str(extracted)
 
+    report("Registering stack…")
     _write_stack_manifest(name, entry)
 
     # Make it active immediately. Only touch an explicit set if one exists;

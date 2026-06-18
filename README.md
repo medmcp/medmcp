@@ -31,7 +31,7 @@ MedMCP runs entirely on-premise and is designed to meet the data governance and 
 
 - **OS:** Linux (tested on Ubuntu)
 - **Hardware:** an NVIDIA GPU; ≥ 24 GB VRAM recommended for the local Gemma 4 26B model (~18 GB loaded). CPU-only inference works but is slow.
-- **To run (recommended):** Docker (rootless is supported) + the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/) with a CDI spec (`nvidia-ctk cdi generate`); host driver ≥ R570 (CUDA 12.8); and access to the private image registry — `docker login ghcr.io` with a `read:packages` token.
+- **To run (recommended):** Docker (rootless is supported) + the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/) with a CDI spec (`sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`) and CDI enabled in the daemon (`"features": { "cdi": true }` in `/etc/docker/daemon.json`, then restart Docker) so `nvidia.com/gpu=all` resolves; host driver ≥ R570 (CUDA 12.8); and access to the private image registry — `docker login ghcr.io` with a `read:packages` token. On rootful Docker, set `MEDMCP_DOCKER_SOCK=/var/run/docker.sock`. Behind a corporate proxy, see [Running behind a proxy](#running-behind-a-proxy).
 - **To develop (build from source):** [uv](https://docs.astral.sh/uv/) and [just](https://github.com/casey/just) (we recommend `uv tool install rust-just`); Node 24 for the frontend.
 
 ### Run with Docker (recommended)
@@ -85,6 +85,46 @@ explorer, medical-image viewer, workflows, chat). See [Workspace UI](#workspace-
 
 > **Developing MedMCP?** The recommended setup is the **dev container** (PyCharm or
 > VS Code) — see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Running behind a proxy
+
+Corporate proxies touch MedMCP at three independent layers — configuring only one
+is the usual cause of `TLS handshake timeout` or `certificate signed by unknown
+authority` during install:
+
+1. **Docker daemon** (pulls the MedMCP/Ollama images). The daemon does *not* read
+   your shell's proxy vars — configure it explicitly, e.g. a systemd drop-in
+   `/etc/systemd/system/docker.service.d/http-proxy.conf` with
+   `Environment="HTTPS_PROXY=http://user:pass@proxy:port"` then
+   `systemctl daemon-reload && systemctl restart docker`. (In a systemd unit, a
+   literal `%` in the password must be escaped as `%%`.)
+
+2. **Containers** (the first-run `ollama pull` of `gemma4:26b` reaches out to
+   `registry.ollama.ai`). Set proxy env for containers via `~/.docker/config.json`
+   `"proxies"`, and **add the compose service names to `noProxy`** so
+   container-to-container calls don't get sent to the proxy:
+
+   ```json
+   { "proxies": { "default": {
+       "httpProxy":  "http://user:pass@proxy:port",
+       "httpsProxy": "http://user:pass@proxy:port",
+       "noProxy": "localhost,127.0.0.1,llm,llm-init,medmcp"
+   } } }
+   ```
+
+3. **TLS interception (MITM).** If the proxy re-signs TLS, add the proxy overlay so
+   containers trust its CA — point `MEDMCP_CA_BUNDLE` at a bundle that includes the
+   proxy root (the host's own bundle usually already does):
+
+   ```bash
+   MEDMCP_WORKSPACE="$PWD/data" MEDMCP_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+     docker compose -f docker-compose.ghcr.yml -f docker-compose.proxy.yml up -d
+   ```
+
+**Simplest escape hatch:** pull the model on the host once
+(`ollama pull gemma4:26b`) and set `OLLAMA_MODELS_DIR` to your host store (e.g.
+`~/.ollama`). The container then reuses it and skips the ~18 GB in-container pull
+entirely — sidestepping layers 2 and 3 for the model download.
 
 ---
 

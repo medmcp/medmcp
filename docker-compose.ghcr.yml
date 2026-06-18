@@ -56,8 +56,9 @@ services:
     ports:
       - "127.0.0.1:8100:8100"
     volumes:
-      # Rootless docker socket → core spawns sibling stack containers.
-      - "${XDG_RUNTIME_DIR}/docker.sock:/var/run/docker.sock"
+      # Docker socket → core spawns sibling stack containers. Defaults to the
+      # rootless path; rootful hosts set MEDMCP_DOCKER_SOCK=/var/run/docker.sock.
+      - "${MEDMCP_DOCKER_SOCK:-${XDG_RUNTIME_DIR}/docker.sock}:/var/run/docker.sock"
       # Workspace at an identical absolute path (path parity for nested run -v).
       - "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}"
       # Host registry credentials (read-only) so the install flow can pull private images.

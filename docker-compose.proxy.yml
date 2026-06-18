@@ -1,0 +1,25 @@
+# Opt-in overlay for hosts behind a TLS-intercepting (MITM) corporate proxy.
+#
+# The first-run model pull happens *inside* the llm container (ollama pulling
+# gemma4:26b from registry.ollama.ai). Behind a proxy that re-signs TLS, the
+# container's minimal trust store rejects the proxy's certificate. This overlay
+# mounts a CA bundle that includes the proxy's root CA into each service.
+#
+# Point MEDMCP_CA_BUNDLE at a bundle that trusts your proxy (the host's own
+# bundle usually already does, since host git/curl work through the proxy):
+#
+#   MEDMCP_WORKSPACE=/abs/path MEDMCP_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+#     docker compose -f docker-compose.ghcr.yml -f docker-compose.proxy.yml up -d
+#
+# Container proxy env + NO_PROXY come from ~/.docker/config.json "proxies"
+# (NO_PROXY MUST list the service names llm,llm-init,medmcp so container-to-
+# container traffic bypasses the proxy). The daemon's own image pulls use the
+# daemon proxy (systemd drop-in / /etc/docker/daemon.json). See README.
+x-ca: &ca
+  volumes:
+    - "${MEDMCP_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}:/etc/ssl/certs/ca-certificates.crt:ro"
+
+services:
+  llm: *ca
+  llm-init: *ca
+  medmcp: *ca

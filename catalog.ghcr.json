@@ -12,6 +12,18 @@
       "image": "ghcr.io/medmcp/neuro:main",
       "description": "Brain extraction (HD-BET) and image registration (ANTs).",
       "gpu": true
+    },
+    {
+      "name": "medmcp-neuro-ms",
+      "image": "ghcr.io/medmcp/neuro-ms:main",
+      "description": "MS white-matter lesion segmentation and lesion load (LST-AI).",
+      "gpu": true
+    },
+    {
+      "name": "medmcp-neuro-cancer",
+      "image": "ghcr.io/medmcp/neuro-cancer:main",
+      "description": "Brain-tumor (glioma / BraTS) segmentation (MONAI SegResNet).",
+      "gpu": true
     }
   ]
 }

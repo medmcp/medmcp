@@ -238,6 +238,26 @@ class TestConfigTomlFallback:
         names = {s["name"] for s in servers}
         assert names == {"medmcp-neuro", "medmcp-cardiac"}
 
+    def test_orphaned_docker_entry_dropped(self, tmp_path: Path) -> None:
+        """A leftover container-stack entry (command "docker") with no manifest is dropped.
+
+        sync_servers_to_vibe_config writes active container stacks into config.toml;
+        once the stacks.d manifest is uninstalled, that entry must not resurrect the
+        stack via the config.toml fallback (the uninstall-doesn't-stick bug).
+        """
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            '[[mcp_servers]]\nname = "medmcp-neuro"\n'
+            'command = "docker"\nargs = ["run", "--rm", "-i", "medmcp-neuro:dev"]\n'
+        )
+        with (
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+        ):
+            servers = load_mcp_servers()
+
+        assert servers == []
+
     def test_no_tools_no_config_returns_empty(self, tmp_path: Path) -> None:
         """Nothing installed and no config → empty list."""
         with (

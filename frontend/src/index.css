@@ -213,7 +213,10 @@ button:hover {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 14px;
+  /* Fixed height so all four panel headers line up regardless of whether they
+     hold buttons/menus (taller) or just a title; content centers vertically. */
+  min-height: 44px;
+  padding: 6px 14px;
   background: var(--dark2);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -997,7 +1000,7 @@ button:hover {
   top: 0;
   right: 0;
   bottom: 0;
-  width: 380px;
+  width: 460px;
   max-width: 90vw;
   background: var(--dark2);
   border-left: 1px solid var(--border2);

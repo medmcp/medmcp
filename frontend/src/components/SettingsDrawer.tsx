@@ -234,11 +234,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               <div className="settings-row">
                 <div className="settings-row-text">
                   <div className="settings-row-label">GPU</div>
-                  <div className="settings-row-hint">
-                    Imaging stacks use this immediately. The chat model uses the GPU set at
-                    startup{state.llm_gpu ? ` (currently ${state.llm_gpu})` : ''}; change
-                    MEDMCP_GPU and restart to move it.
-                  </div>
+                  <div className="settings-row-hint">Imaging stacks; chat model set at startup.</div>
                 </div>
                 <select
                   className="wf-input gpu-select"
@@ -249,7 +245,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                   <option value="all">All GPUs</option>
                   {gpus.map((g) => (
                     <option key={g.uuid} value={g.index}>
-                      GPU {g.index} — {g.name}
+                      GPU {g.index}
                     </option>
                   ))}
                   {state.gpu !== 'all' && !gpus.some((g) => g.index === state.gpu) && (
@@ -301,32 +297,35 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               })}
 
               <div className="settings-section">Available</div>
-              {catalog.map((c) => (
-                <div className="settings-row" key={`cat-${c.name}`}>
-                  <div className="settings-row-text">
-                    <div className="settings-row-label">
-                      {c.name}
-                      {c.gpu && <span className="stack-badge">GPU</span>}
+              {catalog.length > 0 && catalog.every((c) => c.installed) && (
+                <div className="settings-row-hint">All available stacks are installed.</div>
+              )}
+              {catalog
+                .filter((c) => !c.installed)
+                .map((c) => (
+                  <div className="settings-row" key={`cat-${c.name}`}>
+                    <div className="settings-row-text">
+                      <div className="settings-row-label">
+                        {c.name}
+                        {c.gpu && <span className="stack-badge">GPU</span>}
+                      </div>
+                      {c.description && <div className="settings-row-hint">{c.description}</div>}
                     </div>
-                    {c.description && <div className="settings-row-hint">{c.description}</div>}
+                    <div className="stack-row-actions">
+                      {installingImage === c.image ? (
+                        <InstallProgress line={installProgress} />
+                      ) : (
+                        <button
+                          className="btn-primary btn-sm"
+                          disabled={installing}
+                          onClick={() => performInstall(c.image)}
+                        >
+                          Install
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  <div className="stack-row-actions">
-                    {installingImage === c.image ? (
-                      <InstallProgress line={installProgress} />
-                    ) : c.installed ? (
-                      <span className="settings-row-hint">Installed</span>
-                    ) : (
-                      <button
-                        className="btn-primary btn-sm"
-                        disabled={installing}
-                        onClick={() => performInstall(c.image)}
-                      >
-                        Install
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))}
+                ))}
               <div className="stack-install">
                 <input
                   className="wf-input"

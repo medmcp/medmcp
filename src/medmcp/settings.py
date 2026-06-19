@@ -323,6 +323,13 @@ def load_mcp_servers() -> list[JsonDict]:
                     "Skipping stale config.toml entry %r (command not found: %s)", name, command
                 )
                 continue
+            # A container-stack entry (command "docker") reaching here is an orphan:
+            # a present stacks.d manifest would have claimed its name in source #2, so
+            # this is a leftover written into config.toml by a prior sync before the
+            # stack was uninstalled. Drop it so uninstalls actually take effect.
+            if command and Path(command).name == "docker":
+                log.debug("Skipping orphaned container-stack config.toml entry %r", name)
+                continue
             servers[name] = {
                 "name": name,
                 "command": command,

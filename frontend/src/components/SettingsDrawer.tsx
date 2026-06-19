@@ -36,6 +36,18 @@ function Toggle({
   )
 }
 
+/** Indeterminate progress bar + live status line, shown inline where an install runs. */
+function InstallProgress({ line }: { line: string | null }) {
+  return (
+    <div className="install-inline">
+      <div className="install-bar">
+        <span className="install-bar-fill" />
+      </div>
+      <div className="install-line">{line ?? 'Starting…'}</div>
+    </div>
+  )
+}
+
 function Row({
   label,
   hint,
@@ -72,6 +84,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [catalog, setCatalog] = useState<CatalogEntry[]>([])
   const [installImage, setInstallImage] = useState('')
   const [installing, setInstalling] = useState(false)
+  const [installingImage, setInstallingImage] = useState<string | null>(null)
   const [installProgress, setInstallProgress] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -116,6 +129,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const performInstall = (image: string, after?: () => void) => {
     if (!image || installing) return
     setInstalling(true)
+    setInstallingImage(image)
     setError(null)
     setNotice(null)
     setInstallProgress('Starting…')
@@ -135,6 +149,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
         ws.close()
         after?.()
         setInstalling(false)
+        setInstallingImage(null)
         setInstallProgress(null)
         reloadStacks().then(() =>
           setNotice(`Installed ${m.name} — agent restarted into a fresh session.`),
@@ -142,12 +157,14 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
       } else {
         ws.close()
         setInstalling(false)
+        setInstallingImage(null)
         setInstallProgress(null)
         setError(m.message ?? 'install failed')
       }
     }
     ws.onerror = () => {
       setInstalling(false)
+      setInstallingImage(null)
       setInstallProgress(null)
       setError('install connection failed')
     }
@@ -188,7 +205,6 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
         <div className="drawer-body">
           {error && <div className="panel-error">{error}</div>}
           {notice && <div className="drawer-notice">{notice}</div>}
-          {installProgress && <div className="drawer-notice install-progress">{installProgress}</div>}
           {!state ? (
             <div className="viewer-message">Loading…</div>
           ) : (
@@ -266,7 +282,9 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                     {c.description && <div className="settings-row-hint">{c.description}</div>}
                   </div>
                   <div className="stack-row-actions">
-                    {c.installed ? (
+                    {installingImage === c.image ? (
+                      <InstallProgress line={installProgress} />
+                    ) : c.installed ? (
                       <span className="settings-row-hint">Installed</span>
                     ) : (
                       <button
@@ -299,6 +317,9 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                   {installing ? 'Working…' : 'Install'}
                 </button>
               </div>
+              {installingImage !== null && !catalog.some((c) => c.image === installingImage) && (
+                <InstallProgress line={installProgress} />
+              )}
 
               {state.workflows_enabled && (
                 <>

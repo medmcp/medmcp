@@ -16,7 +16,7 @@ services:
   llm:
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
     devices:
-      - "nvidia.com/gpu=all"
+      - "nvidia.com/gpu=${MEDMCP_GPU:-all}"
     volumes:
       - "${OLLAMA_MODELS_DIR:-ollama-models}:/root/.ollama"
     healthcheck:
@@ -53,6 +53,9 @@ services:
       MEDMCP_WORKSPACE: "${MEDMCP_WORKSPACE:?set MEDMCP_WORKSPACE to an absolute host path}"
       # Default to the GHCR catalog baked into the core image.
       MEDMCP_CATALOG_URL: "${MEDMCP_CATALOG_URL:-/app/catalog.ghcr.json}"
+      # GPU the LLM + GPU stacks target (CDI device id). "all" = every GPU; pin
+      # with an index/UUID, e.g. MEDMCP_GPU=4.
+      MEDMCP_GPU: "${MEDMCP_GPU:-all}"
     ports:
       - "127.0.0.1:8100:8100"
     volumes:
@@ -60,9 +63,14 @@ services:
       - "${XDG_RUNTIME_DIR}/docker.sock:/var/run/docker.sock"
       # Workspace at an identical absolute path (path parity for nested run -v).
       - "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}"
-      # Host registry credentials (read-only) so the install flow can pull private images.
-      - "${HOME}/.docker/config.json:/root/.docker/config.json:ro"
+      # Persist installed stack manifests + extracted skills across recreates.
+      - "stacks-d:/app/stacks.d"
+      # Host registry creds, read-only at a staging path — the entrypoint copies
+      # only `auths` to /root/.docker/config.json, dropping the host's
+      # `currentContext` (which would break every in-container stack pull/run).
+      - "${HOME}/.docker/config.json:/run/host-docker-config.json:ro"
     restart: unless-stopped
 
 volumes:
   ollama-models:
+  stacks-d:

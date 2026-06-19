@@ -1104,9 +1104,43 @@ button:hover {
   vertical-align: middle;
 }
 
-.install-progress {
+/* Inline stack-install progress — rendered in the catalog row where it runs. */
+.install-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 150px;
+}
+
+.install-bar {
+  height: 6px;
+  border-radius: 4px;
+  background: var(--card2);
+  overflow: hidden;
+}
+
+.install-bar-fill {
+  display: block;
+  height: 100%;
+  width: 40%;
+  border-radius: 4px;
+  background: var(--blue-l);
+  animation: install-indeterminate 1.1s ease-in-out infinite;
+}
+
+@keyframes install-indeterminate {
+  0% {
+    margin-left: -40%;
+  }
+  100% {
+    margin-left: 100%;
+  }
+}
+
+.install-line {
   font-family: var(--mono);
   font-size: 11px;
+  color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

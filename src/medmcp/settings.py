@@ -46,6 +46,11 @@ log: logging.Logger = logging.getLogger(__name__)
 OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "gemma4-medmcp")
 
+# GPU selector (CDI device id) substituted into container-stack manifests' ${MEDMCP_GPU}.
+# Default so os.path.expandvars (no ":-" support) never leaves the literal placeholder;
+# "all" = every GPU, override with an index/UUID (e.g. "4") to pin.
+os.environ.setdefault("MEDMCP_GPU", "all")
+
 # Context window size used when Ollama hasn't been queried (yet) — the value
 # set in Modelfile.gemma4.
 DEFAULT_CONTEXT_WINDOW: int = 131_072
@@ -517,7 +522,9 @@ def install_stack_image(image: str, on_progress: ProgressFn | None = None) -> st
 
     args: list[str] = ["run", "--rm", "-i"]
     if meta.get("gpu"):
-        args += ["--device", "nvidia.com/gpu=all"]
+        # ${MEDMCP_GPU} is expanded at load time (defaults to "all"), so the GPU
+        # can be re-pinned via env without reinstalling the stack.
+        args += ["--device", "nvidia.com/gpu=${MEDMCP_GPU}"]
     args += ["-v", "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}", image]
     entry: JsonDict = {"name": name, "command": "docker", "args": args}
 

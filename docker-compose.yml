@@ -15,7 +15,7 @@ services:
   llm:
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
     devices:
-      - "nvidia.com/gpu=all"
+      - "nvidia.com/gpu=${MEDMCP_GPU:-all}"
     volumes:
       - "${OLLAMA_MODELS_DIR:-ollama-models}:/root/.ollama"
     healthcheck:
@@ -57,6 +57,9 @@ services:
       # Catalog source: empty = bundled catalog.json (local :dev images). For a
       # private GHCR fleet, set MEDMCP_CATALOG_URL=/app/catalog.ghcr.json.
       MEDMCP_CATALOG_URL: "${MEDMCP_CATALOG_URL:-}"
+      # GPU the LLM + GPU stacks target (CDI device id). "all" = every GPU; pin
+      # with an index/UUID, e.g. MEDMCP_GPU=4.
+      MEDMCP_GPU: "${MEDMCP_GPU:-all}"
     ports:
       - "127.0.0.1:8100:8100"
     volumes:
@@ -67,11 +70,12 @@ services:
       - "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}"
       # Container-stack manifests (read-write so UI install/uninstall can persist).
       - "./stacks.d:/app/stacks.d"
-      # Host registry credentials (read-only) so the install flow can pull private
-      # GHCR images. Run `docker login ghcr.io` on the host first. (If the host
-      # uses a credential helper rather than plain auths, pre-pull on the host
-      # instead, or mount the helper.)
-      - "${HOME}/.docker/config.json:/root/.docker/config.json:ro"
+      # Host registry creds, read-only at a staging path — the entrypoint copies
+      # only `auths` to /root/.docker/config.json, dropping the host's
+      # `currentContext` (which would break every in-container stack pull/run).
+      # Run `docker login ghcr.io` on the host first. (If the host uses a
+      # credential helper rather than plain auths, pre-pull on the host instead.)
+      - "${HOME}/.docker/config.json:/run/host-docker-config.json:ro"
     restart: unless-stopped
 
 volumes:

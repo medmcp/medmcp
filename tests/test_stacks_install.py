@@ -121,7 +121,7 @@ class TestInstall:
         ):
             settings.install_stack_image("img:dev")
         m = _read_manifest(stacks_dir, "medmcp-foo")
-        assert "nvidia.com/gpu=all" in m["args"]
+        assert "nvidia.com/gpu=${MEDMCP_GPU}" in m["args"]
 
     def test_invalid_name_in_label_raises(self, stacks_dir: Path) -> None:
         """A label name that isn't a safe identifier is rejected."""

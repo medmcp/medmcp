@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 import {
   fetchCatalog,
+  fetchGpus,
   fetchInstalledStacks,
   fetchSettings,
   saveSettings,
   uninstallStack,
 } from '../api'
-import type { CatalogEntry, InstalledStack, SettingsState } from '../types'
+import type { CatalogEntry, GpuInfo, InstalledStack, SettingsState } from '../types'
 import { XIcon } from './icons'
 
 interface SettingsDrawerProps {
@@ -82,6 +83,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [state, setState] = useState<SettingsState | null>(null)
   const [installed, setInstalled] = useState<InstalledStack[]>([])
   const [catalog, setCatalog] = useState<CatalogEntry[]>([])
+  const [gpus, setGpus] = useState<GpuInfo[]>([])
   const [installImage, setInstallImage] = useState('')
   const [installing, setInstalling] = useState(false)
   const [installingImage, setInstallingImage] = useState<string | null>(null)
@@ -92,11 +94,12 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
 
   useEffect(() => {
     if (!open) return
-    Promise.all([fetchSettings(), fetchInstalledStacks(), fetchCatalog()])
-      .then(([s, inst, cat]) => {
+    Promise.all([fetchSettings(), fetchInstalledStacks(), fetchCatalog(), fetchGpus()])
+      .then(([s, inst, cat, gpuList]) => {
         setState(s)
         setInstalled(inst)
         setCatalog(cat)
+        setGpus(gpuList)
         setError(null)
         setNotice(null)
       })
@@ -228,6 +231,32 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                 checked={state.workflows_enabled}
                 onChange={(v) => apply({ ...state, workflows_enabled: v })}
               />
+              <div className="settings-row">
+                <div className="settings-row-text">
+                  <div className="settings-row-label">GPU</div>
+                  <div className="settings-row-hint">
+                    Imaging stacks use this immediately. The chat model uses the GPU set at
+                    startup{state.llm_gpu ? ` (currently ${state.llm_gpu})` : ''}; change
+                    MEDMCP_GPU and restart to move it.
+                  </div>
+                </div>
+                <select
+                  className="wf-input gpu-select"
+                  value={state.gpu}
+                  disabled={saving}
+                  onChange={(e) => apply({ ...state, gpu: e.target.value })}
+                >
+                  <option value="all">All GPUs</option>
+                  {gpus.map((g) => (
+                    <option key={g.uuid} value={g.index}>
+                      GPU {g.index} — {g.name}
+                    </option>
+                  ))}
+                  {state.gpu !== 'all' && !gpus.some((g) => g.index === state.gpu) && (
+                    <option value={state.gpu}>{state.gpu}</option>
+                  )}
+                </select>
+              </div>
 
               <div className="settings-section">Stacks</div>
               {state.stacks.length === 0 && (

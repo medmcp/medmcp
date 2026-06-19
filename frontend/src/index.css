@@ -1146,6 +1146,11 @@ button:hover {
   text-overflow: ellipsis;
 }
 
+.gpu-select {
+  max-width: 200px;
+  flex: none;
+}
+
 /* ── Chats menu (chat-header dropdown) ── */
 
 .chats-menu {

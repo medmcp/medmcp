@@ -53,4 +53,16 @@ if not auths:
 PY
 fi
 
+# If a registry token is supplied, log in inside the core. This covers hosts
+# whose docker config uses a credential helper (so the mounted config carries no
+# plaintext auths) — docker login writes the auth into /root/.docker/config.json.
+if [ -n "${GHCR_TOKEN:-}" ]; then
+    if printf '%s' "$GHCR_TOKEN" | docker login "${GHCR_REGISTRY:-ghcr.io}" \
+        -u "${GHCR_USER:-medmcp}" --password-stdin >/dev/null 2>&1; then
+        echo "medmcp-entrypoint: logged in to ${GHCR_REGISTRY:-ghcr.io}"
+    else
+        echo "medmcp-entrypoint: WARNING: docker login to ${GHCR_REGISTRY:-ghcr.io} failed" >&2
+    fi
+fi
+
 exec medmcp-workspace

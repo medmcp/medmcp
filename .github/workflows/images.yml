@@ -27,6 +27,35 @@ jobs:
         run: |
           docker build -f Dockerfile.base --build-arg CUDA_TAG="${CUDA_TAG}" -t medmcp-base:ci .
           docker build --build-arg BASE_IMAGE=medmcp-base:ci -t medmcp-core:ci .
+      - name: Smoke test (entrypoint sanitizer + server boots)
+        run: |
+          # A host-like docker config carrying the leaked context + a credential
+          # helper, mounted where the entrypoint sanitizes it.
+          printf '{"auths":{"ghcr.io":{"auth":"dGVzdA=="}},"currentContext":"rootless","credsStore":"pass"}' \
+            > /tmp/host-docker-config.json
+          docker run -d --name medmcp-smoke \
+            -v /tmp/host-docker-config.json:/run/host-docker-config.json:ro \
+            -e MEDMCP_GPU=all \
+            medmcp-core:ci
+          # Wait for the server to answer /healthz.
+          ok=
+          for _ in $(seq 1 30); do
+            if docker exec medmcp-smoke python3 -c \
+              "import urllib.request; urllib.request.urlopen('http://localhost:8100/healthz')" 2>/dev/null; then
+              ok=1; break
+            fi
+            sleep 2
+          done
+          [ "$ok" = 1 ] || { echo "::error::server never became healthy"; docker logs medmcp-smoke; exit 1; }
+          # The entrypoint must have reduced the mounted config to auths-only.
+          keys=$(docker exec medmcp-smoke python3 -c \
+            "import json; print(sorted(json.load(open('/root/.docker/config.json')).keys()))")
+          echo "sanitized config keys: $keys"
+          [ "$keys" = "['auths']" ] || { echo "::error::config not sanitized: $keys"; docker logs medmcp-smoke; exit 1; }
+          echo "smoke test passed"
+      - name: Smoke test cleanup
+        if: always()
+        run: docker rm -f medmcp-smoke 2>/dev/null || true
       - name: Push to GHCR (main only)
         if: github.event_name != 'pull_request'
         env:

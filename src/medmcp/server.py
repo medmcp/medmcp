@@ -237,6 +237,8 @@ class SettingsPayload(BaseModel):
     explain_tools: bool
     record_provenance: bool
     workflows_enabled: bool
+    # Selected GPU (CDI device id) for container stacks; "" = leave unchanged.
+    gpu: str = ""
     stacks: list[ToggleEntry]
     workflows: list[ToggleEntry]
 
@@ -251,6 +253,8 @@ def _settings_state() -> JsonDict:
         "explain_tools": settings.load_explain_enabled(),
         "record_provenance": settings.load_provenance_enabled(),
         "workflows_enabled": settings.load_workflows_enabled(),
+        "gpu": settings.load_gpu_selection(),
+        "llm_gpu": settings.LLM_GPU,
         "stacks": [
             {"name": s["name"], "version": s.get("version"), "active": s["name"] in active}
             for s in stacks
@@ -287,6 +291,11 @@ async def put_settings(payload: SettingsPayload) -> JsonDict:
         old_workflows = settings.load_active_workflow_names()
         old_wf_enabled = settings.load_workflows_enabled()
 
+        # An empty gpu means "leave unchanged"; a new value re-pins stack containers.
+        gpu_changed = bool(payload.gpu) and payload.gpu != settings.load_gpu_selection()
+        if gpu_changed:
+            settings.save_gpu_selection(payload.gpu)
+
         settings.save_explain_enabled(payload.explain_tools)
         settings.save_provenance_enabled(payload.record_provenance)
         settings.save_workflows_enabled(payload.workflows_enabled)
@@ -305,6 +314,7 @@ async def put_settings(payload: SettingsPayload) -> JsonDict:
             new_stacks != old_stacks
             or new_workflows != old_workflows
             or payload.workflows_enabled != old_wf_enabled
+            or gpu_changed
         )
         if restart:
             settings.sync_servers_to_vibe_config(settings.active_servers())
@@ -341,6 +351,18 @@ def _apply_stack_change() -> None:
     """Re-discover stacks and re-sync vibe-acp config after an install/uninstall."""
     settings.load_mcp_servers.cache_clear()
     settings.sync_servers_to_vibe_config(settings.active_servers())
+
+
+@app.get("/healthz")
+async def healthz() -> JsonDict:
+    """Liveness probe for container healthchecks (touches no dependencies)."""
+    return {"status": "ok"}
+
+
+@app.get("/api/gpus")
+async def get_gpus() -> JsonDict:
+    """Best-effort GPU list for the settings picker (empty if not enumerable)."""
+    return {"gpus": await asyncio.to_thread(settings.list_gpus)}
 
 
 @app.get("/api/stacks")

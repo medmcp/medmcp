@@ -1,5 +1,6 @@
 import type {
   CatalogEntry,
+  GpuInfo,
   InstalledStack,
   ReplayPreviewStep,
   SessionInfo,
@@ -84,11 +85,19 @@ export async function saveSettings(state: SettingsState): Promise<boolean> {
     explain_tools: state.explain_tools,
     record_provenance: state.record_provenance,
     workflows_enabled: state.workflows_enabled,
+    gpu: state.gpu,
     stacks: state.stacks.map((s) => ({ name: s.name, active: s.active })),
     workflows: state.workflows.map((w) => ({ name: w.name, active: w.active })),
   })
   const body = (await res.json()) as { restarted: boolean }
   return body.restarted
+}
+
+/** Best-effort list of GPUs for the settings picker (may be empty). */
+export async function fetchGpus(): Promise<GpuInfo[]> {
+  const res = await check(await fetch('/api/gpus'))
+  const body = (await res.json()) as { gpus: GpuInfo[] }
+  return body.gpus
 }
 
 // ── Container stacks (install / uninstall) ───────────────────

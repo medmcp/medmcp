@@ -48,8 +48,21 @@ OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "gemma4-medmcp")
 
 # GPU selector (CDI device id) substituted into container-stack manifests' ${MEDMCP_GPU}.
 # Default so os.path.expandvars (no ":-" support) never leaves the literal placeholder;
-# "all" = every GPU, override with an index/UUID (e.g. "4") to pin.
+# "all" = every GPU, override with an index/UUID (e.g. "4") to pin. LLM_GPU captures
+# the value the LLM container was created with (deploy-time) before a persisted runtime
+# selection overrides MEDMCP_GPU for stacks (see load/save_gpu_selection).
 os.environ.setdefault("MEDMCP_GPU", "all")
+LLM_GPU: str = os.environ["MEDMCP_GPU"]
+GPU_SELECTION_PATH: Path = VIBE_HOME / "gpu_selection.json"
+if GPU_SELECTION_PATH.exists():
+    try:
+        _gpu_sel = str(
+            cast("dict[str, Any]", json.loads(GPU_SELECTION_PATH.read_text())).get("gpu", "")
+        ).strip()
+    except (json.JSONDecodeError, OSError):
+        _gpu_sel = ""
+    if _gpu_sel:
+        os.environ["MEDMCP_GPU"] = _gpu_sel
 
 # Context window size used when Ollama hasn't been queried (yet) — the value
 # set in Modelfile.gemma4.
@@ -752,6 +765,84 @@ def load_explain_enabled() -> bool:
 def save_explain_enabled(enabled: bool) -> None:
     """Persist the explain-tool-calls on/off preference to disk."""
     _save_flag(EXPLAIN_ENABLED_PATH, enabled)
+
+
+def load_gpu_selection() -> str:
+    """Effective GPU (CDI device id) for container stacks (persisted, else boot default)."""
+    return os.environ.get("MEDMCP_GPU", "all")
+
+
+def save_gpu_selection(gpu: str) -> None:
+    """Persist the stack GPU selection and apply it to this process.
+
+    Clears the discovery cache so the next :func:`load_mcp_servers` re-expands the
+    ``${MEDMCP_GPU}`` ``--device`` arg; the caller should re-sync vibe-acp config and
+    restart it so newly spawned stacks pick up the device. Does not move the LLM —
+    its GPU is fixed at container creation (see :data:`LLM_GPU`).
+    """
+    value = gpu.strip() or "all"
+    _atomic_write_json(GPU_SELECTION_PATH, {"gpu": value})
+    os.environ["MEDMCP_GPU"] = value
+    load_mcp_servers.cache_clear()
+
+
+def _llm_image() -> str:
+    """Image of the running LLM container (a present CUDA image), or "" if unknown."""
+    override = os.environ.get("OLLAMA_IMAGE", "").strip()
+    if override:
+        return override
+    try:
+        ps = _run_docker(
+            [
+                "ps",
+                "--filter",
+                "label=com.docker.compose.service=llm",
+                "--format",
+                "{{.Image}}",
+            ],
+            timeout=10,
+        )
+    except RuntimeError:
+        return ""
+    return next((n.strip() for n in ps.stdout.splitlines() if n.strip()), "")
+
+
+def list_gpus() -> list[JsonDict]:
+    """Best-effort list of GPUs as ``{index, uuid, name}`` for the settings picker.
+
+    The CPU-only core can't enumerate GPUs itself, so it runs ``nvidia-smi`` in a
+    throwaway container with *every* GPU exposed (``--device nvidia.com/gpu=all``) so
+    the real host indices/UUIDs come back — querying the (possibly pinned) LLM
+    container would only show its own GPU(s), renumbered. Reuses the LLM image (a
+    present CUDA image). Returns ``[]`` when not enumerable — the UI falls back to
+    free text.
+    """
+    image = _llm_image()
+    if not image:
+        return []
+    try:
+        smi = _run_docker(
+            [
+                "run",
+                "--rm",
+                "--device",
+                "nvidia.com/gpu=all",
+                "--entrypoint",
+                "nvidia-smi",
+                image,
+                "--query-gpu=index,uuid,name",
+                "--format=csv,noheader",
+            ],
+            timeout=30,
+        )
+    except RuntimeError:
+        return []
+    gpus: list[JsonDict] = []
+    for line in smi.stdout.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 3 and parts[0]:
+            gpus.append({"index": parts[0], "uuid": parts[1], "name": parts[2]})
+    return gpus
 
 
 # Serializes the config.toml read-modify-write within this process: the

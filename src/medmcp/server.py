@@ -343,6 +343,12 @@ def _apply_stack_change() -> None:
     settings.sync_servers_to_vibe_config(settings.active_servers())
 
 
+@app.get("/healthz")
+async def healthz() -> JsonDict:
+    """Liveness probe for container healthchecks (touches no dependencies)."""
+    return {"status": "ok"}
+
+
 @app.get("/api/stacks")
 async def get_stacks() -> JsonDict:
     """List installed container stacks (from ``stacks.d`` manifests)."""

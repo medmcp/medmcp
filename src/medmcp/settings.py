@@ -468,11 +468,21 @@ def _pull_streaming(image: str, on_progress: ProgressFn | None) -> None:
     except FileNotFoundError as exc:
         raise RuntimeError("docker CLI not found") from exc
     assert proc.stdout is not None
+    tail: list[str] = []
     for raw in proc.stdout:
         line = raw.split("\r")[-1].strip()
-        if line and on_progress:
-            on_progress(line)
+        if line:
+            tail = [*tail[-4:], line]
+            if on_progress:
+                on_progress(line)
     if proc.wait() != 0:
+        blob = " ".join(tail).lower()
+        auth_markers = ("denied", "unauthorized", "authentication required", "forbidden")
+        if any(k in blob for k in auth_markers):
+            raise RuntimeError(
+                f"not authorized to pull {image} — log in to the registry on the host "
+                "(`docker login ghcr.io`) or set GHCR_USER/GHCR_TOKEN."
+            )
         raise RuntimeError(f"docker pull {image} failed")
 
 

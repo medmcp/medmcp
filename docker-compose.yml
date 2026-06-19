@@ -60,6 +60,20 @@ services:
       # GPU the LLM + GPU stacks target (CDI device id). "all" = every GPU; pin
       # with an index/UUID, e.g. MEDMCP_GPU=4.
       MEDMCP_GPU: "${MEDMCP_GPU:-all}"
+      # Optional registry login inside the core — for credential-helper hosts
+      # that mount no plaintext auths. Leave empty to use the mounted config.
+      GHCR_USER: "${GHCR_USER:-}"
+      GHCR_TOKEN: "${GHCR_TOKEN:-}"
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://localhost:8100/healthz")
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     ports:
       - "127.0.0.1:8100:8100"
     volumes:

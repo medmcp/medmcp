@@ -14,6 +14,11 @@ name: medmcp
 services:
   llm:
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    environment:
+      # Keep gemma4-medmcp resident in VRAM (-1) so it isn't evicted after the
+      # 5-minute idle default and reloaded on the next prompt. Override with a
+      # duration (e.g. 30m) on shared GPUs to release VRAM when idle.
+      OLLAMA_KEEP_ALIVE: "${OLLAMA_KEEP_ALIVE:--1}"
     devices:
       - "nvidia.com/gpu=${MEDMCP_GPU:-all}"
     volumes:
@@ -37,6 +42,23 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - 'ollama list | grep -q gemma4-medmcp || { ollama pull gemma4:26b && ollama create gemma4-medmcp -f /Modelfile.gemma4; }'
+    restart: "no"
+
+  llm-warmup:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    depends_on:
+      llm:
+        condition: service_healthy
+      llm-init:
+        condition: service_completed_successfully
+    environment:
+      OLLAMA_HOST: "http://llm:11434"
+    entrypoint: ["/bin/sh", "-c"]
+    # Preload the model into VRAM at startup so the first prompt is instant
+    # instead of paying the cold-load latency. Nothing depends on this service,
+    # so the core UI still comes up immediately while the model warms.
+    command:
+      - 'ollama run gemma4-medmcp "ok" </dev/null >/dev/null 2>&1 || true'
     restart: "no"
 
   medmcp:

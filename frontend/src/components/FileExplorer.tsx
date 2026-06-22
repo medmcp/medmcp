@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { Tree } from 'react-arborist'
 import type { NodeApi, NodeRendererProps } from 'react-arborist'
@@ -23,6 +23,8 @@ interface FileExplorerProps {
   refreshSignal?: number
   /** Reports the selected file paths (multi-select via ctrl/shift-click). */
   onSelectionChange?: (paths: string[]) => void
+  /** True while a separator is being dragged; defer tree resize until it ends. */
+  isResizing?: boolean
 }
 
 function parentDir(path: string): string {
@@ -105,13 +107,27 @@ function removeFromTree(nodes: TreeNode[], ids: Set<string>): TreeNode[] {
 }
 
 /** Workspace file tree with open/rename/move/delete/upload. */
-export function FileExplorer({ onOpenFile, refreshSignal, onSelectionChange }: FileExplorerProps) {
+// Memoized so a separator drag — which re-renders the panel content every frame
+// via react-resizable-panels — doesn't re-run react-arborist's tree on each
+// frame. Props from App are stable refs (refreshSignal changes only on fs
+// activity, not during a drag).
+export const FileExplorer = memo(function FileExplorer({
+  onOpenFile,
+  refreshSignal,
+  onSelectionChange,
+  isResizing,
+}: FileExplorerProps) {
   const [data, setData] = useState<TreeNode[]>([])
   const [error, setError] = useState<string | null>(null)
   const [size, setSize] = useState({ width: 280, height: 400 })
   const [menu, setMenu] = useState<{ x: number; y: number; node: NodeApi<TreeNode> } | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // Read inside the mount-once observer effect without re-subscribing.
+  const isResizingRef = useRef(isResizing)
+  useEffect(() => {
+    isResizingRef.current = isResizing
+  }, [isResizing])
 
   const reload = () => {
     fetchTree()
@@ -138,14 +154,19 @@ export function FileExplorer({ onOpenFile, refreshSignal, onSelectionChange }: F
     return () => window.removeEventListener('focus', reload)
   }, [])
 
-  // Trailing debounce: re-rendering the tree on every observer tick adds
-  // React work to each frame of a separator drag; once it settles is enough.
+  // Resize the (virtualized) tree to its container. While a separator is being
+  // dragged we skip entirely — re-rendering react-arborist mid-drag is what made
+  // those drags janky — and resync once when the drag ends (the effect below).
+  // The trailing debounce covers non-drag resizes (window, drawer).
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
     let timer: number | null = null
     const obs = new ResizeObserver(() => {
+      // Clear first so a resize scheduled in the frame before `isResizing`
+      // commits can't fire mid-drag; then skip entirely while dragging.
       if (timer != null) window.clearTimeout(timer)
+      if (isResizingRef.current) return
       timer = window.setTimeout(() => {
         timer = null
         setSize({ width: el.clientWidth, height: el.clientHeight })
@@ -157,6 +178,17 @@ export function FileExplorer({ onOpenFile, refreshSignal, onSelectionChange }: F
       if (timer != null) window.clearTimeout(timer)
     }
   }, [])
+
+  // A separator drag changed our size while the observer was skipping; sync once
+  // on the next frame after it ends (when the layout has settled).
+  useEffect(() => {
+    if (isResizing) return
+    const id = requestAnimationFrame(() => {
+      const el = containerRef.current
+      if (el) setSize({ width: el.clientWidth, height: el.clientHeight })
+    })
+    return () => cancelAnimationFrame(id)
+  }, [isResizing])
 
   const run = (op: Promise<void>) => {
     op.then(reload).catch((e: unknown) => {
@@ -326,4 +358,4 @@ export function FileExplorer({ onOpenFile, refreshSignal, onSelectionChange }: F
       </div>
     </div>
   )
-}
+})

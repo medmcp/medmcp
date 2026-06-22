@@ -156,7 +156,12 @@ button:hover {
   font-weight: 800;
   font-size: 15px;
   letter-spacing: -0.03em;
-  color: #fff;
+  /* Brand wordmark gradient, matching the marketing site's .nav-logo. */
+  background: linear-gradient(110deg, var(--red) 0%, #d96090 45%, var(--blue-l) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
 }
 
 .app-subtitle {
@@ -374,6 +379,7 @@ button:hover {
   display: flex;
   align-items: stretch;
   justify-content: stretch;
+  background: #000;
 }
 
 .viewer-title {
@@ -400,7 +406,23 @@ button:hover {
   color: var(--blue-xl);
 }
 
+/* Wraps the volume view so the rebuild spinner can overlay it; while rebuilding
+ * (after a resize, before the fresh view mounts) the stale canvas is hidden so
+ * it can't flash at the wrong size. */
+.volume-slot {
+  position: relative;
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.volume-slot.rebuilding .niivue-canvas {
+  display: none !important;
+}
+
 .volume-view {
+  position: relative;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -441,6 +463,25 @@ button:hover {
 .overlay-select:focus {
   outline: none;
   border-color: rgba(127, 168, 245, 0.4);
+}
+
+/* Display-convention toggle, pushed to the right edge of the overlay bar. */
+.conv-toggle {
+  margin-left: auto;
+  flex-shrink: 0;
+  background: var(--card);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--muted2);
+}
+
+.conv-toggle:hover {
+  border-color: var(--blue-l);
+  color: var(--text);
 }
 
 .overlay-opacity-label {
@@ -503,6 +544,39 @@ button:hover {
   flex: 1;
 }
 
+/* Shown while Niivue parses/uploads a volume (a big one briefly blocks the
+ * main thread); a frame is yielded before that work so this paints first. */
+.volume-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(13, 15, 20, 0.72);
+  color: var(--muted2);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+.volume-spinner {
+  width: 30px;
+  height: 30px;
+  border: 3px solid var(--border2);
+  border-top-color: var(--blue-xl);
+  border-radius: 50%;
+  animation: volume-spin 0.8s linear infinite;
+}
+
+@keyframes volume-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .pdf-frame {
   width: 100%;
   height: 100%;
@@ -510,11 +584,20 @@ button:hover {
   background: #fff;
 }
 
-/* While a viewer-bordering separator is dragged (App sets `is-resizing`), skip
- * painting the WebGL canvas and PDF frame — compositing them each frame is what
- * makes the drag heavy. They reappear, and the viewer redraws once, on release.
- * (Hiding the iframe also stops it swallowing the drag's pointer events.) */
-.is-resizing .niivue-canvas,
+/* While a viewer-bordering separator is dragged (App sets `is-resizing`), drop
+ * the WebGL canvas's compositor layer entirely. `visibility: hidden` stops it
+ * painting but Chrome keeps the (large, GPU-backed) canvas as its own layer and
+ * re-evaluates it every frame as the panel resizes — that compositing is what
+ * made the drag heavy. `display: none` removes the layer; the canvas reappears
+ * and the viewer redraws once on release (the size resync in VolumeView).
+ * `!important` is required: Niivue sets `canvas.style.display = "block"` inline,
+ * which a plain class rule can't override. */
+.is-resizing .niivue-canvas {
+  display: none !important;
+}
+
+/* The PDF iframe only needs to stop painting / swallowing the drag's pointer
+ * events; visibility avoids an iframe reload that display:none can trigger. */
 .is-resizing .pdf-frame {
   visibility: hidden;
 }

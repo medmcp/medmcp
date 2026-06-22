@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import { fetchTree, rawUrl } from '../api'
 import { getDraggedFilePath } from '../dragState'
@@ -57,6 +57,10 @@ const LABEL_COLORMAP = labelColorMap()
 // use its numeric value.
 const COLORMAP_TYPE_TRANSPARENT_BELOW_MIN = 1
 
+// Persist the display convention across volumes/sessions. Default false =
+// neurological (Niivue's default: image-left is patient-left).
+const RADIOLOGICAL_KEY = 'medmcp.radiologicalView'
+
 type FileKind = 'volume' | 'pdf' | 'image' | 'text' | 'other'
 
 function classify(path: string): FileKind {
@@ -87,39 +91,69 @@ function collectVolumePaths(nodes: TreeNode[], out: string[] = []): string[] {
  * overlay is rendered with a label colormap (distinct color per integer label)
  * and adjustable opacity.
  */
-function VolumeView({ path, refreshSignal }: { path: string; refreshSignal?: number }) {
+function VolumeView({
+  path,
+  refreshSignal,
+  isResizing,
+}: {
+  path: string
+  refreshSignal?: number
+  isResizing?: boolean
+}) {
   const url = rawUrl(path)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sizerRef = useRef<HTMLDivElement>(null)
   const dropRef = useRef<HTMLDivElement>(null)
   const nvRef = useRef<Niivue | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
   const [volumePaths, setVolumePaths] = useState<string[]>([])
   const [overlayPath, setOverlayPath] = useState<string>('')
   const [overlayOpacity, setOverlayOpacity] = useState(0.5)
   const [dragOver, setDragOver] = useState(false)
-
-  // Decouple the canvas box from the panel layout: Niivue's own ResizeObserver
-  // does a full WebGL redraw (multiplanar + 3D ray cast) on every resize tick,
-  // which makes separator drags janky whenever a volume is loaded. The sizer
-  // div tracks the panel; the dropzone (Niivue's observed parent) gets an
-  // explicit pixel size that only syncs on a trailing debounce, so the canvas
-  // stays frozen during the drag and redraws once when it settles.
+  const [radiological, setRadiological] = useState(
+    () => localStorage.getItem(RADIOLOGICAL_KEY) === 'true',
+  )
+  // Read inside the url-keyed load effect without making it a dependency (a
+  // toggle must not tear down and reload the volume).
+  const radiologicalRef = useRef(radiological)
   useEffect(() => {
+    radiologicalRef.current = radiological
+  }, [radiological])
+  // Read inside the mount-once observer effect without re-subscribing.
+  const isResizingRef = useRef(isResizing)
+  useEffect(() => {
+    isResizingRef.current = isResizing
+  }, [isResizing])
+
+  // Size the dropzone (Niivue's observed parent) to the panel. We NEVER do this
+  // during a separator drag: Niivue leaks GPU resources each time its canvas
+  // resizes, so resizing the live instance is what made the viewer degrade. The
+  // sizer tracks the panel; the dropzone gets an explicit pixel size synced only
+  // while NOT dragging. After a drag the Viewer remounts this view fresh at the
+  // new size instead (see `resizeGen`). This observer therefore only matters for
+  // the initial mount and non-drag resizes (window/drawer).
+  const syncCanvasSize = () => {
     const sizer = sizerRef.current
     const drop = dropRef.current
-    if (!sizer || !drop) return
-    let timer: number | null = null
-    const sync = () => {
+    if (sizer && drop) {
       drop.style.width = `${sizer.clientWidth}px`
       drop.style.height = `${sizer.clientHeight}px`
     }
-    sync()
+  }
+  useEffect(() => {
+    const sizer = sizerRef.current
+    if (!sizer) return
+    let timer: number | null = null
+    syncCanvasSize()
     const obs = new ResizeObserver(() => {
+      // Clear first so a sync scheduled in the frame before `isResizing` commits
+      // can't fire mid-drag; then skip entirely while dragging.
       if (timer != null) window.clearTimeout(timer)
+      if (isResizingRef.current) return // never resize the WebGL canvas mid-drag
       timer = window.setTimeout(() => {
         timer = null
-        sync()
+        syncCanvasSize()
       }, 120)
     })
     obs.observe(sizer)
@@ -130,13 +164,22 @@ function VolumeView({ path, refreshSignal }: { path: string; refreshSignal?: num
   }, [])
 
   // Base volume: one Niivue instance per mounted view (remounted via key on
-  // path change), so overlay state always starts clean for a new image.
+  // path change, and on resize-settle), so overlay state always starts clean.
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
     const nv = new Niivue({
       multiplanarShowRender: SHOW_RENDER.ALWAYS,
-      backColor: [0.051, 0.059, 0.078, 1],
+      // Render at 1× pixel ratio instead of the display's HiDPI/Retina ratio.
+      // On a 2× display that's 4× fewer pixels per frame — the single biggest
+      // GPU saving, and it costs no data fidelity: slices are sampled from the
+      // volume, so screen pixels beyond the data resolution are wasted work.
+      // (-1 = block high DPI; this is what was overloading the Intel iGPU.)
+      forceDevicePixelRatio: -1,
+      backColor: [0, 0, 0, 1],
+      // Suppress Niivue's own canvas "loading ..." text — our spinner overlay
+      // is the single loading affordance.
+      loadingText: '',
       // Niivue's own canvas drop handler stopPropagation()s every drop (to load
       // OS files as a new base image). We handle overlay drops ourselves in the
       // capture phase, so disable Niivue's to avoid it hijacking the base image.
@@ -145,12 +188,27 @@ function VolumeView({ path, refreshSignal }: { path: string; refreshSignal?: num
     nvRef.current = nv
     let cancelled = false
     const load = async () => {
+      setLoading(true)
+      setLoadError(null)
       try {
-        await nv.attachToCanvas(canvas)
+        // Disable MSAA: it multiplies the framebuffer's GPU memory, which is the
+        // likely trigger for the WebGL context loss on a memory-starved Intel
+        // iGPU. AA only smooths edges — it doesn't affect slice/data resolution.
+        await nv.attachToCanvas(canvas, false)
         nv.setSliceType(SLICE_TYPE.MULTIPLANAR)
+        // Niivue streams the download/inflate, but parsing the volume and the
+        // initial WebGL upload + 3D render run synchronously on the main thread
+        // — a big volume briefly freezes the tab. Yield a frame here so the
+        // loading overlay actually paints before that blocking work starts,
+        // instead of the viewer just appearing hung.
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+        if (cancelled) return
         await nv.loadVolumes([{ url }])
+        nv.setRadiologicalConvention(radiologicalRef.current)
       } catch (e) {
         if (!cancelled) setLoadError(String(e))
+      } finally {
+        if (!cancelled) setLoading(false)
       }
     }
     // Seed the overlay-op chain with the base load so an overlay dropped
@@ -159,6 +217,17 @@ function VolumeView({ path, refreshSignal }: { path: string; refreshSignal?: num
     return () => {
       cancelled = true
       nvRef.current = null
+      // Each opened file (and each resize-settle) remounts this view and builds
+      // a fresh Niivue + WebGL context. cleanup() removes Niivue's observers and
+      // listeners, then we force-release the GL context: browsers cap live
+      // contexts (~16) and drop the oldest once exceeded, which janks the whole
+      // tab — so a long session must not leak them.
+      try {
+        nv.cleanup()
+        nv.gl?.getExtension('WEBGL_lose_context')?.loseContext()
+      } catch {
+        // best-effort teardown
+      }
     }
   }, [url])
 
@@ -228,6 +297,12 @@ function VolumeView({ path, refreshSignal }: { path: string; refreshSignal?: num
     }
   }
 
+  const setConvention = (value: boolean) => {
+    setRadiological(value)
+    localStorage.setItem(RADIOLOGICAL_KEY, String(value))
+    nvRef.current?.setRadiologicalConvention(value)
+  }
+
   // A path is a valid overlay if it's a volume other than the base image.
   const isOverlayCandidate = (p: string | null): p is string =>
     !!p && p !== path && VOLUME_EXT.test(p.toLowerCase())
@@ -292,6 +367,17 @@ function VolumeView({ path, refreshSignal }: { path: string; refreshSignal?: num
             </button>
           </>
         )}
+        <button
+          className="btn-plain conv-toggle"
+          title={
+            radiological
+              ? 'Radiological convention (image-left = patient-right) — click for neurological'
+              : 'Neurological convention (image-left = patient-left) — click for radiological'
+          }
+          onClick={() => setConvention(!radiological)}
+        >
+          {radiological ? 'Radiological' : 'Neurological'}
+        </button>
       </div>
       {loadError && <div className="panel-error">{loadError}</div>}
       <div className="niivue-sizer" ref={sizerRef}>
@@ -306,6 +392,15 @@ function VolumeView({ path, refreshSignal }: { path: string; refreshSignal?: num
           {dragOver && <div className="dropzone-hint">Drop to overlay</div>}
         </div>
       </div>
+      {/* Covers the whole volume view (overlay bar + canvas) so it centers in
+          the same box as the Viewer's rebuild spinner — otherwise the wheel
+          jumps when one hands off to the other across a resize-rebuild. */}
+      {loading && (
+        <div className="volume-loading">
+          <span className="volume-spinner" />
+          <span>Loading volume…</span>
+        </div>
+      )}
     </div>
   )
 }
@@ -326,21 +421,56 @@ function TextView({ url }: { url: string }) {
 }
 
 /** Routes the selected file to the right renderer (volume / PDF / image / text). */
-export function Viewer({
+// Memoized so a separator drag doesn't re-render the viewer (and its WebGL/React
+// subtree) every frame; props from App are stable except when the open file or
+// fs version actually changes.
+export const Viewer = memo(function Viewer({
   path,
   refreshSignal,
+  isResizing,
 }: {
   path: string | null
   /** Bumped when the workspace may have changed; refreshes the overlay list. */
   refreshSignal?: number
+  /** True while a separator is being dragged; freezes the volume canvas size. */
+  isResizing?: boolean
 }) {
+  // Niivue leaks GPU memory each time its canvas is resized, so we never resize
+  // the live instance — we rebuild it fresh at the new size once a separator
+  // drag settles. `resizeGen` is part of the VolumeView key; bumping it remounts
+  // the volume (same mechanism that resets it when you open a file). Debounced so
+  // a burst of adjustments collapses into one rebuild; gated by `didResize` so
+  // mount / non-resize renders don't trigger a spurious reload.
+  const [resizeGen, setResizeGen] = useState(0)
+  // True from the moment a resize drag ends until the fresh view has remounted,
+  // so we hide the stale (wrong-size) canvas and show the spinner instead of
+  // letting the old image flash at the wrong size during the debounce window.
+  const [rebuilding, setRebuilding] = useState(false)
+  const didResizeRef = useRef(false)
+  useEffect(() => {
+    if (isResizing) {
+      didResizeRef.current = true
+      return
+    }
+    if (!didResizeRef.current) return
+    didResizeRef.current = false
+    setRebuilding(true)
+    const t = window.setTimeout(() => {
+      setResizeGen((g) => g + 1)
+      setRebuilding(false)
+    }, 250)
+    return () => window.clearTimeout(t)
+  }, [isResizing])
+
   if (!path) {
     return (
       <div className="panel">
         <div className="panel-header">
           <span>Viewer</span>
         </div>
-        <div className="viewer-message">Select a file in the explorer to view it here.</div>
+        <div className="panel-body viewer-body">
+          <div className="viewer-message">Select a file in the explorer to view it here.</div>
+        </div>
       </div>
     )
   }
@@ -359,7 +489,22 @@ export function Viewer({
         </span>
       </div>
       <div className="panel-body viewer-body">
-        {kind === 'volume' && <VolumeView key={path} path={path} refreshSignal={refreshSignal} />}
+        {kind === 'volume' && (
+          <div className={`volume-slot${rebuilding ? ' rebuilding' : ''}`}>
+            <VolumeView
+              key={`${path}#${resizeGen}`}
+              path={path}
+              refreshSignal={refreshSignal}
+              isResizing={isResizing}
+            />
+            {rebuilding && (
+              <div className="volume-loading">
+                <span className="volume-spinner" />
+                <span>Loading volume…</span>
+              </div>
+            )}
+          </div>
+        )}
         {kind === 'pdf' && <iframe className="pdf-frame" src={url} title={path} />}
         {kind === 'image' && <img className="image-view" src={url} alt={path} />}
         {kind === 'text' && <TextView key={url} url={url} />}
@@ -374,4 +519,4 @@ export function Viewer({
       </div>
     </div>
   )
-}
+})

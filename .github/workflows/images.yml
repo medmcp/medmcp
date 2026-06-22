@@ -68,3 +68,17 @@ jobs:
             docker push "ghcr.io/medmcp/$img:${{ github.sha }}"
             docker push "ghcr.io/medmcp/$img:main"
           done
+      - name: Publish deploy compose as an OCI artifact (main only)
+        if: github.event_name != 'pull_request'
+        run: |
+          # Publish the self-contained deploy compose so nodes can run it with no
+          # checkout:  docker compose -f oci://ghcr.io/medmcp/compose:main up -d
+          # Reuses the docker login from the push step above. MEDMCP_WORKSPACE is
+          # set only to satisfy publish-time interpolation of its required
+          # ${...:?} value; it is NOT baked into the artifact (no --with-env), so
+          # consumers still supply their own path at `up` time.
+          for tag in "${{ github.sha }}" main; do
+            MEDMCP_WORKSPACE=/run/medmcp \
+              docker compose -f docker-compose.ghcr.yml publish \
+              "ghcr.io/medmcp/compose:$tag" -y
+          done

@@ -1,15 +1,15 @@
 # Deployment compose: runs the PUBLISHED images from the private GHCR — builds
-# nothing. For nodes that only pull (no source checkout). Self-contained; run it
-# on its own (not merged with docker-compose.yml):
+# nothing. Fully self-contained (the Modelfile is inlined into llm-init below),
+# so a node needs NO repo checkout. This file is also published as an OCI artifact
+# by CI, so it can run straight from the registry:
 #
 #   docker login ghcr.io                       # read:packages token
 #   MEDMCP_WORKSPACE=/abs/path \
-#     docker compose -f docker-compose.ghcr.yml up -d
+#     docker compose -f oci://ghcr.io/medmcp/compose:main up -d
 #
-# (or `just compose-up-ghcr`). Pin a release with MEDMCP_TAG=<git-sha> (default
-# :main). A node needs this file + Modelfile.gemma4 (for the one-time model build);
-# everything else is pulled. GPU uses CDI (rootless); rootful hosts set the docker
-# socket path to /var/run.
+# From a checkout you can equivalently point at this file (`just compose-up-ghcr`).
+# Pin a release with MEDMCP_TAG=<git-sha> (default :main). GPU uses CDI (rootless);
+# rootful hosts set the docker socket path to /var/run.
 name: medmcp
 
 services:
@@ -38,11 +38,25 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: "http://llm:11434"
-    volumes:
-      - "./Modelfile.gemma4:/Modelfile.gemma4:ro"
     entrypoint: ["/bin/sh", "-c"]
+    # The Modelfile is inlined (not bind-mounted) so this compose file is fully
+    # self-contained and can run straight from the OCI registry with no checkout.
+    # Keep these PARAMETERs in sync with Modelfile.gemma4 — the source of truth
+    # for the host-native `just pull-model` path.
     command:
-      - 'ollama list | grep -q gemma4-medmcp || { ollama pull gemma4:26b && ollama create gemma4-medmcp -f /Modelfile.gemma4; }'
+      - |
+        if ollama list | grep -q gemma4-medmcp; then exit 0; fi
+        ollama pull gemma4:26b
+        printf '%s\n' \
+          'FROM gemma4:26b' \
+          'PARAMETER num_ctx 131072' \
+          'PARAMETER temperature 0.3' \
+          'PARAMETER top_p 0.95' \
+          'PARAMETER top_k 64' \
+          'PARAMETER repeat_penalty 1.15' \
+          'PARAMETER repeat_last_n 256' \
+          > /tmp/Modelfile.gemma4
+        ollama create gemma4-medmcp -f /tmp/Modelfile.gemma4
     restart: "no"
 
   llm-warmup:

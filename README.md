@@ -36,35 +36,33 @@ MedMCP runs entirely on-premise and is designed to meet the data governance and 
 
 ### Run with Docker (recommended)
 
-MedMCP ships as prebuilt images on the private registry `ghcr.io/medmcp` — a node
-**pulls** them, nothing is built locally. You only need two files from this repo:
-`docker-compose.ghcr.yml` and `Modelfile.gemma4` (clone the repo, or copy just those).
+MedMCP runs as prebuilt images — there's nothing to build and no source to download.
+You just need Docker with GPU access (see [Prerequisites](#prerequisites)) and a
+registry login.
 
-1. **Authenticate** to the registry (once per node — see [Prerequisites](#prerequisites)):
+1. **Sign in to the registry** (once per machine):
 
    ```bash
    docker login ghcr.io   # username: your GitHub user · password: a read:packages token
    ```
 
-2. **Start it** — set `MEDMCP_WORKSPACE` to the absolute host folder holding your imaging data:
+2. **Start MedMCP.** `MEDMCP_WORKSPACE` is the folder on your machine where your imaging
+   data lives and where results are saved — use any absolute path:
 
    ```bash
-   MEDMCP_WORKSPACE="$PWD/data" docker compose -f docker-compose.ghcr.yml up -d
-   # from a repo checkout you can use:  just compose-up-ghcr
+   MEDMCP_WORKSPACE="$HOME/medmcp-data" \
+     docker compose -f oci://ghcr.io/medmcp/compose:main up -d
    ```
 
-   This pulls the CPU-only **core** plus a bundled **Ollama** GPU service and, on first
-   run, builds the `gemma4-medmcp` model (~18 GB pull). Open **http://localhost:8100**.
+   The first start downloads the model (~18 GB), so give it a few minutes. Then open
+   **http://localhost:8100**.
 
-3. **Add tools** — in the UI, open **Settings → Stacks → Available** and install the
-   imaging stacks you need (e.g. `dicom`, `neuro`); each pulls its GPU image on demand
-   and is then launched by the core when the agent calls it.
+3. **Add imaging tools.** In the UI, open **Settings → Stacks → Available** and install
+   the stacks you need (e.g. `dicom`, `neuro`). Each one downloads on demand the first
+   time the agent uses it.
 
-The workspace folder is bind-mounted at the **same absolute path** inside the container,
-so the agent's outputs land back on your host. Pin a specific release with
-`MEDMCP_TAG=<git-sha>` (default `:main`). Tear down with
-`docker compose -f docker-compose.ghcr.yml down`. Air-gapped sites mirror the images
-into an internal registry — see [Imaging Stacks](#imaging-stacks).
+**Stop** with `docker compose -f oci://ghcr.io/medmcp/compose:main down`. **Update** by
+re-running the start command with `--pull always`.
 
 ### Run from source (development)
 
@@ -167,7 +165,7 @@ Once installed, the stack is auto-discovered via its `[medmcp.stacks]` entry poi
 **Private images (GHCR).** CI (`.github/workflows/images.yml`) builds and pushes the base, core, and stack images to the **private** registry `ghcr.io/medmcp/*` (packages are private by default; the base package must grant the stack repos read access). For a private fleet:
 
 1. `docker login ghcr.io` on each node (a `read:packages` token); compose mounts the host's docker credentials so the in-UI install can pull.
-2. Run the **published** images (pulls the core, builds nothing) with the deploy compose — `just compose-up-ghcr`, i.e. `docker compose -f docker-compose.ghcr.yml up -d`. It defaults `MEDMCP_CATALOG_URL` to the bundled `/app/catalog.ghcr.json`; pin a release with `MEDMCP_TAG=<git-sha>`. A node needs only this file + `Modelfile.gemma4`.
+2. Run the **published** images (pulls the core, builds nothing) with the deploy compose, published as an OCI artifact — `docker compose -f oci://ghcr.io/medmcp/compose:main up -d` (no checkout needed). It defaults `MEDMCP_CATALOG_URL` to the bundled `/app/catalog.ghcr.json`; pin a release with `MEDMCP_TAG=<git-sha>`. From a checkout, `just compose-up-ghcr` uses the local file.
 
 Air-gapped sites mirror the images into an internal registry and point the catalog there instead. No image data leaves the machine either way — these are inbound pulls.
 

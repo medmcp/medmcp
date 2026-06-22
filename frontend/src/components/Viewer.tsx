@@ -174,7 +174,7 @@ function VolumeView({
       // On a 2× display that's 4× fewer pixels per frame — the single biggest
       // GPU saving, and it costs no data fidelity: slices are sampled from the
       // volume, so screen pixels beyond the data resolution are wasted work.
-      // (-1 = block high DPI; this is what was overloading the Intel iGPU.)
+      // (-1 = block high DPI; that oversampling was the dominant GPU cost.)
       forceDevicePixelRatio: -1,
       backColor: [0, 0, 0, 1],
       // Suppress Niivue's own canvas "loading ..." text — our spinner overlay
@@ -192,8 +192,8 @@ function VolumeView({
       setLoadError(null)
       try {
         // Disable MSAA: it multiplies the framebuffer's GPU memory, which is the
-        // likely trigger for the WebGL context loss on a memory-starved Intel
-        // iGPU. AA only smooths edges — it doesn't affect slice/data resolution.
+        // likely trigger for WebGL context loss on memory-constrained GPUs. AA
+        // only smooths edges — it doesn't affect slice/data resolution.
         await nv.attachToCanvas(canvas, false)
         nv.setSliceType(SLICE_TYPE.MULTIPLANAR)
         // Niivue streams the download/inflate, but parsing the volume and the

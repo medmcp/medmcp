@@ -97,6 +97,13 @@ function NodeRow({
   )
 }
 
+/** Drop the nodes with the given ids from a tree (for optimistic delete). */
+function removeFromTree(nodes: TreeNode[], ids: Set<string>): TreeNode[] {
+  return nodes
+    .filter((n) => !ids.has(n.id))
+    .map((n) => (n.children ? { ...n, children: removeFromTree(n.children, ids) } : n))
+}
+
 /** Workspace file tree with open/rename/move/delete/upload. */
 export function FileExplorer({ onOpenFile, refreshSignal, onSelectionChange }: FileExplorerProps) {
   const [data, setData] = useState<TreeNode[]>([])
@@ -158,6 +165,20 @@ export function FileExplorer({ onOpenFile, refreshSignal, onSelectionChange }: F
     })
   }
 
+  // Delete one or more paths: drop them from the tree immediately so they vanish
+  // without waiting on a full refetch, fire the deletes together, then reconcile
+  // with a single reload (which also restores anything whose delete failed).
+  const deleteMany = (ids: string[]) => {
+    if (ids.length === 0) return
+    const idSet = new Set(ids)
+    setData((d) => removeFromTree(d, idSet))
+    void Promise.allSettled(ids.map((id) => deletePath(id))).then((results) => {
+      const failed = results.filter((r) => r.status === 'rejected').length
+      if (failed > 0) setError(`failed to delete ${failed} item(s)`)
+      reload()
+    })
+  }
+
   // Any click/Escape outside the menu dismisses it; the menu itself stops
   // mousedown propagation so its buttons still receive their click.
   useEffect(() => {
@@ -183,7 +204,9 @@ export function FileExplorer({ onOpenFile, refreshSignal, onSelectionChange }: F
   const openMenu = (e: ReactMouseEvent, node: NodeApi<TreeNode>) => {
     e.preventDefault()
     e.stopPropagation()
-    node.select()
+    // Keep an existing multi-selection if the right-clicked row is part of it, so
+    // Delete can act on every selected row; otherwise select just this one.
+    if (!node.isSelected) node.select()
     setMenu({ x: e.clientX, y: e.clientY, node })
   }
 
@@ -248,9 +271,10 @@ export function FileExplorer({ onOpenFile, refreshSignal, onSelectionChange }: F
             }
           }}
           onDelete={({ nodes }) => {
-            const names = nodes.map((n) => n.data.name).join(', ')
-            if (window.confirm(`Delete ${names}?`)) {
-              for (const node of nodes) run(deletePath(node.data.id))
+            if (nodes.length === 0) return
+            const label = nodes.length > 1 ? `${nodes.length} items` : (nodes[0]?.data.name ?? '')
+            if (window.confirm(`Delete ${label}?`)) {
+              deleteMany(nodes.map((n) => n.data.id))
             }
           }}
         >
@@ -279,16 +303,24 @@ export function FileExplorer({ onOpenFile, refreshSignal, onSelectionChange }: F
               </button>
             )}
             <button onClick={menuAction(() => void menu.node.edit())}>Rename</button>
-            <button
-              className="danger"
-              onClick={menuAction(() => {
-                if (window.confirm(`Delete ${menu.node.data.name}?`)) {
-                  run(deletePath(menu.node.data.id))
-                }
-              })}
-            >
-              Delete
-            </button>
+            {(() => {
+              const sel = menu.node.tree.selectedNodes
+              const targets =
+                sel.length > 1 && sel.some((n) => n.id === menu.node.id) ? sel : [menu.node]
+              const label = targets.length > 1 ? `${targets.length} items` : menu.node.data.name
+              return (
+                <button
+                  className="danger"
+                  onClick={menuAction(() => {
+                    if (window.confirm(`Delete ${label}?`)) {
+                      deleteMany(targets.map((n) => n.data.id))
+                    }
+                  })}
+                >
+                  {targets.length > 1 ? `Delete ${targets.length} items` : 'Delete'}
+                </button>
+              )
+            })()}
           </div>
         )}
       </div>

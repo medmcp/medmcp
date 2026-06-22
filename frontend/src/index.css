@@ -1658,6 +1658,56 @@ textarea.wf-input {
   word-break: break-all;
 }
 
+.wf-run-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: baseline;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.wf-run-summary .tally-ok {
+  color: var(--ok);
+}
+
+.wf-run-summary .tally-fail {
+  color: var(--red-tint);
+}
+
+.wf-run-summary .tally-muted {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 11.5px;
+}
+
+.wf-timing {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.wf-output-list {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+}
+
+.wf-output-link {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--blue-xl);
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  word-break: break-all;
+}
+
+.wf-output-link:hover {
+  text-decoration: underline;
+}
+
 /* ── Context meter (chat header) ────────────────────────── */
 
 .ctx-meter {

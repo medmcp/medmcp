@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Group, Panel, Separator } from 'react-resizable-panels'
 import { Chat } from './components/Chat'
 import { FileExplorer } from './components/FileExplorer'
@@ -26,14 +26,39 @@ export default function App() {
   // calls, replay steps) so the explorer/viewer reload their file tree.
   const [fsVersion, setFsVersion] = useState(0)
   const notifyFsChanged = useCallback(() => setFsVersion((v) => v + 1), [])
-  // True while a separator that borders the viewer is being dragged. The viewer
-  // is the only WebGL/iframe panel; compositing it every frame is what makes
-  // such a drag feel heavy, so we hide its canvas (via the `is-resizing` class)
-  // until the layout settles. onLayoutChange fires per pointer move (drag in
-  // progress); onLayoutChanged fires once the drag ends.
+  // True while a separator is being dragged. The viewer is the only WebGL panel;
+  // its canvas is a large GPU layer that's expensive to composite every frame, so
+  // we drop it (via the `is-resizing` class) for the whole drag and let it redraw
+  // once on release.
+  //
+  // The flag must stay true for the ENTIRE pointer drag. We can't clear it on the
+  // library's `onLayoutChanged`: that fires on layout "settles" mid-drag (e.g.
+  // when you pause), which would un-hide the canvas and make it lag again — the
+  // exact "fine, then janky" symptom. So we set it on `onLayoutChange` (per move)
+  // and clear it on the real pointer release, with a timed fallback for keyboard
+  // resizes that have no pointerup.
   const [resizing, setResizing] = useState(false)
-  const startResize = useCallback(() => setResizing(true), [])
-  const endResize = useCallback(() => setResizing(false), [])
+  const resizeEndTimer = useRef<number | null>(null)
+  const startResize = useCallback(() => {
+    setResizing(true)
+    if (resizeEndTimer.current != null) clearTimeout(resizeEndTimer.current)
+    resizeEndTimer.current = window.setTimeout(() => setResizing(false), 400)
+  }, [])
+  useEffect(() => {
+    const end = () => {
+      if (resizeEndTimer.current != null) {
+        clearTimeout(resizeEndTimer.current)
+        resizeEndTimer.current = null
+      }
+      setResizing(false)
+    }
+    window.addEventListener('pointerup', end, true)
+    window.addEventListener('pointercancel', end, true)
+    return () => {
+      window.removeEventListener('pointerup', end, true)
+      window.removeEventListener('pointercancel', end, true)
+    }
+  }, [])
   // Chat session continuity: on load resume the last session (auto), and let
   // the user start a fresh one. `resumeId` is what the next Chat mount should
   // resume (stored id, or null for new); bumping `chatKey` remounts <Chat/> so
@@ -76,25 +101,24 @@ export default function App() {
         className="app-main"
         resizeTargetMinimumSize={{ fine: 8, coarse: 24 }}
         onLayoutChange={startResize}
-        onLayoutChanged={endResize}
       >
         <Panel defaultSize="60%" minSize="20%">
           <Group
             orientation="horizontal"
             resizeTargetMinimumSize={{ fine: 8, coarse: 24 }}
             onLayoutChange={startResize}
-            onLayoutChanged={endResize}
           >
             <Panel defaultSize="25%" minSize="12%">
               <FileExplorer
                 onOpenFile={setOpenPath}
                 refreshSignal={fsVersion}
                 onSelectionChange={setSelectedPaths}
+                isResizing={resizing}
               />
             </Panel>
             <Separator className="sep sep-v" />
             <Panel minSize="30%">
-              <Viewer path={openPath} refreshSignal={fsVersion} />
+              <Viewer path={openPath} refreshSignal={fsVersion} isResizing={resizing} />
             </Panel>
           </Group>
         </Panel>

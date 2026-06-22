@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   deleteWorkflow,
@@ -307,7 +307,12 @@ function BatchSelection({ paths }: { paths: string[] }) {
  * review/promote/refine drafts, and replay a recipe deterministically (no
  * LLM) on new inputs with a preview + explicit confirmation.
  */
-export function WorkflowPanel({
+// Memoized: App bumps `fsVersion` on every completed tool call / turn end to
+// refresh the explorer and viewer, but this panel doesn't read it — memo keeps
+// those bumps (frequent during an agent turn) from re-rendering it, and keeps
+// it from re-rendering each frame while a separator is dragged. Its props from
+// App are stable refs.
+export const WorkflowPanel = memo(function WorkflowPanel({
   distillSessionId,
   onWorkspaceChanged,
   onOpenFile,
@@ -1013,4 +1018,4 @@ export function WorkflowPanel({
       </div>
     </div>
   )
-}
+})

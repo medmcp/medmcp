@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { ChatSocket } from '../chatSocket'
 import type { ChatSocketStatus } from '../chatSocket'
@@ -82,12 +82,66 @@ function ContextMeter({ used, size }: { used: number; size: number | null }) {
   )
 }
 
-const AssistantMessage = memo(function AssistantMessage({ text }: { text: string }) {
+// Split markdown into blocks at blank lines, but never inside a fenced code
+// block (``` / ~~~), so a code block containing blank lines stays one block.
+// Used to keep settled blocks stable while a message streams in.
+function splitMarkdownBlocks(text: string): string[] {
+  const blocks: string[] = []
+  let current: string[] = []
+  let inFence = false
+  const flush = () => {
+    if (current.length > 0) {
+      blocks.push(current.join('\n'))
+      current = []
+    }
+  }
+  for (const line of text.split('\n')) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence
+      current.push(line)
+    } else if (!inFence && line.trim() === '') {
+      flush()
+    } else {
+      current.push(line)
+    }
+  }
+  flush()
+  return blocks
+}
+
+// One markdown block, memoized on its source: a settled block never re-parses
+// once its text stops changing.
+const MarkdownBlock = memo(function MarkdownBlock({ source }: { source: string }) {
+  return <ReactMarkdown>{source}</ReactMarkdown>
+})
+
+const AssistantMessage = memo(function AssistantMessage({
+  text,
+  streaming,
+}: {
+  text: string
+  streaming: boolean
+}) {
+  // Re-parsing the whole (growing) message through react-markdown on every
+  // 50ms chunk flush is ~O(n²) and is what makes a long answer feel heavy. While
+  // streaming, split off the settled blocks (rendered as one memoized document
+  // so list numbering etc. stay correct) from the still-growing trailing block,
+  // so only that small tail re-parses per flush. A settled message renders as a
+  // single document — fully correct, parsed once.
+  const { head, tail } = useMemo(() => {
+    if (!streaming) return { head: text, tail: '' }
+    const blocks = splitMarkdownBlocks(text)
+    return {
+      head: blocks.slice(0, -1).join('\n\n'),
+      tail: blocks.length > 0 ? blocks[blocks.length - 1] : '',
+    }
+  }, [text, streaming])
   return (
     <div className="msg msg-ai">
       <div className="msg-avatar avatar-ai">AI</div>
       <div className="msg-bubble bubble-ai">
-        <ReactMarkdown>{text}</ReactMarkdown>
+        {head && <MarkdownBlock source={head} />}
+        {tail && <MarkdownBlock source={tail} />}
       </div>
     </div>
   )
@@ -143,8 +197,60 @@ function PermissionCard({
   )
 }
 
+// The message composer, split out (with its own draft state) so a keystroke
+// re-renders only this textarea — not the whole transcript above it. Memoized,
+// so a streaming flush in the parent doesn't re-render it either. Enter sends
+// even while busy (the server supersedes the in-flight prompt).
+const ChatInput = memo(function ChatInput({
+  busy,
+  canSend,
+  onSend,
+  onCancel,
+}: {
+  busy: boolean
+  canSend: boolean
+  onSend: (text: string) => void
+  onCancel: () => void
+}) {
+  const [input, setInput] = useState('')
+  const submit = () => {
+    const text = input.trim()
+    if (!text || !canSend) return
+    onSend(text)
+    setInput('')
+  }
+  return (
+    <div className="chat-input-row">
+      <textarea
+        value={input}
+        placeholder="Message the agent… (Enter to send, Shift+Enter for newline)"
+        rows={2}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault()
+            submit()
+          }
+        }}
+      />
+      {busy ? (
+        <button className="btn-danger" onClick={onCancel}>
+          Stop
+        </button>
+      ) : (
+        <button className="btn-primary" onClick={submit} disabled={!canSend}>
+          Send
+        </button>
+      )}
+    </div>
+  )
+})
+
 /** The agent chat: streaming transcript, tool-call cards, permission prompts. */
-export function Chat({
+// Memoized: App bumps `fsVersion` on every completed tool call to refresh the
+// explorer/viewer, which would otherwise re-render the whole transcript here on
+// each one. Chat's props from App are all stable refs, so memo skips those.
+export const Chat = memo(function Chat({
   onPromptedSession,
   viewedPath,
   onToolActivity,
@@ -178,7 +284,6 @@ export function Chat({
   const [model, setModel] = useState<string | null>(null)
   const [usage, setUsage] = useState<{ used: number; size: number | null } | null>(null)
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
-  const [input, setInput] = useState('')
   const socketRef = useRef<ChatSocket | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -358,15 +463,19 @@ export function Chat({
     bottomRef.current?.scrollIntoView({ behavior: busy ? 'auto' : 'smooth' })
   }, [items, permission, busy])
 
-  const send = () => {
-    const text = input.trim()
-    if (!text || status !== 'open') return
-    setItems((prev) => [...prev, { kind: 'user', text }])
-    setInput('')
-    setBusy(true)
-    socketRef.current?.sendPrompt(text, viewedPath)
-    if (sessionIdRef.current) onPromptedSession?.(sessionIdRef.current)
-  }
+  // Stable so the memoized ChatInput doesn't re-render on every streaming flush;
+  // the trim/empty + open-socket guards live in ChatInput now.
+  const send = useCallback(
+    (text: string) => {
+      setItems((prev) => [...prev, { kind: 'user', text }])
+      setBusy(true)
+      socketRef.current?.sendPrompt(text, viewedPath)
+      if (sessionIdRef.current) onPromptedSession?.(sessionIdRef.current)
+    },
+    [viewedPath, onPromptedSession],
+  )
+
+  const cancel = useCallback(() => socketRef.current?.cancel(), [])
 
   const decide = (optionId: string | null) => {
     if (permission) {
@@ -419,35 +528,17 @@ export function Chat({
               </div>
             )
           }
-          return <AssistantMessage key={i} text={item.text} />
+          // The actively-streaming message is the last item while busy; it
+          // renders block-split. Everything else renders as a settled document.
+          return (
+            <AssistantMessage key={i} text={item.text} streaming={busy && i === items.length - 1} />
+          )
         })}
         {permission && <PermissionCard perm={permission} onDecide={decide} />}
         {busy && !permission && <div className="thinking">●●●</div>}
         <div ref={bottomRef} />
       </div>
-      <div className="chat-input-row">
-        <textarea
-          value={input}
-          placeholder="Message the agent… (Enter to send, Shift+Enter for newline)"
-          rows={2}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault()
-              send()
-            }
-          }}
-        />
-        {busy ? (
-          <button className="btn-danger" onClick={() => socketRef.current?.cancel()}>
-            Stop
-          </button>
-        ) : (
-          <button className="btn-primary" onClick={send} disabled={status !== 'open'}>
-            Send
-          </button>
-        )}
-      </div>
+      <ChatInput busy={busy} canSend={status === 'open'} onSend={send} onCancel={cancel} />
     </div>
   )
-}
+})

@@ -77,8 +77,11 @@ jobs:
           # set only to satisfy publish-time interpolation of its required
           # ${...:?} value; it is NOT baked into the artifact (no --with-env), so
           # consumers still supply their own path at `up` time.
+          # `yes |` answers the separate "publish these bind mount declarations?"
+          # prompt, which -y does not cover; without it the TTY-less runner reads
+          # EOF, defaults to No, and silently skips the publish (exit 0).
           for tag in "${{ github.sha }}" main; do
-            MEDMCP_WORKSPACE=/run/medmcp \
+            yes | MEDMCP_WORKSPACE=/run/medmcp \
               docker compose -f docker-compose.ghcr.yml publish \
               "ghcr.io/medmcp/compose:$tag" -y
           done

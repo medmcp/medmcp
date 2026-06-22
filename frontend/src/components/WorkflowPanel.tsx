@@ -47,14 +47,25 @@ type Mode =
     }
   | {
       kind: 'running'
+      name: string
+      runs: Record<string, string>[]
+      batchInput: string | null
       total: number
       stepsPerItem: number
+      startedAt: number
+      lastStepAt: number
       items: ItemResult[]
       log: ReplayStepFrame[]
     }
   | {
       kind: 'done'
+      name: string
+      runs: Record<string, string>[]
+      batchInput: string | null
       total: number
+      stepsPerItem: number
+      startedAt: number
+      finishedAt: number
       items: ItemResult[]
       log: ReplayStepFrame[]
       ok: boolean
@@ -80,6 +91,76 @@ function buildRuns(
     return batchValues.map((v) => ({ ...values, [batchInput]: v }))
   }
   return [values]
+}
+
+/** "1m 23s" / "45s" from a millisecond duration. */
+function formatDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000))
+  if (s < 60) return `${s}s`
+  return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`
+}
+
+function basename(p: string): string {
+  const i = p.lastIndexOf('/')
+  return i >= 0 ? p.slice(i + 1) : p
+}
+
+/** Short label for batch item *i* — its batched input's filename, else "Item N". */
+function itemLabel(runs: Record<string, string>[], batchInput: string | null, i: number): string {
+  const v = batchInput ? runs[i]?.[batchInput] : undefined
+  return v ? basename(v) : `Item ${i + 1}`
+}
+
+/** 1-based step number currently in progress for the active item. */
+function currentStep(m: Extract<Mode, { kind: 'running' }>): number {
+  const prevSteps = m.items.reduce((acc, it) => acc + it.steps, 0)
+  return Math.min(m.log.length - prevSteps + 1, m.stepsPerItem)
+}
+
+/** Elapsed time, plus a counting-down ETA extrapolated from finished steps. */
+function runTiming(m: Extract<Mode, { kind: 'running' }>, now: number): string {
+  const elapsed = now - m.startedAt
+  let label = `elapsed ${formatDuration(elapsed)}`
+  const totalSteps = m.total * m.stepsPerItem
+  const doneSteps = m.log.length
+  // Average over *finished* step time only (lastStepAt), not total elapsed —
+  // otherwise a long in-flight step inflates the average and the ETA climbs.
+  // Then count down: remaining = estimated total − elapsed. Rough, hence "~".
+  if (doneSteps > 0 && doneSteps < totalSteps) {
+    const avgPerStep = (m.lastStepAt - m.startedAt) / doneSteps
+    const remaining = avgPerStep * totalSteps - elapsed
+    if (remaining > 0) label += ` · ~${formatDuration(remaining)} left`
+  }
+  return label
+}
+
+/** Produced file paths, clickable to open in the viewer when a handler is given. */
+function OutputLinks({
+  paths,
+  onOpenFile,
+}: {
+  paths: string[]
+  onOpenFile?: (path: string) => void
+}) {
+  return (
+    <span className="wf-output-list">
+      {paths.map((p) =>
+        onOpenFile ? (
+          <button
+            key={p}
+            type="button"
+            className="wf-output-link"
+            title="Open in viewer"
+            onClick={() => onOpenFile(p)}
+          >
+            {p}
+          </button>
+        ) : (
+          <code key={p}>{p}</code>
+        ),
+      )}
+    </span>
+  )
 }
 
 /** One replay input field; accepts a file drag from the explorer. */
@@ -142,15 +223,27 @@ function StepList({ steps }: { steps: { server: string; tool: string }[] }) {
   )
 }
 
-function RunLog({ log, total = 1 }: { log: ReplayStepFrame[]; total?: number }) {
+function RunLog({
+  log,
+  total = 1,
+  runs,
+  batchInput,
+}: {
+  log: ReplayStepFrame[]
+  total?: number
+  runs?: Record<string, string>[]
+  batchInput?: string | null
+}) {
   const rows: ReactNode[] = []
   let lastItem = -1
   for (const s of log) {
     const item = s.item ?? 0
     if (total > 1 && item !== lastItem) {
+      const file = runs && batchInput ? basename(runs[item]?.[batchInput] ?? '') : ''
       rows.push(
         <div key={`item-${item}`} className="wf-runitem">
           Item {item + 1} of {total}
+          {file && ` · ${file}`}
         </div>,
       )
       lastItem = item
@@ -174,11 +267,11 @@ function RunLog({ log, total = 1 }: { log: ReplayStepFrame[]; total?: number }) 
   return <div className="wf-runlog">{rows}</div>
 }
 
-function ProgressBar({ frac, label }: { frac: number; label: string }) {
+function ProgressBar({ frac, label, active }: { frac: number; label: string; active?: boolean }) {
   const pct = Math.round(Math.min(Math.max(frac, 0), 1) * 100)
   return (
     <div className="wf-progress" title={`${pct}%`}>
-      <span className="wf-progress-bar">
+      <span className={active ? 'wf-progress-bar active' : 'wf-progress-bar'}>
         <span className="wf-progress-fill" style={{ width: `${pct}%` }} />
       </span>
       <span className="wf-progress-label">{label}</span>
@@ -217,11 +310,14 @@ function BatchSelection({ paths }: { paths: string[] }) {
 export function WorkflowPanel({
   distillSessionId,
   onWorkspaceChanged,
+  onOpenFile,
   selectedPaths = [],
 }: {
   distillSessionId: string | null
   /** Called when a replay step may have written files into the workspace. */
   onWorkspaceChanged?: () => void
+  /** Open a produced file in the viewer. */
+  onOpenFile?: (path: string) => void
   /** Files multi-selected in the explorer — offered to the batch editor. */
   selectedPaths?: string[]
 }) {
@@ -232,6 +328,7 @@ export function WorkflowPanel({
   const [mode, setMode] = useState<Mode>({ kind: 'view' })
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [now, setNow] = useState(0)
   const runWs = useRef<WebSocket | null>(null)
 
   const reload = useCallback(
@@ -251,6 +348,13 @@ export function WorkflowPanel({
     return () => runWs.current?.close()
   }, [reload])
 
+  // Tick once a second while a run is live so the elapsed/ETA readout updates.
+  useEffect(() => {
+    if (mode.kind !== 'running') return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [mode.kind])
+
   // The workflow whose detail the panel currently wants. Guards against a
   // slow response for a previously clicked row overwriting the current one —
   // the detail's action buttons (Run/Promote/Delete) act on detail.name, so a
@@ -258,8 +362,12 @@ export function WorkflowPanel({
   const detailForRef = useRef<string | null>(null)
 
   const openDetail = async (name: string) => {
-    runWs.current?.close()
-    setMode({ kind: 'view' })
+    // Leave an in-flight or finished run alone when toggling rows — its card is
+    // pinned at the panel top, so collapsing/switching no longer aborts or hides it.
+    if (mode.kind !== 'running' && mode.kind !== 'done') {
+      runWs.current?.close()
+      setMode({ kind: 'view' })
+    }
     if (expanded === name) {
       detailForRef.current = null
       setExpanded(null)
@@ -363,11 +471,29 @@ export function WorkflowPanel({
       setMode({ kind: 'preview', values, batchInput, batchValues, steps: res.steps })
     })
 
-  const startRun = (name: string, runs: Record<string, string>[], stepsPerItem: number) => {
+  const startRun = (
+    name: string,
+    runs: Record<string, string>[],
+    stepsPerItem: number,
+    batchInput: string | null,
+    startedAt: number,
+  ) => {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     const ws = new WebSocket(`${proto}://${location.host}/ws/replay`)
     runWs.current = ws
-    setMode({ kind: 'running', total: runs.length, stepsPerItem, items: [], log: [] })
+    setNow(startedAt)
+    setMode({
+      kind: 'running',
+      name,
+      runs,
+      batchInput,
+      total: runs.length,
+      stepsPerItem,
+      startedAt,
+      lastStepAt: startedAt,
+      items: [],
+      log: [],
+    })
     let finished = false
     ws.onopen = () => ws.send(JSON.stringify({ name, runs }))
     ws.onmessage = (ev: MessageEvent<string>) => {
@@ -380,7 +506,9 @@ export function WorkflowPanel({
       onWorkspaceChanged?.()
       if (frame.type === 'step') {
         const step = frame
-        setMode((m) => (m.kind === 'running' ? { ...m, log: [...m.log, step] } : m))
+        setMode((m) =>
+          m.kind === 'running' ? { ...m, log: [...m.log, step], lastStepAt: Date.now() } : m,
+        )
       } else if (frame.type === 'item_result') {
         const res = frame
         setMode((m) => {
@@ -401,7 +529,13 @@ export function WorkflowPanel({
           m.kind === 'running'
             ? {
                 kind: 'done',
+                name: m.name,
+                runs: m.runs,
+                batchInput: m.batchInput,
                 total: m.total,
+                stepsPerItem: m.stepsPerItem,
+                startedAt: m.startedAt,
+                finishedAt: Date.now(),
                 items: m.items,
                 log: m.log,
                 ok: result.ok,
@@ -417,7 +551,13 @@ export function WorkflowPanel({
           m.kind === 'running'
             ? {
                 kind: 'done',
+                name: m.name,
+                runs: m.runs,
+                batchInput: m.batchInput,
                 total: m.total,
+                stepsPerItem: m.stepsPerItem,
+                startedAt: m.startedAt,
+                finishedAt: Date.now(),
                 items: m.items,
                 log: m.log,
                 ok: false,
@@ -439,6 +579,121 @@ export function WorkflowPanel({
       values: Object.fromEntries(d.inputs.map((i) => [i.name, ''])),
       batchInput: null,
     })
+  }
+
+  const renderRunning = (m: Extract<Mode, { kind: 'running' }>) => (
+    <div className="wf-form">
+      <div className="wf-hint">Replaying… step results appear as they finish.</div>
+      <ProgressBar
+        frac={runProgress(m)}
+        active
+        label={
+          m.total > 1
+            ? `item ${Math.min(m.items.length + 1, m.total)} of ${m.total}`
+            : `step ${Math.min(m.log.length + 1, m.stepsPerItem)} of ${m.stepsPerItem}`
+        }
+      />
+      <div className="wf-active">
+        {m.items.length < m.total ? (
+          m.batchInput ? (
+            <span>
+              Processing <strong>{basename(m.runs[m.items.length]?.[m.batchInput] ?? '')}</strong> —
+              item {m.items.length + 1} of {m.total} · step {currentStep(m)} of {m.stepsPerItem}
+            </span>
+          ) : (
+            <span>
+              Running step {currentStep(m)} of {m.stepsPerItem}
+            </span>
+          )
+        ) : (
+          <span>Finishing…</span>
+        )}
+      </div>
+      <div className="wf-timing">{runTiming(m, now)}</div>
+      <RunLog log={m.log} total={m.total} runs={m.runs} batchInput={m.batchInput} />
+      <div className="wf-actions">
+        <button className="btn-danger" onClick={() => runWs.current?.close()}>
+          <StopSquareIcon size={12} /> Stop
+        </button>
+      </div>
+    </div>
+  )
+
+  const renderDone = (m: Extract<Mode, { kind: 'done' }>) => {
+    const succeeded = m.items.filter((it) => it.ok).length
+    const failedRan = m.items.filter((it) => !it.ok).length
+    const notRun = m.total - m.items.length
+    const retryRuns = m.runs.filter((_, i) => !m.items[i]?.ok)
+    const duration = m.finishedAt - m.startedAt
+    return (
+      <div className="wf-form">
+        {m.total > 1 && (
+          <div className="wf-run-summary">
+            <span className="tally-ok">{succeeded} done</span>
+            {failedRan > 0 && <span className="tally-fail">{failedRan} failed</span>}
+            {notRun > 0 && <span className="tally-muted">{notRun} not run</span>}
+            <span className="tally-muted">in {formatDuration(duration)}</span>
+          </div>
+        )}
+        <RunLog log={m.log} total={m.total} runs={m.runs} batchInput={m.batchInput} />
+        {m.total > 1 && (
+          <div className="wf-batch-summary">
+            {m.items.map((it, i) => (
+              <div key={i} className={it.ok ? 'wf-runstep ok' : 'wf-runstep fail'}>
+                <span className={`status-dot ${it.ok ? 'ok' : 'fail'}`} />
+                <span>
+                  {itemLabel(m.runs, m.batchInput, i)}:{' '}
+                  {it.ok ? (
+                    it.outputs.length > 0 ? (
+                      <>
+                        done → <OutputLinks paths={it.outputs} onOpenFile={onOpenFile} />
+                      </>
+                    ) : (
+                      'done'
+                    )
+                  ) : (
+                    (it.error ?? 'failed')
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        {m.ok ? (
+          <div className="wf-result ok">
+            {m.total > 1
+              ? `Batch complete — all ${m.items.length} item(s) succeeded in ${formatDuration(duration)}.`
+              : `Replay complete in ${formatDuration(duration)} — ${m.log.length} step(s) ran.`}
+            {m.total === 1 && m.items.some((it) => it.outputs.length > 0) && (
+              <div className="wf-outputs">
+                Outputs:
+                <OutputLinks paths={m.items.flatMap((it) => it.outputs)} onOpenFile={onOpenFile} />
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="wf-result fail">
+            {m.total > 1 && succeeded > 0
+              ? `${succeeded} of ${m.total} item(s) succeeded — ${retryRuns.length} need a retry.`
+              : `Replay failed. ${m.error ?? ''}`}
+          </div>
+        )}
+        <div className="wf-actions">
+          {retryRuns.length > 0 && (
+            <button
+              className="btn-primary"
+              title="Re-run only the items that failed or didn't finish"
+              onClick={() => startRun(m.name, retryRuns, m.stepsPerItem, m.batchInput, Date.now())}
+            >
+              <RefreshIcon size={12} /> Retry {retryRuns.length}
+            </button>
+          )}
+          <button className="btn-plain" onClick={() => setMode({ kind: 'view' })}>
+            Close
+          </button>
+        </div>
+      </div>
+    )
   }
 
   const renderDetail = (d: WorkflowDetail) => (
@@ -662,6 +917,8 @@ export function WorkflowPanel({
                   d.name,
                   buildRuns(mode.values, mode.batchInput, mode.batchValues),
                   d.steps.length,
+                  mode.batchInput,
+                  Date.now(),
                 )
               }
             >
@@ -681,70 +938,6 @@ export function WorkflowPanel({
         </div>
       )}
 
-      {mode.kind === 'running' && (
-        <div className="wf-form">
-          <div className="wf-hint">Replaying… step results appear as they finish.</div>
-          <ProgressBar
-            frac={runProgress(mode)}
-            label={
-              mode.total > 1
-                ? `item ${Math.min(mode.items.length + 1, mode.total)} of ${mode.total}`
-                : `step ${Math.min(mode.log.length + 1, mode.stepsPerItem)} of ${mode.stepsPerItem}`
-            }
-          />
-          <RunLog log={mode.log} total={mode.total} />
-          <div className="wf-actions">
-            <button className="btn-danger" onClick={() => runWs.current?.close()}>
-              <StopSquareIcon size={12} /> Stop
-            </button>
-          </div>
-        </div>
-      )}
-
-      {mode.kind === 'done' && (
-        <div className="wf-form">
-          <RunLog log={mode.log} total={mode.total} />
-          {mode.total > 1 && (
-            <div className="wf-batch-summary">
-              {mode.items.map((it, i) => (
-                <div key={i} className={it.ok ? 'wf-runstep ok' : 'wf-runstep fail'}>
-                  <span className={`status-dot ${it.ok ? 'ok' : 'fail'}`} />
-                  <span>
-                    Item {i + 1}:{' '}
-                    {it.ok
-                      ? it.outputs.length > 0
-                        ? `done → ${it.outputs.join(', ')}`
-                        : 'done'
-                      : (it.error ?? 'failed')}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-          {mode.ok ? (
-            <div className="wf-result ok">
-              {mode.total > 1
-                ? `Batch complete — ${mode.items.length} item(s) ran.`
-                : `Replay complete — ${mode.log.length} step(s) ran.`}
-              {mode.total === 1 && mode.items.some((it) => it.outputs.length > 0) && (
-                <div className="wf-outputs">
-                  Outputs:
-                  {mode.items.flatMap((it) => it.outputs).map((o) => (
-                    <code key={o}>{o}</code>
-                  ))}
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="wf-result fail">Replay failed. {mode.error ?? ''}</div>
-          )}
-          <div className="wf-actions">
-            <button className="btn-plain" onClick={() => setMode({ kind: 'view' })}>
-              Close
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   )
 
@@ -780,6 +973,14 @@ export function WorkflowPanel({
         {busy && (
           <div className="wf-busy">
             <span className="status-dot busy" /> {busy}
+          </div>
+        )}
+        {(mode.kind === 'running' || mode.kind === 'done') && (
+          <div className="wf-run-card">
+            <div className="wf-run-card-head">
+              <PlayIcon size={12} /> {mode.name}
+            </div>
+            {mode.kind === 'running' ? renderRunning(mode) : renderDone(mode)}
           </div>
         )}
         {enabled && workflows !== null && workflows.length === 0 && !busy && (

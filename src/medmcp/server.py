@@ -693,40 +693,42 @@ async def ws_replay(ws: WebSocket) -> None:
         )
 
         async def _run_batch() -> None:
-            all_outputs: list[str] = []
-            failed = 0
-            for item, inputs in enumerate(runs):
-
-                async def _on_step(sr: replay.StepResult, item: int = item) -> None:
-                    await ws.send_json(
-                        {
-                            "type": "step",
-                            "item": item,
-                            "index": sr.index,
-                            "server": sr.server,
-                            "tool": sr.tool,
-                            "ok": sr.ok,
-                            "error": sr.error,
-                            "produced": sr.produced,
-                        }
-                    )
-
-                result = await replay.run(
-                    recipe, inputs, servers=servers, cwd=str(WORKSPACE_ROOT), on_step=_on_step
+            async def _on_step(item: int, sr: replay.StepResult) -> None:
+                await ws.send_json(
+                    {
+                        "type": "step",
+                        "item": item,
+                        "index": sr.index,
+                        "server": sr.server,
+                        "tool": sr.tool,
+                        "ok": sr.ok,
+                        "error": sr.error,
+                        "produced": sr.produced,
+                    }
                 )
-                outputs = [v for sr in result.steps for v in sr.produced.values()]
-                all_outputs.extend(outputs)
-                if not result.ok:
-                    failed += 1
+
+            async def _on_item(item: int, result: replay.ReplayResult) -> None:
                 await ws.send_json(
                     {
                         "type": "item_result",
                         "item": item,
                         "ok": result.ok,
                         "error": result.error,
-                        "outputs": outputs,
+                        "outputs": [v for sr in result.steps for v in sr.produced.values()],
                     }
                 )
+
+            # One shared set of stacks across all items (spawned once, not per item).
+            results = await replay.run_batch(
+                recipe,
+                runs,
+                servers=servers,
+                cwd=str(WORKSPACE_ROOT),
+                on_step=_on_step,
+                on_item=_on_item,
+            )
+            all_outputs = [v for r in results for sr in r.steps for v in sr.produced.values()]
+            failed = sum(1 for r in results if not r.ok)
             ok = failed == 0
             batch_error = None if ok else f"{failed} of {len(runs)} item(s) failed"
             _audit.info("replay finished: %s ok=%s", name, ok)
@@ -737,7 +739,7 @@ async def ws_replay(ws: WebSocket) -> None:
         # Race the batch against a socket watcher. The client sends nothing
         # after the first message, so anything receive returns — and above all
         # a disconnect — means "abort". Cancelling the batch task unwinds
-        # replay.run's exit stack, killing the in-flight MCP server and its
+        # run_batch's shared exit stack, killing the in-flight MCP server and its
         # running tool; without the watcher, Stop would only take effect at
         # the next frame send, after the current step finished.
         batch_task = asyncio.create_task(_run_batch())

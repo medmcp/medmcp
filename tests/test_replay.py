@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 import mcp.types as mcp_types
@@ -265,3 +267,149 @@ async def test_on_step_callback_invoked_per_step() -> None:
         _two_step_recipe(), {"in_1": "/x"}, caller=caller, on_step=on_step
     )
     assert seen == [1, 2]
+
+
+# ── batch replay (run_batch) ──────────────────────────────────────────────────
+
+
+def _neuro_servers() -> list[JsonDict]:
+    return [{"name": "medmcp-neuro", "command": "x", "args": []}]
+
+
+def _fake_mcp_caller(
+    caller: replay.ToolCaller, spawns: list[int]
+) -> Callable[..., contextlib.AbstractAsyncContextManager[replay.ToolCaller]]:
+    """A drop-in for ``replay.mcp_caller`` that counts spawns and yields *caller*."""
+
+    @contextlib.asynccontextmanager
+    async def _cm(*_args: object, **_kwargs: object) -> AsyncGenerator[replay.ToolCaller]:
+        spawns[0] += 1
+        yield caller
+
+    return _cm
+
+
+@pytest.mark.asyncio
+async def test_run_batch_spawns_stacks_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A batch reuses one mcp_caller — the stacks are spawned a single time."""
+    spawns = [0]
+
+    async def caller(server: str, tool: str, args: JsonDict) -> tuple[bool, JsonDict, str | None]:
+        return True, {"brain_path": "/b", "registered_path": "/r"}, None
+
+    monkeypatch.setattr(replay, "mcp_caller", _fake_mcp_caller(caller, spawns))
+
+    runs = [{"in_1": f"/scan{i}.nii"} for i in range(3)]
+    results = await replay.run_batch(_two_step_recipe(), runs, servers=_neuro_servers())
+
+    assert spawns[0] == 1
+    assert [r.ok for r in results] == [True, True, True]
+
+
+@pytest.mark.asyncio
+async def test_run_batch_failed_item_does_not_stop_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One item's failure is isolated; the rest still run on the shared stacks."""
+    spawns = [0]
+
+    async def caller(server: str, tool: str, args: JsonDict) -> tuple[bool, JsonDict, str | None]:
+        if "scan1" in str(args.get("input_path", "")):
+            return False, {}, "boom"
+        return True, {"brain_path": "/b", "registered_path": "/r"}, None
+
+    monkeypatch.setattr(replay, "mcp_caller", _fake_mcp_caller(caller, spawns))
+
+    runs = [{"in_1": "/scan0.nii"}, {"in_1": "/scan1.nii"}, {"in_1": "/scan2.nii"}]
+    results = await replay.run_batch(_two_step_recipe(), runs, servers=_neuro_servers())
+
+    assert spawns[0] == 1  # still one shared spawn despite the mid-batch failure
+    assert [r.ok for r in results] == [True, False, True]
+    assert "boom" in (results[1].error or "")
+
+
+@pytest.mark.asyncio
+async def test_run_batch_isolates_validation_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An item missing its inputs fails validation without running; others run."""
+    spawns = [0]
+
+    async def caller(server: str, tool: str, args: JsonDict) -> tuple[bool, JsonDict, str | None]:
+        return True, {"brain_path": "/b", "registered_path": "/r"}, None
+
+    monkeypatch.setattr(replay, "mcp_caller", _fake_mcp_caller(caller, spawns))
+
+    runs = [{"in_1": "/a.nii"}, {}, {"in_1": "/c.nii"}]
+    results = await replay.run_batch(_two_step_recipe(), runs, servers=_neuro_servers())
+
+    assert [r.ok for r in results] == [True, False, True]
+    assert "missing" in (results[1].error or "")
+    assert results[1].steps == []  # never ran a step
+
+
+@pytest.mark.asyncio
+async def test_run_batch_streams_item_indexed_callbacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """on_step / on_item fire tagged with the item's index in runs."""
+    spawns = [0]
+
+    async def caller(server: str, tool: str, args: JsonDict) -> tuple[bool, JsonDict, str | None]:
+        return True, {"brain_path": "/b", "registered_path": "/r"}, None
+
+    monkeypatch.setattr(replay, "mcp_caller", _fake_mcp_caller(caller, spawns))
+
+    steps: list[tuple[int, int]] = []
+    items: list[int] = []
+
+    async def on_step(item: int, sr: replay.StepResult) -> None:
+        steps.append((item, sr.index))
+
+    async def on_item(item: int, res: replay.ReplayResult) -> None:
+        items.append(item)
+
+    runs = [{"in_1": "/a.nii"}, {"in_1": "/b.nii"}]
+    await replay.run_batch(
+        _two_step_recipe(), runs, servers=_neuro_servers(), on_step=on_step, on_item=on_item
+    )
+
+    assert steps == [(0, 1), (0, 2), (1, 1), (1, 2)]
+    assert items == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_mcp_caller_respawns_after_transport_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A transport error evicts the dead session; the next call spawns a fresh one."""
+    spawns = [0]
+    calls = [0]
+
+    @contextlib.asynccontextmanager
+    async def fake_stdio_client(_params: object) -> AsyncGenerator[tuple[None, None]]:
+        spawns[0] += 1
+        yield (None, None)
+
+    class FakeSession:
+        def __init__(self, *_args: object, **_kwargs: object) -> None: ...
+
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None: ...
+
+        async def initialize(self) -> None: ...
+
+        async def call_tool(
+            self, tool: str, args: JsonDict, read_timeout_seconds: object = None
+        ) -> mcp_types.CallToolResult:
+            calls[0] += 1
+            if calls[0] == 1:
+                raise ConnectionError("server died")
+            return _result(structured={"brain_path": "/b"})
+
+    monkeypatch.setattr(replay, "stdio_client", fake_stdio_client)
+    monkeypatch.setattr(replay, "ClientSession", FakeSession)
+
+    async with replay.mcp_caller(_neuro_servers()) as call:
+        with pytest.raises(ConnectionError):
+            await call("medmcp-neuro", "skull_strip", {})  # crash → session evicted
+        outcome = await call("medmcp-neuro", "skull_strip", {})  # fresh server, succeeds
+
+    assert spawns[0] == 2  # the dead server was re-spawned, not reused
+    assert outcome == (True, {"brain_path": "/b"}, None)

@@ -53,6 +53,7 @@ type Mode =
       total: number
       stepsPerItem: number
       startedAt: number
+      lastStepAt: number
       items: ItemResult[]
       log: ReplayStepFrame[]
     }
@@ -110,13 +111,25 @@ function itemLabel(runs: Record<string, string>[], batchInput: string | null, i:
   return v ? basename(v) : `Item ${i + 1}`
 }
 
-/** Elapsed time, plus a rough ETA for a batch once at least one item is done. */
+/** 1-based step number currently in progress for the active item. */
+function currentStep(m: Extract<Mode, { kind: 'running' }>): number {
+  const prevSteps = m.items.reduce((acc, it) => acc + it.steps, 0)
+  return Math.min(m.log.length - prevSteps + 1, m.stepsPerItem)
+}
+
+/** Elapsed time, plus a counting-down ETA extrapolated from finished steps. */
 function runTiming(m: Extract<Mode, { kind: 'running' }>, now: number): string {
   const elapsed = now - m.startedAt
   let label = `elapsed ${formatDuration(elapsed)}`
-  if (m.total > 1 && m.items.length > 0 && m.items.length < m.total) {
-    const remaining = (elapsed / m.items.length) * (m.total - m.items.length)
-    label += ` · ~${formatDuration(remaining)} left`
+  const totalSteps = m.total * m.stepsPerItem
+  const doneSteps = m.log.length
+  // Average over *finished* step time only (lastStepAt), not total elapsed —
+  // otherwise a long in-flight step inflates the average and the ETA climbs.
+  // Then count down: remaining = estimated total − elapsed. Rough, hence "~".
+  if (doneSteps > 0 && doneSteps < totalSteps) {
+    const avgPerStep = (m.lastStepAt - m.startedAt) / doneSteps
+    const remaining = avgPerStep * totalSteps - elapsed
+    if (remaining > 0) label += ` · ~${formatDuration(remaining)} left`
   }
   return label
 }
@@ -254,11 +267,11 @@ function RunLog({
   return <div className="wf-runlog">{rows}</div>
 }
 
-function ProgressBar({ frac, label }: { frac: number; label: string }) {
+function ProgressBar({ frac, label, active }: { frac: number; label: string; active?: boolean }) {
   const pct = Math.round(Math.min(Math.max(frac, 0), 1) * 100)
   return (
     <div className="wf-progress" title={`${pct}%`}>
-      <span className="wf-progress-bar">
+      <span className={active ? 'wf-progress-bar active' : 'wf-progress-bar'}>
         <span className="wf-progress-fill" style={{ width: `${pct}%` }} />
       </span>
       <span className="wf-progress-label">{label}</span>
@@ -349,8 +362,12 @@ export function WorkflowPanel({
   const detailForRef = useRef<string | null>(null)
 
   const openDetail = async (name: string) => {
-    runWs.current?.close()
-    setMode({ kind: 'view' })
+    // Leave an in-flight or finished run alone when toggling rows — its card is
+    // pinned at the panel top, so collapsing/switching no longer aborts or hides it.
+    if (mode.kind !== 'running' && mode.kind !== 'done') {
+      runWs.current?.close()
+      setMode({ kind: 'view' })
+    }
     if (expanded === name) {
       detailForRef.current = null
       setExpanded(null)
@@ -473,6 +490,7 @@ export function WorkflowPanel({
       total: runs.length,
       stepsPerItem,
       startedAt,
+      lastStepAt: startedAt,
       items: [],
       log: [],
     })
@@ -488,7 +506,9 @@ export function WorkflowPanel({
       onWorkspaceChanged?.()
       if (frame.type === 'step') {
         const step = frame
-        setMode((m) => (m.kind === 'running' ? { ...m, log: [...m.log, step] } : m))
+        setMode((m) =>
+          m.kind === 'running' ? { ...m, log: [...m.log, step], lastStepAt: Date.now() } : m,
+        )
       } else if (frame.type === 'item_result') {
         const res = frame
         setMode((m) => {
@@ -560,6 +580,44 @@ export function WorkflowPanel({
       batchInput: null,
     })
   }
+
+  const renderRunning = (m: Extract<Mode, { kind: 'running' }>) => (
+    <div className="wf-form">
+      <div className="wf-hint">Replaying… step results appear as they finish.</div>
+      <ProgressBar
+        frac={runProgress(m)}
+        active
+        label={
+          m.total > 1
+            ? `item ${Math.min(m.items.length + 1, m.total)} of ${m.total}`
+            : `step ${Math.min(m.log.length + 1, m.stepsPerItem)} of ${m.stepsPerItem}`
+        }
+      />
+      <div className="wf-active">
+        {m.items.length < m.total ? (
+          m.batchInput ? (
+            <span>
+              Processing <strong>{basename(m.runs[m.items.length]?.[m.batchInput] ?? '')}</strong> —
+              item {m.items.length + 1} of {m.total} · step {currentStep(m)} of {m.stepsPerItem}
+            </span>
+          ) : (
+            <span>
+              Running step {currentStep(m)} of {m.stepsPerItem}
+            </span>
+          )
+        ) : (
+          <span>Finishing…</span>
+        )}
+      </div>
+      <div className="wf-timing">{runTiming(m, now)}</div>
+      <RunLog log={m.log} total={m.total} runs={m.runs} batchInput={m.batchInput} />
+      <div className="wf-actions">
+        <button className="btn-danger" onClick={() => runWs.current?.close()}>
+          <StopSquareIcon size={12} /> Stop
+        </button>
+      </div>
+    </div>
+  )
 
   const renderDone = (m: Extract<Mode, { kind: 'done' }>) => {
     const succeeded = m.items.filter((it) => it.ok).length
@@ -880,28 +938,6 @@ export function WorkflowPanel({
         </div>
       )}
 
-      {mode.kind === 'running' && (
-        <div className="wf-form">
-          <div className="wf-hint">Replaying… step results appear as they finish.</div>
-          <ProgressBar
-            frac={runProgress(mode)}
-            label={
-              mode.total > 1
-                ? `item ${Math.min(mode.items.length + 1, mode.total)} of ${mode.total}`
-                : `step ${Math.min(mode.log.length + 1, mode.stepsPerItem)} of ${mode.stepsPerItem}`
-            }
-          />
-          <div className="wf-timing">{runTiming(mode, now)}</div>
-          <RunLog log={mode.log} total={mode.total} runs={mode.runs} batchInput={mode.batchInput} />
-          <div className="wf-actions">
-            <button className="btn-danger" onClick={() => runWs.current?.close()}>
-              <StopSquareIcon size={12} /> Stop
-            </button>
-          </div>
-        </div>
-      )}
-
-      {mode.kind === 'done' && renderDone(mode)}
     </div>
   )
 
@@ -937,6 +973,14 @@ export function WorkflowPanel({
         {busy && (
           <div className="wf-busy">
             <span className="status-dot busy" /> {busy}
+          </div>
+        )}
+        {(mode.kind === 'running' || mode.kind === 'done') && (
+          <div className="wf-run-card">
+            <div className="wf-run-card-head">
+              <PlayIcon size={12} /> {mode.name}
+            </div>
+            {mode.kind === 'running' ? renderRunning(mode) : renderDone(mode)}
           </div>
         )}
         {enabled && workflows !== null && workflows.length === 0 && !busy && (

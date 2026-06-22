@@ -372,3 +372,44 @@ async def test_run_batch_streams_item_indexed_callbacks(monkeypatch: pytest.Monk
 
     assert steps == [(0, 1), (0, 2), (1, 1), (1, 2)]
     assert items == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_mcp_caller_respawns_after_transport_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A transport error evicts the dead session; the next call spawns a fresh one."""
+    spawns = [0]
+    calls = [0]
+
+    @contextlib.asynccontextmanager
+    async def fake_stdio_client(_params: object) -> AsyncGenerator[tuple[None, None]]:
+        spawns[0] += 1
+        yield (None, None)
+
+    class FakeSession:
+        def __init__(self, *_args: object, **_kwargs: object) -> None: ...
+
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None: ...
+
+        async def initialize(self) -> None: ...
+
+        async def call_tool(
+            self, tool: str, args: JsonDict, read_timeout_seconds: object = None
+        ) -> mcp_types.CallToolResult:
+            calls[0] += 1
+            if calls[0] == 1:
+                raise ConnectionError("server died")
+            return _result(structured={"brain_path": "/b"})
+
+    monkeypatch.setattr(replay, "stdio_client", fake_stdio_client)
+    monkeypatch.setattr(replay, "ClientSession", FakeSession)
+
+    async with replay.mcp_caller(_neuro_servers()) as call:
+        with pytest.raises(ConnectionError):
+            await call("medmcp-neuro", "skull_strip", {})  # crash → session evicted
+        outcome = await call("medmcp-neuro", "skull_strip", {})  # fresh server, succeeds
+
+    assert spawns[0] == 2  # the dead server was re-spawned, not reused
+    assert outcome == (True, {"brain_path": "/b"}, None)

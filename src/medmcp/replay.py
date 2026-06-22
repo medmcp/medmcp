@@ -26,7 +26,7 @@ import json
 import os
 import re
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, cast
@@ -220,24 +220,50 @@ async def mcp_caller(
     """Yield a :data:`ToolCaller` backed by lazily-spawned MCP stdio servers.
 
     Each needed stack's server is started on first use and reused for the rest of
-    the run; all are shut down when the context exits.
+    the run. A transport error (the server process dying) evicts that server, so
+    the next call re-spawns a fresh one rather than reusing a broken session — a
+    crash on one batch item does not sink the items that follow. Every live server
+    is shut down when the context exits (including on cancellation/Stop).
     """
     server_map = {str(s["name"]): s for s in servers}
     timeout = timedelta(seconds=tool_timeout_sec)
 
     async with AsyncExitStack() as stack:
+        # Each server keeps its own exit stack so a dead one can be torn down
+        # individually, without disturbing the others.
         sessions: dict[str, ClientSession] = {}
+        server_stacks: dict[str, AsyncExitStack] = {}
+
+        async def _evict(server: str) -> None:
+            sessions.pop(server, None)
+            sstack = server_stacks.pop(server, None)
+            if sstack is not None:
+                with suppress(Exception):
+                    await sstack.aclose()
+
+        async def _evict_all() -> None:
+            for server in list(server_stacks):
+                await _evict(server)
+
+        # Shut every live server down on exit (normal or cancellation/Stop).
+        stack.push_async_callback(_evict_all)
 
         async def _session(server: str) -> ClientSession:
             if server not in sessions:
                 cfg = server_map.get(server)
                 if cfg is None:
                     raise ReplayError(f"stack {server!r} is not installed")
-                read, write = await stack.enter_async_context(
-                    stdio_client(_server_params(cfg, cwd=cwd))
-                )
-                session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
+                sstack = AsyncExitStack()
+                try:
+                    read, write = await sstack.enter_async_context(
+                        stdio_client(_server_params(cfg, cwd=cwd))
+                    )
+                    session = await sstack.enter_async_context(ClientSession(read, write))
+                    await session.initialize()
+                except BaseException:
+                    await sstack.aclose()  # don't leak a half-started server
+                    raise
+                server_stacks[server] = sstack
                 sessions[server] = session
             return sessions[server]
 
@@ -245,7 +271,15 @@ async def mcp_caller(
             server: str, tool: str, args: JsonDict
         ) -> tuple[bool, JsonDict, str | None]:
             session = await _session(server)
-            result = await session.call_tool(tool, args, read_timeout_seconds=timeout)
+            try:
+                result = await session.call_tool(tool, args, read_timeout_seconds=timeout)
+            except Exception:
+                # Transport-level failure: the server process is probably dead, so
+                # drop it — the next call spawns a fresh one instead of reusing a
+                # broken session. (A tool that merely *reports* failure returns a
+                # result and is handled below; its session stays healthy.)
+                await _evict(server)
+                raise
             structured = extract_structured(result)
             if _result_failed(result):
                 return False, structured, _result_text(result) or "tool reported failure"
@@ -401,9 +435,9 @@ async def run_batch(
     item's index in *runs*; the return value is one :class:`ReplayResult` per item,
     in order.
 
-    Because the MCP sessions are shared, a stack that crashes mid-batch stays down
-    for the remaining items (they fail rather than respawn) — :func:`run`'s per-item
-    isolation is traded for the startup saving.
+    The MCP servers are shared across items for speed, but one that crashes is
+    re-spawned for the next item (see :func:`mcp_caller`), so a single failure does
+    not cascade to the rest of the batch.
     """
     pre = [validate(recipe, inputs, servers) for inputs in runs]
     results: list[ReplayResult] = []

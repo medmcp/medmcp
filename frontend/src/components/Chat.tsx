@@ -1,5 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 import { ChatSocket } from '../chatSocket'
 import type { ChatSocketStatus } from '../chatSocket'
 import type { ChatItem, PermissionRequest, ServerFrame, ToolCallState } from '../types'
@@ -109,10 +112,42 @@ function splitMarkdownBlocks(text: string): string[] {
   return blocks
 }
 
+// remark-math only renders $$…$$ as a centered *display* block when the fences
+// sit on their own lines; a single-line $$…$$ (which models routinely emit)
+// parses as inline math — no displaystyle, no .katex-display scroll container.
+// Promote a standalone single-line display equation to block form. Lines inside
+// fenced code are skipped so literal $$ in a code sample is never touched, and a
+// line carrying more than one $$…$$ pair is left as inline (ambiguous).
+function promoteDisplayMath(text: string): string {
+  if (!text.includes('$$')) return text
+  let inFence = false
+  return text
+    .split('\n')
+    .map((line) => {
+      if (/^\s*(```|~~~)/.test(line)) {
+        inFence = !inFence
+        return line
+      }
+      if (inFence) return line
+      const m = /^\s*\$\$(.+?)\$\$\s*$/.exec(line)
+      if (m && !m[1].includes('$$')) return `$$\n${m[1].trim()}\n$$`
+      return line
+    })
+    .join('\n')
+}
+
 // One markdown block, memoized on its source: a settled block never re-parses
-// once its text stops changing.
+// once its text stops changing. remark-gfm adds tables, strikethrough, task
+// lists, and bare-URL autolinks on top of CommonMark; remark-math + rehype-katex
+// render LaTeX ($…$ inline, $$…$$ display).
+const REMARK_PLUGINS = [remarkGfm, remarkMath]
+const REHYPE_PLUGINS = [rehypeKatex]
 const MarkdownBlock = memo(function MarkdownBlock({ source }: { source: string }) {
-  return <ReactMarkdown>{source}</ReactMarkdown>
+  return (
+    <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
+      {source}
+    </ReactMarkdown>
+  )
 })
 
 const AssistantMessage = memo(function AssistantMessage({
@@ -129,8 +164,9 @@ const AssistantMessage = memo(function AssistantMessage({
   // so only that small tail re-parses per flush. A settled message renders as a
   // single document — fully correct, parsed once.
   const { head, tail } = useMemo(() => {
-    if (!streaming) return { head: text, tail: '' }
-    const blocks = splitMarkdownBlocks(text)
+    const md = promoteDisplayMath(text)
+    if (!streaming) return { head: md, tail: '' }
+    const blocks = splitMarkdownBlocks(md)
     return {
       head: blocks.slice(0, -1).join('\n\n'),
       tail: blocks.length > 0 ? blocks[blocks.length - 1] : '',

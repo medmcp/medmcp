@@ -24,6 +24,12 @@
       "image": "medmcp-neuro-cancer:dev",
       "description": "Brain-tumor (glioma / BraTS) segmentation (MONAI SegResNet).",
       "gpu": true
+    },
+    {
+      "name": "medmcp-monai",
+      "image": "medmcp-monai:dev",
+      "description": "Run pretrained MONAI Model-Zoo bundles (spleen / multi-organ / whole-body CT segmentation).",
+      "gpu": true
     }
   ]
 }

@@ -612,6 +612,32 @@ async def delete_workflow(name: str) -> JsonDict:
     return {"ok": True}
 
 
+def _resolve_input_path(value: str) -> str:
+    """Rewrite a workspace-relative replay input to its absolute on-disk path.
+
+    Workflow inputs reach the server as workspace-relative paths — the explorer
+    tree ids and the drag payloads that populate the Run form are all relative to
+    ``WORKSPACE_ROOT``. Replay, however, calls the stack tools directly and they
+    resolve paths on disk, where the workspace is bind-mounted at the identical
+    absolute path (path parity). A relative value naming an existing file or
+    directory under the workspace is rewritten to that absolute path; an
+    already-absolute path, a non-path argument (e.g. ``"cuda"``), or a value that
+    doesn't exist on disk is returned unchanged — so non-path inputs pass through
+    and a genuinely missing scan still surfaces as a clear tool error.
+    """
+    if not value or Path(value).is_absolute():
+        return value
+    candidate = (WORKSPACE_ROOT / value).resolve()
+    if candidate.is_relative_to(WORKSPACE_ROOT) and candidate.exists():
+        return str(candidate)
+    return value
+
+
+def _resolve_input_paths(inputs: dict[str, str]) -> dict[str, str]:
+    """Apply :func:`_resolve_input_path` to every value of a replay input binding."""
+    return {key: _resolve_input_path(value) for key, value in inputs.items()}
+
+
 class ReplayPreviewPayload(BaseModel):
     """Request body for previewing a replay's resolved steps."""
 
@@ -631,10 +657,11 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
         if d is None:
             raise FileNotFoundError(f"no workflow named {name!r}")
         recipe = distill.load_recipe(d)
-        error = replay.validate(recipe, dict(payload.inputs), settings.active_servers())
+        inputs = _resolve_input_paths(dict(payload.inputs))
+        error = replay.validate(recipe, inputs, settings.active_servers())
         if error is not None:
             return {"ok": False, "error": error, "steps": []}
-        bindings: dict[str, Any] = dict(payload.inputs)
+        bindings: dict[str, Any] = dict(inputs)
         steps = [
             {
                 "index": i,
@@ -677,7 +704,7 @@ async def ws_replay(ws: WebSocket) -> None:
         first = cast("JsonDict", await ws.receive_json())
         name = str(first.get("name") or "")
         runs = [
-            {str(k): str(v) for k, v in cast("JsonDict", r).items()}
+            _resolve_input_paths({str(k): str(v) for k, v in cast("JsonDict", r).items()})
             for r in cast("list[object]", first.get("runs") or [])
             if isinstance(r, dict)
         ]
@@ -829,6 +856,23 @@ def _strip_workspace_note(text: str) -> str:
     return _WORKSPACE_NOTE_RE.sub("", text).strip()
 
 
+def _workspace_note(viewed_path: str) -> str:
+    """Build the ``[workspace context: …]`` note for the file open in the viewer.
+
+    The viewer reports a workspace-relative path, but the stack tools run in
+    sibling containers and resolve paths on disk, where the workspace is
+    bind-mounted at the identical absolute path (path parity). Handing the agent
+    the **absolute** path lets its first tool call hit; a relative path misses and
+    only recovers after the agent searches the filesystem. Resolution mirrors
+    replay's :func:`_resolve_input_path` (an unknown/absolute value is unchanged).
+    """
+    absolute = _resolve_input_path(viewed_path)
+    return (
+        f'\n\n[workspace context: the file "{absolute}" is currently open in the '
+        'viewer; references like "this image" or "the current image" mean that file]'
+    )
+
+
 class _ChatConnection:
     """State for one browser websocket: one vibe-acp session, one prompt at a time."""
 
@@ -975,10 +1019,11 @@ class _ChatConnection:
         """Send one ``session/prompt`` and stream its frames to the browser.
 
         ``viewed_path`` is the workspace-relative file currently open in the
-        viewer; it is appended to the prompt as a context note so the agent
-        can resolve references like "this image". Appended to the user's text
-        block (not sent as a separate content block) so it survives any
-        prompt handling downstream.
+        viewer; it is resolved to its absolute on-disk path and appended to the
+        prompt as a context note (see :func:`_workspace_note`) so the agent can
+        resolve references like "this image" *and* pass the path the stack tools
+        expect. Appended to the user's text block (not sent as a separate content
+        block) so it survives any prompt handling downstream.
 
         Race loop: wait for either the next inbound session frame or the
         prompt response, then drain whatever is left in the queue once the
@@ -1007,10 +1052,7 @@ class _ChatConnection:
         await self._drain_stale_frames()
         prompt_text = text
         if viewed_path is not None:
-            prompt_text += (
-                f'\n\n[workspace context: the file "{viewed_path}" is currently open in the '
-                'viewer; references like "this image" or "the current image" mean that file]'
-            )
+            prompt_text += _workspace_note(viewed_path)
         prompt_fut = asyncio.create_task(
             _client.request(
                 "session/prompt",

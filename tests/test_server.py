@@ -87,6 +87,112 @@ class TestSafePath:
         assert "escapes" in str(exc.value.detail)
 
 
+# ── _resolve_input_path: workspace-relative replay inputs → absolute ──────────
+
+
+class TestResolveInputPath:
+    """Replay inputs arrive workspace-relative; the stack tools need absolute paths.
+
+    The Run form (drags carry explorer tree ids) hands the server paths relative
+    to ``WORKSPACE_ROOT``, but replay calls the stack tools directly and they
+    resolve paths on disk. Existing relative paths must be lifted to absolute;
+    everything else (already-absolute, non-path args, missing files) is left as-is
+    so non-path inputs pass through and a missing scan still yields a clear error.
+    """
+
+    @pytest.fixture
+    def root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Point the server's workspace root at a temp dir (resolved, no symlinks)."""
+        resolved = tmp_path.resolve()
+        monkeypatch.setattr(server, "WORKSPACE_ROOT", resolved)
+        return resolved
+
+    def test_relative_existing_file_becomes_absolute(self, root: Path) -> None:
+        """A relative path naming an existing file resolves to its absolute path."""
+        scan = root / "patient_01" / "visit_02" / "t1n_3d.nii.gz"
+        scan.parent.mkdir(parents=True)
+        scan.touch()
+        assert server._resolve_input_path("patient_01/visit_02/t1n_3d.nii.gz") == str(scan)
+
+    def test_relative_existing_dir_becomes_absolute(self, root: Path) -> None:
+        """Directory inputs resolve too (some tools take a folder)."""
+        visit = root / "patient_01" / "visit_02"
+        visit.mkdir(parents=True)
+        assert server._resolve_input_path("patient_01/visit_02") == str(visit)
+
+    def test_absolute_path_is_left_unchanged(self, root: Path) -> None:
+        """An already-absolute path (the recorded example) passes through verbatim."""
+        scan = root / "patient_01" / "visit_01" / "t1n_3d.nii.gz"
+        scan.parent.mkdir(parents=True)
+        scan.touch()
+        assert server._resolve_input_path(str(scan)) == str(scan)
+
+    def test_non_path_argument_is_left_unchanged(self, root: Path) -> None:
+        """A non-path argument like a device string is not mistaken for a file."""
+        assert server._resolve_input_path("cuda") == "cuda"
+
+    def test_missing_relative_path_is_left_unchanged(self, root: Path) -> None:
+        """A relative path that doesn't exist is left as-is for a clear tool error."""
+        assert (
+            server._resolve_input_path("patient_01/visit_09/missing.nii.gz")
+            == "patient_01/visit_09/missing.nii.gz"
+        )
+
+    def test_empty_value_is_left_unchanged(self, root: Path) -> None:
+        """An empty value is returned untouched (not joined to the root)."""
+        assert server._resolve_input_path("") == ""
+
+    def test_resolve_input_paths_maps_every_value(self, root: Path) -> None:
+        """The dict helper resolves each binding value independently."""
+        scan = root / "patient_01" / "visit_02" / "t1n_3d.nii.gz"
+        scan.parent.mkdir(parents=True)
+        scan.touch()
+        resolved = server._resolve_input_paths(
+            {"in_1": "patient_01/visit_02/t1n_3d.nii.gz", "in_2": "cuda"}
+        )
+        assert resolved == {"in_1": str(scan), "in_2": "cuda"}
+
+
+# ── _workspace_note: the viewer-context note handed to the agent ─────────────
+
+
+class TestWorkspaceNote:
+    """The viewer-context note carries the absolute path so the agent calls tools right.
+
+    The viewer reports a workspace-relative path, but the stack tools run in
+    sibling containers and resolve paths on disk. The note must hand the agent the
+    absolute path so its *first* tool call hits — without it the agent passes the
+    relative path, the tool reports "not found", and it only recovers after a
+    filesystem search. The note must also still be strippable from transcripts.
+    """
+
+    @pytest.fixture
+    def root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Point the server's workspace root at a temp dir (resolved, no symlinks)."""
+        resolved = tmp_path.resolve()
+        monkeypatch.setattr(server, "WORKSPACE_ROOT", resolved)
+        return resolved
+
+    def test_note_carries_absolute_path(self, root: Path) -> None:
+        """A relative viewer path is rendered as its absolute location in the note."""
+        scan = root / "patient_01" / "visit_01" / "t1n_3d.nii.gz"
+        scan.parent.mkdir(parents=True)
+        scan.touch()
+        note = server._workspace_note("patient_01/visit_01/t1n_3d.nii.gz")
+        assert str(scan) in note
+        assert "patient_01/visit_01/t1n_3d.nii.gz" not in note.replace(str(scan), "")
+
+    def test_note_is_strippable(self, root: Path) -> None:
+        """The note appends cleanly and `_strip_workspace_note` removes it again."""
+        scan = root / "patient_01" / "visit_01" / "t1n_3d.nii.gz"
+        scan.parent.mkdir(parents=True)
+        scan.touch()
+        prompt = "skull strip this image" + server._workspace_note(
+            "patient_01/visit_01/t1n_3d.nii.gz"
+        )
+        assert server._strip_workspace_note(prompt) == "skull strip this image"
+
+
 # ── PUT /api/settings: the merge-not-overwrite logic ─────────────────────────
 
 

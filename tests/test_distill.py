@@ -198,6 +198,36 @@ def test_slugify() -> None:
     assert distill._slugify("") == "workflow"
 
 
+class TestFirstUserMessage:
+    """_first_user_message yields a clean seed request for naming/description."""
+
+    def test_strips_workspace_note(self) -> None:
+        """The appended [workspace context: …] note is stripped from the seed request."""
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Skull strip this scan\n\n"
+                    '[workspace context: the file "/data/sub-01_T1w.nii.gz" is '
+                    "currently open in the viewer]"
+                ),
+            }
+        ]
+        assert distill._first_user_message(messages) == "Skull strip this scan"
+
+    def test_skips_injected_message(self) -> None:
+        """An injected message is not treated as the user's request."""
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": "injected context", "injected": True},
+            {"role": "user", "content": "the real request"},
+        ]
+        assert distill._first_user_message(messages) == "the real request"
+
+    def test_plain_message_trimmed(self) -> None:
+        """A message with no note is returned, trimmed."""
+        assert distill._first_user_message([{"role": "user", "content": "  do it  "}]) == "do it"
+
+
 class TestRenderSkillMd:
     """render_skill_md produces a valid SKILL.md with or without prose."""
 

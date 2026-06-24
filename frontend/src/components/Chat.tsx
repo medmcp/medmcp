@@ -531,7 +531,11 @@ export const Chat = memo(function Chat({
             </button>
           )}
           {onSelectSession && (
-            <ChatsMenu currentSessionId={currentSessionId ?? null} onSelectSession={onSelectSession} />
+            <ChatsMenu
+              currentSessionId={currentSessionId ?? null}
+              onSelectSession={onSelectSession}
+              onCurrentDeleted={onNewChat ?? (() => undefined)}
+            />
           )}
         </span>
         <span className="panel-actions chat-meta">

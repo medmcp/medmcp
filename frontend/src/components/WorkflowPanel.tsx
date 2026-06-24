@@ -105,6 +105,17 @@ function basename(p: string): string {
   return i >= 0 ? p.slice(i + 1) : p
 }
 
+type Input = { name: string; example: string; description: string }
+
+/** Dropdown label for an input: its name plus whatever hints what it is —
+ *  the human description and/or the example filename (e.g. "...T1w.nii.gz"). */
+function inputOptionLabel(i: Input): string {
+  const bits: string[] = []
+  if (i.description) bits.push(i.description)
+  if (i.example) bits.push(`e.g. ${basename(i.example)}`)
+  return bits.length > 0 ? `${i.name} — ${bits.join(' · ')}` : i.name
+}
+
 /** Short label for batch item *i* — its batched input's filename, else "Item N". */
 function itemLabel(runs: Record<string, string>[], batchInput: string | null, i: number): string {
   const v = batchInput ? runs[i]?.[batchInput] : undefined
@@ -163,7 +174,8 @@ function OutputLinks({
   )
 }
 
-/** One replay input field; accepts a file drag from the explorer. */
+/** One replay input field; accepts a file drag from the explorer (and is
+ *  auto-filled from the explorer selection by the parent form). */
 function InputField({
   name,
   example,
@@ -359,6 +371,36 @@ export const WorkflowPanel = memo(function WorkflowPanel({
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
   }, [mode.kind])
+
+  // Auto-fill the single-run inputs form from the explorer selection — no extra
+  // click, mirroring how the batch flow binds the selection. Done by adjusting
+  // state during render on a selection change (tracked via prevSel) rather than
+  // in an effect — the React-recommended pattern for "adjust state when a prop
+  // changes" (https://react.dev/learn/you-might-not-need-an-effect). One input:
+  // take the latest selected file (re-selecting updates it). Several inputs:
+  // fill the still-empty ones in order. Skipped while batching (the selection is
+  // reserved for the batch input then) and when nothing is selected; the no-op
+  // guard avoids a render loop. Typing/dragging still overrides.
+  const [prevSel, setPrevSel] = useState<string[]>(selectedPaths)
+  if (selectedPaths !== prevSel) {
+    setPrevSel(selectedPaths)
+    if (mode.kind === 'inputs' && mode.batchInput === null && selectedPaths.length > 0) {
+      setMode((m) => {
+        if (m.kind !== 'inputs' || m.batchInput !== null) return m
+        const fields = Object.keys(m.values)
+        const values = { ...m.values }
+        if (fields.length === 1) {
+          values[fields[0]] = selectedPaths[selectedPaths.length - 1]
+        } else {
+          const empty = fields.filter((n) => !(values[n] ?? '').trim())
+          empty.forEach((n, idx) => {
+            if (selectedPaths[idx]) values[n] = selectedPaths[idx]
+          })
+        }
+        return fields.some((n) => values[n] !== m.values[n]) ? { ...m, values } : m
+      })
+    }
+  }
 
   // The workflow whose detail the panel currently wants. Guards against a
   // slow response for a previously clicked row overwriting the current one —
@@ -831,7 +873,8 @@ export const WorkflowPanel = memo(function WorkflowPanel({
           }}
         >
           <div className="wf-hint">
-            Provide a value for each input — type it or drag a file in from the explorer.
+            Provide a value for each input — select a file in the explorer to fill it, or type /
+            drag a path.
           </div>
           {d.inputs.map((i) =>
             i.name === mode.batchInput ? null : (
@@ -859,12 +902,23 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             >
               <option value="">— single run —</option>
               {d.inputs.map((i) => (
-                <option key={i.name} value={i.name}>
-                  {i.name}
+                <option key={i.name} value={i.name} title={i.example || undefined}>
+                  {inputOptionLabel(i)}
                 </option>
               ))}
             </select>
           </label>
+          {mode.batchInput &&
+            (() => {
+              const bi = d.inputs.find((i) => i.name === mode.batchInput)
+              return bi && (bi.description || bi.example) ? (
+                <div className="wf-hint">
+                  Batching <code>{bi.name}</code>
+                  {bi.description ? ` — ${bi.description}` : ''}
+                  {bi.example ? ` (e.g. ${basename(bi.example)})` : ''}
+                </div>
+              ) : null
+            })()}
           {mode.batchInput && <BatchSelection paths={selectedPaths} />}
           <div className="wf-actions">
             <button

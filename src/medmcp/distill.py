@@ -98,13 +98,25 @@ def parse_messages_file(path: Path) -> list[JsonDict]:
     return messages
 
 
+# The workspace server appends a "[workspace context: …]" note to the prompt
+# text so the agent can resolve "this image" (server.py:_workspace_note). That
+# note is live-turn metadata, not part of the user's request — strip it here or
+# it leaks into the distilled workflow's name and description. Keep this in sync
+# with server.py's _WORKSPACE_NOTE_RE.
+_WORKSPACE_NOTE_RE = re.compile(r"\n\n\[workspace context:.*$", re.DOTALL)
+
+
 def _first_user_message(messages: list[JsonDict]) -> str:
-    """Return the first non-injected user message, for context/naming."""
+    """Return the first non-injected user message, for context/naming.
+
+    The appended workspace-context note is stripped — it would otherwise pollute
+    the distilled workflow's name and description.
+    """
     for msg in messages:
         if msg.get("role") == "user" and not msg.get("injected"):
             content = msg.get("content")
             if isinstance(content, str) and content.strip():
-                return content.strip()
+                return _WORKSPACE_NOTE_RE.sub("", content).strip()
     return ""
 
 

@@ -847,7 +847,9 @@ def _extract_text(content: object) -> str:
 # showing either to the user. The note is always appended last, so we cut from
 # its marker to the end — this also handles a title truncated mid-note (no
 # closing ``]``). The ``\n\n`` anchor avoids touching a bracketed phrase a user
-# happened to type inline.
+# happened to type inline. distill.py keeps a copy of this pattern (it strips the
+# note from the request that seeds a distilled workflow's name/description) —
+# keep the two in sync.
 _WORKSPACE_NOTE_RE = re.compile(r"\n\n\[workspace context:.*$", re.DOTALL)
 
 

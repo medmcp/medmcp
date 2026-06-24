@@ -465,23 +465,142 @@ button:hover {
   border-color: rgba(127, 168, 245, 0.4);
 }
 
-/* Display-convention toggle, pushed to the right edge of the overlay bar. */
-.conv-toggle {
-  margin-left: auto;
-  flex-shrink: 0;
+/* Viewer settings: gear in the panel header opens a popover. Positioned within
+   the header (no overflow:hidden there); .panel is the clip box and is tall, so
+   the downward popover isn't clipped. */
+.viewer-settings-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.btn-icon.active {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.vs-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+.vs-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 41;
+  /* Fixed width (not min-width) so the popover doesn't grow when the Advanced
+     section — with its description lines — expands. */
+  width: 264px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px;
   background: var(--card);
   border: 1px solid var(--border2);
-  border-radius: 6px;
-  padding: 3px 10px;
-  font-family: var(--mono);
-  font-size: 11.5px;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  /* The popover lives inside .panel-header, which sets uppercase/bold/spaced
+     text — reset all three so its controls use the normal UI type. */
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
+}
+
+.vs-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.vs-label {
+  font-size: 12px;
   font-weight: 500;
   color: var(--muted2);
 }
 
-.conv-toggle:hover {
-  border-color: var(--blue-l);
+.vs-check {
+  cursor: pointer;
+}
+
+.vs-check input {
+  accent-color: var(--blue-l);
+  width: 15px;
+  height: 15px;
+}
+
+.vs-select {
+  background: var(--dark2);
   color: var(--text);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.vs-segmented {
+  display: inline-flex;
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.vs-seg {
+  background: var(--dark2);
+  color: var(--muted);
+  border: none;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.vs-seg:not(:last-child) {
+  border-right: 1px solid var(--border2);
+}
+
+.vs-seg.active {
+  background: var(--blue);
+  color: #fff;
+}
+
+.vs-seg:hover:not(.active) {
+  color: var(--text);
+}
+
+.vs-advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  padding: 8px 0 2px;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.vs-advanced-toggle:hover {
+  /* Neutralize the global button:hover (faint bg fade + brightened border) — on
+     this full-width, border-top-only row it read as a shimmer. Only the text and
+     chevron colour shift, and colour isn't in the global transition, so it's
+     instant (no fade). */
+  background: none;
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.vs-chevron {
+  /* Inherit the toggle's colour (muted at rest, brighter on hover) instead of
+     pinning it, so the chevron tracks the hover with the label. */
+  transition: transform 0.12s ease;
+}
+
+.vs-chevron.open {
+  transform: rotate(90deg);
 }
 
 .overlay-opacity-label {

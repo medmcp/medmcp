@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { Tree } from 'react-arborist'
 import type { NodeApi, NodeRendererProps } from 'react-arborist'
@@ -122,6 +123,7 @@ export const FileExplorer = memo(function FileExplorer({
   const [size, setSize] = useState({ width: 280, height: 400 })
   const [menu, setMenu] = useState<{ x: number; y: number; node: NodeApi<TreeNode> } | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   // Read inside the mount-once observer effect without re-subscribing.
   const isResizingRef = useRef(isResizing)
@@ -211,11 +213,18 @@ export const FileExplorer = memo(function FileExplorer({
     })
   }
 
-  // Any click/Escape outside the menu dismisses it; the menu itself stops
-  // mousedown propagation so its buttons still receive their click.
+  // Any click/Escape outside the menu dismisses it. The menu is portaled to
+  // <body> (so it can't be clipped by a panel), which means it's outside the
+  // React root's event delegation — stopPropagation on its mousedown wouldn't
+  // reliably stop this window listener. Instead, skip dismissal when the event
+  // originates inside the menu (a contains-check, position-independent); its
+  // buttons close it explicitly via menuAction.
   useEffect(() => {
     if (!menu) return
-    const close = () => setMenu(null)
+    const close = (e: Event) => {
+      if (menuRef.current?.contains(e.target as Node)) return
+      setMenu(null)
+    }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setMenu(null)
     }
@@ -312,16 +321,17 @@ export const FileExplorer = memo(function FileExplorer({
         >
           {(props) => <NodeRow {...props} onMenu={openMenu} />}
         </Tree>
-        {menu && (
-          <div
-            className="ctx-menu"
-            style={{
-              left: Math.min(menu.x, window.innerWidth - 170),
-              top: Math.min(menu.y, window.innerHeight - 150),
-            }}
-            onMouseDown={(e) => e.stopPropagation()}
-            onContextMenu={(e) => e.preventDefault()}
-          >
+        {menu &&
+          createPortal(
+            <div
+              ref={menuRef}
+              className="ctx-menu"
+              style={{
+                left: Math.min(menu.x, window.innerWidth - 170),
+                top: Math.min(menu.y, window.innerHeight - 150),
+              }}
+              onContextMenu={(e) => e.preventDefault()}
+            >
             {menu.node.isLeaf ? (
               <button onClick={menuAction(() => onOpenFile(menu.node.data.id))}>Open</button>
             ) : (
@@ -353,8 +363,9 @@ export const FileExplorer = memo(function FileExplorer({
                 </button>
               )
             })()}
-          </div>
-        )}
+            </div>,
+            document.body,
+          )}
       </div>
     </div>
   )

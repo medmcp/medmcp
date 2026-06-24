@@ -1,9 +1,10 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import { fetchTree, rawUrl } from '../api'
 import { getDraggedFilePath } from '../dragState'
 import { DRAG_PATH_MIME, type TreeNode } from '../types'
-import { DownloadIcon, XIcon } from './icons'
+import { DownloadIcon, GearIcon, XIcon } from './icons'
+import { ViewerSettingsPanel } from './ViewerSettings'
 
 const VOLUME_EXT = /\.(nii|nii\.gz|mgz|mgh|nrrd|nhdr|mha|mhd|hdr|img|v16|dcm)$/
 const IMAGE_EXT = /\.(png|jpe?g|gif|svg|webp|bmp)$/
@@ -57,9 +58,81 @@ const LABEL_COLORMAP = labelColorMap()
 // use its numeric value.
 const COLORMAP_TYPE_TRANSPARENT_BELOW_MIN = 1
 
-// Persist the display convention across volumes/sessions. Default false =
-// neurological (Niivue's default: image-left is patient-left).
+// Legacy standalone convention key — still read once to migrate the preference
+// into the consolidated viewer settings below.
 const RADIOLOGICAL_KEY = 'medmcp.radiologicalView'
+
+export type SlicePlane = 'multiplanar' | 'axial' | 'coronal' | 'sagittal'
+
+/** User-tunable viewer display options (the gear popover); persisted per browser. */
+export type RenderScale = 'native' | '2x' | '4x'
+
+export interface ViewerSettings {
+  /** Slice sampling: nearest (faithful voxels, sharp label edges) or linear (smoothed). */
+  interpolation: 'nearest' | 'linear'
+  /** true = radiological (image-left is patient-right), false = neurological. */
+  radiological: boolean
+  /** Multiplanar (3 orthogonal + optional 3D) or a single plane. */
+  slicePlane: SlicePlane
+  /** Show the 3D volume render alongside the slices (multiplanar only). */
+  showRender: boolean
+  /** Draw the crosshair lines. */
+  crosshair: boolean
+  /** WebGL MSAA edge anti-aliasing (browser picks the sample count). */
+  antialias: boolean
+  /** Supersampling factor via forceDevicePixelRatio: 'native' matches the
+   *  display, '2x'/'3x' render larger then downsample (smoother edges, more
+   *  GPU), '1x' is the cheapest. Both antialias and renderScale are set at
+   *  canvas-attach time, so a change remounts the view rather than applying live. */
+  renderScale: RenderScale
+}
+
+/** Map a RenderScale to Niivue's forceDevicePixelRatio (0 = window.devicePixelRatio). */
+const RENDER_SCALE_DPR: Record<RenderScale, number> = { native: 0, '2x': 2, '4x': 4 }
+
+const VIEWER_SETTINGS_KEY = 'medmcp.viewerSettings'
+
+const DEFAULT_VIEWER_SETTINGS: ViewerSettings = {
+  interpolation: 'nearest',
+  radiological: false,
+  slicePlane: 'multiplanar',
+  showRender: true,
+  crosshair: true,
+  antialias: true,
+  renderScale: 'native',
+}
+
+const SLICE_TYPE_BY_PLANE: Record<SlicePlane, SLICE_TYPE> = {
+  multiplanar: SLICE_TYPE.MULTIPLANAR,
+  axial: SLICE_TYPE.AXIAL,
+  coronal: SLICE_TYPE.CORONAL,
+  sagittal: SLICE_TYPE.SAGITTAL,
+}
+
+function loadViewerSettings(): ViewerSettings {
+  try {
+    const raw = localStorage.getItem(VIEWER_SETTINGS_KEY)
+    if (raw) {
+      const merged = { ...DEFAULT_VIEWER_SETTINGS, ...(JSON.parse(raw) as Partial<ViewerSettings>) }
+      // Drop a renderScale persisted under an older option set (e.g. '1x'/'3x').
+      if (!(merged.renderScale in RENDER_SCALE_DPR)) merged.renderScale = 'native'
+      return merged
+    }
+  } catch {
+    // malformed storage — fall back to defaults (+ legacy migration below)
+  }
+  return { ...DEFAULT_VIEWER_SETTINGS, radiological: localStorage.getItem(RADIOLOGICAL_KEY) === 'true' }
+}
+
+/** Apply the full settings set to a live Niivue instance (idempotent). */
+function applyViewerSettings(nv: Niivue, s: ViewerSettings): void {
+  nv.setInterpolation(s.interpolation === 'nearest')
+  nv.setRadiologicalConvention(s.radiological)
+  nv.setSliceType(SLICE_TYPE_BY_PLANE[s.slicePlane])
+  nv.setCrosshairWidth(s.crosshair ? 1 : 0)
+  nv.opts.multiplanarShowRender = s.showRender ? SHOW_RENDER.ALWAYS : SHOW_RENDER.NEVER
+  nv.drawScene()
+}
 
 type FileKind = 'volume' | 'pdf' | 'image' | 'text' | 'other'
 
@@ -93,10 +166,12 @@ function collectVolumePaths(nodes: TreeNode[], out: string[] = []): string[] {
  */
 function VolumeView({
   path,
+  settings,
   refreshSignal,
   isResizing,
 }: {
   path: string
+  settings: ViewerSettings
   refreshSignal?: number
   isResizing?: boolean
 }) {
@@ -111,15 +186,13 @@ function VolumeView({
   const [overlayPath, setOverlayPath] = useState<string>('')
   const [overlayOpacity, setOverlayOpacity] = useState(0.5)
   const [dragOver, setDragOver] = useState(false)
-  const [radiological, setRadiological] = useState(
-    () => localStorage.getItem(RADIOLOGICAL_KEY) === 'true',
-  )
-  // Read inside the url-keyed load effect without making it a dependency (a
-  // toggle must not tear down and reload the volume).
-  const radiologicalRef = useRef(radiological)
+  // Read inside the url-keyed load effect (constructor seeding + post-load) and
+  // the live-settings effect without making settings a dependency of the load
+  // effect — a setting change must not tear down and reload the volume.
+  const settingsRef = useRef(settings)
   useEffect(() => {
-    radiologicalRef.current = radiological
-  }, [radiological])
+    settingsRef.current = settings
+  }, [settings])
   // Read inside the mount-once observer effect without re-subscribing.
   const isResizingRef = useRef(isResizing)
   useEffect(() => {
@@ -168,14 +241,16 @@ function VolumeView({
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
+    const s0 = settingsRef.current
     const nv = new Niivue({
-      multiplanarShowRender: SHOW_RENDER.ALWAYS,
-      // Render at 1× pixel ratio instead of the display's HiDPI/Retina ratio.
-      // On a 2× display that's 4× fewer pixels per frame — the single biggest
-      // GPU saving, and it costs no data fidelity: slices are sampled from the
-      // volume, so screen pixels beyond the data resolution are wasted work.
-      // (-1 = block high DPI; that oversampling was the dominant GPU cost.)
-      forceDevicePixelRatio: -1,
+      // Seed the creation-time opts from the current viewer settings (the rest
+      // are applied after load / live). Nearest interpolation keeps a
+      // segmentation overlay's integer labels crisp instead of blending IDs at
+      // boundaries; native DPR renders crisp slices; the 3D render is part of
+      // the multiplanar layout. All are user-toggleable in the viewer settings.
+      isNearestInterpolation: s0.interpolation === 'nearest',
+      forceDevicePixelRatio: RENDER_SCALE_DPR[s0.renderScale],
+      multiplanarShowRender: s0.showRender ? SHOW_RENDER.ALWAYS : SHOW_RENDER.NEVER,
       backColor: [0, 0, 0, 1],
       // Suppress Niivue's own canvas "loading ..." text — our spinner overlay
       // is the single loading affordance.
@@ -191,10 +266,12 @@ function VolumeView({
       setLoading(true)
       setLoadError(null)
       try {
-        // Disable MSAA: it multiplies the framebuffer's GPU memory, which is the
-        // likely trigger for WebGL context loss on memory-constrained GPUs. AA
-        // only smooths edges — it doesn't affect slice/data resolution.
-        await nv.attachToCanvas(canvas, false)
+        // MSAA (anti-aliasing) follows the antialias setting. AA smooths edges
+        // (3D render, crosshair, slice boundaries) but multiplies the
+        // framebuffer's GPU memory — the trigger for WebGL context loss on
+        // memory-constrained GPUs — so it's toggleable. Independent of the
+        // render scale (supersampling), which is set via forceDevicePixelRatio.
+        await nv.attachToCanvas(canvas, s0.antialias)
         nv.setSliceType(SLICE_TYPE.MULTIPLANAR)
         // Niivue streams the download/inflate, but parsing the volume and the
         // initial WebGL upload + 3D render run synchronously on the main thread
@@ -204,7 +281,7 @@ function VolumeView({
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
         if (cancelled) return
         await nv.loadVolumes([{ url }])
-        nv.setRadiologicalConvention(radiologicalRef.current)
+        applyViewerSettings(nv, settingsRef.current)
       } catch (e) {
         if (!cancelled) setLoadError(String(e))
       } finally {
@@ -243,6 +320,15 @@ function VolumeView({
     }, 300)
     return () => window.clearTimeout(timer)
   }, [path, refreshSignal])
+
+  // Apply live setting changes to the open volume. `antialias` and
+  // `renderScale` are excluded here — both are creation-time, so changing them
+  // remounts this view via its key (see Viewer). The guard skips the initial
+  // mount before the volume has loaded; the load effect applies settings then.
+  useEffect(() => {
+    const nv = nvRef.current
+    if (nv && nv.volumes.length > 0) applyViewerSettings(nv, settings)
+  }, [settings])
 
   // Overlay operations are serialized on a promise chain, seeded with the
   // base-volume load: a switch while the previous add was still in flight
@@ -295,12 +381,6 @@ function VolumeView({
     if (nv && nv.volumes.length > 1) {
       nv.setOpacity(1, value)
     }
-  }
-
-  const setConvention = (value: boolean) => {
-    setRadiological(value)
-    localStorage.setItem(RADIOLOGICAL_KEY, String(value))
-    nvRef.current?.setRadiologicalConvention(value)
   }
 
   // A path is a valid overlay if it's a volume other than the base image.
@@ -367,17 +447,6 @@ function VolumeView({
             </button>
           </>
         )}
-        <button
-          className="btn-plain conv-toggle"
-          title={
-            radiological
-              ? 'Radiological convention (image-left = patient-right) — click for neurological'
-              : 'Neurological convention (image-left = patient-left) — click for radiological'
-          }
-          onClick={() => setConvention(!radiological)}
-        >
-          {radiological ? 'Radiological' : 'Neurological'}
-        </button>
       </div>
       {loadError && <div className="panel-error">{loadError}</div>}
       <div className="niivue-sizer" ref={sizerRef}>
@@ -447,6 +516,19 @@ export const Viewer = memo(function Viewer({
   // letting the old image flash at the wrong size during the debounce window.
   const [rebuilding, setRebuilding] = useState(false)
   const didResizeRef = useRef(false)
+  const [settings, setSettings] = useState<ViewerSettings>(loadViewerSettings)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const updateSettings = useCallback((patch: Partial<ViewerSettings>) => {
+    setSettings((prev) => {
+      const next = { ...prev, ...patch }
+      try {
+        localStorage.setItem(VIEWER_SETTINGS_KEY, JSON.stringify(next))
+      } catch {
+        // ignore storage failure — settings still apply for this session
+      }
+      return next
+    })
+  }, [])
   useEffect(() => {
     if (isResizing) {
       didResizeRef.current = true
@@ -483,6 +565,24 @@ export const Viewer = memo(function Viewer({
           {path}
         </span>
         <span className="panel-actions">
+          {kind === 'volume' && (
+            <span className="viewer-settings-anchor">
+              <button
+                className={settingsOpen ? 'btn-icon active' : 'btn-icon'}
+                title="Viewer settings"
+                onClick={() => setSettingsOpen((v) => !v)}
+              >
+                <GearIcon />
+              </button>
+              {settingsOpen && (
+                <ViewerSettingsPanel
+                  settings={settings}
+                  onChange={updateSettings}
+                  onClose={() => setSettingsOpen(false)}
+                />
+              )}
+            </span>
+          )}
           <a href={url} download title="Download">
             <DownloadIcon />
           </a>
@@ -492,8 +592,9 @@ export const Viewer = memo(function Viewer({
         {kind === 'volume' && (
           <div className={`volume-slot${rebuilding ? ' rebuilding' : ''}`}>
             <VolumeView
-              key={`${path}#${resizeGen}`}
+              key={`${path}#${resizeGen}#${settings.antialias ? 'aa' : 'noaa'}#${settings.renderScale}`}
               path={path}
+              settings={settings}
               refreshSignal={refreshSignal}
               isResizing={isResizing}
             />

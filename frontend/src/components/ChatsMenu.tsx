@@ -8,6 +8,8 @@ interface ChatsMenuProps {
   currentSessionId: string | null
   /** Open an existing session in the chat panel. */
   onSelectSession: (id: string) => void
+  /** Called when the currently-open session is deleted, so a fresh chat opens. */
+  onCurrentDeleted: () => void
 }
 
 /** Coarse day bucket for the list headers, from an ISO timestamp. */
@@ -37,7 +39,7 @@ function timeLabel(iso: string | null): string {
  * archive, or delete from per-row actions; reveal archived ones to restore or
  * delete. Sessions load each time the menu opens.
  */
-export function ChatsMenu({ currentSessionId, onSelectSession }: ChatsMenuProps) {
+export function ChatsMenu({ currentSessionId, onSelectSession, onCurrentDeleted }: ChatsMenuProps) {
   const [open, setOpen] = useState(false)
   const [list, setList] = useState<SessionInfo[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -79,8 +81,16 @@ export function ChatsMenu({ currentSessionId, onSelectSession }: ChatsMenuProps)
   }
 
   const confirmDelete = (id: string) => {
-    if (confirm('Delete this chat for good? Its transcript and provenance are removed too.'))
-      act(deleteSession(id))
+    if (!confirm('Delete this chat for good? Its transcript and provenance are removed too.')) return
+    deleteSession(id)
+      .then(() => {
+        // Deleting the open chat would otherwise leave its (now-gone) transcript
+        // on screen — start a fresh chat instead. That remounts Chat (and this
+        // menu with it), so reloading the list here is unnecessary.
+        if (id === currentSessionId) onCurrentDeleted()
+        else load()
+      })
+      .catch((e: unknown) => setError(String(e)))
   }
 
   const select = (id: string) => {

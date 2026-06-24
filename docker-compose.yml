@@ -106,6 +106,14 @@ services:
       - "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}"
       # Container-stack manifests (read-write so UI install/uninstall can persist).
       - "./stacks.d:/app/stacks.d"
+      # Persist user state across recreates: personal workflows, provenance, and
+      # chat transcripts. Without these, .vibe lives in the ephemeral container
+      # layer and every recreate (compose down/up, image update) wipes them.
+      # Subdirs only — the baked prompts/ and the startup-written config.toml
+      # stay image-fresh.
+      - "vibe-workflows:/app/.vibe/workflows"
+      - "vibe-provenance:/app/.vibe/provenance"
+      - "vibe-logs:/app/.vibe/logs"
       # Host registry creds, read-only at a staging path — the entrypoint copies
       # only `auths` to /root/.docker/config.json, dropping the host's
       # `currentContext` (which would break every in-container stack pull/run).
@@ -116,3 +124,6 @@ services:
 
 volumes:
   ollama-models:
+  vibe-workflows:
+  vibe-provenance:
+  vibe-logs:

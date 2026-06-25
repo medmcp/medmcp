@@ -42,6 +42,7 @@ dependencies = [
 [project.scripts]
 medmcp = "medmcp.provcli:main"
 medmcp-workspace = "medmcp.server:main"
+medmcp-mcp-proxy = "medmcp.proxy:main"
 
 [dependency-groups]
 test = [

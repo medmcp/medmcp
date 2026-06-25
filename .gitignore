@@ -219,6 +219,9 @@ __marimo__/
 .vibe/provenance_enabled.json
 .vibe/explain_enabled.json
 .vibe/ui_sessions.json
+.vibe/gpu_selection.json
+.vibe/backends.json
+.vibe/backend.sock
 .vibe/provenance/
 .vibe/workflows/
 data/

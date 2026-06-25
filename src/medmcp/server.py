@@ -39,6 +39,7 @@ import os
 import re
 import shutil
 import time
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any, cast
 
@@ -50,8 +51,11 @@ from pydantic import BaseModel
 
 from medmcp import distill, explain, provenance, replay, sessions, settings
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict, VibeAcpClient
+from medmcp.backend_broker import BackendBroker
+from medmcp.backend_pool import BackendPool, BackendSpec
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
+log: logging.Logger = logging.getLogger(__name__)
 
 # Directory shown in the file explorer AND the agent's working directory (its
 # tools run here, so it sees the same files as the explorer/viewer). Defaults
@@ -78,7 +82,59 @@ _SKIP_DIRS: frozenset[str] = frozenset(
 _TREE_MAX_DEPTH: int = 12
 _TREE_MAX_ENTRIES_PER_DIR: int = 500
 
-app = FastAPI(title="MedMCP Workspace")
+# ── Persistent stack pool + broker (Layer 1; MEDMCP_STACK_POOL) ───────────────
+# Created at startup only when the pool is enabled; None otherwise (the legacy
+# per-call spawn). The pool lives in THIS process, so warm backends survive the
+# vibe-acp restarts that stack/workflow changes trigger.
+_pool: BackendPool | None = None
+_broker: BackendBroker | None = None
+
+
+def _resolve_backend_spec(name: str) -> BackendSpec | None:
+    """Map an active stack name to its persistent-backend launch spec (pool callback)."""
+    entry = settings.build_backend_registry(settings.active_servers()).get(name)
+    if entry is None:
+        return None
+    return BackendSpec(
+        name=name,
+        command=str(entry["command"]),
+        args=[str(a) for a in cast("list[Any]", entry["args"])],
+        env={str(k): str(v) for k, v in cast("JsonDict", entry["env"]).items()},
+        gpu=bool(entry["gpu"]),
+        idle_ttl_sec=float(entry["idle_ttl_sec"]),
+        startup_timeout_sec=float(entry["startup_timeout_sec"]),
+        tool_timeout_sec=float(entry["tool_timeout_sec"]),
+    )
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
+    """Start the stack pool + broker on boot (when enabled); tear them down on exit."""
+    global _pool, _broker
+    if settings.stack_pool_enabled():
+        # Proxy children read MEDMCP_WORKSPACE for their fallback cwd; export it.
+        os.environ.setdefault("MEDMCP_WORKSPACE", str(WORKSPACE_ROOT))
+        _pool = BackendPool(resolve_spec=_resolve_backend_spec, cwd=str(WORKSPACE_ROOT))
+        _broker = BackendBroker(_pool, settings.backend_socket_path())
+        try:
+            await _broker.start()
+            # Proxied config + backends.json exist from boot, before any tool call.
+            await asyncio.to_thread(settings.sync_servers_to_vibe_config, settings.active_servers())
+            log.info("stack pool enabled; broker at %s", settings.backend_socket_path())
+        except Exception:
+            log.exception("backend broker failed to start; proxy will direct-spawn")
+    try:
+        yield
+    finally:
+        if _broker is not None:
+            await _broker.aclose()
+        if _pool is not None:
+            await _pool.aclose()
+        _broker = None
+        _pool = None
+
+
+app = FastAPI(title="MedMCP Workspace", lifespan=_lifespan)
 
 # One vibe-acp subprocess shared by every websocket connection. The subprocess
 # cwd must stay PROJECT_ROOT — `uv run` resolves the project from it; the
@@ -286,7 +342,7 @@ async def put_settings(payload: SettingsPayload) -> JsonDict:
     sockets are closed; each client auto-reconnects into a new session.
     """
 
-    def _apply() -> bool:
+    def _apply() -> tuple[bool, set[str], set[str]]:
         old_stacks = settings.load_active_server_names()
         old_workflows = settings.load_active_workflow_names()
         old_wf_enabled = settings.load_workflows_enabled()
@@ -318,13 +374,29 @@ async def put_settings(payload: SettingsPayload) -> JsonDict:
         )
         if restart:
             settings.sync_servers_to_vibe_config(settings.active_servers())
-        return restart
+        return restart, new_stacks - old_stacks, old_stacks - new_stacks
 
-    restart_needed = await asyncio.to_thread(_apply)
+    restart_needed, newly_active, newly_inactive = await asyncio.to_thread(_apply)
     if restart_needed:
         _audit.info("settings changed; restarting vibe-acp")
         await _restart_vibe()
+    await _apply_pool_changes(newly_active, newly_inactive)
     return {"ok": True, "restarted": restart_needed}
+
+
+async def _apply_pool_changes(newly_active: set[str], newly_inactive: set[str]) -> None:
+    """Evict deactivated stacks and pre-warm newly-activated ones (pool enabled only)."""
+    if _pool is None:
+        return
+    for name in newly_inactive:
+        with contextlib.suppress(Exception):
+            await _pool.evict(name)
+    if newly_active:
+        # Pre-warm in the background so the settings response stays snappy; the
+        # heavy spawn/import/CUDA cost is then paid before the first real call.
+        task = asyncio.create_task(_pool.prewarm(newly_active))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
 
 
 async def _restart_vibe() -> None:

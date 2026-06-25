@@ -128,6 +128,99 @@ EXPLAIN_ENABLED_PATH: Path = VIBE_HOME / "explain_enabled.json"
 # against the environment at load time (e.g. ``${MEDMCP_WORKSPACE}`` for path parity).
 STACKS_D_PATH: Path = Path(PROJECT_ROOT) / "stacks.d"
 
+# ── Persistent stack pool / pre-warm proxy (Layer 1) ─────────────────────────
+# When MEDMCP_STACK_POOL is enabled, vibe's [[mcp_servers]] are rewritten to spawn
+# the lightweight `medmcp-mcp-proxy <stack>` shim, which forwards tool calls to a
+# persistent BackendPool over a broker socket (so the spawn/import/CUDA cost is
+# paid once, not per call). The real launch specs go to backends.json for the pool
+# and the proxy's direct-spawn fallback. Off by default — ships dark.
+PROXY_COMMAND: str = "medmcp-mcp-proxy"
+DEFAULT_IDLE_TTL_SEC: float = 120.0
+DEFAULT_STARTUP_TIMEOUT_SEC: float = 60.0
+DEFAULT_TOOL_TIMEOUT_SEC: float = 900.0
+# Env keys the proxy layer injects into a stack's [[mcp_servers]] entry — stripped
+# again when the pool is disabled so toggling off leaves no stale routing.
+_POOL_ENV_KEYS: tuple[str, ...] = ("MEDMCP_BROKER_SOCK", "MEDMCP_WORKSPACE")
+
+
+def stack_pool_enabled() -> bool:
+    """Whether the persistent stack pool / pre-warm proxy is enabled (default off)."""
+    return os.environ.get("MEDMCP_STACK_POOL", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def backend_socket_path() -> Path:
+    """Unix socket the broker binds and the proxy connects to."""
+    return VIBE_HOME / "backend.sock"
+
+
+def backends_registry_path() -> Path:
+    """Registry of real stack launch specs (pool + proxy direct-spawn fallback)."""
+    return VIBE_HOME / "backends.json"
+
+
+def build_backend_registry(servers: list[JsonDict]) -> dict[str, JsonDict]:
+    """Build the name→launch-spec registry the pool and proxy fallback read.
+
+    Captures each stack's *real* command/args/env (the pool spawns these, not vibe)
+    plus the pool-policy fields. ``gpu`` is taken from an explicit flag or inferred
+    from a CDI ``--device nvidia.com/gpu=…`` arg (host-native stacks without the
+    flag are treated as non-GPU — a known gap for the LRU cap in local dev).
+    """
+    registry: dict[str, JsonDict] = {}
+    for srv in servers:
+        name = str(srv["name"])
+        args = [str(a) for a in cast("list[Any]", srv.get("args", []))]
+        raw_env = srv.get("env")
+        env = (
+            {str(k): str(v) for k, v in cast("JsonDict", raw_env).items()}
+            if isinstance(raw_env, dict)
+            else {}
+        )
+        registry[name] = {
+            "command": str(srv["command"]),
+            "args": args,
+            "env": env,
+            "gpu": bool(srv.get("gpu")) or any("nvidia.com/gpu" in a for a in args),
+            "idle_ttl_sec": float(srv.get("idle_ttl_sec") or DEFAULT_IDLE_TTL_SEC),
+            "startup_timeout_sec": float(
+                srv.get("startup_timeout_sec") or DEFAULT_STARTUP_TIMEOUT_SEC
+            ),
+            "tool_timeout_sec": float(srv.get("tool_timeout_sec") or DEFAULT_TOOL_TIMEOUT_SEC),
+        }
+    return registry
+
+
+def _write_backend_registry(servers: list[JsonDict]) -> None:
+    """Atomically write backends.json from the real (un-proxied) server specs."""
+    _atomic_write_json(backends_registry_path(), build_backend_registry(servers))
+
+
+def _proxied_entry(entry: JsonDict, ws_root: str | None) -> JsonDict:
+    """Rewrite a synced ``[[mcp_servers]]`` entry to launch through the proxy shim.
+
+    vibe spawns ``medmcp-mcp-proxy <stack>`` instead of the real server; discovery
+    fields (``skills_path``, ``tool_timeout_sec``, ``transport``, ``name``) are kept
+    so vibe still loads skills and waits long enough for a possibly-cold backend.
+    The stack's real ``env`` lives in backends.json, not here.
+    """
+    out = dict(entry)
+    out["command"] = shutil.which(PROXY_COMMAND) or PROXY_COMMAND
+    out["args"] = [str(entry["name"])]
+    proxied_env: dict[str, str] = {"MEDMCP_BROKER_SOCK": str(backend_socket_path())}
+    if ws_root:
+        proxied_env["MEDMCP_WORKSPACE"] = ws_root
+    out["env"] = proxied_env
+    return out
+
+
+def _strip_pool_env(entries: list[JsonDict]) -> None:
+    """Drop pool-injected env keys preserved from a prior proxied config."""
+    for entry in entries:
+        env = entry.get("env")
+        if isinstance(env, dict):
+            for key in _POOL_ENV_KEYS:
+                cast("JsonDict", env).pop(key, None)
+
 
 def get_uv_tool_dir() -> Path | None:
     """Return the uv tool installation directory, or ``None`` if unavailable."""
@@ -194,6 +287,8 @@ def _load_stack_manifests() -> list[JsonDict]:
             entry["skills_path"] = os.path.expandvars(str(raw["skills_path"]))
         if raw.get("tool_timeout_sec") is not None:
             entry["tool_timeout_sec"] = raw["tool_timeout_sec"]
+        if raw.get("idle_ttl_sec") is not None:
+            entry["idle_ttl_sec"] = raw["idle_ttl_sec"]
         manifests.append(entry)
     return manifests
 
@@ -283,7 +378,13 @@ def load_mcp_servers() -> list[JsonDict]:
                     "env": dict(cast("dict[str, str]", srv.get("env", {}))),
                     "version": version,
                 }
-                for key in ("skills_path", "tool_timeout_sec", "startup_timeout_sec"):
+                for key in (
+                    "skills_path",
+                    "tool_timeout_sec",
+                    "startup_timeout_sec",
+                    "idle_ttl_sec",
+                    "gpu",
+                ):
                     if srv.get(key) is not None:
                         entry[key] = srv[key]
                 servers[name] = entry
@@ -929,6 +1030,17 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
             else:
                 entry.pop("args", None)
             new_entries.append(entry)
+
+    # Route every stack through the pre-warm proxy when the pool is enabled. vibe
+    # then spawns the cheap `medmcp-mcp-proxy <stack>` shim, which forwards to the
+    # persistent BackendPool; the real launch specs go to backends.json. Disabled
+    # is byte-for-byte the legacy behaviour, minus any stale proxy env keys.
+    if stack_pool_enabled():
+        _write_backend_registry(servers)
+        ws_root = os.environ.get("MEDMCP_WORKSPACE") or None
+        new_entries = [_proxied_entry(entry, ws_root) for entry in new_entries]
+    else:
+        _strip_pool_env(new_entries)
 
     cfg["mcp_servers"] = new_entries
 

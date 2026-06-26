@@ -7,11 +7,12 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
 import yaml
 
 # pyright: reportPrivateUsage=false
 from medmcp import distill, provcli, provenance
-from medmcp.workflow import Recipe
+from medmcp.workflow import Recipe, RecipeStep, StackRequirement
 
 JsonDict = dict[str, Any]
 
@@ -134,8 +135,8 @@ class TestBuildRecipe:
         )
         assert [s.tool for s in recipe.steps] == ["skull_strip", "register_to_template"]
 
-    def test_keeps_shell_call_that_writes(self) -> None:
-        """A bash command with output redirection writes, so it is kept."""
+    def test_writing_shell_call_becomes_manual_step(self) -> None:
+        """A writing bash command is dropped from steps and recorded as a manual step."""
         messages: list[JsonDict] = [
             _assistant_call("w0", "bash", {"command": "cat a.txt > b.txt"}),
             _tool_result("w0", "ok: True"),
@@ -143,7 +144,28 @@ class TestBuildRecipe:
         recipe = distill.build_recipe(
             messages, server_names=["medmcp-neuro"], name="t", description="d"
         )
-        assert [s.tool for s in recipe.steps] == ["bash"]
+        assert recipe.steps == []
+        assert recipe.manual_steps == ["builtin:bash `cat a.txt > b.txt`"]
+
+    def test_drops_internal_warmup_tool(self) -> None:
+        """Pool-machinery tools (warmup) are dropped entirely — not a step nor manual."""
+        messages: list[JsonDict] = [
+            _assistant_call("w0", "medmcp-neuro_warmup", {}),
+            _tool_result("w0", "ok: True"),
+            _assistant_call("s0", "medmcp-neuro_skull_strip", {"input_path": "/data/a.nii.gz"}),
+            _tool_result("s0", "ok: True"),
+        ]
+        recipe = distill.build_recipe(
+            messages, server_names=["medmcp-neuro"], name="t", description="d"
+        )
+        assert [(s.server, s.tool) for s in recipe.steps] == [("medmcp-neuro", "skull_strip")]
+        assert recipe.manual_steps == []
+
+    def test_internal_tools_cover_proxy_hidden(self) -> None:
+        """distill.INTERNAL_TOOLS must cover every tool the proxy hides (keep in sync)."""
+        from medmcp.proxy import _HIDDEN_TOOLS
+
+        assert _HIDDEN_TOOLS <= distill.INTERNAL_TOOLS
 
     def test_drops_tool_error_rendered_as_ok_true(self) -> None:
         """A wrapped tool exception (vibe renders ``ok: True``) is dropped as failed.
@@ -194,8 +216,8 @@ class TestProseParsing:
 
 def test_slugify() -> None:
     """Slugs are lowercased, hyphenated, and bounded."""
-    assert distill._slugify("Skull Strip & Register!") == "skull-strip-register"
-    assert distill._slugify("") == "workflow"
+    assert distill.slugify("Skull Strip & Register!") == "skull-strip-register"
+    assert distill.slugify("") == "workflow"
 
 
 class TestFirstUserMessage:
@@ -267,18 +289,78 @@ class TestRenderSkillMd:
         assert "`medmcp-neuro:skull_strip` — from the `medmcp-neuro` stack" in md
         assert "`medmcp-neuro:register_to_template`" in md
 
-    def test_required_tools_dedup_and_builtin(self) -> None:
-        """Distinct tools are listed once; builtin tools are labelled built-in."""
+    def test_required_tools_dedup(self) -> None:
+        """Distinct MCP tools are listed once, in first-seen order."""
+        recipe = Recipe(name="f", description="d")
+        recipe.steps = [
+            RecipeStep(server="medmcp-neuro", tool="skull_strip", arguments={}),
+            RecipeStep(server="medmcp-neuro", tool="skull_strip", arguments={}),
+            RecipeStep(server="medmcp-neuro", tool="coregister", arguments={}),
+        ]
+        assert distill._required_tools(recipe) == [
+            ("medmcp-neuro", "skull_strip"),
+            ("medmcp-neuro", "coregister"),
+        ]
+
+    def test_builtin_calls_recorded_as_manual_steps(self) -> None:
+        """Built-in (non-MCP) calls are dropped but surfaced as manual steps in Gotchas."""
         messages: list[JsonDict] = [
             _assistant_call("b0", "bash", {"command": "convert a b"}),
             _tool_result("b0", "ok: True"),
-            _assistant_call("b1", "bash", {"command": "convert c d"}),
-            _tool_result("b1", "ok: True"),
         ]
         recipe = distill.build_recipe(messages, server_names=[], name="f", description="d")
-        tools = distill._required_tools(recipe)
-        assert tools == [("builtin", "bash")]
-        assert "`bash` — built-in tool" in distill.render_skill_md(recipe, None)
+        assert distill._required_tools(recipe) == []
+        assert recipe.manual_steps == ["builtin:bash `convert a b`"]
+        md = distill.render_skill_md(recipe, None)
+        assert "## Gotchas" in md
+        assert "builtin:bash `convert a b`" in md
+
+
+class TestRequirements:
+    """build_requirements + the ## Requirements rendering."""
+
+    def test_filters_to_used_stacks_and_pins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Only stacks the recipe uses are required; container→image+digest, uv→version."""
+        recipe = Recipe(name="w", description="d")
+        recipe.steps = [
+            RecipeStep(server="medmcp-neuro", tool="skull_strip", arguments={}),
+            RecipeStep(server="builtin", tool="bash", arguments={}),  # needs no stack
+        ]
+        manifest: JsonDict = {
+            "stacks": [
+                {"name": "medmcp-neuro", "image": "ghcr.io/medmcp/neuro:main"},
+                {"name": "medmcp-dicom", "version": "0.1.0"},  # not used → excluded
+            ]
+        }
+
+        def _fake_digest(_image: str) -> str:
+            return "sha256:abc"
+
+        monkeypatch.setattr(distill, "resolve_digest", _fake_digest)
+        reqs = distill.build_requirements(recipe, manifest)
+        assert [r.stack for r in reqs] == ["medmcp-neuro"]
+        assert reqs[0].image == "ghcr.io/medmcp/neuro:main"
+        assert reqs[0].digest == "sha256:abc"
+
+    def test_used_stack_absent_from_manifest_listed_by_name(self) -> None:
+        """A used stack with no manifest entry is still listed (importer needs it)."""
+        recipe = Recipe(name="w", description="d")
+        recipe.steps = [RecipeStep(server="medmcp-x", tool="t", arguments={})]
+        assert distill.build_requirements(recipe, None) == [StackRequirement(stack="medmcp-x")]
+
+    def test_requirements_rendered_in_skill_md(self) -> None:
+        """## Requirements pins each stack by image(+digest) or version."""
+        recipe = Recipe(name="w", description="d")
+        recipe.requires = [
+            StackRequirement(
+                stack="medmcp-neuro", image="ghcr.io/medmcp/neuro:main", digest="sha256:abc"
+            ),
+            StackRequirement(stack="medmcp-dicom", version="0.1.0"),
+        ]
+        md = distill.render_skill_md(recipe, None)
+        assert "## Requirements" in md
+        assert "image `ghcr.io/medmcp/neuro:main` (`sha256:abc`)" in md
+        assert "version `0.1.0`" in md
 
 
 def _write_fake_session(root: Path) -> None:

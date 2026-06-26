@@ -3,8 +3,10 @@ import type { ReactNode } from 'react'
 import {
   deleteWorkflow,
   distillSession,
+  exportWorkflow,
   fetchWorkflowDetail,
   fetchWorkflows,
+  importWorkflow,
   promoteWorkflow,
   refineWorkflow,
   renameWorkflow,
@@ -15,6 +17,7 @@ import { getDraggedFilePath } from '../dragState'
 import type {
   ReplayFrame,
   ReplayPreviewStep,
+  StackRequirement,
   WorkflowDetail,
   WorkflowListEntry,
 } from '../types'
@@ -22,9 +25,11 @@ import { DRAG_PATH_MIME } from '../types'
 import {
   BookmarkPlusIcon,
   ChevronRightIcon,
+  DownloadIcon,
   PlayIcon,
   RefreshIcon,
   StopSquareIcon,
+  UploadIcon,
 } from './icons'
 
 type ReplayStepFrame = Extract<ReplayFrame, { type: 'step' }>
@@ -221,6 +226,31 @@ function InputField({
   )
 }
 
+/** The stacks a workflow needs, pinned by image(+digest) or version. */
+function Requirements({ requires }: { requires: StackRequirement[] }) {
+  if (requires.length === 0) return null
+  return (
+    <div className="wf-requires">
+      <div className="wf-requires-title">Requires</div>
+      <ul className="wf-requires-list">
+        {requires.map((r) => {
+          const pin = r.image
+            ? `${r.image}${r.digest ? ` @ ${r.digest.slice(0, 19)}…` : ''}`
+            : r.version
+              ? `v${r.version}`
+              : ''
+          return (
+            <li key={r.stack}>
+              <code>{r.stack}</code>
+              {pin && <span className="wf-req-pin">{pin}</span>}
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
+
 function StepList({ steps }: { steps: { server: string; tool: string }[] }) {
   return (
     <ol className="wf-steps">
@@ -347,6 +377,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
   const [error, setError] = useState<string | null>(null)
   const [now, setNow] = useState(0)
   const runWs = useRef<WebSocket | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const reload = useCallback(
     () =>
@@ -463,6 +494,18 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       await promoteWorkflow(name)
       await reload()
       setDetail(await fetchWorkflowDetail(name))
+    })
+
+  const exportFile = (name: string) => withBusy('Exporting…', () => exportWorkflow(name))
+
+  const importFile = (file: File) =>
+    withBusy('Importing workflow…', async () => {
+      const draft = await importWorkflow(await file.text())
+      await reload()
+      detailForRef.current = draft.name
+      setExpanded(draft.name)
+      setDetail(draft)
+      setMode({ kind: 'view' })
     })
 
   const unpromote = (name: string) =>
@@ -758,6 +801,19 @@ export const WorkflowPanel = memo(function WorkflowPanel({
           {!d.replayable && d.replay_error && d.steps.length > 0 && (
             <div className="wf-notice">Can't replay: {d.replay_error}</div>
           )}
+          <Requirements requires={d.requires} />
+          {d.manual_steps.length > 0 && (
+            <div className="wf-notice">
+              Includes manual step(s) replay can't run — do these by hand:
+              <ul className="wf-manual-list">
+                {d.manual_steps.map((m, i) => (
+                  <li key={i}>
+                    <code>{m}</code>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <div className="wf-actions">
             <button
               className="btn-primary wf-run-btn"
@@ -803,6 +859,13 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                 Edit
               </button>
             )}
+            <button
+              className="btn-plain"
+              title="Export as a shareable .workflow.yaml file"
+              onClick={() => void exportFile(d.name)}
+            >
+              <UploadIcon size={12} /> Export
+            </button>
             <button className="btn-plain wf-delete" onClick={() => remove(d.name)}>
               Delete
             </button>
@@ -1017,9 +1080,28 @@ export const WorkflowPanel = memo(function WorkflowPanel({
           >
             <BookmarkPlusIcon />
           </button>
+          <button
+            className="btn-icon"
+            title="Import a shared workflow (.workflow.yaml)"
+            disabled={busy !== null}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <DownloadIcon />
+          </button>
           <button className="btn-icon" title="Refresh" onClick={() => void reload()}>
             <RefreshIcon />
           </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".yaml,.yml"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const file = e.target.files?.[0]
+              e.target.value = '' // allow re-importing the same file
+              if (file) void importFile(file)
+            }}
+          />
         </span>
       </div>
       <div className="panel-body wf-body">

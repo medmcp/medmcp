@@ -196,6 +196,26 @@ export async function deleteWorkflow(name: string): Promise<void> {
   await check(await fetch(`/api/workflows/${encodeURIComponent(name)}`, { method: 'DELETE' }))
 }
 
+/** Download a workflow as a shareable <name>.workflow.yaml via the browser. */
+export async function exportWorkflow(name: string): Promise<void> {
+  const res = await check(await fetch(`/api/workflows/${encodeURIComponent(name)}/export`))
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${name}.workflow.yaml`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+/** Import a shared workflow file (its YAML text); returns the new draft's detail. */
+export async function importWorkflow(content: string): Promise<WorkflowDetail> {
+  const res = await postJson('/api/workflows/import', { content })
+  return (await res.json()) as WorkflowDetail
+}
+
 export async function replayPreview(
   name: string,
   inputs: Record<string, string>,

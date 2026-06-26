@@ -85,6 +85,25 @@ class TestManifest:
         with patch.object(provenance, "VIBE_HOME", tmp_path):
             assert provenance.read_manifest(SESSION_ID) is None
 
+    def test_captures_container_image_ref(self, tmp_path: Path) -> None:
+        """A docker-launched stack records its image ref (the last non-flag arg)."""
+        servers = [
+            {
+                "name": "medmcp-neuro",
+                "command": "docker",
+                "args": ["run", "--rm", "-i", "-v", "/d:/d", "ghcr.io/medmcp/neuro:main"],
+            },
+            {"name": "medmcp-dicom", "version": "0.1.0", "command": "/x/bin/dicom"},
+        ]
+        with patch.object(provenance, "VIBE_HOME", tmp_path):
+            provenance.write_manifest(SESSION_ID, servers=servers, model_name="m")
+            manifest = provenance.read_manifest(SESSION_ID)
+
+        assert manifest is not None
+        assert manifest["stacks"][0]["image"] == "ghcr.io/medmcp/neuro:main"
+        # A uv-tool stack carries no image key.
+        assert "image" not in manifest["stacks"][1]
+
 
 # ── run log ──────────────────────────────────────────────────────────────────
 

@@ -9,14 +9,17 @@ Exposed as the ``medmcp`` console script::
     medmcp promote <name>       # move a reviewed draft into active/ (reusable)
     medmcp workflows            # list personal workflows (draft + promoted)
     medmcp delete   <name>      # delete a personal workflow (draft or active)
+    medmcp export   <name>      # write a shareable <name>.workflow.yaml
+    medmcp import   <file>      # import a shared workflow file as a draft
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
-from medmcp import distill, provenance
+from medmcp import distill, provenance, share
 
 
 def _list_sessions() -> int:
@@ -99,6 +102,36 @@ def _delete(name: str) -> int:
     return 0
 
 
+def _export(name: str, out: str | None) -> int:
+    """Serialize a workflow into a single shareable ``<name>.workflow.yaml`` file."""
+    try:
+        text = share.export_workflow(name)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    out_path = Path(out) if out else Path(f"{name}{share.EXPORT_SUFFIX}")
+    out_path.write_text(text, encoding="utf-8")
+    print(f"Exported workflow to: {out_path}")
+    return 0
+
+
+def _import(path: str) -> int:
+    """Import a shared workflow file as a reviewable draft."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"error: cannot read {path}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        draft = share.import_workflow(text)
+    except share.WorkflowShareError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Imported workflow as draft: {draft}")
+    print("Review it, then promote it to reuse.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``medmcp`` console script."""
     parser = argparse.ArgumentParser(prog="medmcp", description=__doc__)
@@ -126,6 +159,13 @@ def main(argv: list[str] | None = None) -> int:
     delete_p = sub.add_parser("delete", help="delete a personal workflow by name")
     delete_p.add_argument("name")
 
+    export_p = sub.add_parser("export", help="write a shareable <name>.workflow.yaml")
+    export_p.add_argument("name")
+    export_p.add_argument("--out", help="output path (default <name>.workflow.yaml)")
+
+    import_p = sub.add_parser("import", help="import a shared workflow file as a draft")
+    import_p.add_argument("file")
+
     args = parser.parse_args(argv)
     if args.command == "list":
         return _list_sessions()
@@ -139,6 +179,10 @@ def main(argv: list[str] | None = None) -> int:
         return _list_workflows()
     if args.command == "delete":
         return _delete(args.name)
+    if args.command == "export":
+        return _export(args.name, args.out)
+    if args.command == "import":
+        return _import(args.file)
     parser.error(f"unknown command {args.command!r}")
 
 

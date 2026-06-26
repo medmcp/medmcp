@@ -45,11 +45,11 @@ from typing import Any, cast
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from medmcp import distill, explain, provenance, replay, sessions, settings
+from medmcp import distill, explain, provenance, replay, sessions, settings, share
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict, VibeAcpClient
 from medmcp.backend_broker import BackendBroker
 from medmcp.backend_pool import BackendPool, BackendSpec
@@ -570,6 +570,8 @@ def _workflow_detail(name: str) -> JsonDict:
         "steps": [
             {"server": s.server, "tool": s.tool, "arguments": s.arguments} for s in recipe.steps
         ],
+        "requires": [r.to_dict() for r in recipe.requires],
+        "manual_steps": list(recipe.manual_steps),
         "replayable": replay_error is None,
         "replay_error": replay_error,
     }
@@ -682,6 +684,38 @@ async def delete_workflow(name: str) -> JsonDict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     _audit.info("workflow deleted: %s", name)
     return {"ok": True}
+
+
+@app.get("/api/workflows/{name}/export")
+async def get_workflow_export(name: str) -> Response:
+    """Export a workflow as a single self-contained ``.workflow.yaml`` download."""
+    try:
+        text = await asyncio.to_thread(share.export_workflow, name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    filename = f"{name}{share.EXPORT_SUFFIX}"
+    return Response(
+        content=text,
+        media_type="application/x-yaml",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+class WorkflowImportPayload(BaseModel):
+    """Request body for importing a shared workflow file (its YAML text)."""
+
+    content: str
+
+
+@app.post("/api/workflows/import")
+async def post_import_workflow(payload: WorkflowImportPayload) -> JsonDict:
+    """Import a shared workflow envelope as a reviewable draft; return its detail."""
+    try:
+        draft_dir = await asyncio.to_thread(share.import_workflow, payload.content)
+    except share.WorkflowShareError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit.info("workflow imported: %s", draft_dir.name)
+    return await asyncio.to_thread(_workflow_detail, draft_dir.name)
 
 
 def _resolve_input_path(value: str) -> str:

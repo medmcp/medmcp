@@ -33,7 +33,7 @@ import httpx
 import yaml
 
 from medmcp import provenance
-from medmcp.workflow import Recipe, RecipeStep, WorkflowInput
+from medmcp.workflow import Recipe, RecipeStep, StackRequirement, WorkflowInput
 
 JsonDict = dict[str, Any]
 
@@ -46,6 +46,13 @@ PROSE_TIMEOUT: float = 60.0
 EXPLORATORY_TOOLS: frozenset[str] = frozenset(
     {"read_file", "grep", "todo", "skill", "task", "ls", "web_fetch", "web_search"}
 )
+
+# Pool-machinery / internal tools that the model isn't meant to call and that
+# carry no workflow meaning (the persistent backend pool calls ``warmup`` itself).
+# Kept in sync with ``proxy._HIDDEN_TOOLS`` (which hides them from the model) via
+# ``tests/test_distill.py`` — distill must drop any tool the proxy hides, or a
+# session recorded before the proxy existed would bake ``warmup`` into a recipe.
+INTERNAL_TOOLS: frozenset[str] = frozenset({"warmup"})
 
 # Shell tools whose command is inspected so read-only invocations can be dropped.
 _SHELL_TOOLS: frozenset[str] = frozenset({"bash", "shell", "sh"})
@@ -224,6 +231,19 @@ def _iter_tool_calls(messages: list[JsonDict]) -> list[tuple[str, JsonDict, str]
 # ── Deterministic recipe extraction ──────────────────────────────────────────
 
 
+def _manual_step_label(tool: str, arguments: JsonDict) -> str:
+    """Describe a dropped built-in step for the workflow's manual-steps note.
+
+    For shell tools the command is included (it's the actual action); other
+    built-ins are labelled by tool name alone.
+    """
+    if tool in _SHELL_TOOLS:
+        command = arguments.get("command")
+        if isinstance(command, str) and command.strip():
+            return f"builtin:{tool} `{command.strip()}`"
+    return f"builtin:{tool}"
+
+
 def build_recipe(
     messages: list[JsonDict],
     *,
@@ -240,6 +260,7 @@ def build_recipe(
     recipe = Recipe(name=name, description=description)
     produced: dict[str, str] = {}  # concrete path → placeholder reference
     inputs: dict[str, WorkflowInput] = {}  # concrete path → input definition
+    manual_steps: list[str] = []  # dropped built-in steps, kept as documentation
 
     step_no = 0
     for tool_name, args, result_text in _iter_tool_calls(messages):
@@ -249,8 +270,19 @@ def build_recipe(
             or _is_rejected_result(result_text)
         ):
             continue
-        step_no += 1
         server, tool = provenance.split_tool_name(tool_name, server_names)
+
+        # Internal pool-machinery tools (warmup) carry no workflow meaning — drop
+        # them silently so they never become a replayable step.
+        if tool in INTERNAL_TOOLS:
+            continue
+        # Built-in (non-MCP) tools can't be replayed deterministically. Drop them
+        # from the recipe so the workflow stays replayable, but record them as
+        # manual steps so the real work isn't silently lost (see render_skill_md).
+        if server == "builtin":
+            manual_steps.append(_manual_step_label(tool, args))
+            continue
+        step_no += 1
 
         # Parameterize input paths against earlier outputs / declared inputs.
         new_args: JsonDict = {}
@@ -285,13 +317,54 @@ def build_recipe(
         )
 
     recipe.inputs = list(inputs.values())
+    recipe.manual_steps = manual_steps
     return recipe
 
 
-def _slugify(text: str) -> str:
+def slugify(text: str) -> str:
     """Turn arbitrary text into a filesystem/skill-safe slug."""
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return slug[:48] or "workflow"
+
+
+def resolve_digest(image: str) -> str:
+    """Resolve *image*'s digest best-effort; never raise (distillation must not fail)."""
+    try:
+        from medmcp import settings
+
+        return settings.resolve_image_digest(image) or ""
+    except Exception:
+        return ""
+
+
+def build_requirements(recipe: Recipe, manifest: JsonDict | None) -> list[StackRequirement]:
+    """Build reproducibility requirements for *recipe* from the session *manifest*.
+
+    Filtered to the stacks the recipe actually uses (built-in steps need none).
+    Container stacks pin by image (+ best-effort digest); uv-tool stacks by version.
+    A used stack absent from the manifest is still listed by name so an importer
+    knows it is required.
+    """
+    used = sorted({s.server for s in recipe.steps if s.server != "builtin"})
+    by_name = {
+        str(s.get("name")): s for s in cast("list[JsonDict]", (manifest or {}).get("stacks") or [])
+    }
+    requires: list[StackRequirement] = []
+    for server in used:
+        entry = by_name.get(server)
+        if entry is None:
+            requires.append(StackRequirement(stack=server))
+            continue
+        image = str(entry.get("image") or "")
+        requires.append(
+            StackRequirement(
+                stack=server,
+                version=str(entry.get("version") or ""),
+                image=image,
+                digest=resolve_digest(image) if image else "",
+            )
+        )
+    return requires
 
 
 # ── Hybrid prose pass ────────────────────────────────────────────────────────
@@ -303,6 +376,13 @@ def _prose_prompt(recipe: Recipe, context: str) -> str:
         f"{i}. {s.server}:{s.tool} arguments={json.dumps(s.arguments)}"
         for i, s in enumerate(recipe.steps, start=1)
     )
+    manual_note = ""
+    if recipe.manual_steps:
+        manual_note = (
+            "\n\nManual steps (built-in tools that were used but CANNOT be replayed "
+            "automatically) — call these out in gotchas_markdown so the reader performs "
+            "them by hand:\n" + "\n".join(f"- {m}" for m in recipe.manual_steps)
+        )
     return (
         "You are documenting a medical-imaging workflow so a colleague can reuse it "
         "on their own data. Below is the original user request and the exact sequence "
@@ -329,6 +409,7 @@ def _prose_prompt(recipe: Recipe, context: str) -> str:
         '"gotchas_markdown": "<markdown bullet list of caveats, or empty string>"}\n\n'
         f"Original request:\n{context}\n\n"
         f"Executed steps (tool names are authoritative — reuse them verbatim):\n{steps_desc}\n"
+        f"{manual_note}"
     )
 
 
@@ -402,6 +483,37 @@ def _required_tools(recipe: Recipe) -> list[tuple[str, str]]:
     return seen
 
 
+def _manual_steps_markdown(recipe: Recipe) -> str:
+    """Render the note about manual (built-in) steps replay can't run, or ``""``."""
+    if not recipe.manual_steps:
+        return ""
+    lines = [
+        "This workflow originally included manual steps using built-in tools that "
+        "the replay engine cannot run automatically. Perform them by hand where the "
+        "pipeline needs them:",
+    ]
+    lines += [f"- `{m}`" for m in recipe.manual_steps]
+    return "\n".join(lines)
+
+
+def _requirements_markdown(recipe: Recipe) -> str:
+    """Render the stacks the workflow needs, pinned for reproducibility.
+
+    Derived from the recipe's ``requires`` (captured at distillation): container
+    stacks show their image (+ digest when resolved), uv-tool stacks their version.
+    """
+    lines: list[str] = []
+    for req in recipe.requires:
+        if req.image:
+            pin = f"image `{req.image}`" + (f" (`{req.digest}`)" if req.digest else "")
+        elif req.version:
+            pin = f"version `{req.version}`"
+        else:
+            pin = ""
+        lines.append(f"- `{req.stack}`" + (f" — {pin}" if pin else ""))
+    return "\n".join(lines)
+
+
 def _tools_markdown(recipe: Recipe) -> str:
     """Render the explicit list of tools/skills the workflow requires.
 
@@ -427,6 +539,10 @@ def render_skill_md(recipe: Recipe, prose: JsonDict | None) -> str:
         steps_md = str(prose.get("steps_markdown") or steps_md)
         gotchas_md = str(prose.get("gotchas_markdown") or "")
 
+    # Always surface dropped manual steps (deterministic), ahead of any LLM gotchas.
+    manual_md = _manual_steps_markdown(recipe)
+    gotchas_md = "\n\n".join(part for part in (manual_md, gotchas_md.strip()) if part)
+
     title = recipe.name.replace("-", " ").strip().capitalize()
     parts: list[str] = [
         "---",
@@ -439,6 +555,9 @@ def render_skill_md(recipe: Recipe, prose: JsonDict | None) -> str:
     tools_md = _tools_markdown(recipe)
     if tools_md:
         parts += ["", "## Tools", "", tools_md]
+    reqs_md = _requirements_markdown(recipe)
+    if reqs_md:
+        parts += ["", "## Requirements", "", reqs_md]
     parts += ["", "## Steps", "", steps_md]
     if gotchas_md.strip():
         parts += ["", "## Gotchas", "", gotchas_md.strip()]
@@ -510,11 +629,23 @@ def load_recipe(draft_dir: Path) -> Recipe:
         )
         for s in cast("list[JsonDict]", data.get("steps", []))
     ]
+    requires = [
+        StackRequirement(
+            stack=str(r.get("stack", "")),
+            version=str(r.get("version", "")),
+            image=str(r.get("image", "")),
+            digest=str(r.get("digest", "")),
+        )
+        for r in cast("list[JsonDict]", data.get("requires", []))
+    ]
+    manual_steps = [str(m) for m in cast("list[Any]", data.get("manual_steps", []))]
     return Recipe(
         name=str(data.get("name", "")),
         description=str(data.get("description", "")),
         inputs=inputs,
         steps=steps,
+        requires=requires,
+        manual_steps=manual_steps,
     )
 
 
@@ -551,7 +682,7 @@ def distill_session(
     )
 
     context = _first_user_message(messages)
-    fallback_name = _slugify(context) if context else f"workflow-{session_id[:8]}"
+    fallback_name = slugify(context) if context else f"workflow-{session_id[:8]}"
     recipe = build_recipe(
         messages,
         server_names=server_names,
@@ -559,9 +690,11 @@ def distill_session(
         description=context[:120] if context else "Distilled MedMCP workflow",
     )
 
+    recipe.requires = build_requirements(recipe, manifest)
+
     prose = generate_prose(recipe, context) if use_llm else None
     if prose is not None and isinstance(prose.get("name"), str):
-        recipe.name = _slugify(str(prose["name"]))
+        recipe.name = slugify(str(prose["name"]))
         recipe.description = str(prose.get("description") or recipe.description)
 
     draft_dir = _draft_dir(recipe.name, workflows_root)
@@ -632,7 +765,7 @@ def rename_draft(name: str, new_name: str, *, workflows_root: Path | None = None
     src = _draft_dir(name, workflows_root)
     if not (src / "SKILL.md").exists():
         raise FileNotFoundError(f"no draft workflow named {name!r} (looked in {src})")
-    new_slug = _slugify(new_name)
+    new_slug = slugify(new_name)
     recipe = load_recipe(src)
     recipe.name = new_slug
     prose = _read_prose(src)

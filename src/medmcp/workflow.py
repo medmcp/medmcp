@@ -40,6 +40,34 @@ class WorkflowInput:
 
 
 @dataclass
+class StackRequirement:
+    """A stack the workflow needs, pinned for reproducibility.
+
+    Captured at distillation from the session's provenance manifest and filtered
+    to the stacks the recipe actually uses. ``version`` applies to uv-tool stacks;
+    ``image`` (+ best-effort ``digest``) applies to container stacks.
+    """
+
+    stack: str
+    """The MCP server/stack name (e.g. ``medmcp-neuro``)."""
+    version: str = ""
+    """Package version for a uv-tool stack (e.g. ``0.1.0``); empty if unknown."""
+    image: str = ""
+    """Container image ref for a container stack (e.g. ``ghcr.io/medmcp/neuro:main``)."""
+    digest: str = ""
+    """Resolved image digest (``sha256:…``) for exact pinning; empty if unresolved."""
+
+    def to_dict(self) -> JsonDict:
+        """Return a plain-dict form suitable for YAML/JSON serialization."""
+        out: JsonDict = {"stack": self.stack}
+        for key in ("version", "image", "digest"):
+            value = getattr(self, key)
+            if value:
+                out[key] = value
+        return out
+
+
+@dataclass
 class RecipeStep:
     """A single tool invocation in a distilled workflow."""
 
@@ -72,12 +100,25 @@ class Recipe:
     description: str
     inputs: list[WorkflowInput] = field(default_factory=list[WorkflowInput])
     steps: list[RecipeStep] = field(default_factory=list[RecipeStep])
+    requires: list[StackRequirement] = field(default_factory=list[StackRequirement])
+    manual_steps: list[str] = field(default_factory=list[str])
+    """Built-in (non-MCP) steps dropped from the replayable recipe, kept as docs.
+
+    These are real actions from the session (e.g. ``builtin:edit``) that the replay
+    engine can't run deterministically; recording them here lets the workflow note
+    the manual work instead of silently losing it.
+    """
 
     def to_dict(self) -> JsonDict:
         """Return a plain-dict form suitable for YAML/JSON serialization."""
-        return {
+        out: JsonDict = {
             "name": self.name,
             "description": self.description,
             "inputs": [i.to_dict() for i in self.inputs],
             "steps": [s.to_dict() for s in self.steps],
         }
+        if self.requires:
+            out["requires"] = [r.to_dict() for r in self.requires]
+        if self.manual_steps:
+            out["manual_steps"] = list(self.manual_steps)
+        return out

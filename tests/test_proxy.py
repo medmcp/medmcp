@@ -23,6 +23,8 @@ from medmcp import replay
 from medmcp.backend_broker import BackendBroker
 from medmcp.backend_pool import BackendPool, BackendSpec
 
+# pyright: reportPrivateUsage=false
+
 _FAKE_SERVER: Path = Path(__file__).parent / "fake_stack_server.py"
 
 

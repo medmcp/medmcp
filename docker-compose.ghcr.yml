@@ -96,6 +96,10 @@ services:
       # that mount no plaintext auths. Leave empty to use the mounted config.
       GHCR_USER: "${GHCR_USER:-}"
       GHCR_TOKEN: "${GHCR_TOKEN:-}"
+      # Persistent stack pool + pre-warm proxy (Layer 1): keeps stack backends
+      # warm across calls and hides pool-machinery tools (warmup) from the model.
+      # 1/true to enable; empty = off (legacy per-call spawn).
+      MEDMCP_STACK_POOL: "${MEDMCP_STACK_POOL:-}"
     healthcheck:
       test:
         - CMD

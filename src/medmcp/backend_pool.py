@@ -12,9 +12,12 @@ same primitives as :mod:`medmcp.replay`'s ``mcp_caller``) but does **not** tear
 the session down after a call. Because the MCP/anyio session must be entered and
 exited in the *same* task, each backend runs a dedicated *runner* task that owns
 the session for its whole lifetime: it opens the session, signals readiness, then
-waits for a close signal before unwinding. Calls from other tasks use the live
-``ClientSession`` object (safe — the SDK multiplexes requests by id); calls into a
-single backend are serialized so a stack keeps its one-call-at-a-time assumption.
+waits for a close signal before unwinding. Concurrent calls share that one live
+``ClientSession`` and run in parallel — the SDK multiplexes requests by id and the
+stack server handles each as its own task — so a long-running tool call (e.g. a
+multi-minute skull-strip) no longer blocks shorter calls to the same stack. An
+in-flight counter keeps :attr:`Backend.busy` truthful so the pool never evicts or
+reaps a backend that still has work running.
 
 :class:`BackendPool` owns the set of warm backends and enforces two policies: an
 idle-TTL reaper evicts backends unused past their TTL, and a GPU LRU cap bounds
@@ -109,7 +112,7 @@ class Backend:
         self._started: asyncio.Event = asyncio.Event()
         self._closing: asyncio.Event = asyncio.Event()
         self._start_error: BaseException | None = None
-        self._lock: asyncio.Lock = asyncio.Lock()  # serializes call_tool
+        self._inflight: int = 0  # in-flight call_tool count (drives `busy`)
         self._tools: list[mcp_types.Tool] | None = None
         self._last_used: float = time.monotonic()
 
@@ -200,7 +203,13 @@ class Backend:
     # ── use ──────────────────────────────────────────────────────────────────
 
     async def call(self, tool: str, args: JsonDict) -> mcp_types.CallToolResult:
-        """Call *tool* on this backend (serialized with other calls to it).
+        """Call *tool* on this backend; concurrent calls run in parallel.
+
+        Calls share the one live ``ClientSession`` (the SDK multiplexes requests by
+        id and the stack server handles each in its own task), so a long-running
+        tool call does not block other calls to the same backend. The in-flight
+        count keeps :attr:`busy` truthful so the pool will not evict or reap a
+        backend with work still running.
 
         A transport-level failure (the process having died) propagates so the pool
         can evict and respawn; a tool that merely *reports* failure returns a
@@ -210,12 +219,13 @@ class Backend:
         if session is None or not self.alive:
             raise BackendError(f"backend {self.spec.name!r} is not running")
         timeout = timedelta(seconds=self.spec.tool_timeout_sec)
-        async with self._lock:
+        self._inflight += 1
+        self._last_used = time.monotonic()
+        try:
+            return await session.call_tool(tool, args, read_timeout_seconds=timeout)
+        finally:
+            self._inflight -= 1
             self._last_used = time.monotonic()
-            try:
-                return await session.call_tool(tool, args, read_timeout_seconds=timeout)
-            finally:
-                self._last_used = time.monotonic()
 
     async def list_tools(self) -> list[mcp_types.Tool]:
         """Return the backend's tools (cached after the first call)."""
@@ -254,8 +264,8 @@ class Backend:
 
     @property
     def busy(self) -> bool:
-        """Whether a call is currently in flight (its lock is held)."""
-        return self._lock.locked()
+        """Whether at least one call is currently in flight."""
+        return self._inflight > 0
 
     @property
     def last_used(self) -> float:

@@ -23,6 +23,8 @@ from medmcp import replay
 from medmcp.backend_broker import BackendBroker
 from medmcp.backend_pool import BackendPool, BackendSpec
 
+# pyright: reportPrivateUsage=false
+
 _FAKE_SERVER: Path = Path(__file__).parent / "fake_stack_server.py"
 
 
@@ -62,6 +64,18 @@ async def _proxy_client(env: dict[str, str]) -> AsyncGenerator[ClientSession]:
         yield session
 
 
+def test_hidden_tools_cover_warmup_convention() -> None:
+    """The proxy's hidden-tool set is hand-synced with the pool's warmup convention.
+
+    ``proxy`` deliberately doesn't import ``backend_pool`` (keeps the per-call shim
+    light), so this guards against the two constants drifting apart.
+    """
+    from medmcp.backend_pool import WARMUP_TOOL
+    from medmcp.proxy import _HIDDEN_TOOLS
+
+    assert WARMUP_TOOL in _HIDDEN_TOOLS
+
+
 @pytest.mark.asyncio
 async def test_proxy_forwards_to_broker(tmp_path: Path) -> None:
     """With a live broker, the proxy forwards list_tools and call_tool."""
@@ -71,10 +85,15 @@ async def test_proxy_forwards_to_broker(tmp_path: Path) -> None:
     try:
         async with _proxy_client({"MEDMCP_BROKER_SOCK": str(broker.socket_path)}) as session:
             names = {t.name for t in (await session.list_tools()).tools}
-            assert {"echo", "warmup", "crash"} <= names
+            assert {"echo", "crash"} <= names
+            # ``warmup`` is pool machinery, not a model-facing tool: hidden from the
+            # list, but still callable (the pool invokes it on activation).
+            assert "warmup" not in names
             result = await session.call_tool("echo", {"text": "hi"})
             assert replay.extract_structured(result) == {"text": "hi"}
             assert result.isError is False
+            warmup = await session.call_tool("warmup", {})
+            assert warmup.isError is False
     finally:
         await broker.aclose()
         await pool.aclose()
@@ -102,6 +121,11 @@ async def test_proxy_falls_back_to_direct_spawn(tmp_path: Path) -> None:
         "MEDMCP_BACKENDS_FILE": str(backends),
     }
     async with _proxy_client(env) as session:
+        # The hidden-tool filter applies on the direct-spawn path too, not just the
+        # broker path: ``warmup`` is absent while real tools remain.
+        names = {t.name for t in (await session.list_tools()).tools}
+        assert "echo" in names
+        assert "warmup" not in names
         result = await session.call_tool("echo", {"text": "via-fallback"})
         assert replay.extract_structured(result) == {"text": "via-fallback"}
 

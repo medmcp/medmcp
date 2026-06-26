@@ -8,6 +8,7 @@ warm backend), and ``crash`` (kills the process to exercise death/respawn).
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 from mcp.server.fastmcp import FastMCP
@@ -35,6 +36,13 @@ def warmup() -> dict[str, bool]:
 def warmup_count() -> dict[str, int]:
     """Return how many times ``warmup`` ran in this process."""
     return {"count": _warmups}
+
+
+@mcp.tool()
+async def sleep(seconds: float) -> dict[str, float]:
+    """Sleep *seconds* then return; used to prove calls overlap, not serialize."""
+    await asyncio.sleep(seconds)
+    return {"slept": seconds}
 
 
 @mcp.tool()

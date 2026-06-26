@@ -62,6 +62,27 @@ async def test_backend_start_call_and_close() -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_calls_overlap_on_one_backend() -> None:
+    """Two slow calls to one warm backend run in parallel, not back-to-back."""
+    pool = BackendPool(resolve_spec=_resolver({"fake": _spec("fake")}))
+    try:
+        backend = await pool.ensure("fake")
+        assert not backend.busy
+        started = time.monotonic()
+        results = await asyncio.gather(
+            pool.call("fake", "sleep", {"seconds": 0.5}),
+            pool.call("fake", "sleep", {"seconds": 0.5}),
+        )
+        elapsed = time.monotonic() - started
+        # Serialized these would take ~1.0s; multiplexed they finish in ~0.5s.
+        assert elapsed < 0.9, f"concurrent calls serialized ({elapsed:.2f}s)"
+        assert all(replay.extract_structured(r) == {"slept": 0.5} for r in results)
+        assert not backend.busy  # in-flight count returns to zero
+    finally:
+        await pool.aclose()
+
+
+@pytest.mark.asyncio
 async def test_pool_ensure_reuses_then_evicts() -> None:
     """Ensure returns the same warm backend; evict tears it down."""
     pool = BackendPool(resolve_spec=_resolver({"fake": _spec("fake")}))

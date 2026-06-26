@@ -864,7 +864,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
               title="Export as a shareable .workflow.yaml file"
               onClick={() => void exportFile(d.name)}
             >
-              <DownloadIcon size={12} /> Export
+              <UploadIcon size={12} /> Export
             </button>
             <button className="btn-plain wf-delete" onClick={() => remove(d.name)}>
               Delete
@@ -1086,7 +1086,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             disabled={busy !== null}
             onClick={() => fileInputRef.current?.click()}
           >
-            <UploadIcon />
+            <DownloadIcon />
           </button>
           <button className="btn-icon" title="Refresh" onClick={() => void reload()}>
             <RefreshIcon />

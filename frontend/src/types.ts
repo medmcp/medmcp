@@ -115,6 +115,10 @@ export interface StackRequirement {
   version?: string
   image?: string
   digest?: string
+  /** Availability of this stack in the current environment (server-computed). */
+  status?: 'ok' | 'missing' | 'mismatch'
+  /** Digest of the locally-present image, when it differs from the pinned one. */
+  installed_digest?: string
 }
 
 /** Full recipe detail from GET /api/workflows/{name}. */

@@ -10,7 +10,7 @@ import mcp.types as mcp_types
 import pytest
 
 from medmcp import replay
-from medmcp.workflow import Recipe, RecipeStep, WorkflowInput
+from medmcp.workflow import Recipe, RecipeStep, StackRequirement, WorkflowInput
 
 # pyright: reportPrivateUsage=false
 
@@ -165,6 +165,21 @@ class TestValidate:
         recipe = _recipe([RecipeStep(server="medmcp-cardiac", tool="t", arguments={})])
         msg = replay.validate(recipe, {}, _SERVERS)
         assert msg is not None and "medmcp-cardiac" in msg
+
+    def test_missing_stack_message_names_the_pin(self) -> None:
+        """The missing-stack message names the image/version from requires."""
+        recipe = Recipe(
+            name="wf",
+            description="d",
+            inputs=[],
+            steps=[RecipeStep(server="medmcp-cardiac", tool="t", arguments={})],
+            requires=[
+                StackRequirement(stack="medmcp-cardiac", image="ghcr.io/medmcp/cardiac:main")
+            ],
+        )
+        msg = replay.validate(recipe, {}, _SERVERS)
+        assert msg is not None
+        assert "medmcp-cardiac" in msg and "ghcr.io/medmcp/cardiac:main" in msg
 
     def test_no_steps(self) -> None:
         """A recipe with no steps has nothing to replay."""

@@ -30,6 +30,7 @@ import {
   RefreshIcon,
   StopSquareIcon,
   UploadIcon,
+  XIcon,
 } from './icons'
 
 type ReplayStepFrame = Extract<ReplayFrame, { type: 'step' }>
@@ -42,19 +43,19 @@ type Mode =
   | { kind: 'view' }
   | { kind: 'rename'; value: string }
   | { kind: 'refine'; value: string }
-  | { kind: 'inputs'; values: Record<string, string>; batchInput: string | null }
+  | { kind: 'inputs'; batch: boolean; values: Record<string, string>; rows: Record<string, string>[] }
   | {
       kind: 'preview'
+      batch: boolean
       values: Record<string, string>
-      batchInput: string | null
-      batchValues: string[]
+      rows: Record<string, string>[]
+      runs: Record<string, string>[]
       steps: ReplayPreviewStep[]
     }
   | {
       kind: 'running'
       name: string
       runs: Record<string, string>[]
-      batchInput: string | null
       total: number
       stepsPerItem: number
       startedAt: number
@@ -66,7 +67,6 @@ type Mode =
       kind: 'done'
       name: string
       runs: Record<string, string>[]
-      batchInput: string | null
       total: number
       stepsPerItem: number
       startedAt: number
@@ -86,16 +86,14 @@ function runProgress(m: Extract<Mode, { kind: 'running' }>): number {
   return (m.items.length + currentFrac) / m.total
 }
 
-/** One run's input bindings per batch item (a single run is a batch of one). */
+/** The runs to execute: a single binding, or every fully-filled table row. Each
+ *  run is an independent full input binding ({in_1, in_2, …}). */
 function buildRuns(
-  values: Record<string, string>,
-  batchInput: string | null,
-  batchValues: string[],
+  st: { batch: boolean; values: Record<string, string>; rows: Record<string, string>[] },
+  inputNames: string[],
 ): Record<string, string>[] {
-  if (batchInput && batchValues.length > 0) {
-    return batchValues.map((v) => ({ ...values, [batchInput]: v }))
-  }
-  return [values]
+  if (!st.batch) return [st.values]
+  return st.rows.filter((r) => inputNames.every((n) => (r[n] ?? '').trim() !== ''))
 }
 
 /** "1m 23s" / "45s" from a millisecond duration. */
@@ -121,10 +119,17 @@ function inputOptionLabel(i: Input): string {
   return bits.length > 0 ? `${i.name} — ${bits.join(' · ')}` : i.name
 }
 
-/** Short label for batch item *i* — its batched input's filename, else "Item N". */
-function itemLabel(runs: Record<string, string>[], batchInput: string | null, i: number): string {
-  const v = batchInput ? runs[i]?.[batchInput] : undefined
-  return v ? basename(v) : `Item ${i + 1}`
+/** The file basenames of a run's input values, joined (e.g. "subjA.nii + atlas.nii"). */
+function runFiles(run: Record<string, string>): string {
+  return Object.values(run)
+    .filter((v) => v.trim() !== '')
+    .map(basename)
+    .join(' + ')
+}
+
+/** Short label for batch item *i* — its input filenames, else "Item N". */
+function itemLabel(runs: Record<string, string>[], i: number): string {
+  return runFiles(runs[i] ?? {}) || `Item ${i + 1}`
 }
 
 /** 1-based step number currently in progress for the active item. */
@@ -227,8 +232,18 @@ function InputField({
 }
 
 /** The stacks a workflow needs, pinned by image(+digest) or version. */
+const REQ_STATUS: Record<
+  NonNullable<StackRequirement['status']>,
+  { icon: string; cls: string; title: string }
+> = {
+  ok: { icon: '✓', cls: 'ok', title: 'installed' },
+  missing: { icon: '✗', cls: 'missing', title: 'not installed' },
+  mismatch: { icon: '⚠', cls: 'mismatch', title: 'installed, but a different version' },
+}
+
 function Requirements({ requires }: { requires: StackRequirement[] }) {
   if (requires.length === 0) return null
+  const mismatched = requires.filter((r) => r.status === 'mismatch')
   return (
     <div className="wf-requires">
       <div className="wf-requires-title">Requires</div>
@@ -239,14 +254,26 @@ function Requirements({ requires }: { requires: StackRequirement[] }) {
             : r.version
               ? `v${r.version}`
               : ''
+          const s = r.status ? REQ_STATUS[r.status] : null
           return (
             <li key={r.stack}>
+              {s && (
+                <span className={`wf-req-status ${s.cls}`} title={s.title}>
+                  {s.icon}
+                </span>
+              )}
               <code>{r.stack}</code>
               {pin && <span className="wf-req-pin">{pin}</span>}
             </li>
           )
         })}
       </ul>
+      {mismatched.length > 0 && (
+        <div className="wf-req-warn">
+          A different version of {mismatched.map((r) => r.stack).join(', ')} is installed than this
+          workflow was built with — results may not reproduce exactly.
+        </div>
+      )}
     </div>
   )
 }
@@ -269,19 +296,17 @@ function RunLog({
   log,
   total = 1,
   runs,
-  batchInput,
 }: {
   log: ReplayStepFrame[]
   total?: number
   runs?: Record<string, string>[]
-  batchInput?: string | null
 }) {
   const rows: ReactNode[] = []
   let lastItem = -1
   for (const s of log) {
     const item = s.item ?? 0
     if (total > 1 && item !== lastItem) {
-      const file = runs && batchInput ? basename(runs[item]?.[batchInput] ?? '') : ''
+      const file = runs ? runFiles(runs[item] ?? {}) : ''
       rows.push(
         <div key={`item-${item}`} className="wf-runitem">
           Item {item + 1} of {total}
@@ -321,26 +346,40 @@ function ProgressBar({ frac, label, active }: { frac: number; label: string; act
   )
 }
 
-/** Read-only view of the explorer selection feeding the batched input. */
-function BatchSelection({ paths }: { paths: string[] }) {
-  if (paths.length === 0) {
-    return (
-      <div className="wf-hint">
-        Select the files to process in the explorer — ctrl/shift-click for multiple.
-      </div>
-    )
-  }
+/** One batch-table cell: a compact path input that also accepts a file drag. */
+function BatchCell({
+  value,
+  example,
+  onChange,
+}: {
+  value: string
+  example: string
+  onChange: (v: string) => void
+}) {
+  const [dropReady, setDropReady] = useState(false)
   return (
-    <div className="wf-batch-selection">
-      <div className="wf-hint">
-        Using the explorer selection ({paths.length} file{paths.length === 1 ? '' : 's'}):
-      </div>
-      <div className="wf-batch-chips">
-        {paths.map((p) => (
-          <code key={p}>{p}</code>
-        ))}
-      </div>
-    </div>
+    <input
+      className={dropReady ? 'wf-batch-cell drop-ready' : 'wf-batch-cell'}
+      value={value}
+      placeholder={example ? `e.g. ${basename(example)}` : 'path'}
+      title={value || undefined}
+      onChange={(e) => onChange(e.target.value)}
+      onDragOver={(e) => {
+        if (e.dataTransfer.types.includes(DRAG_PATH_MIME) || getDraggedFilePath() !== null) {
+          e.preventDefault()
+          setDropReady(true)
+        }
+      }}
+      onDragLeave={() => setDropReady(false)}
+      onDrop={(e) => {
+        const path = e.dataTransfer.getData(DRAG_PATH_MIME) || getDraggedFilePath()
+        if (path) {
+          e.preventDefault()
+          onChange(path)
+        }
+        setDropReady(false)
+      }}
+    />
   )
 }
 
@@ -415,9 +454,9 @@ export const WorkflowPanel = memo(function WorkflowPanel({
   const [prevSel, setPrevSel] = useState<string[]>(selectedPaths)
   if (selectedPaths !== prevSel) {
     setPrevSel(selectedPaths)
-    if (mode.kind === 'inputs' && mode.batchInput === null && selectedPaths.length > 0) {
+    if (mode.kind === 'inputs' && !mode.batch && selectedPaths.length > 0) {
       setMode((m) => {
-        if (m.kind !== 'inputs' || m.batchInput !== null) return m
+        if (m.kind !== 'inputs' || m.batch) return m
         const fields = Object.keys(m.values)
         const values = { ...m.values }
         if (fields.length === 1) {
@@ -546,26 +585,29 @@ export const WorkflowPanel = memo(function WorkflowPanel({
 
   const toPreview = (
     name: string,
-    values: Record<string, string>,
-    batchInput: string | null,
-    batchValues: string[],
+    st: { batch: boolean; values: Record<string, string>; rows: Record<string, string>[] },
+    inputNames: string[],
   ) =>
     withBusy('Resolving steps…', async () => {
-      // Preview resolves the first batch item; the others differ only in the
-      // batched input's value, which the preview screen lists alongside.
-      const res = await replayPreview(name, buildRuns(values, batchInput, batchValues)[0])
+      const runs = buildRuns(st, inputNames)
+      if (runs.length === 0) {
+        setError('add at least one run with every input filled')
+        return
+      }
+      // Preview resolves the first run; a batch's other runs differ only in their
+      // input values, which the preview screen lists alongside.
+      const res = await replayPreview(name, runs[0])
       if (!res.ok) {
         setError(res.error ?? 'this workflow cannot be replayed')
         return
       }
-      setMode({ kind: 'preview', values, batchInput, batchValues, steps: res.steps })
+      setMode({ kind: 'preview', batch: st.batch, values: st.values, rows: st.rows, runs, steps: res.steps })
     })
 
   const startRun = (
     name: string,
     runs: Record<string, string>[],
     stepsPerItem: number,
-    batchInput: string | null,
     startedAt: number,
   ) => {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -576,7 +618,6 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       kind: 'running',
       name,
       runs,
-      batchInput,
       total: runs.length,
       stepsPerItem,
       startedAt,
@@ -621,7 +662,6 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                 kind: 'done',
                 name: m.name,
                 runs: m.runs,
-                batchInput: m.batchInput,
                 total: m.total,
                 stepsPerItem: m.stepsPerItem,
                 startedAt: m.startedAt,
@@ -643,7 +683,6 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                 kind: 'done',
                 name: m.name,
                 runs: m.runs,
-                batchInput: m.batchInput,
                 total: m.total,
                 stepsPerItem: m.stepsPerItem,
                 startedAt: m.startedAt,
@@ -661,14 +700,11 @@ export const WorkflowPanel = memo(function WorkflowPanel({
 
   const beginRun = (d: WorkflowDetail) => {
     if (d.inputs.length === 0) {
-      void toPreview(d.name, {}, null, [])
+      void toPreview(d.name, { batch: false, values: {}, rows: [] }, [])
       return
     }
-    setMode({
-      kind: 'inputs',
-      values: Object.fromEntries(d.inputs.map((i) => [i.name, ''])),
-      batchInput: null,
-    })
+    const empty = Object.fromEntries(d.inputs.map((i) => [i.name, '']))
+    setMode({ kind: 'inputs', batch: false, values: empty, rows: [{ ...empty }] })
   }
 
   const renderRunning = (m: Extract<Mode, { kind: 'running' }>) => (
@@ -685,10 +721,10 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       />
       <div className="wf-active">
         {m.items.length < m.total ? (
-          m.batchInput ? (
+          m.total > 1 ? (
             <span>
-              Processing <strong>{basename(m.runs[m.items.length]?.[m.batchInput] ?? '')}</strong> —
-              item {m.items.length + 1} of {m.total} · step {currentStep(m)} of {m.stepsPerItem}
+              Processing <strong>{itemLabel(m.runs, m.items.length)}</strong> — item{' '}
+              {m.items.length + 1} of {m.total} · step {currentStep(m)} of {m.stepsPerItem}
             </span>
           ) : (
             <span>
@@ -700,7 +736,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         )}
       </div>
       <div className="wf-timing">{runTiming(m, now)}</div>
-      <RunLog log={m.log} total={m.total} runs={m.runs} batchInput={m.batchInput} />
+      <RunLog log={m.log} total={m.total} runs={m.runs} />
       <div className="wf-actions">
         <button className="btn-danger" onClick={() => runWs.current?.close()}>
           <StopSquareIcon size={12} /> Stop
@@ -725,14 +761,14 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             <span className="tally-muted">in {formatDuration(duration)}</span>
           </div>
         )}
-        <RunLog log={m.log} total={m.total} runs={m.runs} batchInput={m.batchInput} />
+        <RunLog log={m.log} total={m.total} runs={m.runs} />
         {m.total > 1 && (
           <div className="wf-batch-summary">
             {m.items.map((it, i) => (
               <div key={i} className={it.ok ? 'wf-runstep ok' : 'wf-runstep fail'}>
                 <span className={`status-dot ${it.ok ? 'ok' : 'fail'}`} />
                 <span>
-                  {itemLabel(m.runs, m.batchInput, i)}:{' '}
+                  {itemLabel(m.runs, i)}:{' '}
                   {it.ok ? (
                     it.outputs.length > 0 ? (
                       <>
@@ -773,7 +809,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             <button
               className="btn-primary"
               title="Re-run only the items that failed or didn't finish"
-              onClick={() => startRun(m.name, retryRuns, m.stepsPerItem, m.batchInput, Date.now())}
+              onClick={() => startRun(m.name, retryRuns, m.stepsPerItem, Date.now())}
             >
               <RefreshIcon size={12} /> Retry {retryRuns.length}
             </button>
@@ -925,83 +961,180 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         </form>
       )}
 
-      {mode.kind === 'inputs' && (
-        <form
-          className="wf-form"
-          onSubmit={(e) => {
-            e.preventDefault()
-            // Snapshot the explorer selection now so later clicks in the
-            // explorer can't change what the preview confirmed.
-            void toPreview(d.name, mode.values, mode.batchInput, selectedPaths)
-          }}
-        >
-          <div className="wf-hint">
-            Provide a value for each input — select a file in the explorer to fill it, or type /
-            drag a path.
-          </div>
-          {d.inputs.map((i) =>
-            i.name === mode.batchInput ? null : (
-              <InputField
-                key={i.name}
-                name={i.name}
-                example={i.example}
-                description={i.description}
-                value={mode.values[i.name] ?? ''}
-                onChange={(v) => setMode({ ...mode, values: { ...mode.values, [i.name]: v } })}
-              />
-            ),
-          )}
-          <label className="wf-input-row">
-            <span className="wf-input-label">
-              Batch over
-              <span className="wf-input-desc">
-                run once per file selected in the explorer, bound to this input
-              </span>
-            </span>
-            <select
-              className="wf-input"
-              value={mode.batchInput ?? ''}
-              onChange={(e) => setMode({ ...mode, batchInput: e.target.value || null })}
+      {mode.kind === 'inputs' &&
+        ((m: Extract<Mode, { kind: 'inputs' }>) => {
+          const inputNames = d.inputs.map((i) => i.name)
+          const emptyRow = (): Record<string, string> =>
+            Object.fromEntries(inputNames.map((n) => [n, '']))
+          // Distribute the selected files across rows: every N files (N = number
+          // of inputs) fill one row's inputs in order. So a 2-input workflow turns
+          // 2 selected files into one run (in_1, in_2), 4 files into two runs, etc.
+          // A single-input workflow gets one row per file. Drops blank rows.
+          const addFromSelection = () => {
+            const k = inputNames.length
+            if (k === 0 || selectedPaths.length === 0) return
+            const added: Record<string, string>[] = []
+            for (let i = 0; i < selectedPaths.length; i += k) {
+              const row = emptyRow()
+              inputNames.forEach((n, j) => {
+                const file = selectedPaths[i + j]
+                if (file) row[n] = file
+              })
+              added.push(row)
+            }
+            const filled = m.rows.filter((r) => Object.values(r).some((v) => v.trim()))
+            setMode({ ...m, rows: [...filled, ...added] })
+          }
+          const singleIncomplete = inputNames.some((n) => !(m.values[n] ?? '').trim())
+          const completeRows = m.rows.filter((r) => inputNames.every((n) => (r[n] ?? '').trim()))
+          const previewDisabled = m.batch ? completeRows.length === 0 : singleIncomplete
+          return (
+            <form
+              className="wf-form"
+              onSubmit={(e) => {
+                e.preventDefault()
+                void toPreview(d.name, { batch: m.batch, values: m.values, rows: m.rows }, inputNames)
+              }}
             >
-              <option value="">— single run —</option>
-              {d.inputs.map((i) => (
-                <option key={i.name} value={i.name} title={i.example || undefined}>
-                  {inputOptionLabel(i)}
-                </option>
-              ))}
-            </select>
-          </label>
-          {mode.batchInput &&
-            (() => {
-              const bi = d.inputs.find((i) => i.name === mode.batchInput)
-              return bi && (bi.description || bi.example) ? (
-                <div className="wf-hint">
-                  Batching <code>{bi.name}</code>
-                  {bi.description ? ` — ${bi.description}` : ''}
-                  {bi.example ? ` (e.g. ${basename(bi.example)})` : ''}
-                </div>
-              ) : null
-            })()}
-          {mode.batchInput && <BatchSelection paths={selectedPaths} />}
-          <div className="wf-actions">
-            <button
-              className="btn-primary"
-              type="submit"
-              disabled={
-                d.inputs.some(
-                  (i) => i.name !== mode.batchInput && !(mode.values[i.name] ?? '').trim(),
-                ) ||
-                (mode.batchInput !== null && selectedPaths.length === 0)
-              }
-            >
-              Preview steps
-            </button>
-            <button className="btn-plain" type="button" onClick={() => setMode({ kind: 'view' })}>
-              Cancel
-            </button>
-          </div>
-        </form>
-      )}
+              <div className="wf-mode-toggle">
+                <button
+                  type="button"
+                  className={!m.batch ? 'active' : ''}
+                  onClick={() => setMode({ ...m, batch: false })}
+                >
+                  Single run
+                </button>
+                <button
+                  type="button"
+                  className={m.batch ? 'active' : ''}
+                  onClick={() =>
+                    setMode({
+                      ...m,
+                      batch: true,
+                      rows: m.rows.some((r) => Object.values(r).some((v) => v.trim()))
+                        ? m.rows
+                        : [{ ...m.values }],
+                    })
+                  }
+                >
+                  Batch
+                </button>
+              </div>
+
+              {!m.batch ? (
+                <>
+                  <div className="wf-hint">
+                    Provide a value for each input — select a file in the explorer to fill it, or
+                    type / drag a path.
+                  </div>
+                  {d.inputs.map((i) => (
+                    <InputField
+                      key={i.name}
+                      name={i.name}
+                      example={i.example}
+                      description={i.description}
+                      value={m.values[i.name] ?? ''}
+                      onChange={(v) => setMode({ ...m, values: { ...m.values, [i.name]: v } })}
+                    />
+                  ))}
+                </>
+              ) : (
+                <>
+                  <div className="wf-hint">
+                    One row per run — each runs the whole workflow on its own inputs. Drag a file
+                    into any cell, or select files in the explorer and “Add from selection” (every{' '}
+                    {d.inputs.length} selected file{d.inputs.length === 1 ? '' : 's'} fill one row).
+                  </div>
+                  <div className="wf-batch-table">
+                    <div className="wf-batch-row wf-batch-head">
+                      <span className="wf-batch-idx">#</span>
+                      {d.inputs.map((i) => (
+                        <span key={i.name} className="wf-batch-col" title={inputOptionLabel(i)}>
+                          {i.name}
+                        </span>
+                      ))}
+                      <span className="wf-batch-rm" />
+                    </div>
+                    {m.rows.map((row, ri) => (
+                      <div key={ri} className="wf-batch-row">
+                        <span className="wf-batch-idx">{ri + 1}</span>
+                        {d.inputs.map((i) => (
+                          <BatchCell
+                            key={i.name}
+                            value={row[i.name] ?? ''}
+                            example={i.example}
+                            onChange={(v) =>
+                              setMode({
+                                ...m,
+                                rows: m.rows.map((r, j) =>
+                                  j === ri ? { ...r, [i.name]: v } : r,
+                                ),
+                              })
+                            }
+                          />
+                        ))}
+                        <button
+                          type="button"
+                          className="btn-icon wf-batch-rm"
+                          title="Remove row"
+                          onClick={() =>
+                            setMode({ ...m, rows: m.rows.filter((_, j) => j !== ri) })
+                          }
+                        >
+                          <XIcon size={12} />
+                        </button>
+                      </div>
+                    ))}
+                    <div className="wf-batch-tools">
+                      <button
+                        type="button"
+                        className="btn-plain"
+                        onClick={() => setMode({ ...m, rows: [...m.rows, emptyRow()] })}
+                      >
+                        + Add row
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-plain"
+                        disabled={selectedPaths.length === 0}
+                        title={
+                          selectedPaths.length === 0
+                            ? 'Select files in the explorer first'
+                            : `Group the ${selectedPaths.length} selected file(s) into rows of ${d.inputs.length} (one per input)`
+                        }
+                        onClick={addFromSelection}
+                      >
+                        Add from selection ({selectedPaths.length})
+                      </button>
+                    </div>
+                  </div>
+                  {completeRows.length > 0 && (
+                    <div className="wf-hint">
+                      {completeRows.length} run{completeRows.length === 1 ? '' : 's'} ready
+                      {m.rows.length > completeRows.length
+                        ? ` (${m.rows.length - completeRows.length} incomplete row(s) skipped)`
+                        : ''}
+                      .
+                    </div>
+                  )}
+                </>
+              )}
+
+              <div className="wf-actions">
+                <button className="btn-primary" type="submit" disabled={previewDisabled}>
+                  Preview steps
+                </button>
+                <button
+                  className="btn-plain"
+                  type="button"
+                  onClick={() => setMode({ kind: 'view' })}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          )
+        })(mode)}
 
       {mode.kind === 'preview' && (
         <div className="wf-form">
@@ -1009,16 +1142,14 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             Replay will run these exact steps — no LLM, no permission prompts. Review before
             running.
           </div>
-          {mode.batchInput && mode.batchValues.length > 0 && (
+          {mode.runs.length > 1 && (
             <div className="wf-hint">
-              Batch: runs {mode.batchValues.length}×, with <code>{mode.batchInput}</code> set to
-              each of:
+              Batch: {mode.runs.length} runs — the steps below show the first. All runs:
               <span className="wf-batch-chips">
-                {mode.batchValues.map((v) => (
-                  <code key={v}>{v}</code>
+                {mode.runs.map((_run, i) => (
+                  <code key={i}>{itemLabel(mode.runs, i)}</code>
                 ))}
               </span>
-              The steps below show the first item.
             </div>
           )}
           <ol className="wf-steps">
@@ -1034,15 +1165,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
           <div className="wf-actions">
             <button
               className="btn-primary"
-              onClick={() =>
-                startRun(
-                  d.name,
-                  buildRuns(mode.values, mode.batchInput, mode.batchValues),
-                  d.steps.length,
-                  mode.batchInput,
-                  Date.now(),
-                )
-              }
+              onClick={() => startRun(d.name, mode.runs, d.steps.length, Date.now())}
             >
               <PlayIcon size={12} /> Run now
             </button>
@@ -1050,7 +1173,12 @@ export const WorkflowPanel = memo(function WorkflowPanel({
               className="btn-plain"
               onClick={() =>
                 d.inputs.length > 0
-                  ? setMode({ kind: 'inputs', values: mode.values, batchInput: mode.batchInput })
+                  ? setMode({
+                      kind: 'inputs',
+                      batch: mode.batch,
+                      values: mode.values,
+                      rows: mode.rows,
+                    })
                   : setMode({ kind: 'view' })
               }
             >

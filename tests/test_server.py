@@ -522,3 +522,44 @@ class TestSessionsApi:
         resp = client.delete("/api/sessions/abc")
         assert resp.status_code == 200
         assert calls == [("purge", "abc"), ("remove", "abc")]
+
+
+def test_requirement_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Per-requirement status flags missing stacks and image-digest mismatches."""
+    from medmcp.workflow import Recipe, RecipeStep, StackRequirement
+
+    recipe = Recipe(
+        name="wf",
+        description="d",
+        inputs=[],
+        steps=[RecipeStep(server="medmcp-neuro", tool="t", arguments={})],
+        requires=[
+            StackRequirement(
+                stack="medmcp-neuro", image="ghcr.io/medmcp/neuro:main", digest="sha256:aaa"
+            ),
+            StackRequirement(stack="medmcp-cardiac", image="ghcr.io/medmcp/cardiac:main"),
+        ],
+    )
+    servers = [
+        {
+            "name": "medmcp-neuro",
+            "command": "docker",
+            "args": ["run", "-i", "ghcr.io/medmcp/neuro:main"],
+        }
+    ]
+
+    def _installed_digest(_image: str) -> str | None:
+        return "sha256:zzz"  # differs from the pinned sha256:aaa
+
+    monkeypatch.setattr(settings, "resolve_image_digest", _installed_digest)
+    by_stack = {s["stack"]: s for s in server._requirement_statuses(recipe, servers)}
+    assert by_stack["medmcp-neuro"]["status"] == "mismatch"
+    assert by_stack["medmcp-neuro"]["installed_digest"] == "sha256:zzz"
+    assert by_stack["medmcp-cardiac"]["status"] == "missing"  # not in servers
+
+    def _matching_digest(_image: str) -> str | None:
+        return "sha256:aaa"  # matches the pin
+
+    monkeypatch.setattr(settings, "resolve_image_digest", _matching_digest)
+    ok = {s["stack"]: s for s in server._requirement_statuses(recipe, servers)}
+    assert ok["medmcp-neuro"]["status"] == "ok"

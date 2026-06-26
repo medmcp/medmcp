@@ -311,7 +311,14 @@ def validate(recipe: Recipe, inputs: dict[str, Any], servers: list[JsonDict]) ->
     installed = {str(s["name"]) for s in servers}
     needed = sorted({s.server for s in recipe.steps} - installed)
     if needed:
-        return f"required stack(s) not installed: {', '.join(needed)}"
+        # Make the message actionable: name each missing stack with the image or
+        # version it's pinned to in the recipe's requirements, so a colleague who
+        # received this workflow knows exactly what to install.
+        pins = {
+            r.stack: (r.image or (f"v{r.version}" if r.version else "")) for r in recipe.requires
+        }
+        labels = [f"{s} ({pins[s]})" if pins.get(s) else s for s in needed]
+        return f"required stack(s) not installed: {', '.join(labels)}"
 
     if not recipe.steps:
         return "this workflow has no replayable steps"

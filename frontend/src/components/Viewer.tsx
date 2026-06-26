@@ -58,6 +58,23 @@ const LABEL_COLORMAP = labelColorMap()
 // use its numeric value.
 const COLORMAP_TYPE_TRANSPARENT_BELOW_MIN = 1
 
+/** Add `url` as a styled label overlay on top of `nv`'s base volume: a discrete
+ *  label colormap (distinct color per integer label) with the background label
+ *  dropped out in both the 2D slices and the 3D render. Shared by the user
+ *  overlay action and the post-load restore so they style identically. */
+async function addStyledOverlay(nv: Niivue, url: string, opacity: number): Promise<void> {
+  await nv.addVolumeFromUrl({ url, opacity })
+  const overlay = nv.volumes[nv.volumes.length - 1]
+  overlay.setColormapLabel(LABEL_COLORMAP)
+  // The label LUT's zero-alpha hides the background only in the 2D slices. In the
+  // 3D volume render, transparency is driven by colormapType + cal_min: mark
+  // sub-min voxels transparent and put the threshold just above 0 so the
+  // background label (0) drops out there too.
+  overlay.colormapType = COLORMAP_TYPE_TRANSPARENT_BELOW_MIN
+  overlay.cal_min = 0.5
+  nv.updateGLVolume()
+}
+
 // Legacy standalone convention key — still read once to migrate the preference
 // into the consolidated viewer settings below.
 const RADIOLOGICAL_KEY = 'medmcp.radiologicalView'
@@ -169,11 +186,19 @@ function VolumeView({
   settings,
   refreshSignal,
   isResizing,
+  overlayPath,
+  overlayOpacity,
+  onOverlayChange,
+  onOpacityChange,
 }: {
   path: string
   settings: ViewerSettings
   refreshSignal?: number
   isResizing?: boolean
+  overlayPath: string
+  overlayOpacity: number
+  onOverlayChange: (path: string) => void
+  onOpacityChange: (opacity: number) => void
 }) {
   const url = rawUrl(path)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -183,8 +208,6 @@ function VolumeView({
   const [loadError, setLoadError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [volumePaths, setVolumePaths] = useState<string[]>([])
-  const [overlayPath, setOverlayPath] = useState<string>('')
-  const [overlayOpacity, setOverlayOpacity] = useState(0.5)
   const [dragOver, setDragOver] = useState(false)
   // Read inside the url-keyed load effect (constructor seeding + post-load) and
   // the live-settings effect without making settings a dependency of the load
@@ -198,6 +221,18 @@ function VolumeView({
   useEffect(() => {
     isResizingRef.current = isResizing
   }, [isResizing])
+  // Overlay path + opacity are owned by the parent Viewer so they survive the
+  // resize-rebuild remount. Mirror them into refs so the url-keyed load effect
+  // can restore the overlay after the base volume loads, without taking them as
+  // dependencies (which would tear down and reload the base volume).
+  const overlayPathRef = useRef(overlayPath)
+  useEffect(() => {
+    overlayPathRef.current = overlayPath
+  }, [overlayPath])
+  const overlayOpacityRef = useRef(overlayOpacity)
+  useEffect(() => {
+    overlayOpacityRef.current = overlayOpacity
+  }, [overlayOpacity])
 
   // Size the dropzone (Niivue's observed parent) to the panel. We NEVER do this
   // during a separator drag: Niivue leaks GPU resources each time its canvas
@@ -282,14 +317,21 @@ function VolumeView({
         if (cancelled) return
         await nv.loadVolumes([{ url }])
         applyViewerSettings(nv, settingsRef.current)
+        // Restore a persisted overlay so it survives the resize-rebuild remount
+        // (which rebuilds this view fresh — see the parent Viewer). The overlay
+        // path/opacity are owned there and mirrored into refs above.
+        if (overlayPathRef.current && !cancelled) {
+          await addStyledOverlay(nv, rawUrl(overlayPathRef.current), overlayOpacityRef.current)
+        }
       } catch (e) {
         if (!cancelled) setLoadError(String(e))
       } finally {
         if (!cancelled) setLoading(false)
       }
     }
-    // Seed the overlay-op chain with the base load so an overlay dropped
-    // before the base image finished loading can't race it.
+    // Seed the overlay-op chain with the base load (which now also restores a
+    // persisted overlay) so an overlay dropped before the base finished loading
+    // can't race it.
     overlayOpRef.current = load()
     return () => {
       cancelled = true
@@ -338,8 +380,10 @@ function VolumeView({
   const overlayOpRef = useRef<Promise<void>>(Promise.resolve())
 
   const setOverlay = (newPath: string) => {
-    // Only ever called from event handlers (drop/select/remove), where ref
-    // writes are fine — the lint rule just can't see the call sites.
+    // Persist in the parent Viewer so the overlay survives a resize-rebuild
+    // remount. Only ever called from event handlers (drop/select/remove), where
+    // ref writes are fine — the lint rule just can't see the call sites.
+    onOverlayChange(newPath)
     // eslint-disable-next-line react-hooks/immutability
     overlayOpRef.current = overlayOpRef.current.then(() => applyOverlay(newPath))
   }
@@ -352,31 +396,18 @@ function VolumeView({
       while (nv.volumes.length > 1) {
         nv.removeVolume(nv.volumes[nv.volumes.length - 1])
       }
-      setOverlayPath(newPath)
       if (newPath) {
-        await nv.addVolumeFromUrl({ url: rawUrl(newPath), opacity: overlayOpacity })
-        // Render as discrete labels: each integer value gets a distinct color,
-        // value 0 stays transparent. Nicer than a single-hue ramp for masks
-        // and segmentations alike.
-        const overlay = nv.volumes[nv.volumes.length - 1]
-        overlay.setColormapLabel(LABEL_COLORMAP)
-        // The label LUT's zero-alpha hides the background only in the 2D slices.
-        // In the 3D volume render, transparency is driven by colormapType +
-        // cal_min: mark sub-min voxels transparent and put the threshold just
-        // above 0 so the background label (0) drops out there too.
-        overlay.colormapType = COLORMAP_TYPE_TRANSPARENT_BELOW_MIN
-        overlay.cal_min = 0.5
-        nv.updateGLVolume()
+        await addStyledOverlay(nv, rawUrl(newPath), overlayOpacityRef.current)
       }
       setLoadError(null)
     } catch (e) {
-      setOverlayPath('')
+      onOverlayChange('')
       setLoadError(`Could not load overlay: ${String(e)}`)
     }
   }
 
   const setOpacity = (value: number) => {
-    setOverlayOpacity(value)
+    onOpacityChange(value)
     const nv = nvRef.current
     if (nv && nv.volumes.length > 1) {
       nv.setOpacity(1, value)
@@ -518,6 +549,19 @@ export const Viewer = memo(function Viewer({
   const didResizeRef = useRef(false)
   const [settings, setSettings] = useState<ViewerSettings>(loadViewerSettings)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Overlay selection lives here, not in VolumeView, so it survives the
+  // resize-rebuild remount (which bumps resizeGen and rebuilds VolumeView fresh).
+  // It's tagged with the base file it belongs to, so it's transparently ignored
+  // once a different file is opened — no state reset (which the hooks lint
+  // forbids both in render and in effects) is needed.
+  const [overlay, setOverlay] = useState<{ base: string; path: string; opacity: number }>({
+    base: '',
+    path: '',
+    opacity: 0.5,
+  })
+  const overlayForThisFile = overlay.base === path
+  const overlayPath = overlayForThisFile ? overlay.path : ''
+  const overlayOpacity = overlayForThisFile ? overlay.opacity : 0.5
   const updateSettings = useCallback((patch: Partial<ViewerSettings>) => {
     setSettings((prev) => {
       const next = { ...prev, ...patch }
@@ -597,6 +641,22 @@ export const Viewer = memo(function Viewer({
               settings={settings}
               refreshSignal={refreshSignal}
               isResizing={isResizing}
+              overlayPath={overlayPath}
+              overlayOpacity={overlayOpacity}
+              onOverlayChange={(p) =>
+                setOverlay((prev) => ({
+                  base: path,
+                  path: p,
+                  opacity: prev.base === path ? prev.opacity : 0.5,
+                }))
+              }
+              onOpacityChange={(o) =>
+                setOverlay((prev) => ({
+                  base: path,
+                  path: prev.base === path ? prev.path : '',
+                  opacity: o,
+                }))
+              }
             />
             {rebuilding && (
               <div className="volume-loading">

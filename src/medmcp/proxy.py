@@ -41,6 +41,14 @@ JsonDict = dict[str, Any]
 _DEFAULT_STARTUP_TIMEOUT_SEC: float = 60.0
 _DEFAULT_TOOL_TIMEOUT_SEC: float = 900.0
 
+# Tools that exist for the backend pool's machinery, not for the model to call, so
+# the shim hides them from the vibe/LLM-facing tool list. Kept in sync by hand with
+# ``medmcp.backend_pool.WARMUP_TOOL`` rather than imported — importing that module
+# would pull the whole pool implementation into this deliberately lightweight per-call
+# shim. The pool discovers ``warmup`` by listing tools directly on the backend (not
+# through this proxy), so hiding it here leaves pre-warm untouched.
+_HIDDEN_TOOLS: frozenset[str] = frozenset({"warmup"})
+
 
 class ProxyError(Exception):
     """A broker- or registry-level error to surface to the caller as a tool error."""
@@ -188,7 +196,10 @@ async def _serve(stack: str) -> None:
     # Registered via decorator side effect; pyright can't see the access.
     @server.list_tools()
     async def _list_tools() -> list[mcp_types.Tool]:  # pyright: ignore[reportUnusedFunction]
-        return await forwarder.list_tools()
+        # Hide pool-machinery tools (e.g. ``warmup``) from the model; the pool still
+        # discovers them by listing tools directly on the backend.
+        tools = await forwarder.list_tools()
+        return [t for t in tools if t.name not in _HIDDEN_TOOLS]
 
     @server.call_tool(validate_input=False)
     async def _call_tool(  # pyright: ignore[reportUnusedFunction]

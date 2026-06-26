@@ -966,15 +966,23 @@ export const WorkflowPanel = memo(function WorkflowPanel({
           const inputNames = d.inputs.map((i) => i.name)
           const emptyRow = (): Record<string, string> =>
             Object.fromEntries(inputNames.map((n) => [n, '']))
-          // Append one row per selected explorer file, filling the first input;
-          // other inputs default to the last filled row so a shared input (e.g. a
-          // template) carries down. Drops leading blank rows.
+          // Distribute the selected files across rows: every N files (N = number
+          // of inputs) fill one row's inputs in order. So a 2-input workflow turns
+          // 2 selected files into one run (in_1, in_2), 4 files into two runs, etc.
+          // A single-input workflow gets one row per file. Drops blank rows.
           const addFromSelection = () => {
-            const first = inputNames[0]
-            if (!first) return
+            const k = inputNames.length
+            if (k === 0 || selectedPaths.length === 0) return
+            const added: Record<string, string>[] = []
+            for (let i = 0; i < selectedPaths.length; i += k) {
+              const row = emptyRow()
+              inputNames.forEach((n, j) => {
+                const file = selectedPaths[i + j]
+                if (file) row[n] = file
+              })
+              added.push(row)
+            }
             const filled = m.rows.filter((r) => Object.values(r).some((v) => v.trim()))
-            const template = filled[filled.length - 1] ?? emptyRow()
-            const added = selectedPaths.map((p) => ({ ...template, [first]: p }))
             setMode({ ...m, rows: [...filled, ...added] })
           }
           const singleIncomplete = inputNames.some((n) => !(m.values[n] ?? '').trim())
@@ -1033,8 +1041,9 @@ export const WorkflowPanel = memo(function WorkflowPanel({
               ) : (
                 <>
                   <div className="wf-hint">
-                    One row per run — each runs the whole workflow on its own inputs. Drag files into
-                    a cell, or select files in the explorer and “Add from selection”.
+                    One row per run — each runs the whole workflow on its own inputs. Drag a file
+                    into any cell, or select files in the explorer and “Add from selection” (every{' '}
+                    {d.inputs.length} selected file{d.inputs.length === 1 ? '' : 's'} fill one row).
                   </div>
                   <div className="wf-batch-table">
                     <div className="wf-batch-row wf-batch-head">
@@ -1091,7 +1100,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                         title={
                           selectedPaths.length === 0
                             ? 'Select files in the explorer first'
-                            : 'Add one row per selected file (fills the first input)'
+                            : `Group the ${selectedPaths.length} selected file(s) into rows of ${d.inputs.length} (one per input)`
                         }
                         onClick={addFromSelection}
                       >

@@ -12,6 +12,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -302,6 +303,60 @@ class TestSettingsMerge:
         assert harness["stacks"] == {"alpha", "beta"}
         assert harness["workflows"] == {"wf-keep"}
         assert result["restarted"] is False
+
+
+# ── Workflow export / import endpoints ───────────────────────────────────────
+
+
+class TestWorkflowShareEndpoints:
+    """Export/import workflow endpoints: wiring + error mapping."""
+
+    @pytest.fixture
+    def vibe_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Point both the server and provenance/share VIBE_HOME at a temp dir."""
+        monkeypatch.setattr(server, "VIBE_HOME", tmp_path)
+        monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
+        return tmp_path
+
+    def _envelope(self) -> str:
+        return yaml.safe_dump(
+            {
+                "medmcp_workflow": 1,
+                "name": "demo-flow",
+                "description": "demo",
+                "inputs": [{"name": "in_1", "example": "/d/a.nii.gz"}],
+                "steps": [
+                    {
+                        "server": "medmcp-neuro",
+                        "tool": "skull_strip",
+                        "arguments": {"input_path": "{{in_1}}"},
+                    }
+                ],
+            }
+        )
+
+    def test_import_then_export_round_trip(self, vibe_home: Path) -> None:
+        """A valid envelope imports as a draft and exports back as a YAML download."""
+        client = TestClient(server.app)
+        resp = client.post("/api/workflows/import", json={"content": self._envelope()})
+        assert resp.status_code == 200
+        assert resp.json()["name"] == "demo-flow"
+
+        exp = client.get("/api/workflows/demo-flow/export")
+        assert exp.status_code == 200
+        assert "medmcp_workflow" in exp.text
+        assert exp.headers["content-disposition"].endswith('demo-flow.workflow.yaml"')
+
+    def test_import_malformed_returns_400(self, vibe_home: Path) -> None:
+        """A payload that isn't a workflow envelope maps to HTTP 400."""
+        client = TestClient(server.app)
+        resp = client.post("/api/workflows/import", json={"content": "- not a mapping"})
+        assert resp.status_code == 400
+
+    def test_export_missing_returns_404(self, vibe_home: Path) -> None:
+        """Exporting an unknown workflow maps to HTTP 404."""
+        client = TestClient(server.app)
+        assert client.get("/api/workflows/nope/export").status_code == 404
 
 
 # ── Session resume helpers ───────────────────────────────────────────────────

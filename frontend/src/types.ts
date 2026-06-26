@@ -109,6 +109,14 @@ export interface WorkflowListEntry {
   kind: 'active' | 'draft'
 }
 
+/** A stack the workflow needs, pinned for reproducibility. */
+export interface StackRequirement {
+  stack: string
+  version?: string
+  image?: string
+  digest?: string
+}
+
 /** Full recipe detail from GET /api/workflows/{name}. */
 export interface WorkflowDetail {
   name: string
@@ -116,6 +124,8 @@ export interface WorkflowDetail {
   description: string
   inputs: { name: string; example: string; description: string }[]
   steps: { server: string; tool: string; arguments: Record<string, unknown> }[]
+  requires: StackRequirement[]
+  manual_steps: string[]
   replayable: boolean
   replay_error: string | null
 }

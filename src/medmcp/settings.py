@@ -543,6 +543,38 @@ def read_stack_label(image: str) -> JsonDict:
     return cast("JsonDict", meta)
 
 
+def resolve_image_digest(image: str) -> str | None:
+    """Return the local image's ``sha256:…`` digest, or ``None`` if unresolved.
+
+    Best-effort and offline: reads the ``RepoDigests`` of an **already-present**
+    image and never pulls — digest resolution (for a workflow's requirements pin)
+    must not block on a registry or drag in a multi-GB image. Prefers the digest
+    whose repository matches *image*, falling back to the first available.
+    """
+    image = image.strip()
+    if not image or any(c.isspace() for c in image) or not _image_present(image):
+        return None
+    try:
+        raw = _run_docker(["inspect", "--format", "{{json .RepoDigests}}", image], timeout=30)
+    except RuntimeError:
+        return None
+    try:
+        repo_digests = json.loads(raw.stdout.strip())
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(repo_digests, list):
+        return None
+    repo = image.split("@", 1)[0].rsplit(":", 1)[0]
+    digests = [
+        rd for rd in cast("list[Any]", repo_digests) if isinstance(rd, str) and "@sha256:" in rd
+    ]
+    for rd in digests:
+        rd_repo, _, digest = rd.partition("@")
+        if rd_repo == repo:
+            return digest
+    return digests[0].partition("@")[2] if digests else None
+
+
 def _extract_image_skills(image: str, in_image_path: str, into_dir: Path) -> None:
     """Copy ``<image>:<in_image_path>`` into *into_dir* via a throwaway container.
 

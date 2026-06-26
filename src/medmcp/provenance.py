@@ -99,6 +99,35 @@ def _read_model_config(model_name: str) -> JsonDict:
     return {}
 
 
+def _docker_image_ref(server: JsonDict) -> str | None:
+    """Return the container image ref for a ``docker``-launched stack, else ``None``.
+
+    MedMCP container stacks launch via ``docker run … <image>`` with no trailing
+    command, so the image is the last non-flag argument (e.g.
+    ``ghcr.io/medmcp/neuro:main``). Cheap and offline — no docker call.
+    """
+    if str(server.get("command", "")) != "docker":
+        return None
+    args = [str(a) for a in cast("list[Any]", server.get("args", []))]
+    for arg in reversed(args):
+        if not arg.startswith("-"):
+            return None if arg == "run" else arg
+    return None
+
+
+def _stack_manifest_entry(server: JsonDict) -> JsonDict:
+    """Build one stack entry for the manifest (name/version/command + image)."""
+    entry: JsonDict = {
+        "name": server.get("name"),
+        "version": server.get("version"),
+        "command": server.get("command"),
+    }
+    image = _docker_image_ref(server)
+    if image:
+        entry["image"] = image
+    return entry
+
+
 def build_manifest(session_id: str, *, servers: list[JsonDict], model_name: str) -> JsonDict:
     """Assemble (but do not write) the environment manifest for a session."""
     return {
@@ -108,14 +137,7 @@ def build_manifest(session_id: str, *, servers: list[JsonDict], model_name: str)
             "git_commit": _git(["rev-parse", "HEAD"]),
             "git_branch": _git(["rev-parse", "--abbrev-ref", "HEAD"]),
         },
-        "stacks": [
-            {
-                "name": s.get("name"),
-                "version": s.get("version"),
-                "command": s.get("command"),
-            }
-            for s in servers
-        ],
+        "stacks": [_stack_manifest_entry(s) for s in servers],
         "model": {"name": model_name, **_read_model_config(model_name)},
         "platform": {
             "python": sys.version.split()[0],

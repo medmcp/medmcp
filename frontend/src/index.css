@@ -1833,6 +1833,37 @@ textarea.wf-input {
   line-height: 1.45;
 }
 
+.wf-requires {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+}
+
+.wf-requires-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.wf-requires-list,
+.wf-manual-list {
+  margin: 2px 0 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wf-req-pin {
+  margin-left: 6px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
 .wf-runlog {
   display: flex;
   flex-direction: column;

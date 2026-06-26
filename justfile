@@ -146,6 +146,16 @@ workflows:
 delete-workflow NAME:
     uv run medmcp delete {{NAME}}
 
+# Export a workflow to a shareable <name>.workflow.yaml (add --out PATH to override)
+# Usage: just export-workflow <workflow-name>
+export-workflow NAME *ARGS:
+    uv run medmcp export {{NAME}} {{ARGS}}
+
+# Import a shared workflow file as a reviewable draft
+# Usage: just import-workflow <file.workflow.yaml>
+import-workflow FILE:
+    uv run medmcp import {{FILE}}
+
 # Launch the workspace UI (explorer + viewer + chat) at http://localhost:8100
 workspace:
     uv run medmcp-workspace

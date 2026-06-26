@@ -99,7 +99,7 @@ def _read_model_config(model_name: str) -> JsonDict:
     return {}
 
 
-def _docker_image_ref(server: JsonDict) -> str | None:
+def docker_image_ref(server: JsonDict) -> str | None:
     """Return the container image ref for a ``docker``-launched stack, else ``None``.
 
     MedMCP container stacks launch via ``docker run … <image>`` with no trailing
@@ -122,7 +122,7 @@ def _stack_manifest_entry(server: JsonDict) -> JsonDict:
         "version": server.get("version"),
         "command": server.get("command"),
     }
-    image = _docker_image_ref(server)
+    image = docker_image_ref(server)
     if image:
         entry["image"] = image
     return entry

@@ -1864,6 +1864,33 @@ textarea.wf-input {
   font-size: 11px;
 }
 
+.wf-req-status {
+  display: inline-block;
+  width: 1em;
+  margin-right: 5px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.wf-req-status.ok {
+  color: var(--ok);
+}
+
+.wf-req-status.missing {
+  color: var(--red);
+}
+
+.wf-req-status.mismatch {
+  color: var(--warn);
+}
+
+.wf-req-warn {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--warn);
+  line-height: 1.45;
+}
+
 .wf-runlog {
   display: flex;
   flex-direction: column;
@@ -1988,6 +2015,100 @@ textarea.wf-input {
   border: 1px solid var(--border2);
   border-radius: 5px;
   background: var(--card);
+}
+
+.wf-mode-toggle {
+  display: inline-flex;
+  align-self: flex-start;
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.wf-mode-toggle button {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  cursor: pointer;
+}
+
+.wf-mode-toggle button + button {
+  border-left: 1px solid var(--border2);
+}
+
+.wf-mode-toggle button.active {
+  background: var(--blue);
+  color: #fff;
+}
+
+.wf-batch-table {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.wf-batch-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.wf-batch-idx {
+  width: 18px;
+  flex: none;
+  text-align: right;
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+
+.wf-batch-col {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-batch-rm {
+  width: 22px;
+  flex: none;
+}
+
+.wf-batch-cell {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  font-family: var(--mono);
+  background: var(--dark2);
+  color: var(--text);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+
+.wf-batch-cell:focus {
+  outline: none;
+  border-color: var(--blue-l);
+}
+
+.wf-batch-cell.drop-ready {
+  border-color: var(--blue-xl);
+  box-shadow: 0 0 0 2px rgba(127, 168, 245, 0.25);
+}
+
+.wf-batch-tools {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
 }
 
 .wf-batch-summary {

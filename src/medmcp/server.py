@@ -49,7 +49,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from medmcp import distill, explain, provenance, replay, sessions, settings, share
+from medmcp import distill, explain, provenance, replay, sessions, settings, share, workflow
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict, VibeAcpClient
 from medmcp.backend_broker import BackendBroker
 from medmcp.backend_pool import BackendPool, BackendSpec
@@ -554,6 +554,32 @@ def _workflow_dir(name: str) -> Path | None:
     return None
 
 
+def _requirement_statuses(recipe: workflow.Recipe, servers: list[JsonDict]) -> list[JsonDict]:
+    """Each requirement enriched with its availability against the installed stacks.
+
+    ``status`` is ``"missing"`` (the stack isn't installed), ``"mismatch"`` (it is,
+    but the locally-present image digest differs from the pinned one — results may
+    not reproduce), or ``"ok"``. Offline (reads already-present image digests) and
+    best-effort: a digest it can't resolve is treated as ``"ok"`` rather than a
+    false alarm.
+    """
+    by_name = {str(s.get("name")): s for s in servers}
+    statuses: list[JsonDict] = []
+    for req in recipe.requires:
+        entry = req.to_dict()
+        server = by_name.get(req.stack)
+        if server is None:
+            entry["status"] = "missing"
+        else:
+            image = provenance.docker_image_ref(server)
+            local = settings.resolve_image_digest(image) if image else None
+            if local:
+                entry["installed_digest"] = local
+            entry["status"] = "mismatch" if req.digest and local and req.digest != local else "ok"
+        statuses.append(entry)
+    return statuses
+
+
 def _workflow_detail(name: str) -> JsonDict:
     """Load a workflow's recipe and replayability state (blocking; run in a thread)."""
     d = _workflow_dir(name)
@@ -561,7 +587,8 @@ def _workflow_detail(name: str) -> JsonDict:
         raise FileNotFoundError(f"no workflow named {name!r}")
     recipe = distill.load_recipe(d)
     examples = {i.name: i.example for i in recipe.inputs}
-    replay_error = replay.validate(recipe, examples, settings.active_servers())
+    servers = settings.active_servers()
+    replay_error = replay.validate(recipe, examples, servers)
     return {
         "name": recipe.name,
         "kind": d.parent.name,
@@ -570,7 +597,7 @@ def _workflow_detail(name: str) -> JsonDict:
         "steps": [
             {"server": s.server, "tool": s.tool, "arguments": s.arguments} for s in recipe.steps
         ],
-        "requires": [r.to_dict() for r in recipe.requires],
+        "requires": _requirement_statuses(recipe, servers),
         "manual_steps": list(recipe.manual_steps),
         "replayable": replay_error is None,
         "replay_error": replay_error,

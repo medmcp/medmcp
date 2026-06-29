@@ -2,53 +2,50 @@
 
 <p align="center">
   <a href="https://medmcp.ai"><b>medmcp.ai</b></a> ·
-  <a href="#installation">Installation</a> ·
+  <a href="#quick-start">Quick start</a> ·
   <a href="#security">Security</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
-MedMCP is an open, agentic framework that puts validated medical-imaging tools behind a natural-language interface. It lets clinicians, radiologists, and researchers run state-of-the-art image-analysis pipelines without the command line, Python environments, or library-specific APIs.
+MedMCP is an open, community-driven agentic framework that exposes validated medical imaging tools through a natural-language interface.
+It is designed to enable clinicians, radiologists, and domain researchers to apply state-of-the-art image analysis methods without requiring expertise in command-line interfaces, Python environment management, or library-specific APIs.
 
-Everything runs **on-premise**: a locally served model plans and sequences the work, all computation is delegated to tested implementations, and no imaging data, patient metadata, or results leave your infrastructure. You work through a single browser workspace — file explorer, image viewer, workflows, and chat — at `http://localhost:8100`.
-
-Learn more at **[medmcp.ai](https://medmcp.ai)**.
+Everything runs **on-premise**: a locally served model plans and sequences the work, all computation is delegated to tested implementations, and no imaging data, patient metadata, or results leave your infrastructure. You work through a single workspace that contains a *file explorer, image viewer, replay engine for personal workflows, and the chat interface*.
 
 > [!WARNING]
 > MedMCP is under active development and **not licensed for clinical use**.
 
 ---
 
-## Installation
+## Quick start
 
-The easiest way to run MedMCP is with the prebuilt Docker images — nothing to build, no source to download.
+The easiest way to run MedMCP is with the prebuilt Docker images.
 
-**You need:** Linux with an NVIDIA GPU (≥ 24 GB VRAM recommended for the local Gemma 4 26B model), a recent driver (≥ R570 / CUDA 12.8), and Docker with GPU access via the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/) (CDI; rootless Docker works).
-
-**Start it.** Set `MEDMCP_WORKSPACE` to the folder where your imaging data lives and results should be saved (any absolute path):
+**Start with a single command:** Set `MEDMCP_WORKSPACE` to the folder where your imaging data lives and results should be saved (any absolute path):
 
 ```bash
 MEDMCP_WORKSPACE="$HOME/medmcp-data" \
   docker compose -f oci://ghcr.io/medmcp/compose:main up -d
 ```
+Then open **http://localhost:8100**.
 
-The first start downloads the model (~18 GB), so give it a few minutes. Then open **http://localhost:8100**.
+**Requirements:** Linux OS with an NVIDIA GPU (≥ 24 GB VRAM recommended for the local Gemma 4 26B model), a recent driver (≥ R570 / CUDA 12.8), and Docker with GPU access via the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/) (CDI; rootless Docker works).
 
-**Add imaging tools.** In the UI, open **Settings → Stacks → Available** and install the stacks you need (e.g. `dicom`, `neuro`). Each one downloads the first time the agent uses it.
+**Stop** with `docker compose -f oci://ghcr.io/medmcp/compose:main down`.
 
-**Stop** with `docker compose -f oci://ghcr.io/medmcp/compose:main down`. **Update** by re-running the start command with `--pull always`.
+**Update** by re-running the start command with `--pull always`.
 
 > Want to build from source or run host-native? See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 ---
 
-## Team
+## Features
 
-MedMCP is developed and maintained by:
-
-- **Julian McGinnis** — Technical University of Munich
-- **Paul Friedrich** — University of Basel
-
-… together with the [open-source community](CONTRIBUTING.md).
+- **Chat & Agent**: a familiar interface to interact with your local models, tools, and skills.
+- **File explorer**: a builtin file explorer to organize your data.
+- **Image viewer**: a builtin image viewer for medical images (`.nii.gz`, `.nrrd`, `.dcm`, ...) and other file formats (`.pdf`, `.csv`, ...).
+- **Replay engine**: a replay engine for distilling and replaying processing pipelines into shareable workflows.
+- **Easy to extend**: easily install new imaging capabilities through the UI.
 
 ---
 
@@ -56,9 +53,9 @@ MedMCP is developed and maintained by:
 
 MedMCP assumes the local model can be steered by prompt injection (e.g. text pasted from untrusted documents), so its safety model is built around explicit user control:
 
-- **No auto-approval** — every tool call (bash, file writes, web fetches) requires an explicit click. There is no auto-approval path.
-- **Localhost only** — the server binds to localhost. Do not expose port 8100 over a network without adding real authentication.
-- **No data egress** — `web_search` is disabled and `web_fetch` requires approval. Nothing leaves your infrastructure by default.
+- **No auto-approval**: every tool call (bash, file writes, web fetches) requires an explicit click.
+- **Localhost only**: the server binds to localhost. Do not expose port 8100 over a network without adding real authentication.
+- **No data egress**: `web_search` is disabled and `web_fetch` requires approval. Nothing leaves your infrastructure by default.
 
 To report a vulnerability, see **[SECURITY.md](SECURITY.md)**.
 
@@ -66,7 +63,35 @@ To report a vulnerability, see **[SECURITY.md](SECURITY.md)**.
 
 ## Contributing
 
-Contributions are welcome. MedMCP grows through a shared schema for tool and skill metadata, CI-based testing, and a central registry — so every new contribution is immediately available to all users. See **[CONTRIBUTING.md](CONTRIBUTING.md)** to set up a development environment and submit a pull request.
+Contributions are welcome. MedMCP grows through a shared schema for tool and skill metadata, CI-based testing, and a central registry — so every new contribution is immediately available to all users.
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** to set up a development environment and submit a pull request.
+
+---
+
+## Team
+
+MedMCP is developed and maintained by:
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <a href="https://github.com/jqmcginnis"><img src="https://github.com/jqmcginnis.png" width="64" height="64" alt="Julian McGinnis"/></a><br/>
+      <b>Julian McGinnis</b><br/>
+      Technical University of Munich<br/>
+      <a href="https://jqmcginnis.github.io/">Website</a> · <a href="https://github.com/jqmcginnis">GitHub</a>
+    </td>
+    <td align="center" width="50%">
+      <a href="https://github.com/pfriedri"><img src="https://github.com/pfriedri.png" width="64" height="64" alt="Paul Friedrich"/></a><br/>
+      <b>Paul Friedrich</b><br/>
+      University of Basel<br/>
+      <a href="https://pfriedri.github.io">Website</a> · <a href="https://github.com/pfriedri">GitHub</a>
+    </td>
+  </tr>
+</table>
+
+… together with the [open-source community](CONTRIBUTING.md):
+
+[![Contributors](https://contrib.rocks/image?repo=medmcp/medmcp-dev)](https://github.com/medmcp/medmcp-dev/graphs/contributors)
 
 ---
 

@@ -1,205 +1,90 @@
 ![](https://capsule-render.vercel.app/api?type=waving&height=200&color=0:D22229,100:2B4FA3&text=MedMCP&reversal=false&fontSize=46&fontAlignY=28&desc=An%20Agentic%20Framework%20for%20Democratizing%20Medical%20Imaging%20Pipelines&descSize=24&descAlignY=55&fontColor=FFFFFF)
 
+<p align="center">
+  <a href="https://medmcp.ai"><b>medmcp.ai</b></a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#security">Security</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
+
 MedMCP is an open, community-driven agentic framework that exposes validated medical imaging tools through a natural-language interface.
 It is designed to enable clinicians, radiologists, and domain researchers to apply state-of-the-art image analysis methods without requiring expertise in command-line interfaces, Python environment management, or library-specific APIs.
 
-The framework enforces a strict separation between **orchestration** and **execution**: a locally served language model plans and sequences operations by invoking pre-registered tools, while all computational work is delegated to validated, tested implementations.
-MedMCP runs entirely on-premise and is designed to meet the data governance and privacy requirements of clinical and translational research environments.
+Everything runs **on-premise**: a locally served model plans and sequences the work, all computation is delegated to tested implementations, and no imaging data, patient metadata, or results leave your infrastructure. You work through a single workspace that contains a *file explorer, image viewer, replay engine for personal workflows, and the chat interface*.
 
 > [!WARNING]
-> MedMCP is under active development and not licensed for clinical use!
+> MedMCP is under active development and **not licensed for clinical use**.
 
 ---
 
-## Table of Contents
+## Quick start
 
-- [Installation](#installation)
-- [Vision](#vision)
-- [Architecture](#architecture)
-- [Workspace UI](#workspace-ui)
-- [Imaging Stacks](#imaging-stacks)
-- [Provenance & Reusable Workflows](#provenance--reusable-workflows)
-- [Security](#security)
-- [Contributing](#contributing)
-- [License](#license)
+The easiest way to run MedMCP is with the prebuilt Docker images.
 
----
-
-## Installation
-
-### Prerequisites
-
-- **OS:** Linux (tested on Ubuntu)
-- **Hardware:** an NVIDIA GPU; ≥ 24 GB VRAM recommended for the local Gemma 4 26B model (~18 GB loaded). CPU-only inference works but is slow.
-- **To run (recommended):** Docker (rootless is supported) + the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/) with a CDI spec (`nvidia-ctk cdi generate`); host driver ≥ R570 (CUDA 12.8); and access to the private image registry — `docker login ghcr.io` with a `read:packages` token.
-- **To develop (build from source):** [uv](https://docs.astral.sh/uv/) and [just](https://github.com/casey/just) (we recommend `uv tool install rust-just`); Node 24 for the frontend.
-
-### Run with Docker (recommended)
-
-MedMCP runs as prebuilt images — there's nothing to build and no source to download.
-You just need Docker with GPU access (see [Prerequisites](#prerequisites)) and a
-registry login.
-
-1. **Sign in to the registry** (once per machine):
-
-   ```bash
-   docker login ghcr.io   # username: your GitHub user · password: a read:packages token
-   ```
-
-2. **Start MedMCP.** `MEDMCP_WORKSPACE` is the folder on your machine where your imaging
-   data lives and where results are saved — use any absolute path:
-
-   ```bash
-   MEDMCP_WORKSPACE="$HOME/medmcp-data" \
-     docker compose -f oci://ghcr.io/medmcp/compose:main up -d
-   ```
-
-   The first start downloads the model (~18 GB), so give it a few minutes. Then open
-   **http://localhost:8100**.
-
-3. **Add imaging tools.** In the UI, open **Settings → Stacks → Available** and install
-   the stacks you need (e.g. `dicom`, `neuro`). Each one downloads on demand the first
-   time the agent uses it.
-
-**Stop** with `docker compose -f oci://ghcr.io/medmcp/compose:main down`. **Update** by
-re-running the start command with `--pull always`.
-
-### Run from source (development)
-
-To build and run everything locally instead of pulling images:
+**Start with a single command:** Set `MEDMCP_WORKSPACE` to the folder where your imaging data lives and results should be saved (any absolute path):
 
 ```bash
-just compose-up   # build the images, then start core + Ollama (http://localhost:8100)
+MEDMCP_WORKSPACE="$HOME/medmcp-data" \
+  docker compose -f oci://ghcr.io/medmcp/compose:main up -d
 ```
+Then open **http://localhost:8100**.
 
-Or run host-native (uv + Ollama, no containers):
+**Requirements:** Linux OS with an NVIDIA GPU (≥ 24 GB VRAM recommended for the local Gemma 4 26B model), a recent driver (≥ R570 / CUDA 12.8), and Docker with GPU access via the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/) (CDI; rootless Docker works).
 
-```bash
-just medmcp       # install everything, pull the model, start Ollama, launch the UI
-```
+**Stop** with `docker compose -f oci://ghcr.io/medmcp/compose:main down`.
 
-MedMCP's primary interface is the **workspace UI** — a four-panel layout (file
-explorer, medical-image viewer, workflows, chat). See [Workspace UI](#workspace-ui).
+**Update** by re-running the start command with `--pull always`.
 
-> **Developing MedMCP?** The recommended setup is the **dev container** (PyCharm or
-> VS Code) — see [CONTRIBUTING.md](CONTRIBUTING.md).
+> Want to build from source or run host-native? See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 ---
 
-## Vision
+## Features
 
-MedMCP aims to become a **community-driven framework of tested medical imaging skills** for local AI agents. The core idea:
-
-- **Accessibility** — MedMCP exists to make validated imaging tools reachable, not to produce new ones. Every architectural decision is evaluated against one question: *"Does this reduce the barrier between a working method and the practitioner who needs it?"*
-- **Local-First** — MedMCP runs entirely on-premise: LLM inference is handled by a locally served model (in our case via Ollama), and no imaging data, patient metadata, or intermediate results leave the institution's infrastructure. This is a hard architectural constraint, not an optional feature.
-- **Community Driven** — MedMCP is designed to grow through community contributions: a shared schema for tool and skill metadata, CI-based testing, and a central registry for discovery ensure that each new contribution is immediately available to all users. Accessibility scales with the community, not with any single team's capacity. [Learn how to contribute!](CONTRIBUTING.md)
-
----
-
-## Architecture
-
-MedMCP is built as a three-layer stack:
-
-1. **Web UI** — the user-facing frontend: the **workspace UI** (`src/medmcp/server.py` + `frontend/`, `http://localhost:8100`; see [Workspace UI](#workspace-ui)).
-2. **vibe-acp subprocess** — an agent orchestrator that receives JSON-RPC 2.0 messages from the UI, manages tool execution, and communicates with the local LLM.
-3. **Ollama** — serves the local Gemma 4 model (`Modelfile.gemma4`) with 128k context, top-p/top-k sampling, and repeat-penalty guards. The model runs at temperature 0.3 for deterministic instruction-following, configured in `Modelfile.gemma4`.
-
-The UI spawns a single vibe-acp subprocess and demultiplexes sessions over it. Every tool call (bash, file writes, web fetches) is gated by an interactive Approve/Reject prompt — the user must explicitly approve each action before any side effect occurs.
-
-MedMCP runs **host-native** (the `just` recipes above) or **fully containerized** for deployment: a CPU-only core image plus a bundled Ollama GPU service, with imaging stacks launched as their own GPU containers. The same on-premise, no-egress, per-tool-approval posture holds in both modes. See [Run with Docker](#run-with-docker-recommended).
-
----
-
-## Workspace UI
-
-The **workspace UI** is MedMCP's primary interface — a four-panel layout built for working *with* imaging data, not just chatting about it:
-
-- **File explorer** (top-left) — browse, rename, move, delete, and upload files in your workspace.
-- **Image viewer** (top-right) — view medical images directly in the browser: NIfTI/NRRD/MGZ volumes render with multiplanar slices and a 3D view (scroll to move through slices), and PDFs, images, and text files open inline. **Drag a segmentation from the explorer onto an image** to overlay it — each label is drawn in a distinct color over the anatomy, with an adjustable opacity, and the background stays transparent in both the slices and the 3D render.
-- **Workflows** (bottom-left) — save the current chat as a reusable workflow (the bookmark button distills it into a recipe + skill), then review, rename, refine, promote, or delete it. **Run** replays a saved recipe deterministically on new inputs — no LLM involved: fill in the inputs (drag files in from the explorer), review the resolved steps, and watch each step stream its result.
-- **Chat** (bottom-right) — the MedMCP agent, with streamed responses, per-tool-call approval prompts (with plain-language explanations and risk tags), and a settings drawer for the stack/workflow/feature toggles. The agent knows which file is open in the viewer, so "this image" means what you're looking at. Conversations persist: a refresh resumes your last session, and a **Chats menu** lists, renames, archives, or deletes this workspace's past sessions.
-
-The workspace UI is served by a local server on `http://localhost:8100`.
-
-```bash
-just workspace-build  # build the React frontend (requires node + npm; one-time / after updates)
-just workspace        # launch the workspace UI at http://localhost:8100
-```
-
-The explorer and the agent's working directory are rooted at the repository's `data/` directory by default (created on first launch); point them at another folder with `MEDMCP_WORKSPACE=/path/to/data just workspace`. The server binds to localhost only and gates every tool call behind explicit approval.
-
----
-
-## Imaging Stacks
-
-MedMCP's imaging capabilities are provided by optional **stack** packages. Each stack bundles domain-specific tools and their foundation dependencies into a single MCP server.
-
-```
-┌─ medmcp (core) ──────────────────────────────────┐
-│  workspace UI, agent loop, prompts, config       │
-└──────────────────────────────────────────────────┘
-           │ discovers via uv tool environments
-           ▼
-┌─ stack layer (domain-specific) ──────────────────┐
-│  medmcp-neuro       brain extraction, seg, reg   │
-│  medmcp-cardiac     (planned)                    │
-│  medmcp-microscopy  (planned)                    │
-└──────────────────────────────────────────────────┘
-           │ depends on
-           ▼
-┌─ foundation layer (shared I/O) ──────────────────┐
-│  medmcp-dicom       DICOM inspection + conversion│
-└──────────────────────────────────────────────────┘
-```
-
-Each stack runs in its own isolated uv tool environment. Install a stack with:
-
-```bash
-just install-stack "git+ssh://git@github.com/medmcp/medmcp-neuro.git"
-```
-
-Once installed, the stack is auto-discovered via its `[medmcp.stacks]` entry point and appears as a toggle in the UI's **ChatSettings panel** — no manual edits to `.vibe/config.toml` needed. Toggle changes take effect on the next conversation. Restart the UI after installing or removing a stack.
-
-**Containerized stacks (deployment).** A stack can instead ship as a container image and be declared in a `stacks.d/<name>.toml` manifest (`command = "docker"`, `args = [...]`); the core then launches it over stdio with `docker run -i` (GPU stacks add `--device nvidia.com/gpu=all`). This is a second discovery source alongside `uv tool` installs — a local `uv tool` install of the same name takes precedence, so you can develop against a local checkout while the fleet runs the pinned image. Each containerized stack pins its own CUDA build, so it runs on any host with driver ≥ R570 (CUDA backward-compatibility covers newer drivers).
-
-**Private images (GHCR).** CI (`.github/workflows/images.yml`) builds and pushes the base, core, and stack images to the **private** registry `ghcr.io/medmcp/*` (packages are private by default; the base package must grant the stack repos read access). For a private fleet:
-
-1. `docker login ghcr.io` on each node (a `read:packages` token); compose mounts the host's docker credentials so the in-UI install can pull.
-2. Run the **published** images (pulls the core, builds nothing) with the deploy compose, published as an OCI artifact — `docker compose -f oci://ghcr.io/medmcp/compose:main up -d` (no checkout needed). It defaults `MEDMCP_CATALOG_URL` to the bundled `/app/catalog.ghcr.json`; pin a release with `MEDMCP_TAG=<git-sha>`. From a checkout, `just compose-up-ghcr` uses the local file.
-
-Air-gapped sites mirror the images into an internal registry and point the catalog there instead. No image data leaves the machine either way — these are inbound pulls.
-
----
-
-## Provenance & Reusable Workflows
-
-Beyond running one-off analyses, MedMCP records what it does and lets you turn a successful session into a repeatable pipeline.
-
-- **Provenance** — every session is recorded to `.vibe/provenance/<session>/`: the environment (git commit, active stacks + versions, model), one normalized entry per tool call (resolved arguments, structured outputs, permission decision, duration), a mirror of the approval log, and a documentation-grade `report.md`. Recording is on by default and can be turned off per session with the **Record provenance** switch in settings. Deleting a chat in the UI removes its logs; you never need the CLI for cleanup.
-
-- **Save a workflow** — the **Save workflow** button in the message box distills the current chat into a reusable workflow. MedMCP keeps only the steps that mattered (dropping exploratory, failed, and rejected tool calls) and lifts concrete file paths into named inputs, producing a human-readable `SKILL.md` and a machine-readable `recipe.yaml`. Review, rename, refine, and **Promote** it to keep it as a permanent skill.
-
-- **Replay on new data (no LLM)** — the **Run** button replays a saved workflow deterministically: it asks for the new inputs (each labelled with what it is, e.g. *the input_path for `medmcp-neuro:skull_strip`*), shows you the exact steps it will run, and on confirmation calls the same tools in the same order — no model reasoning involved. Step outputs are fed forward automatically, and a failed step aborts the run.
-
-Personal workflows can be toggled on/off individually, or disabled entirely with the **Personal workflows** master switch in settings. The same operations are available from the `medmcp` CLI (`medmcp list`, `report`, `distill`, `promote`, …) and the matching `just` recipes for scripted use.
+- **Chat & Agent**: a familiar interface to interact with your local models, tools, and skills.
+- **File explorer**: a builtin file explorer to organize your data.
+- **Image viewer**: a builtin image viewer for medical images (`.nii.gz`, `.nrrd`, `.dcm`, ...) and other file formats (`.pdf`, `.csv`, ...).
+- **Replay engine**: a replay engine for distilling and replaying processing pipelines into shareable workflows.
+- **Easy to extend**: easily install new imaging capabilities through the UI.
 
 ---
 
 ## Security
 
-MedMCP's security model is designed around the assumption that the local model may be steered by prompt injection (e.g. content pasted from untrusted documents). Key constraints:
+MedMCP assumes the local model can be steered by prompt injection (e.g. text pasted from untrusted documents), so its safety model is built around explicit user control:
 
-- **No auto-approval** — every tool call requires an explicit user click. There is no auto-approval path.
-- **Localhost only** — the workspace server binds to localhost. Do not expose port 8100 over a network without adding real authentication.
-- **No data exfiltration** — `web_search` is disabled; `web_fetch` requires approval. No data leaves the institution's infrastructure by default.
+- **No auto-approval**: every tool call (bash, file writes, web fetches) requires an explicit click.
+- **Localhost only**: the server binds to localhost. Do not expose port 8100 over a network without adding real authentication.
+- **No data egress**: `web_search` is disabled and `web_fetch` requires approval. Nothing leaves your infrastructure by default.
 
-For vulnerability reporting, see [SECURITY.md](SECURITY.md).
+To report a vulnerability, see **[SECURITY.md](SECURITY.md)**.
 
 ---
 
 ## Contributing
 
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for instructions on forking, setting up a development environment, running checks, and submitting pull requests.
+We welcome community contributions.
+
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** to set up a development environment and submit a pull request.
+
+### Contributors
+
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
+<table>
+  <tbody>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://jqmcginnis.github.io/"><img src="https://avatars.githubusercontent.com/u/33037028?v=4?s=100" width="100px;" alt="Julian McGinnis"/><br /><sub><b>Julian McGinnis</b></sub></a><br /><a href="https://github.com/medmcp/medmcp-dev/commits?author=jqmcginnis" title="Code">💻</a> <a href="#ideas-jqmcginnis" title="Ideas, Planning, & Feedback">🤔</a> <a href="https://github.com/medmcp/medmcp-dev/commits?author=jqmcginnis" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://pfriedri.github.io"><img src="https://avatars.githubusercontent.com/u/101359393?v=4?s=100" width="100px;" alt="Paul Friedrich"/><br /><sub><b>Paul Friedrich</b></sub></a><br /><a href="https://github.com/medmcp/medmcp-dev/commits?author=pfriedri" title="Code">💻</a> <a href="#ideas-pfriedri" title="Ideas, Planning, & Feedback">🤔</a> <a href="https://github.com/medmcp/medmcp-dev/commits?author=pfriedri" title="Documentation">📖</a></td>
+    </tr>
+  </tbody>
+</table>
+<!-- markdownlint-restore -->
+<!-- prettier-ignore-end -->
+<!-- ALL-CONTRIBUTORS-LIST:END -->
+
+This project follows the [all-contributors](https://allcontributors.org) specification — contributions of any kind are welcome!
 
 ---
 

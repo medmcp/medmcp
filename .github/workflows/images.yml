@@ -4,7 +4,7 @@ name: Images
 # On pull_request: build only (validates the Dockerfiles) — no login, no push.
 # Plain `docker build` on the runner's daemon so core can FROM the just-built base
 # without a registry round-trip. amd64 only — build arm64 natively on an aarch64
-# runner / the Spark (QEMU is too slow for the CUDA/torch compiles).
+# runner (QEMU is too slow for the CUDA/torch compiles).
 on:
   push:
     branches: [main]

@@ -5,7 +5,7 @@
 # CUDA + Python + uv layers are not rebuilt per stack.
 #
 # CUDA_TAG is a build arg so the base tracks the deployment target:
-#   - 12.8.1 (default) matches a host driver >= R570 (CUDA 12.8) — testable here.
+#   - 12.8.1 (default) matches a host driver >= R570 (CUDA 12.8).
 #   - 13.0.x for an R580+ fleet (matches torch 2.11's bundled CUDA 13; note that
 #     torch self-contains its CUDA libs, so its GPU requirement is driven by the
 #     wheel, not by this base).

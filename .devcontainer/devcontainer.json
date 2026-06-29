@@ -1,11 +1,11 @@
 {
-  "name": "medmcp-dev",
+  "name": "medmcp",
   "build": {
     "dockerfile": "Dockerfile",
     "args": { "BASE_IMAGE": "medmcp-base:dev" }
   },
-  "workspaceFolder": "/workspaces/medmcp-dev",
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/medmcp-dev,type=bind",
+  "workspaceFolder": "/workspaces/medmcp",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/medmcp,type=bind",
   "mounts": [
     "source=${localEnv:XDG_RUNTIME_DIR}/docker.sock,target=/var/run/docker.sock,type=bind"
   ],

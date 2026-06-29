@@ -63,7 +63,8 @@ To report a vulnerability, see **[SECURITY.md](SECURITY.md)**.
 
 ## Contributing
 
-Contributions are welcome. MedMCP grows through a shared schema for tool and skill metadata, CI-based testing, and a central registry — so every new contribution is immediately available to all users.
+We welcome community contributions. We believe
+
 See **[CONTRIBUTING.md](CONTRIBUTING.md)** to set up a development environment and submit a pull request.
 
 ---
@@ -89,9 +90,30 @@ MedMCP is developed and maintained by:
   </tr>
 </table>
 
-… together with the [open-source community](CONTRIBUTING.md):
+… together with the wider [open-source community](CONTRIBUTING.md).
 
-[![Contributors](https://contrib.rocks/image?repo=medmcp/medmcp-dev)](https://github.com/medmcp/medmcp-dev/graphs/contributors)
+### Contributors
+
+[![All Contributors](https://img.shields.io/badge/all_contributors-2-orange.svg?style=flat-square)](#contributors)
+
+Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
+
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
+<table>
+  <tbody>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://jqmcginnis.github.io/"><img src="https://avatars.githubusercontent.com/u/33037028?v=4?s=100" width="100px;" alt="Julian McGinnis"/><br /><sub><b>Julian McGinnis</b></sub></a><br /><a href="https://github.com/medmcp/medmcp-dev/commits?author=jqmcginnis" title="Code">💻</a> <a href="#ideas-jqmcginnis" title="Ideas, Planning, & Feedback">🤔</a> <a href="https://github.com/medmcp/medmcp-dev/commits?author=jqmcginnis" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://pfriedri.github.io"><img src="https://avatars.githubusercontent.com/u/101359393?v=4?s=100" width="100px;" alt="Paul Friedrich"/><br /><sub><b>Paul Friedrich</b></sub></a><br /><a href="https://github.com/medmcp/medmcp-dev/commits?author=pfriedri" title="Code">💻</a> <a href="#ideas-pfriedri" title="Ideas, Planning, & Feedback">🤔</a> <a href="https://github.com/medmcp/medmcp-dev/commits?author=pfriedri" title="Documentation">📖</a></td>
+    </tr>
+  </tbody>
+</table>
+<!-- markdownlint-restore -->
+<!-- prettier-ignore-end -->
+<!-- ALL-CONTRIBUTORS-LIST:END -->
+
+This project follows the [all-contributors](https://allcontributors.org) specification — contributions of any kind are welcome!
 
 ---
 

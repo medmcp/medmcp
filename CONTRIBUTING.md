@@ -15,13 +15,13 @@ already be implemented.
 
 ### 2) Fork the `medmcp` repository on GitHub
 
-Click [here](https://github.com/medmcp/medmcp-dev/fork) to create your fork.
+Click [here](https://github.com/medmcp/medmcp/fork) to create your fork.
 
 ### 3) Clone your fork locally
 
 ```bash
-git clone https://github.com/<your-username>/medmcp-dev.git
-cd medmcp-dev
+git clone https://github.com/<your-username>/medmcp.git
+cd medmcp
 ```
 
 ### 4) Develop in the dev container (recommended)

@@ -87,7 +87,7 @@ async def generate_explanation(tc: JsonDict) -> tuple[str, list[str]] | None:
     if len(raw_input_str) > 400:
         raw_input_str = raw_input_str[:400] + "\n… (truncated)"
 
-    valid_keys = ", ".join(RISK_CATEGORIES)
+    risk_options = "\n".join(f"- {key}: {label}" for key, (label, _) in RISK_CATEGORIES.items())
     prompt = (
         "You are a security-aware assistant helping a physician review an AI action "
         "before it runs on their computer. Your job is to explain what the action does "
@@ -98,8 +98,9 @@ async def generate_explanation(tc: JsonDict) -> tuple[str, list[str]] | None:
         "'filesystem path', 'subprocess', or 'flag' into everyday language "
         "(e.g. 'runs a program', 'opens a file', 'contacts a website').\n"
         "- State what the action will DO and what will CHANGE as a result.\n\n"
-        "Then select every applicable risk from this fixed list (use the exact keys):\n"
-        f"{valid_keys}\n\n"
+        "Then select every applicable risk from this fixed list — output the exact key "
+        "shown before each colon, and pick none if the action is harmless:\n"
+        f"{risk_options}\n\n"
         "Respond with ONLY a JSON object — no markdown fences, no extra text:\n"
         '{"explanation": "<one sentence>", "risks": ["<key>", ...]}\n\n'
         f"Tool: {title}\n"

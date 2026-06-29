@@ -63,40 +63,11 @@ To report a vulnerability, see **[SECURITY.md](SECURITY.md)**.
 
 ## Contributing
 
-We welcome community contributions. We believe
+We welcome community contributions.
 
 See **[CONTRIBUTING.md](CONTRIBUTING.md)** to set up a development environment and submit a pull request.
 
----
-
-## Team
-
-MedMCP is developed and maintained by:
-
-<table>
-  <tr>
-    <td align="center" width="50%">
-      <a href="https://github.com/jqmcginnis"><img src="https://github.com/jqmcginnis.png" width="64" height="64" alt="Julian McGinnis"/></a><br/>
-      <b>Julian McGinnis</b><br/>
-      Technical University of Munich<br/>
-      <a href="https://jqmcginnis.github.io/">Website</a> · <a href="https://github.com/jqmcginnis">GitHub</a>
-    </td>
-    <td align="center" width="50%">
-      <a href="https://github.com/pfriedri"><img src="https://github.com/pfriedri.png" width="64" height="64" alt="Paul Friedrich"/></a><br/>
-      <b>Paul Friedrich</b><br/>
-      University of Basel<br/>
-      <a href="https://pfriedri.github.io">Website</a> · <a href="https://github.com/pfriedri">GitHub</a>
-    </td>
-  </tr>
-</table>
-
-… together with the wider [open-source community](CONTRIBUTING.md).
-
 ### Contributors
-
-[![All Contributors](https://img.shields.io/badge/all_contributors-2-orange.svg?style=flat-square)](#contributors)
-
-Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
 
 <!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
 <!-- prettier-ignore-start -->

@@ -36,7 +36,6 @@ import asyncio
 import contextlib
 import logging
 import os
-import re
 import shutil
 import time
 from collections.abc import AsyncGenerator
@@ -53,6 +52,7 @@ from medmcp import distill, explain, provenance, replay, sessions, settings, sha
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict, VibeAcpClient
 from medmcp.backend_broker import BackendBroker
 from medmcp.backend_pool import BackendPool, BackendSpec
+from medmcp.workspace_note import build_workspace_note, strip_workspace_note
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
 log: logging.Logger = logging.getLogger(__name__)
@@ -974,21 +974,13 @@ def _extract_text(content: object) -> str:
     return "\n".join(p for p in parts if p)
 
 
-# The viewer-context note appended to a prompt in _run_prompt. On transcript
-# replay (session/load) the stored user message still carries it, and vibe-acp
-# derives a session's title from that first message too, so we strip it before
-# showing either to the user. The note is always appended last, so we cut from
-# its marker to the end — this also handles a title truncated mid-note (no
-# closing ``]``). The ``\n\n`` anchor avoids touching a bracketed phrase a user
-# happened to type inline. distill.py keeps a copy of this pattern (it strips the
-# note from the request that seeds a distilled workflow's name/description) —
-# keep the two in sync.
-_WORKSPACE_NOTE_RE = re.compile(r"\n\n\[workspace context:.*$", re.DOTALL)
-
-
-def _strip_workspace_note(text: str) -> str:
-    """Remove the appended ``[workspace context: …]`` note from text."""
-    return _WORKSPACE_NOTE_RE.sub("", text).strip()
+# The viewer-context note appended to a prompt in _run_prompt. Its format and the
+# pattern that strips it live in medmcp.workspace_note (shared with distill.py, the
+# other consumer). On transcript replay (session/load) the stored user message
+# still carries the note, and vibe-acp derives a session's title from that first
+# message too, so _strip_workspace_note removes it before showing either to the
+# user.
+_strip_workspace_note = strip_workspace_note
 
 
 def _workspace_note(viewed_path: str) -> str:
@@ -999,13 +991,10 @@ def _workspace_note(viewed_path: str) -> str:
     bind-mounted at the identical absolute path (path parity). Handing the agent
     the **absolute** path lets its first tool call hit; a relative path misses and
     only recovers after the agent searches the filesystem. Resolution mirrors
-    replay's :func:`_resolve_input_path` (an unknown/absolute value is unchanged).
+    replay's :func:`_resolve_input_path` (an unknown/absolute value is unchanged);
+    the note's text format comes from :func:`build_workspace_note`.
     """
-    absolute = _resolve_input_path(viewed_path)
-    return (
-        f'\n\n[workspace context: the file "{absolute}" is currently open in the '
-        'viewer; references like "this image" or "the current image" mean that file]'
-    )
+    return build_workspace_note(_resolve_input_path(viewed_path))
 
 
 class _ChatConnection:

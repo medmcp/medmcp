@@ -39,4 +39,4 @@ RUN mkdir -p /usr/libexec/docker/cli-plugins; \
         -o /usr/libexec/docker/cli-plugins/docker-compose; \
     chmod +x /usr/libexec/docker/cli-plugins/docker-compose
 
-WORKDIR /workspaces/medmcp-dev
+WORKDIR /workspaces/medmcp

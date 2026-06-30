@@ -696,7 +696,8 @@ button:hover {
   }
 }
 
-.pdf-frame {
+.pdf-frame,
+.html-frame {
   width: 100%;
   height: 100%;
   border: none;
@@ -717,7 +718,8 @@ button:hover {
 
 /* The PDF iframe only needs to stop painting / swallowing the drag's pointer
  * events; visibility avoids an iframe reload that display:none can trigger. */
-.is-resizing .pdf-frame {
+.is-resizing .pdf-frame,
+.is-resizing .html-frame {
   visibility: hidden;
 }
 

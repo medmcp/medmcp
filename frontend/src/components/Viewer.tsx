@@ -151,12 +151,15 @@ function applyViewerSettings(nv: Niivue, s: ViewerSettings): void {
   nv.drawScene()
 }
 
-type FileKind = 'volume' | 'pdf' | 'image' | 'text' | 'other'
+type FileKind = 'volume' | 'pdf' | 'html' | 'image' | 'text' | 'other'
 
 function classify(path: string): FileKind {
   const lower = path.toLowerCase()
   if (VOLUME_EXT.test(lower)) return 'volume'
   if (lower.endsWith('.pdf')) return 'pdf'
+  // Render HTML (e.g. QC reports) rather than showing source — checked before
+  // TEXT_EXT, which also matches .html.
+  if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'html'
   if (IMAGE_EXT.test(lower)) return 'image'
   if (TEXT_EXT.test(lower)) return 'text'
   return 'other'
@@ -667,6 +670,12 @@ export const Viewer = memo(function Viewer({
           </div>
         )}
         {kind === 'pdf' && <iframe className="pdf-frame" src={url} title={path} />}
+        {kind === 'html' && (
+          // Render reports (e.g. the QC report.html) instead of showing source.
+          // sandbox="allow-scripts" runs self-contained inline JS (the QC flicker
+          // toggle) while isolating the frame: no same-origin access, no navigation.
+          <iframe className="html-frame" src={url} title={path} sandbox="allow-scripts" />
+        )}
         {kind === 'image' && <img className="image-view" src={url} alt={path} />}
         {kind === 'text' && <TextView key={url} url={url} />}
         {kind === 'other' && (

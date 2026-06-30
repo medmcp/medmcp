@@ -1,7 +1,7 @@
-"""Integration tests for the medmcp-neuro stack.
+"""Integration tests for the medmcp-neuro-core stack.
 
-These tests require the medmcp-neuro stack to be installed as an isolated uv
-tool (``just install-stack medmcp-neuro``) and are skipped otherwise.
+These tests require the medmcp-neuro-core stack to be installed as an isolated uv
+tool (``just install-stack medmcp-neuro-core``) and are skipped otherwise.
 """
 
 from __future__ import annotations
@@ -14,19 +14,19 @@ import pytest
 
 
 def _neuro_installed() -> bool:
-    """Return True if medmcp-neuro is present in the uv tool store."""
+    """Return True if medmcp-neuro-core is present in the uv tool store."""
     result = subprocess.run(
         ["uv", "tool", "list"],
         capture_output=True,
         text=True,
     )
-    return "medmcp-neuro" in result.stdout
+    return "medmcp-neuro-core" in result.stdout
 
 
 neuro_available = _neuro_installed()
 
 skip_no_neuro = pytest.mark.skipif(
-    not neuro_available, reason="medmcp-neuro not installed via uv tool"
+    not neuro_available, reason="medmcp-neuro-core not installed via uv tool"
 )
 
 JsonDict = dict[str, Any]
@@ -66,16 +66,16 @@ def _write(proc: subprocess.Popen[str], msg: str) -> None:
 
 
 def _neuro_executable() -> str:
-    """Return the absolute path to medmcp-neuro inside its isolated uv tool env."""
+    """Return the absolute path to medmcp-neuro-core inside its isolated uv tool env."""
     from pathlib import Path
 
     result = subprocess.run(["uv", "tool", "dir"], capture_output=True, text=True)
-    candidate = Path(result.stdout.strip()) / "medmcp-neuro" / "bin" / "medmcp-neuro"
-    return str(candidate) if candidate.exists() else "medmcp-neuro"
+    candidate = Path(result.stdout.strip()) / "medmcp-neuro-core" / "bin" / "medmcp-neuro-core"
+    return str(candidate) if candidate.exists() else "medmcp-neuro-core"
 
 
 def _start_server() -> subprocess.Popen[str]:
-    """Spawn the medmcp-neuro MCP server via its isolated uv tool environment."""
+    """Spawn the medmcp-neuro-core MCP server via its isolated uv tool environment."""
     return subprocess.Popen(
         [_neuro_executable()],
         stdin=subprocess.PIPE,
@@ -102,7 +102,7 @@ def _initialize(proc: subprocess.Popen[str]) -> JsonDict:
 
 @skip_no_neuro
 def test_neuro_server_starts() -> None:
-    """The medmcp-neuro MCP server starts and responds to initialize."""
+    """The medmcp-neuro-core MCP server starts and responds to initialize."""
     proc = _start_server()
     try:
         resp = _initialize(proc)
@@ -114,7 +114,7 @@ def test_neuro_server_starts() -> None:
 
 @skip_no_neuro
 def test_neuro_server_exposes_tools() -> None:
-    """The medmcp-neuro MCP server advertises at least one tool via tools/list."""
+    """The medmcp-neuro-core MCP server advertises at least one tool via tools/list."""
     proc = _start_server()
     try:
         _initialize(proc)
@@ -126,7 +126,7 @@ def test_neuro_server_exposes_tools() -> None:
         )
         result_payload: JsonDict = cast("JsonDict", tools_response["result"])
         tools: list[Any] = cast("list[Any]", result_payload.get("tools", []))
-        assert len(tools) > 0, "medmcp-neuro server registered zero tools"
+        assert len(tools) > 0, "medmcp-neuro-core server registered zero tools"
     finally:
         proc.kill()
         proc.wait()

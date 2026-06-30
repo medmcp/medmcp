@@ -8,9 +8,9 @@
       "gpu": false
     },
     {
-      "name": "medmcp-neuro",
-      "image": "ghcr.io/medmcp/neuro:main",
-      "description": "Brain extraction (HD-BET) and image registration (ANTs).",
+      "name": "medmcp-neuro-core",
+      "image": "ghcr.io/medmcp/neuro-core:main",
+      "description": "Brain extraction (HD-BET), image registration (ANTs), and whole-brain segmentation (FastSurfer).",
       "gpu": true
     },
     {

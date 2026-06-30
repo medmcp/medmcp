@@ -94,6 +94,21 @@ This project follows the [all-contributors](https://allcontributors.org) specifi
 
 ---
 
+## Acknowledgements
+
+MedMCP builds on a lot of open-source work. In particular:
+
+- **Agent runtime** — [mistral-vibe](https://github.com/mistralai/mistral-vibe) over the [Agent Client Protocol](https://github.com/agentclientprotocol/python-sdk)
+- **Web server** — [FastAPI](https://github.com/fastapi/fastapi), [Starlette](https://github.com/Kludex/starlette), and [Uvicorn](https://github.com/Kludex/uvicorn)
+- **Frontend** — [React](https://github.com/facebook/react) and [Vite](https://github.com/vitejs/vite), with [Niivue](https://github.com/niivue/niivue) for the medical-image viewer and [react-markdown](https://github.com/remarkjs/react-markdown) for chat rendering
+- **Typefaces** — [Inter](https://github.com/rsms/inter) and [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono)
+- **Local inference** — [Ollama](https://github.com/ollama/ollama), serving [Google Gemma](https://ai.google.dev/gemma) by default (subject to the [Gemma Terms of Use](https://ai.google.dev/gemma/terms))
+
+A complete list of bundled components and their licenses is in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md); model and base-layer
+attributions are in [`NOTICE`](NOTICE).
+
 ## License
 
 MedMCP is released under the [Apache License 2.0](LICENSE).
+See [`NOTICE`](NOTICE) for attribution that downstream redistributors must retain.

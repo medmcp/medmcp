@@ -1,0 +1,42 @@
+MedMCP
+Copyright 2026 Julian McGinnis
+Copyright 2026 Paul Friedrich
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+------------------------------------------------------------------------------
+Models
+------------------------------------------------------------------------------
+
+MedMCP is model-agnostic: it talks to whatever model the local Ollama server
+serves and does not redistribute any model weights. The default configuration
+(Modelfile.gemma4) builds on Google's Gemma. When Gemma is used, it is provided
+under and subject to the Gemma Terms of Use; that model and any derivative of it
+(including the custom "gemma4-medmcp" build) carry Google's attribution and
+use-restriction obligations:
+
+  - Gemma Terms of Use:   https://ai.google.dev/gemma/terms
+  - Prohibited Use Policy: https://ai.google.dev/gemma/prohibited_use_policy
+
+Operators who swap in a different model are responsible for complying with that
+model's own license and use terms.
+
+------------------------------------------------------------------------------
+Container base layers
+------------------------------------------------------------------------------
+
+The published container images build on third-party base layers, each governed
+by its own license:
+
+  - NVIDIA CUDA runtime image (nvidia/cuda:*-runtime-ubuntu24.04), subject to
+    the NVIDIA Deep Learning Container license / CUDA EULA.
+  - Ubuntu 24.04 and its system packages, under their respective licenses.
+  - Ollama (ollama/ollama), MIT License, run as a separate service.
+
+------------------------------------------------------------------------------
+Bundled libraries
+------------------------------------------------------------------------------
+
+The Python and JavaScript libraries redistributed inside the container image
+are listed, with their licenses, in THIRD_PARTY_NOTICES.md. Each remains under
+its own license; full license texts travel with each package's distribution.

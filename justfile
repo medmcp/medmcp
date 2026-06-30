@@ -109,6 +109,18 @@ fix:
     uv run ruff check --fix
     uv run ruff format
 
+# Regenerate THIRD_PARTY_NOTICES.md from the resolved deps (offline; run after a
+# runtime dependency change). Reads uv.lock + node_modules, no network.
+notices:
+    uv run python scripts/gen_third_party_notices.py
+
+# Verify THIRD_PARTY_NOTICES.md matches the installed deps (the CI gate; needs
+# both .venv synced and frontend node_modules installed). Regenerates, then fails
+# if it drifted — re-stage the file and commit.
+notices-check:
+    uv run python scripts/gen_third_party_notices.py
+    git diff --exit-code THIRD_PARTY_NOTICES.md
+
 # Pull Gemma 4 26B and build custom gemma4-medmcp
 pull-model:
     ollama pull gemma4:26b

@@ -25,7 +25,7 @@ WORKDIR /app
 
 # Python deps into /app/.venv from the frozen lock (build-time network; the
 # runtime is offline). uv installs the project itself (editable) against ./src.
-COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY pyproject.toml uv.lock README.md LICENSE NOTICE THIRD_PARTY_NOTICES.md ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev

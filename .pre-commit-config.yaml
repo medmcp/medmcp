@@ -15,3 +15,15 @@ repos:
       - id: check-added-large-files
         args: ['--maxkb=1500']
       - id: check-merge-conflict
+  - repo: local
+    hooks:
+      # Regenerate THIRD_PARTY_NOTICES.md when dependencies change. Runs in the
+      # project env (language: system) because it reads installed metadata from
+      # .venv / node_modules — sync those first if the result looks stale. If the
+      # file changes, the commit fails; re-stage it and commit again.
+      - id: third-party-notices
+        name: regenerate THIRD_PARTY_NOTICES.md
+        entry: uv run python scripts/gen_third_party_notices.py
+        language: system
+        pass_filenames: false
+        files: ^(uv\.lock|pyproject\.toml|frontend/package\.json|frontend/package-lock\.json)$

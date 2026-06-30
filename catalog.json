@@ -36,6 +36,12 @@
       "image": "medmcp-qc:dev",
       "description": "Visual QC reports for segmentations (brain extraction, lesions, tumor, parcellations).",
       "gpu": false
+    },
+    {
+      "name": "medmcp-cohort",
+      "image": "medmcp-cohort:dev",
+      "description": "Clinical cohort assembly, imaging-biomarker stratification, and association analysis (ehrapy).",
+      "gpu": false
     }
   ]
 }

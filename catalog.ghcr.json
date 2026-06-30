@@ -30,6 +30,12 @@
       "image": "ghcr.io/medmcp/monai:main",
       "description": "Run pretrained MONAI Model-Zoo bundles (spleen / multi-organ / whole-body CT segmentation).",
       "gpu": true
+    },
+    {
+      "name": "medmcp-qc",
+      "image": "ghcr.io/medmcp/qc:main",
+      "description": "Visual QC reports for segmentations (brain extraction, lesions, tumor, parcellations).",
+      "gpu": false
     }
   ]
 }

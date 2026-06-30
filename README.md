@@ -12,6 +12,10 @@ It is designed to enable clinicians, radiologists, and domain researchers to app
 
 Everything runs **on-premise**: a locally served model plans and sequences the work, all computation is delegated to tested implementations, and no imaging data, patient metadata, or results leave your infrastructure. You work through a single workspace that contains a *file explorer, image viewer, replay engine for personal workflows, and the chat interface*.
 
+<p align="center">
+  <img src="assets/medmcp.png" alt="The MedMCP workspace: file explorer, medical-image viewer, workflow manager, and agent chat" width="100%">
+</p>
+
 > [!WARNING]
 > MedMCP is under active development and **not licensed for clinical use**.
 

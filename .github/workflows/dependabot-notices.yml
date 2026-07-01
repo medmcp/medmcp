@@ -1,0 +1,61 @@
+name: Dependabot notices
+
+# Dependabot bumps pyproject.toml/uv.lock (and the frontend lockfile) but never
+# regenerates THIRD_PARTY_NOTICES.md, so its PRs land the checked-in notices
+# stale. The CI `notices` job only *detects* that drift; this workflow *fixes*
+# it in place — it regenerates the file on Dependabot PRs and commits the result
+# back onto the PR branch, so the notices are already correct at merge time and
+# no follow-up PR is needed.
+
+on:
+  pull_request:
+    paths:
+      - "uv.lock"
+      - "frontend/package-lock.json"
+
+# Needed to push the regenerated file back to the PR branch. For Dependabot-
+# triggered runs the GITHUB_TOKEN is read-only by default; this block elevates it
+# to contents:write for this same-repo branch.
+permissions:
+  contents: write
+
+jobs:
+  regenerate:
+    # Only Dependabot PRs — human PRs are expected to run `just notices`
+    # themselves (and the CI `notices` job guards that).
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Check out the PR head branch so the regen commit lands on it. A push
+          # made with GITHUB_TOKEN does not re-trigger workflows, so this can't
+          # loop.
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Sync Python runtime deps
+        run: uv sync --no-dev
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+      - name: Regenerate third-party notices
+        run: uv run python scripts/gen_third_party_notices.py
+      - name: Commit refreshed notices if changed
+        run: |
+          if git diff --quiet THIRD_PARTY_NOTICES.md; then
+            echo "THIRD_PARTY_NOTICES.md already up to date — nothing to commit."
+            exit 0
+          fi
+          git config user.name "dependabot[bot]"
+          git config user.email "49699333+dependabot[bot]@users.noreply.github.com"
+          git add THIRD_PARTY_NOTICES.md
+          git commit -m "chore: regenerate third-party notices"
+          git push

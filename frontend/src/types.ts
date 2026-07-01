@@ -134,6 +134,24 @@ export interface WorkflowDetail {
   replay_error: string | null
 }
 
+/** A flagged manifest row from plan_batch that isn't ready to run. */
+export interface BatchPlanSkip {
+  subject?: string
+  session?: string
+  status?: string
+  reason?: string
+}
+
+/** Result of POST /api/workflows/{name}/batch-from-plan: rows to pre-fill the
+ *  batch editor from a plan_batch manifest, plus the flagged rows to resolve. */
+export interface BatchFromPlanResult {
+  ok: boolean
+  error: string | null
+  runs: Record<string, string>[]
+  skipped: BatchPlanSkip[]
+  column_map?: Record<string, string>
+}
+
 /** One resolved step from POST /api/workflows/{name}/replay-preview. */
 export interface ReplayPreviewStep {
   index: number

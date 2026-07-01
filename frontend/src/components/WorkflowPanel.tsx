@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
+  batchFromPlan,
   deleteWorkflow,
   distillSession,
   exportWorkflow,
@@ -15,6 +16,7 @@ import {
 } from '../api'
 import { getDraggedFilePath } from '../dragState'
 import type {
+  BatchPlanSkip,
   ReplayFrame,
   ReplayPreviewStep,
   StackRequirement,
@@ -415,6 +417,8 @@ export const WorkflowPanel = memo(function WorkflowPanel({
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [now, setNow] = useState(0)
+  const [planCsv, setPlanCsv] = useState('')
+  const [planSkipped, setPlanSkipped] = useState<BatchPlanSkip[] | null>(null)
   const runWs = useRef<WebSocket | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -581,6 +585,28 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       await reload()
       setDetail(await fetchWorkflowDetail(name))
       setMode({ kind: 'view' })
+    })
+
+  // Fill the batch table from a plan_batch manifest — the "binding name list"
+  // built once from a single-subject prototype, so the roll-out over the whole
+  // cohort is a review-and-run, not a row-by-row drag. Flagged (missing/ambiguous)
+  // items are surfaced, never silently run.
+  const fillFromPlan = (name: string) =>
+    withBusy('Building the binding list from the cohort plan…', async () => {
+      const res = await batchFromPlan(name, planCsv.trim())
+      if (!res.ok) {
+        setPlanSkipped(null)
+        setError(res.error ?? 'could not read the cohort plan')
+        return
+      }
+      setPlanSkipped(res.skipped)
+      if (res.runs.length === 0) {
+        setError('no ready (ok) items in the plan — resolve the flagged rows first')
+        return
+      }
+      setMode((m) =>
+        m.kind === 'inputs' ? { ...m, batch: true, rows: res.runs } : m,
+      )
     })
 
   const toPreview = (
@@ -1107,7 +1133,57 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                         Add from selection ({selectedPaths.length})
                       </button>
                     </div>
+                    <div className="wf-batch-tools wf-batch-plan">
+                      <input
+                        className="wf-batch-cell"
+                        value={planCsv}
+                        placeholder="…/batch_plan.csv (from the cohort plan_batch step)"
+                        title={planCsv || undefined}
+                        onChange={(e) => setPlanCsv(e.target.value)}
+                        onDragOver={(e) => {
+                          if (
+                            e.dataTransfer.types.includes(DRAG_PATH_MIME) ||
+                            getDraggedFilePath() !== null
+                          )
+                            e.preventDefault()
+                        }}
+                        onDrop={(e) => {
+                          const path =
+                            e.dataTransfer.getData(DRAG_PATH_MIME) || getDraggedFilePath()
+                          if (path) {
+                            e.preventDefault()
+                            setPlanCsv(path)
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="btn-plain"
+                        disabled={!planCsv.trim()}
+                        title="Build one row per cohort subject from a plan_batch manifest"
+                        onClick={() => void fillFromPlan(d.name)}
+                      >
+                        Fill from cohort plan
+                      </button>
+                    </div>
                   </div>
+                  {planSkipped && planSkipped.length > 0 && (
+                    <div className="wf-hint wf-plan-skipped">
+                      {planSkipped.length} item(s) flagged and left out — resolve them in the plan,
+                      then re-fill:
+                      <ul className="wf-manual-list">
+                        {planSkipped.map((s, i) => (
+                          <li key={i}>
+                            <code>
+                              {s.subject}
+                              {s.session ? `/${s.session}` : ''}
+                            </code>{' '}
+                            — {s.status}: {s.reason}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                   {completeRows.length > 0 && (
                     <div className="wf-hint">
                       {completeRows.length} run{completeRows.length === 1 ? '' : 's'} ready

@@ -48,7 +48,17 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from medmcp import distill, explain, provenance, replay, sessions, settings, share, workflow
+from medmcp import (
+    batchplan,
+    distill,
+    explain,
+    provenance,
+    replay,
+    sessions,
+    settings,
+    share,
+    workflow,
+)
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict, VibeAcpClient
 from medmcp.backend_broker import BackendBroker
 from medmcp.backend_pool import BackendPool, BackendSpec
@@ -808,6 +818,50 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
 
     try:
         return await asyncio.to_thread(_preview)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class BatchFromPlanPayload(BaseModel):
+    """Request body: a workspace-relative ``plan_batch`` manifest CSV."""
+
+    plan_csv: str
+
+
+@app.post("/api/workflows/{name}/batch-from-plan")
+async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> JsonDict:
+    """Turn a ``plan_batch`` manifest into ready-to-run batch bindings for a workflow.
+
+    Reads the cohort manifest CSV (written by the cohort stack's ``plan_batch``),
+    maps each ``ok`` row's resolved files onto the recipe's ``{{in_N}}`` inputs, and
+    returns the per-subject runs that pre-fill the batch editor — so the user
+    reviews the binding list instead of hand-entering one row per subject. Flagged
+    rows (missing/ambiguous) are returned separately to be resolved, never run.
+    """
+
+    def _build() -> JsonDict:
+        d = _workflow_dir(name)
+        if d is None:
+            raise FileNotFoundError(f"no workflow named {name!r}")
+        recipe = distill.load_recipe(d)
+        try:
+            rows = batchplan.read_manifest(_resolve_input_path(payload.plan_csv))
+        except OSError as exc:
+            return {"ok": False, "error": f"cannot read plan: {exc}", "runs": [], "skipped": []}
+        try:
+            binding = batchplan.runs_from_manifest(recipe, rows)
+        except batchplan.BatchPlanError as exc:
+            return {"ok": False, "error": str(exc), "runs": [], "skipped": []}
+        return {
+            "ok": True,
+            "error": None,
+            "runs": [_resolve_input_paths(r) for r in binding.runs],
+            "skipped": binding.skipped,
+            "column_map": binding.column_map,
+        }
+
+    try:
+        return await asyncio.to_thread(_build)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

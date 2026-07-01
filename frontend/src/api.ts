@@ -1,4 +1,5 @@
 import type {
+  BatchFromPlanResult,
   CatalogEntry,
   GpuInfo,
   InstalledStack,
@@ -224,4 +225,12 @@ export async function replayPreview(
     inputs,
   })
   return (await res.json()) as { ok: boolean; error: string | null; steps: ReplayPreviewStep[] }
+}
+
+/** Turn a plan_batch manifest CSV into per-subject batch rows for this workflow. */
+export async function batchFromPlan(name: string, planCsv: string): Promise<BatchFromPlanResult> {
+  const res = await postJson(`/api/workflows/${encodeURIComponent(name)}/batch-from-plan`, {
+    plan_csv: planCsv,
+  })
+  return (await res.json()) as BatchFromPlanResult
 }

@@ -24,9 +24,9 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | cffi | 2.0.0 | MIT |
 | charset-normalizer | 3.4.7 | MIT |
 | click | 8.3.3 | BSD-3-Clause |
-| cryptography | 47.0.0 | Apache-2.0 OR BSD-3-Clause |
+| cryptography | 48.0.1 | Apache-2.0 OR BSD-3-Clause |
 | eval-type-backport | 0.3.1 | MIT |
-| fastapi | 0.135.3 | MIT |
+| fastapi | 0.138.0 | MIT |
 | gitdb | 4.0.12 | BSD-3-Clause |
 | gitpython | 3.1.47 | BSD-3-Clause |
 | giturlparse | 0.14.0 | Apache-2.0 |
@@ -37,7 +37,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | httpx | 0.28.1 | BSD-3-Clause |
 | httpx-sse | 0.4.3 | MIT |
 | humanize | 4.15.0 | MIT |
-| idna | 3.13 | BSD-3-Clause |
+| idna | 3.18 | BSD-3-Clause |
 | importlib-metadata | 8.7.1 | Apache-2.0 |
 | jaraco-classes | 3.4.0 | MIT |
 | jaraco-context | 6.1.2 | MIT |
@@ -52,11 +52,11 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | linkify-it-py | 2.1.0 | MIT |
 | markdown-it-py | 4.0.0 | MIT |
 | markdownify | 1.2.2 | MIT |
-| mcp | 1.27.1 | MIT |
+| mcp | 1.28.0 | MIT |
 | mdit-py-plugins | 0.5.0 | MIT |
 | mdurl | 0.1.2 | MIT |
-| mistral-vibe | 2.16.0 | Apache-2.0 |
-| mistralai | 2.4.4 | Apache-2.0 |
+| mistral-vibe | 2.17.1 | Apache-2.0 |
+| mistralai | 2.4.11 | Apache-2.0 |
 | more-itertools | 11.0.2 | MIT |
 | opentelemetry-api | 1.39.1 | Apache-2.0 |
 | opentelemetry-exporter-otlp-proto-common | 1.39.1 | Apache-2.0 |
@@ -76,11 +76,11 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | pydantic-core | 2.46.3 | MIT |
 | pydantic-settings | 2.14.0 | MIT |
 | pygments | 2.20.0 | BSD-2-Clause |
-| pyjwt | 2.12.1 | MIT |
+| pyjwt | 2.13.0 | MIT |
 | pyperclip | 1.11.0 | BSD-3-Clause |
 | python-dateutil | 2.9.0.post0 | Apache-2.0 |
 | python-dotenv | 1.2.2 | BSD-3-Clause |
-| python-multipart | 0.0.27 | Apache-2.0 |
+| python-multipart | 0.0.32 | Apache-2.0 |
 | pyyaml | 6.0.3 | MIT |
 | referencing | 0.37.0 | MIT |
 | requests | 2.33.1 | Apache-2.0 |
@@ -102,7 +102,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | typing-extensions | 4.15.0 | PSF-2.0 |
 | typing-inspection | 0.4.2 | MIT |
 | uc-micro-py | 2.0.0 | MIT |
-| urllib3 | 2.6.3 | MIT |
+| urllib3 | 2.7.0 | MIT |
 | uvicorn | 0.46.0 | BSD-3-Clause |
 | watchfiles | 1.1.1 | MIT |
 | websockets | 16.0 | BSD-3-Clause |

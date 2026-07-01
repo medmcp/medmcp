@@ -27,10 +27,10 @@ classifiers = [
 keywords = ["medical", "image processing", "ai-agent"]
 requires-python = ">=3.12"
 dependencies = [
-    "mistral-vibe>=2.14.1,<3",
+    "mistral-vibe>=2.17.1,<3",
     "tomli-w>=1.0",
     "pyyaml>=6.0",
-    "fastapi>=0.115",
+    "fastapi>=0.138.0",
     "uvicorn>=0.30",
     # uvicorn's WebSocket protocol needs an explicit ws library (/ws/chat,
     # /ws/replay).
@@ -49,12 +49,12 @@ medmcp-mcp-proxy = "medmcp.proxy:main"
 
 [dependency-groups]
 test = [
-    "pytest>=9",
+    "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0"
 ]
 quality = [
-    "ruff>=0.15.16",
-    "pyright>=1.1.410",
+    "ruff>=0.15.19",
+    "pyright>=1.1.411",
     "pre-commit>=4.6.0",
     "types-pyyaml>=6.0"
 ]

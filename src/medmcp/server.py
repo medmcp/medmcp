@@ -62,6 +62,7 @@ from medmcp import (
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict, VibeAcpClient
 from medmcp.backend_broker import BackendBroker
 from medmcp.backend_pool import BackendPool, BackendSpec
+from medmcp.reasoning import ThoughtStripper
 from medmcp.workspace_note import build_workspace_note, strip_workspace_note
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
@@ -1086,6 +1087,10 @@ class _ChatConnection:
         # Tool-call state accumulated across frames, keyed by toolCallId; feeds
         # the permission dialog backfill and the provenance run log.
         self._tool_calls: dict[str, JsonDict] = {}
+        # Strips the local model's inline <thought>…</thought> reasoning out of the
+        # streamed agent text before it reaches the browser (it isn't a separate
+        # ACP thought channel, so without this it renders as normal chat content).
+        self._thoughts = ThoughtStripper()
         # In-flight explanation tasks, kept so they aren't GC'd mid-run.
         self._explain_tasks: set[asyncio.Task[None]] = set()
         self._prompted: bool = False
@@ -1241,6 +1246,7 @@ class _ChatConnection:
             )
         )
         completed = False
+        self._thoughts.reset()  # start each turn with a clean reasoning-strip state
         try:
             while True:
                 get_task: asyncio.Task[JsonDict] = asyncio.create_task(self.queue.get())
@@ -1261,6 +1267,9 @@ class _ChatConnection:
                     err = cast("JsonDict", resp["error"])
                     await self._send({"type": "error", "message": str(err.get("message", err))})
                 break
+            tail = self._thoughts.flush()  # emit any real text held back at a tag boundary
+            if tail:
+                await self._send({"type": "chunk", "text": tail})
             await self._send({"type": "done"})
             completed = True
         except asyncio.CancelledError:
@@ -1336,7 +1345,9 @@ class _ChatConnection:
             if update_type == "agent_message_chunk":
                 content = cast("JsonDict", update.get("content") or {})
                 if content.get("type") == "text":
-                    await self._send({"type": "chunk", "text": str(content.get("text") or "")})
+                    visible = self._thoughts.feed(str(content.get("text") or ""))
+                    if visible:
+                        await self._send({"type": "chunk", "text": visible})
             elif update_type == "user_message_chunk":
                 # Replayed user turns (session/load); live prompts are not echoed.
                 content = cast("JsonDict", update.get("content") or {})

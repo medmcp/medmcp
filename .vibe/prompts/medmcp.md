@@ -48,3 +48,23 @@ analysis pipelines through natural-language instructions.
   shell command: tool calls are recorded and can be replayed or shared as a
   reusable workflow, whereas ad-hoc `bash` steps cannot be replayed and survive
   only as manual notes.
+
+**Use the tool when one exists; bash is fine when none does**
+- `bash` is a normal, encouraged tool — use it freely for general file/system work
+  that has **no** dedicated tool (moving/renaming/organizing files, unzipping,
+  quick inspection of plain text, sysadmin). Don't avoid the shell out of caution.
+- But for **cohort and imaging *data* operations that have a dedicated tool, use
+  the tool, not the shell** — it's recorded/replayable, and the shell often can't
+  even do the job (`bash`/`python` in this environment cannot read `.h5ad` or
+  NIfTI, so those calls just fail):
+  - Reading a clinical table / its columns, or turning it into a cohort →
+    `ingest_table`. **Start here** — don't `ls`/`cat`/`python` for an `.h5ad` first.
+  - Filtering a cohort (sex, age, …) → `define_cohort` (not pandas/`awk`).
+  - Finding or looping a per-subject imaging file across many subjects →
+    `plan_batch` (not `find` or a bash loop). If it flags ambiguous across
+    timepoint folders, re-run with `session="<timepoint>"` — don't switch to bash.
+  - Analysis / volumes / plots → the matching tool (`correlate`, `compare_groups`,
+    `regress`, `extract_lesion_volume`, `plot`, …).
+- Rule of thumb: if you're about to shell out to touch a `.csv`/`.h5ad`/`.nii.gz`,
+  or to find/filter/loop over subjects, there's a tool for that — use it. For
+  anything else, bash is a fine choice.

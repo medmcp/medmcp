@@ -1,28 +1,41 @@
-"""Strip a local model's inline chain-of-thought from streamed agent text.
+"""Strip a local model's inline reasoning + stray control tokens from agent text.
 
-Some locally-served models (e.g. gemma via Ollama) emit their reasoning inside
-``<thought>...</thought>`` spans in the *normal message content* rather than a
-separate reasoning channel (vibe's ``agent_thought_chunk``, fed from a model's
-``reasoning_content`` field). That content is relayed to the UI verbatim, so the
-reasoning leaks into the chat.
+Two things leak from locally-served models into the chat content stream and must
+be removed before relaying to the UI:
 
-:class:`ThoughtStripper` removes those spans from a token stream. It is
-streaming-aware: an opening/closing tag may be split across feeds, so it holds
-back only the shortest possible partial-tag suffix and emits everything else.
+- ``<thought>...</thought>`` spans — some models wrap chain-of-thought this way in
+  the normal message content instead of a separate reasoning channel.
+- **harmony-style control-token fragments** — e.g. ``<|channel|>``, ``<|message|>``,
+  ``<|start|>``, ``<|end|>`` (and mangled forms like ``<channel|>`` when the server
+  half-parses them). These are structural tokens, never meant to be shown.
+
+:class:`ThoughtStripper` removes both from a token stream. It is streaming-aware:
+a tag or token may be split across feeds, so it holds back only the shortest
+possible partial-construct suffix and emits everything else.
+
+NOTE: this does not hide reasoning that a harmony model emits as *analysis-channel
+prose* (paragraphs, not tokens) — that needs the model/Ollama layer to route
+reasoning into a ``reasoning_content`` field so vibe tags it ``agent_thought_chunk``.
+This strips the structural tokens and ``<thought>`` spans only.
 """
 
 from __future__ import annotations
 
-_OPEN = "<thought>"
-_CLOSE = "</thought>"
+import re
+
+_THOUGHT_OPEN = "<thought>"
+_THOUGHT_CLOSE = "</thought>"
+# A complete special construct: a <thought> open/close tag, or a harmony control
+# token. Control tokens always carry a pipe (<|channel|>, or a half-parsed
+# <|channel> / <channel|>), so requiring one avoids eating real markup like <div>.
+_SPECIAL = re.compile(r"</?thought>|<\|[a-zA-Z_]+\|?>|<[a-zA-Z_]+\|>")
+# A trailing fragment that could still grow into one of the above on the next feed
+# (a '<', optional '/'|'|', word chars, optional '|', with no closing '>' yet).
+_PARTIAL = re.compile(r"<[/|]?[a-zA-Z_]*\|?$")
 
 
 def _held_tail(buf: str, tag: str) -> int:
-    """Length of the longest suffix of *buf* that is a proper prefix of *tag*.
-
-    That suffix might be the start of a tag split across chunk boundaries, so it
-    must be held back until the next feed rather than emitted.
-    """
+    """Length of the longest suffix of *buf* that is a proper prefix of *tag*."""
     for k in range(min(len(buf), len(tag) - 1), 0, -1):
         if buf.endswith(tag[:k]):
             return k
@@ -30,7 +43,7 @@ def _held_tail(buf: str, tag: str) -> int:
 
 
 class ThoughtStripper:
-    """Streaming remover of ``<thought>...</thought>`` spans (tags may split across feeds)."""
+    """Streaming remover of ``<thought>`` spans and harmony control tokens."""
 
     def __init__(self) -> None:
         """Start with an empty buffer, outside any thought span."""
@@ -38,29 +51,37 @@ class ThoughtStripper:
         self._in_thought = False
 
     def feed(self, text: str) -> str:
-        """Consume streamed *text*; return only the portion outside thought spans."""
+        """Consume streamed *text*; return it with thought spans + control tokens removed."""
         self._buf += text
         out: list[str] = []
-        while self._buf:
-            if not self._in_thought:
-                i = self._buf.find(_OPEN)
-                if i != -1:
-                    out.append(self._buf[:i])
-                    self._buf = self._buf[i + len(_OPEN) :]
-                    self._in_thought = True
-                    continue
-                k = _held_tail(self._buf, _OPEN)
-                cut = len(self._buf) - k
-                out.append(self._buf[:cut])
-                self._buf = self._buf[cut:]
-                break
-            j = self._buf.find(_CLOSE)
-            if j != -1:
-                self._buf = self._buf[j + len(_CLOSE) :]
+        while True:
+            if self._in_thought:
+                idx = self._buf.find(_THOUGHT_CLOSE)
+                if idx == -1:
+                    k = _held_tail(self._buf, _THOUGHT_CLOSE)
+                    self._buf = self._buf[len(self._buf) - k :]
+                    break
+                self._buf = self._buf[idx + len(_THOUGHT_CLOSE) :]
                 self._in_thought = False
                 continue
-            k = _held_tail(self._buf, _CLOSE)
-            self._buf = self._buf[len(self._buf) - k :]
+            m = _SPECIAL.search(self._buf)
+            if m is not None:
+                out.append(self._buf[: m.start()])
+                token = m.group(0)
+                self._buf = self._buf[m.end() :]
+                if token == _THOUGHT_OPEN:
+                    self._in_thought = True
+                # else: a control token or a stray close — just drop it.
+                continue
+            # No complete construct left; emit the safe prefix and hold back a
+            # trailing fragment that might still become one on the next feed.
+            partial = _PARTIAL.search(self._buf)
+            if partial is not None:
+                out.append(self._buf[: partial.start()])
+                self._buf = self._buf[partial.start() :]
+            else:
+                out.append(self._buf)
+                self._buf = ""
             break
         return "".join(out)
 

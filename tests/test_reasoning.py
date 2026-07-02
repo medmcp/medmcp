@@ -53,6 +53,27 @@ def test_trailing_partial_open_is_flushed_as_text() -> None:
     assert _stream(["done<"]) == "done<"
 
 
+def test_control_token_dropped() -> None:
+    """A harmony control token (and its mangled form) is removed, text kept."""
+    assert _stream(["done<|channel|>"]) == "done"
+    assert _stream(["planning batch...<channel|>"]) == "planning batch..."
+
+
+def test_control_tokens_various() -> None:
+    """The common harmony tokens are all stripped, surrounding text preserved."""
+    assert _stream(["a<|start|>b<|message|>c<|end|>d"]) == "abcd"
+
+
+def test_control_token_split_across_chunks() -> None:
+    """A control token split across feeds is still recognized and dropped."""
+    assert _stream(["answer<|chan", "nel|>more"]) == "answermore"
+
+
+def test_plain_less_than_is_kept() -> None:
+    """A literal '<' in prose (e.g. a comparison) is not mistaken for a token."""
+    assert _stream(["EDSS < 3 and p < 0.05"]) == "EDSS < 3 and p < 0.05"
+
+
 def test_reset_clears_in_thought_state() -> None:
     """reset() drops a half-open thought so the next turn starts clean."""
     s = ThoughtStripper()

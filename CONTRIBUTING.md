@@ -74,6 +74,57 @@ What the dev container wires up for you:
   so to use the live agent run `just serve-ollama` (and `just pull-model` once) on
   the **host**; tests and frontend builds don't need it.
 
+**Running on a Remote Linux Host (Remote-SSH)**
+
+If you are developing on a remote Linux server (e.g., via VS Code Remote-SSH) and using a native Ollama installation running on the host, the Dev Container will automatically attempt to connect to Ollama using `http://host.docker.internal:11434`. However, you must configure your Linux host to accept these connections from the Docker network.
+
+**1. Bind Ollama to All Network Interfaces**
+
+By default, Linux installations of Ollama only listen to `127.0.0.1` (localhost). This actively rejects requests coming from the Docker container. You need to bind the service to `0.0.0.0`. (Sudo required)
+
+1. Open the systemd service override file:
+   ```bash
+   sudo systemctl edit ollama.service
+   ```
+   Add the following environment variable under the [Service] block, save, and exit:
+   ```bash
+   [Service]
+   Environment="OLLAMA_HOST=0.0.0.0"
+   ```
+2. Reload systemd and restart the Ollama service:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl restart ollama
+   ```
+**2. Update the Host Firewall (UFW)**
+
+If your Linux distribution uses UFW (Uncomplicated Firewall), it will actively drop packets originating from the Docker container trying to reach host ports.
+Allow traffic on the default Ollama port by running:
+
+```bash
+sudo ufw allow 11434/tcp
+```
+(Note: If you use iptables or firewalld instead of UFW, adjust your configuration to open TCP port 11434 for your specific Docker bridge interface).
+
+**3. Configure the Docker Socket Mount**
+
+Some IDE with remote connection (e.g. Remote-SSH in VSCode) cannot resolve the `${localEnv:XDG_RUNTIME_DIR}` variable, causing errors in the Dev Container build.
+
+You must manually replace the `"mounts"` array of `devcontainer.json` and hardcode the correct socket path.
+
+- **For Standard Docker:** Use the standard system path (fallback too Docker with root)
+  ```bash
+    "mounts": [
+      "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+    ]
+  ```
+- **For Rootless Docker:** Find your host user ID by running `id -u` and insert here:
+  ```bash
+    "mounts": [
+      "source=/run/user/<id>/docker.sock,target=/var/run/docker.sock,type=bind"
+    ]
+  ```
+
 ### 5) Local install (alternative)
 
 [uv](https://docs.astral.sh/uv/) is recommended for development. You can simply install it with:

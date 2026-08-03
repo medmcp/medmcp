@@ -34,7 +34,7 @@ import yaml
 
 from medmcp import provenance
 from medmcp.workflow import Recipe, RecipeStep, StackRequirement, WorkflowInput
-from medmcp.workspace_note import strip_workspace_note
+from medmcp.workspace_note import display_content_text, strip_workspace_note
 
 JsonDict = dict[str, Any]
 
@@ -109,14 +109,21 @@ def parse_messages_file(path: Path) -> list[JsonDict]:
 def _first_user_message(messages: list[JsonDict]) -> str:
     """Return the first non-injected user message, for context/naming.
 
-    The workspace server appends a "[workspace context: …]" note to the prompt
-    text so the agent can resolve "this image" (server.py:_workspace_note). That
-    note is live-turn metadata, not part of the user's request, so it is stripped
-    here (via :func:`strip_workspace_note`) — it would otherwise pollute the
-    distilled workflow's name and description.
+    The workspace server sends a "[workspace context: …]" note with the prompt
+    so the agent can resolve "this image" (server.py:_workspace_note). That note
+    is live-turn metadata, not part of the user's request — it would otherwise
+    pollute the distilled workflow's name and description. vibe ≥2.23 persists
+    the note-free text on the message (``user_display_content``), which is
+    preferred; older transcripts fall back to stripping the note from the stored
+    text (via :func:`strip_workspace_note`).
     """
     for msg in messages:
         if msg.get("role") == "user" and not msg.get("injected"):
+            display = msg.get("user_display_content")
+            if isinstance(display, dict):
+                text = display_content_text(cast("JsonDict", display))
+                if text:
+                    return text
             content = msg.get("content")
             if isinstance(content, str) and content.strip():
                 return strip_workspace_note(content)
@@ -656,20 +663,23 @@ def distill_session(
 ) -> Path:
     """Distill *session_id* into a draft workflow directory and return its path.
 
-    Reads the session's ``messages.jsonl``, builds a parameterized recipe, adds
-    a (hybrid) prose narrative, and writes ``recipe.yaml`` + ``SKILL.md`` into
+    Reads the session's ``messages.jsonl`` — concatenated across the session's
+    compaction chain (vibe rolls a compacted conversation over to a new dir;
+    see :func:`provenance.find_vibe_session_dirs`), so tool calls made after a
+    compaction distill too — builds a parameterized recipe, adds a (hybrid)
+    prose narrative, and writes ``recipe.yaml`` + ``SKILL.md`` into
     ``<workflows_root>/draft/<name>/`` for human review.
 
     Raises ``FileNotFoundError`` if the session's raw log cannot be located.
     """
-    session_dir = provenance.find_vibe_session_dir(session_id)
-    if session_dir is None:
+    session_dirs = provenance.find_vibe_session_dirs(session_id)
+    if not session_dirs:
         raise FileNotFoundError(f"no vibe session log found for session {session_id!r}")
-    messages_path = session_dir / "messages.jsonl"
-    if not messages_path.exists():
-        raise FileNotFoundError(f"no messages.jsonl in {session_dir}")
+    message_paths = [d / "messages.jsonl" for d in session_dirs if (d / "messages.jsonl").exists()]
+    if not message_paths:
+        raise FileNotFoundError(f"no messages.jsonl in {session_dirs[0]}")
 
-    messages = parse_messages_file(messages_path)
+    messages = [m for path in message_paths for m in parse_messages_file(path)]
     manifest = provenance.read_manifest(session_id)
     server_names = (
         [str(s.get("name")) for s in cast("list[JsonDict]", manifest.get("stacks") or [])]

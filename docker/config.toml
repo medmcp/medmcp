@@ -32,7 +32,10 @@ enabled_agents = []
 disabled_agents = []
 skill_paths = []
 enabled_skills = []
-disabled_skills = []
+disabled_skills = [
+    "skill-creator",
+    "vibe",
+]
 applied_migrations = [
     "bash_read_only_defaults_v1",
 ]
@@ -83,38 +86,7 @@ denylist = []
 
 [tools.bash]
 permission = "ask"
-allowlist = [
-    "basename",
-    "cat",
-    "cut",
-    "date",
-    "df",
-    "diff",
-    "dirname",
-    "du",
-    "echo",
-    "file",
-    "find",
-    "fold",
-    "grep",
-    "head",
-    "ls",
-    "md5sum",
-    "nl",
-    "od",
-    "ps",
-    "pwd",
-    "readlink",
-    "sha256sum",
-    "sort",
-    "stat",
-    "tail",
-    "tr",
-    "uname",
-    "uniq",
-    "wc",
-    "which",
-]
+allowlist = []
 denylist_standalone = []
 sensitive_patterns = [
     "sudo",

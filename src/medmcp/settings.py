@@ -110,6 +110,16 @@ def cached_context_window() -> int:
     )
 
 
+def fetched_context_window() -> int | None:
+    """Return the Ollama-fetched window size, or ``None`` when not yet fetched (no I/O).
+
+    Unlike :func:`cached_context_window` this does not substitute the static
+    default, so callers with a better fallback (e.g. the size vibe reports on a
+    usage frame) can tell "known" from "guessed".
+    """
+    return _context_window_tokens
+
+
 # Tracks which discovered stacks are enabled; defaults to all when absent.
 ACTIVE_STACKS_PATH: Path = VIBE_HOME / "active_stacks.json"
 # Tracks which personal workflows are enabled (loaded as skills); all when absent.

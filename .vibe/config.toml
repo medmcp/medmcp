@@ -28,6 +28,7 @@ disabled_agents = []
 skill_paths = []
 enabled_skills = []
 disabled_skills = [
+    "skill-creator",
     "vibe",
 ]
 
@@ -133,25 +134,7 @@ denylist = []
 
 [tools.bash]
 permission = "ask"
-allowlist = [
-    "ls",
-    "find",
-    "cat",
-    "head",
-    "tail",
-    "wc",
-    "stat",
-    "file",
-    "pwd",
-    "which",
-    "ps",
-    "du",
-    "df",
-    "echo",
-    "sort",
-    "uniq",
-    "diff",
-]
+allowlist = []
 denylist_standalone = []
 sensitive_patterns = [
     "sudo",

@@ -216,56 +216,66 @@ def test_purge_session_is_safe_when_absent(tmp_path: Path) -> None:
         provenance.purge_session(SESSION_ID)  # no error
 
 
-FORK_ID = "ef567890-9999-8888-7777-666655554444"
+# ── compaction chains ────────────────────────────────────────────────────────
+
+CONT_ID = "ef567890-9999-8888-7777-666655554444"
+CONT2_ID = "01234567-aaaa-bbbb-cccc-ddddeeeeffff"
 
 
-def test_delete_vibe_transcript_keeps_provenance(tmp_path: Path) -> None:
-    """delete_vibe_transcript drops the transcript dir but leaves provenance."""
-    vibe_dir = tmp_path / "logs" / "session" / "session_20260101_000000_abcd1234"
-    vibe_dir.mkdir(parents=True)
-    (vibe_dir / "meta.json").write_text(json.dumps({"session_id": SESSION_ID}))
+def _make_vibe_session(
+    root: Path, timestamp: str, session_id: str, parent_id: str | None = None
+) -> Path:
+    """Create a vibe-style transcript dir with a meta.json (and empty log)."""
+    d = root / "logs" / "session" / f"session_{timestamp}_{session_id[:8]}"
+    d.mkdir(parents=True)
+    meta: dict[str, object] = {"session_id": session_id}
+    if parent_id is not None:
+        meta["parent_session_id"] = parent_id
+    (d / "meta.json").write_text(json.dumps(meta))
+    (d / "messages.jsonl").write_text("")
+    return d
+
+
+def test_find_vibe_session_dirs_follows_compaction_chain(tmp_path: Path) -> None:
+    """The chain lists the original dir first, then continuations in order."""
+    original = _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)
+    cont = _make_vibe_session(tmp_path, "20260101_010000", CONT_ID, parent_id=SESSION_ID)
+    cont2 = _make_vibe_session(tmp_path, "20260101_020000", CONT2_ID, parent_id=CONT_ID)
+    _make_vibe_session(tmp_path, "20260101_030000", "99999999-0000-0000-0000-000000000000")
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        assert provenance.find_vibe_session_dirs(SESSION_ID) == [original, cont, cont2]
+
+
+def test_find_vibe_session_dirs_without_continuations(tmp_path: Path) -> None:
+    """A session that never compacted yields just its own dir."""
+    original = _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        assert provenance.find_vibe_session_dirs(SESSION_ID) == [original]
+
+
+def test_find_vibe_session_dirs_unknown_session(tmp_path: Path) -> None:
+    """An unknown id yields an empty chain."""
+    (tmp_path / "logs" / "session").mkdir(parents=True)
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        assert provenance.find_vibe_session_dirs(SESSION_ID) == []
+
+
+def test_purge_session_removes_compaction_continuations(tmp_path: Path) -> None:
+    """Purging a chat also deletes the transcript dirs compaction rolled over to."""
+    original = _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)
+    cont = _make_vibe_session(tmp_path, "20260101_010000", CONT_ID, parent_id=SESSION_ID)
+    unrelated = _make_vibe_session(
+        tmp_path, "20260101_020000", "99999999-0000-0000-0000-000000000000"
+    )
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         provenance.append_run_event(SESSION_ID, {"tool": "a"})
-        prov_dir = provenance.provenance_dir(SESSION_ID)
 
-        provenance.delete_vibe_transcript(SESSION_ID)
+        provenance.purge_session(SESSION_ID)
 
-        assert not vibe_dir.exists()
-        assert prov_dir.exists()  # provenance is preserved for relocation
-
-
-def test_move_session_record_relocates(tmp_path: Path) -> None:
-    """The provenance record moves from the old id to the fork id."""
-    with patch.object(provenance, "VIBE_HOME", tmp_path):
-        provenance.append_run_event(SESSION_ID, {"tool": "a"})
-        old_dir = provenance.provenance_dir(SESSION_ID)
-        new_dir = provenance.provenance_dir(FORK_ID)
-
-        provenance.move_session_record(SESSION_ID, FORK_ID)
-
-        assert not old_dir.exists()
-        assert (new_dir / "run.jsonl").exists()
-
-
-def test_move_session_record_no_clobber(tmp_path: Path) -> None:
-    """An existing destination is left intact (the source is not moved over it)."""
-    with patch.object(provenance, "VIBE_HOME", tmp_path):
-        provenance.append_run_event(SESSION_ID, {"tool": "old"})
-        provenance.append_run_event(FORK_ID, {"tool": "new"})
-
-        provenance.move_session_record(SESSION_ID, FORK_ID)
-
-        # Destination kept its own record; source remains rather than overwriting.
-        assert provenance.provenance_dir(SESSION_ID).exists()
-        events = provenance.read_run_events(FORK_ID)
-        assert [e.get("tool") for e in events] == ["new"]
-
-
-def test_move_session_record_absent_source(tmp_path: Path) -> None:
-    """Moving a record that doesn't exist is a no-op, not an error."""
-    with patch.object(provenance, "VIBE_HOME", tmp_path):
-        provenance.move_session_record(SESSION_ID, FORK_ID)  # no error
-        assert not provenance.provenance_dir(FORK_ID).exists()
+        assert not provenance.provenance_dir(SESSION_ID).exists()
+        assert not original.exists()
+        assert not cont.exists()
+        assert unrelated.exists()
 
 
 # ── orphan GC ────────────────────────────────────────────────────────────────

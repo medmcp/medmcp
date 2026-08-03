@@ -772,7 +772,7 @@ test = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "mistral-vibe", specifier = ">=2.23.2,<3" },
+    { name = "mistral-vibe", specifier = ">=2.23.3,<3" },
     { name = "python-multipart", specifier = ">=0.0.18" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "tomli-w", specifier = ">=1.0" },
@@ -804,7 +804,7 @@ test = [
 
 [[package]]
 name = "mistral-vibe"
-version = "2.23.2"
+version = "2.23.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-client-protocol" },
@@ -905,9 +905,9 @@ dependencies = [
     { name = "zipp" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e3/a6/fd5103713ef96ba0a35032073b599a8beff825ee4269863964bca501683b/mistral_vibe-2.23.2.tar.gz", hash = "sha256:9938ef615a7d36c7c547de70d2d35f2ef4e1740ba819058e7b244e3b92cfd16c", size = 1617824, upload-time = "2026-07-30T08:26:41.577Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/64/b3/bca9e4bae4d8140bc2a79c74bde7057e4e996db114a06d16b496c1c04871/mistral_vibe-2.23.3.tar.gz", hash = "sha256:89da5ae8e74482ec322c67acd55ab454e2da9d1ca65c23836354fab9c0883dba", size = 1645949, upload-time = "2026-08-03T13:01:07.324Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0c/a0/a0d3917565a3e9146563764432307d59c6cf2611876db9ac195160ab9143/mistral_vibe-2.23.2-py3-none-any.whl", hash = "sha256:84e5dce6c405d9e0ce0d38dede1565c792ff573225fc6d864a3366048f05261f", size = 917962, upload-time = "2026-07-30T08:26:39.658Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/55/b945146ed3c2276705d746a7e807daa250af618736385b4ac0dd54c4fecd/mistral_vibe-2.23.3-py3-none-any.whl", hash = "sha256:0b3dc1d615ec45ec6b06dedfde40252612d5e902f622f9e80decf0f8e4a6fcc5", size = 928665, upload-time = "2026-08-03T13:01:05.163Z" },
 ]
 
 [[package]]

@@ -249,6 +249,37 @@ class TestFirstUserMessage:
         """A message with no note is returned, trimmed."""
         assert distill._first_user_message([{"role": "user", "content": "  do it  "}]) == "do it"
 
+    def test_prefers_persisted_display_content(self) -> None:
+        """The note-free user_display_content (vibe ≥2.23) wins over the stored text."""
+        messages = [
+            {
+                "role": "user",
+                "content": "Skull strip this scan\n\n[workspace context: …]",
+                "user_display_content": {
+                    "version": "1",
+                    "host": "medmcp",
+                    "content": [{"type": "text", "text": "Skull strip this scan"}],
+                },
+            }
+        ]
+        assert distill._first_user_message(messages) == "Skull strip this scan"
+
+    def test_empty_display_content_falls_back_to_stripping(self) -> None:
+        """A present-but-empty display payload does not blank the seed request."""
+        empty: list[object] = []
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Register this scan\n\n"
+                    '[workspace context: the file "/data/t1.nii.gz" is currently open '
+                    "in the viewer]"
+                ),
+                "user_display_content": {"version": "1", "host": "medmcp", "content": empty},
+            }
+        ]
+        assert distill._first_user_message(messages) == "Register this scan"
+
 
 class TestRenderSkillMd:
     """render_skill_md produces a valid SKILL.md with or without prose."""
@@ -398,6 +429,47 @@ def test_distill_session_missing_log_raises(tmp_path: Path) -> None:
         except FileNotFoundError:
             return
     raise AssertionError("expected FileNotFoundError")
+
+
+def test_distill_session_spans_compaction_chain(tmp_path: Path) -> None:
+    """Tool calls made after a context compaction distill too.
+
+    vibe rolls a compacted conversation over to a new session dir whose
+    meta.json backlinks the original via parent_session_id; distillation must
+    read the whole chain, not just the pre-compaction prefix.
+    """
+    _write_fake_session(tmp_path)
+    cont_id = "ef567890-9999-8888-7777-666655554444"
+    cont = tmp_path / "logs" / "session" / f"session_20260101_010000_{cont_id[:8]}"
+    cont.mkdir(parents=True)
+    (cont / "meta.json").write_text(
+        json.dumps({"session_id": cont_id, "parent_session_id": SESSION_ID})
+    )
+    post_compaction: list[JsonDict] = [
+        _assistant_call(
+            "c9",
+            "medmcp-neuro_coregister",
+            {"input_path": "data/x/t1_mni.nii.gz", "reference": "data/x/flair.nii.gz"},
+        ),
+        _tool_result(
+            "c9", "ok: True\nstructured: {'coregistered_path': 'data/x/flair_reg.nii.gz'}"
+        ),
+    ]
+    with (cont / "messages.jsonl").open("w") as f:
+        for msg in post_compaction:
+            f.write(json.dumps(msg) + "\n")
+
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        draft_dir = distill.distill_session(
+            SESSION_ID, use_llm=False, workflows_root=tmp_path / "workflows"
+        )
+
+    recipe = yaml.safe_load((draft_dir / "recipe.yaml").read_text())
+    assert [s["tool"] for s in recipe["steps"]] == [
+        "skull_strip",
+        "register_to_template",
+        "coregister",
+    ]
 
 
 def test_promote_moves_draft_to_active(tmp_path: Path) -> None:

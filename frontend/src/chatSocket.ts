@@ -54,10 +54,6 @@ export class ChatSocket {
           this.retryDelay = 1000
           // Reattach to this exact session if the socket later drops.
           this.resumeId = frame.sessionId
-        } else if (frame.type === 'session_migrated') {
-          // The session forked on continue; reconnect to the fork, not the
-          // (now-deleted) original, or a drop would lose the conversation.
-          this.resumeId = frame.sessionId
         }
         this.handlers.onFrame(frame)
       } catch {

@@ -1,0 +1,58 @@
+# Changelog
+
+Notable, user-visible changes to MedMCP. Format follows
+[Keep a Changelog](https://keepachangelog.com/); entries land under
+**Unreleased** as PRs merge and move under a version heading at release time.
+
+## Unreleased
+
+### Added
+
+- **Rewind**: hover a user message in a resumed chat to rewind the conversation
+  to before it — previews which workspace files would be restored, asks for
+  confirmation, then truncates in place (#93).
+- **Branch a chat**: a git-branch icon on the open chat's row in the Chats menu
+  duplicates its full history into a new session, for trying a second analysis
+  path on the same context; branches inherit the source's title (#92).
+- Stack connection failures now surface as a chat message on session start
+  ("The following MCP servers failed to connect: …") instead of tools being
+  silently missing (#89).
+
+### Changed
+
+- One chat, one entry: context compaction no longer splits a chat into multiple
+  sessions in the Chats menu, and reopening a compacted chat restores the full
+  post-compaction context — including after an agent restart (#90).
+- Deleting a chat now removes everything it produced: the whole transcript
+  chain, the provenance record, and the agent's own stored copy (#89, #90).
+- Renaming a chat writes the title into the agent's session metadata too (#89).
+- The context meter reports the model's actually-served window (Ollama
+  `num_ctx`), not the model family's nominal maximum (#89).
+- Replayed chats show the user's message text without the internal
+  `[workspace context: …]` viewer note, natively (#89).
+
+### Fixed
+
+- Sent messages no longer appear twice (the agent runtime echoes live prompts
+  since vibe 2.23; the echo is now merged into the already-rendered bubble) —
+  as a side effect, messages sent in the current session become rewindable
+  immediately instead of after a reload (#94).
+- A branched chat and its original are now truly independent: opening the
+  original no longer attaches to the branch, deleting the original no longer
+  deletes the branch, and workflow distillation no longer mixes the two (#94).
+- Workflow distillation covers tool calls made after a context compaction (#89).
+
+### Security
+
+- Every bash command the agent runs now requires interactive approval: the
+  read-only allowlist was removed after finding that an output redirect from an
+  allowlisted command (e.g. `echo "" > file`) wrote files without a prompt (#89).
+- The permission dialog no longer offers the durable "Always allow" option
+  vibe 2.23 introduced (it would persist an auto-approval into the config) —
+  per-session approval remains (#89).
+- The agent's built-in `skill-creator` skill is disabled: workflow distillation
+  stays the single, reviewable skill-authoring path (#89).
+
+### Dependencies
+
+- mistral-vibe 2.17 → 2.23.3, fastapi 0.141, ruff 0.16 (#84, #88, #89).

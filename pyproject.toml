@@ -49,8 +49,9 @@ medmcp-mcp-proxy = "medmcp.proxy:main"
 
 [dependency-groups]
 test = [
+    "httpx2>=2.9.1",
     "pytest>=9.1.1",
-    "pytest-asyncio>=1.4.0"
+    "pytest-asyncio>=1.4.0",
 ]
 quality = [
     "ruff>=0.16.0",

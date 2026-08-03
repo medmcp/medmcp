@@ -656,20 +656,23 @@ def distill_session(
 ) -> Path:
     """Distill *session_id* into a draft workflow directory and return its path.
 
-    Reads the session's ``messages.jsonl``, builds a parameterized recipe, adds
-    a (hybrid) prose narrative, and writes ``recipe.yaml`` + ``SKILL.md`` into
+    Reads the session's ``messages.jsonl`` — concatenated across the session's
+    compaction chain (vibe rolls a compacted conversation over to a new dir;
+    see :func:`provenance.find_vibe_session_dirs`), so tool calls made after a
+    compaction distill too — builds a parameterized recipe, adds a (hybrid)
+    prose narrative, and writes ``recipe.yaml`` + ``SKILL.md`` into
     ``<workflows_root>/draft/<name>/`` for human review.
 
     Raises ``FileNotFoundError`` if the session's raw log cannot be located.
     """
-    session_dir = provenance.find_vibe_session_dir(session_id)
-    if session_dir is None:
+    session_dirs = provenance.find_vibe_session_dirs(session_id)
+    if not session_dirs:
         raise FileNotFoundError(f"no vibe session log found for session {session_id!r}")
-    messages_path = session_dir / "messages.jsonl"
-    if not messages_path.exists():
-        raise FileNotFoundError(f"no messages.jsonl in {session_dir}")
+    message_paths = [d / "messages.jsonl" for d in session_dirs if (d / "messages.jsonl").exists()]
+    if not message_paths:
+        raise FileNotFoundError(f"no messages.jsonl in {session_dirs[0]}")
 
-    messages = parse_messages_file(messages_path)
+    messages = [m for path in message_paths for m in parse_messages_file(path)]
     manifest = provenance.read_manifest(session_id)
     server_names = (
         [str(s.get("name")) for s in cast("list[JsonDict]", manifest.get("stacks") or [])]

@@ -389,6 +389,75 @@ class TestStripWorkspaceNote:
         assert server._strip_workspace_note(text) == "Hi"
 
 
+class TestReplayedUserText:
+    """Replayed user turns prefer the note-free display content vibe echoes back."""
+
+    def test_prefers_user_display_content(self) -> None:
+        """The ``user_display_content`` meta wins over the stored text."""
+        update = {
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": "segment this\n\n[workspace context: …]"},
+            "_meta": {
+                "user_display_content": {
+                    "version": "1",
+                    "host": "medmcp",
+                    "content": [{"type": "text", "text": "segment this"}],
+                }
+            },
+        }
+        assert server._replayed_user_text(update) == "segment this"
+
+    def test_falls_back_to_stripping_the_note(self) -> None:
+        """Transcripts from before the display-content meta still strip cleanly."""
+        update = {
+            "sessionUpdate": "user_message_chunk",
+            "content": {
+                "type": "text",
+                "text": 'segment this\n\n[workspace context: the file "a/b.nii.gz" is currently '
+                "open in the viewer]",
+            },
+        }
+        assert server._replayed_user_text(update) == "segment this"
+
+    def test_empty_display_content_falls_back(self) -> None:
+        """A present-but-empty display meta does not blank the message."""
+        empty: list[object] = []
+        update = {
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": "plain question"},
+            "_meta": {"user_display_content": {"version": "1", "host": "x", "content": empty}},
+        }
+        assert server._replayed_user_text(update) == "plain question"
+
+    def test_non_text_content_is_ignored(self) -> None:
+        """Image/resource chunks yield no text (the UI only renders text turns)."""
+        update = {
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "image", "data": "…"},
+        }
+        assert server._replayed_user_text(update) == ""
+
+
+class TestVisiblePermissionOptions:
+    """The durable auto-approval option is never offered to the browser."""
+
+    def test_drops_allow_always_permanent(self) -> None:
+        """``allow_always_permanent`` is filtered; the interactive options stay."""
+        options = [
+            {"optionId": "allow_once", "name": "Allow once"},
+            {"optionId": "allow_always", "name": "Allow for remainder of this session"},
+            {"optionId": "allow_always_permanent", "name": "Always allow"},
+            {"optionId": "reject_once", "name": "Deny"},
+        ]
+        visible = server._visible_permission_options(options)
+        assert [o["optionId"] for o in visible] == ["allow_once", "allow_always", "reject_once"]
+
+    def test_passes_unknown_options_through(self) -> None:
+        """Only the durable option is dropped — future option ids are relayed."""
+        options = [{"optionId": "allow_once"}, {"optionId": "something_new"}]
+        assert server._visible_permission_options(options) == options
+
+
 class TestSessionsApi:
     """GET /api/sessions maps vibe-acp's session/list to the UI shape."""
 

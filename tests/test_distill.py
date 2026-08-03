@@ -400,6 +400,47 @@ def test_distill_session_missing_log_raises(tmp_path: Path) -> None:
     raise AssertionError("expected FileNotFoundError")
 
 
+def test_distill_session_spans_compaction_chain(tmp_path: Path) -> None:
+    """Tool calls made after a context compaction distill too.
+
+    vibe rolls a compacted conversation over to a new session dir whose
+    meta.json backlinks the original via parent_session_id; distillation must
+    read the whole chain, not just the pre-compaction prefix.
+    """
+    _write_fake_session(tmp_path)
+    cont_id = "ef567890-9999-8888-7777-666655554444"
+    cont = tmp_path / "logs" / "session" / f"session_20260101_010000_{cont_id[:8]}"
+    cont.mkdir(parents=True)
+    (cont / "meta.json").write_text(
+        json.dumps({"session_id": cont_id, "parent_session_id": SESSION_ID})
+    )
+    post_compaction: list[JsonDict] = [
+        _assistant_call(
+            "c9",
+            "medmcp-neuro_coregister",
+            {"input_path": "data/x/t1_mni.nii.gz", "reference": "data/x/flair.nii.gz"},
+        ),
+        _tool_result(
+            "c9", "ok: True\nstructured: {'coregistered_path': 'data/x/flair_reg.nii.gz'}"
+        ),
+    ]
+    with (cont / "messages.jsonl").open("w") as f:
+        for msg in post_compaction:
+            f.write(json.dumps(msg) + "\n")
+
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        draft_dir = distill.distill_session(
+            SESSION_ID, use_llm=False, workflows_root=tmp_path / "workflows"
+        )
+
+    recipe = yaml.safe_load((draft_dir / "recipe.yaml").read_text())
+    assert [s["tool"] for s in recipe["steps"]] == [
+        "skull_strip",
+        "register_to_template",
+        "coregister",
+    ]
+
+
 def test_promote_moves_draft_to_active(tmp_path: Path) -> None:
     """Promote relocates a reviewed draft into active/ for skill discovery."""
     draft = tmp_path / "workflows" / "draft" / "my-flow"

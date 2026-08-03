@@ -447,14 +447,6 @@ export const Chat = memo(function Chat({
           // locally in send(), so this only fires during history replay).
           setItems((prev) => [...prev, { kind: 'user', text: frame.text }])
           break
-        case 'session_migrated':
-          // Continuing a resumed chat forked it under a new id; track the fork
-          // so resume (localStorage), the menu highlight, and "Save workflow"
-          // all point at the live, complete transcript.
-          sessionIdRef.current = frame.sessionId
-          onSessionEstablishedRef.current?.(frame.sessionId)
-          onPromptedSessionRef.current?.(frame.sessionId)
-          break
         case 'ready':
           // (Re)connect: the server is the transcript's source of truth — a
           // resume replays history, a reconnect reloads it — so rebuild from

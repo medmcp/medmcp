@@ -308,6 +308,17 @@ def record_tool_event(session_id: str, tc_id: str, info: JsonDict, server_names:
 # ── Vibe session lookup ──────────────────────────────────────────────────────
 
 
+def _read_session_meta(session_dir: Path) -> JsonDict | None:
+    """Read a vibe session dir's ``meta.json``, or ``None`` if absent/invalid."""
+    meta = session_dir / "meta.json"
+    if not meta.exists():
+        return None
+    try:
+        return cast("JsonDict", json.loads(meta.read_text()))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def find_vibe_session_dir(session_id: str) -> Path | None:
     """Locate vibe-acp's log dir for *session_id* under ``.vibe/logs/session/``.
 
@@ -320,17 +331,51 @@ def find_vibe_session_dir(session_id: str) -> Path | None:
     short = session_id[:8]
     candidates = sorted(sessions_root.glob(f"session_*_{short}"))
     for candidate in candidates:
-        meta = candidate / "meta.json"
-        if not meta.exists():
-            continue
-        try:
-            data = cast("JsonDict", json.loads(meta.read_text()))
-        except (json.JSONDecodeError, OSError):
+        data = _read_session_meta(candidate)
+        if data is None:
             continue
         if data.get("session_id") == session_id:
             return candidate
     # Fall back to the single prefix match even without a meta confirmation.
     return candidates[0] if candidates else None
+
+
+def find_vibe_session_dirs(session_id: str) -> list[Path]:
+    """Locate *session_id*'s log dir plus its compaction continuations, in order.
+
+    On context compaction vibe rolls the conversation over to a fresh session id
+    and dir, recording the predecessor as ``parent_session_id`` in the new dir's
+    ``meta.json``. Following those backlinks (vibe ≥2.21 writes them) yields the
+    whole chain — original first, then each continuation in creation order — so
+    purge and distillation see one chat, not just its pre-compaction prefix.
+    """
+    root = find_vibe_session_dir(session_id)
+    if root is None:
+        return []
+    sessions_root = VIBE_HOME / "logs" / "session"
+    # One scan builds the parent → children map; session counts are small.
+    children: dict[str, list[tuple[Path, str]]] = {}
+    for candidate in sorted(sessions_root.iterdir()):
+        if not candidate.is_dir():
+            continue
+        data = _read_session_meta(candidate)
+        if data is None:
+            continue
+        child_id = data.get("session_id")
+        parent_id = data.get("parent_session_id")
+        if isinstance(child_id, str) and isinstance(parent_id, str) and parent_id:
+            children.setdefault(parent_id, []).append((candidate, child_id))
+    chain: list[Path] = [root]
+    queue: list[str] = [session_id]
+    seen: set[str] = {session_id}
+    while queue:
+        for child_dir, child_id in children.get(queue.pop(0), []):
+            if child_id in seen:  # defensive: malformed metas must not loop
+                continue
+            seen.add(child_id)
+            chain.append(child_dir)
+            queue.append(child_id)
+    return chain
 
 
 def list_provenance_sessions() -> list[str]:
@@ -361,43 +406,16 @@ def purge_orphans(referenced_ids: set[str]) -> list[str]:
 def purge_session(session_id: str) -> None:
     """Delete all on-disk logs for *session_id*.
 
-    Removes both the provenance directory and vibe-acp's session transcript dir,
-    so deleting a chat leaves nothing orphaned on disk. Best-effort: missing
-    paths are ignored.
+    Removes the provenance directory and every vibe transcript dir in the
+    session's chain (the original plus compaction continuations, see
+    :func:`find_vibe_session_dirs`), so deleting a chat leaves nothing orphaned
+    on disk. Best-effort: missing paths are ignored.
     """
     pdir = provenance_dir(session_id)
     if pdir.exists():
         shutil.rmtree(pdir, ignore_errors=True)
-    delete_vibe_transcript(session_id)
-
-
-def delete_vibe_transcript(session_id: str) -> None:
-    """Delete only vibe-acp's transcript dir for *session_id* (keep provenance).
-
-    Used to retire a session that a fork has superseded: when continuing a
-    reloaded chat, vibe-acp logs under a new id, leaving the original transcript
-    a stale duplicate. Removing it drops the duplicate from vibe's session list
-    while the provenance is relocated to the fork via :func:`move_session_record`.
-    """
-    vibe_dir = find_vibe_session_dir(session_id)
-    if vibe_dir is not None and vibe_dir.exists():
+    for vibe_dir in find_vibe_session_dirs(session_id):
         shutil.rmtree(vibe_dir, ignore_errors=True)
-
-
-def move_session_record(old_id: str, new_id: str) -> None:
-    """Relocate the provenance record from *old_id* to *new_id* (best-effort).
-
-    No-op if the source is absent; if the destination already exists the source
-    is left untouched rather than clobbering it.
-    """
-    src = provenance_dir(old_id)
-    if not src.exists():
-        return
-    dst = provenance_dir(new_id)
-    if dst.exists():
-        return
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(src), str(dst))
 
 
 # ── Human-readable report ────────────────────────────────────────────────────

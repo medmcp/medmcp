@@ -1029,13 +1029,49 @@ def _extract_text(content: object) -> str:
     return "\n".join(p for p in parts if p)
 
 
-# The viewer-context note appended to a prompt in _run_prompt. Its format and the
+# The viewer-context note sent with a prompt in _run_prompt. Its format and the
 # pattern that strips it live in medmcp.workspace_note (shared with distill.py, the
-# other consumer). On transcript replay (session/load) the stored user message
-# still carries the note, and vibe-acp derives a session's title from that first
-# message too, so _strip_workspace_note removes it before showing either to the
-# user.
+# other consumer). Turns sent by vibe ≥2.23 replay with the note-free text in the
+# frame's user_display_content meta; older transcripts (and titles derived from
+# the stored text) still need _strip_workspace_note.
 _strip_workspace_note = strip_workspace_note
+
+
+def _replayed_user_text(update: JsonDict) -> str:
+    """Extract the display text for a replayed ``user_message_chunk`` frame.
+
+    Prefers the ``user_display_content`` meta (vibe ≥2.23 echoes back the
+    note-free text we sent with the prompt); falls back to stripping the
+    workspace note from the stored message text for older transcripts.
+    """
+    meta = update.get("_meta")
+    if isinstance(meta, dict):
+        display = cast("JsonDict", meta).get("user_display_content")
+        if isinstance(display, dict):
+            parts = [
+                str(cast("JsonDict", block).get("text") or "")
+                for block in cast("list[object]", cast("JsonDict", display).get("content") or [])
+                if isinstance(block, dict) and cast("JsonDict", block).get("type") == "text"
+            ]
+            text = "\n\n".join(p for p in parts if p)
+            if text:
+                return text
+    content = cast("JsonDict", update.get("content") or {})
+    if content.get("type") != "text":
+        return ""
+    return _strip_workspace_note(str(content.get("text") or ""))
+
+
+def _visible_permission_options(options: list[JsonDict]) -> list[JsonDict]:
+    """Drop permission options that would create a durable auto-approval.
+
+    vibe ≥2.23 offers ``allow_always_permanent`` ("Always allow"), which
+    persists the approval into ``.vibe/config.toml`` — every future call of
+    that tool would then bypass the permission flow entirely. medmcp's posture
+    is interactive gating only, so the option is never shown to the browser
+    (per-session "allow always" remains available).
+    """
+    return [o for o in options if o.get("optionId") != "allow_always_permanent"]
 
 
 def _workspace_note(viewed_path: str) -> str:
@@ -1077,11 +1113,6 @@ class _ChatConnection:
         self.queue = queue
         self.servers = servers
         self._resumed = resumed
-        # Fork tracking: continuing a resumed session makes vibe-acp log under a
-        # new id (see _maybe_adopt_fork). `_known_ids` is the session set snapshot
-        # before the first continued turn; `_fork` is the adopted new id, if any.
-        self._known_ids: set[str] | None = None
-        self._fork: str | None = None
         self._pending_perms: dict[int, asyncio.Future[str | None]] = {}
         self._prompt_task: asyncio.Task[None] | None = None
         # Tool-call state accumulated across frames, keyed by toolCallId; feeds
@@ -1138,12 +1169,6 @@ class _ChatConnection:
         if not self._prompted and not self._resumed:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(provenance.purge_session, self.session_id)
-        elif self._fork is not None:
-            # The continuation was logged under the fork (the live transcript);
-            # move our provenance record onto it so the record and transcript
-            # live under one id.
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(provenance.move_session_record, self.session_id, self._fork)
 
     async def _cancel_prompt(self) -> None:
         """Cancel the running prompt task and tell vibe-acp to abort its loop."""
@@ -1202,11 +1227,12 @@ class _ChatConnection:
         """Send one ``session/prompt`` and stream its frames to the browser.
 
         ``viewed_path`` is the workspace-relative file currently open in the
-        viewer; it is resolved to its absolute on-disk path and appended to the
-        prompt as a context note (see :func:`_workspace_note`) so the agent can
+        viewer; it is resolved to its absolute on-disk path and sent as a
+        context-note content block (see :func:`_workspace_note`) so the agent can
         resolve references like "this image" *and* pass the path the stack tools
-        expect. Appended to the user's text block (not sent as a separate content
-        block) so it survives any prompt handling downstream.
+        expect. The block's ``automatic`` meta keeps it out of vibe's auto-title
+        derivation, and the prompt's ``user_display_content`` meta records the
+        note-free text vibe echoes back on transcript replay.
 
         Race loop: wait for either the next inbound session frame or the
         prompt response, then drain whatever is left in the queue once the
@@ -1223,29 +1249,38 @@ class _ChatConnection:
                             model_name=settings.OLLAMA_MODEL,
                         )
                     )
-        # Snapshot the existing session set before the first continued turn of a
-        # resumed session: vibe-acp logs the continuation under a fresh id, which
-        # _maybe_adopt_fork spots as the one new id afterwards.
-        if self._resumed and self._fork is None and self._known_ids is None:
-            with contextlib.suppress(Exception):
-                self._known_ids = await self._list_session_ids()
         # Frames can still trickle in between a cancel and this prompt
         # (vibe-acp processes session/cancel asynchronously); drop them now so
         # the old turn can't bleed into this one.
         await self._drain_stale_frames()
-        prompt_text = text
+        params: JsonDict = {
+            "session_id": self.session_id,
+            "prompt": [{"type": "text", "text": text}],
+        }
         if viewed_path is not None:
-            prompt_text += _workspace_note(viewed_path)
-        prompt_fut = asyncio.create_task(
-            _client.request(
-                "session/prompt",
+            # The note rides as its own content block flagged `automatic`: vibe
+            # orders it after the user's text and keeps it out of auto-title
+            # derivation. lstrip() because vibe joins blocks with a blank line —
+            # the persisted text stays byte-identical to the old appended format,
+            # so strip_workspace_note keeps working on every transcript vintage.
+            cast("list[JsonDict]", params["prompt"]).append(
                 {
-                    "session_id": self.session_id,
-                    "prompt": [{"type": "text", "text": prompt_text}],
-                },
+                    "type": "text",
+                    "text": _workspace_note(viewed_path).lstrip(),
+                    "_meta": {"automatic": True},
+                }
             )
-        )
-        completed = False
+            # user_display_content is persisted with the turn and echoed back in
+            # replayed user_message_chunk frames, so resumed transcripts show the
+            # user's text without the note (no stripping needed on that path).
+            params["_meta"] = {
+                "user_display_content": {
+                    "version": "1",
+                    "host": "medmcp",
+                    "content": [{"type": "text", "text": text}],
+                }
+            }
+        prompt_fut = asyncio.create_task(_client.request("session/prompt", params))
         self._thoughts.reset()  # start each turn with a clean reasoning-strip state
         try:
             while True:
@@ -1271,7 +1306,6 @@ class _ChatConnection:
             if tail:
                 await self._send({"type": "chunk", "text": tail})
             await self._send({"type": "done"})
-            completed = True
         except asyncio.CancelledError:
             # Deliberately no `done` frame: when a new prompt superseded this
             # one, a stale done would reset the client's busy/permission state
@@ -1287,48 +1321,6 @@ class _ChatConnection:
                 await _client.notify("session/cancel", {"session_id": self.session_id})
             await self._send({"type": "error", "message": str(exc)})
             await self._send({"type": "done"})
-        if completed and self._resumed and self._fork is None:
-            with contextlib.suppress(Exception):
-                await self._maybe_adopt_fork()
-
-    async def _list_session_ids(self) -> set[str]:
-        """Return the set of session ids vibe-acp currently knows for this workspace."""
-        resp = await _client.request("session/list", {"cwd": str(WORKSPACE_ROOT)})
-        result = cast("JsonDict", resp.get("result") or {})
-        ids: set[str] = set()
-        for s in cast("list[JsonDict]", result.get("sessions") or []):
-            sid = s.get("sessionId") or s.get("session_id")
-            if isinstance(sid, str) and sid:
-                ids.add(sid)
-        return ids
-
-    async def _maybe_adopt_fork(self) -> None:
-        """Adopt the new session vibe-acp creates when a resumed chat is continued.
-
-        ``session/load`` logs continuations under a fresh id (the loaded session
-        is left a stale duplicate), so once exactly one new id appears we retire
-        the original transcript and point the browser at the fork. The provenance
-        record is moved onto the fork on close (see :meth:`close`).
-        """
-        if self._known_ids is None:
-            return
-        # vibe writes the fork's transcript as the turn finishes, which can lag
-        # the prompt response by a beat, so poll briefly for the one new id.
-        fork: str | None = None
-        for _ in range(6):
-            new = await self._list_session_ids() - self._known_ids - {self.session_id}
-            if len(new) == 1:
-                fork = next(iter(new))
-                break
-            if len(new) > 1:
-                return  # ambiguous (concurrent session activity) — don't guess
-            await asyncio.sleep(0.3)
-        if fork is None:
-            return  # no fork — vibe appended in place, nothing to reconcile
-        self._fork = fork
-        # Retire the original transcript so the chat shows up once, as the fork.
-        await asyncio.to_thread(provenance.delete_vibe_transcript, self.session_id)
-        await self._send({"type": "session_migrated", "sessionId": fork})
 
     async def _forward_frame(self, msg: JsonDict, *, replay: bool = False) -> None:
         """Translate one inbound vibe-acp frame into a browser message.
@@ -1350,11 +1342,9 @@ class _ChatConnection:
                         await self._send({"type": "chunk", "text": visible})
             elif update_type == "user_message_chunk":
                 # Replayed user turns (session/load); live prompts are not echoed.
-                content = cast("JsonDict", update.get("content") or {})
-                if content.get("type") == "text":
-                    text = _strip_workspace_note(str(content.get("text") or ""))
-                    if text:
-                        await self._send({"type": "user", "text": text})
+                text = _replayed_user_text(update)
+                if text:
+                    await self._send({"type": "user", "text": text})
             elif update_type == "tool_call":
                 tc_id = str(update.get("toolCallId") or "")
                 title = str(update.get("title") or "tool")
@@ -1417,11 +1407,17 @@ class _ChatConnection:
             elif update_type == "usage_update":
                 used = update.get("used")
                 if isinstance(used, int):
-                    # No-I/O accessor: an inline fetch_context_window() here
-                    # would stall the relay of every queued frame behind an
-                    # Ollama round-trip. The cache is warmed at connect time
-                    # in ws_chat.
-                    size = settings.cached_context_window()
+                    # vibe ≥2.23 reports the model's context window on the frame;
+                    # fall back to the cached Ollama fetch (a no-I/O accessor: an
+                    # inline fetch_context_window() here would stall the relay of
+                    # every queued frame behind an Ollama round-trip; the cache is
+                    # warmed at connect time in ws_chat).
+                    size_raw = update.get("size")
+                    size = (
+                        size_raw
+                        if isinstance(size_raw, int) and size_raw > 0
+                        else settings.cached_context_window()
+                    )
                     await self._send({"type": "usage", "used": used, "size": size})
         elif method == "session/request_permission":
             await self._handle_permission(msg)
@@ -1441,7 +1437,7 @@ class _ChatConnection:
             return
         params = cast("JsonDict", msg.get("params") or {})
         tool_call: JsonDict = dict(cast("JsonDict", params.get("toolCall") or {}))
-        options = cast("list[JsonDict]", params.get("options") or [])
+        options = _visible_permission_options(cast("list[JsonDict]", params.get("options") or []))
         tc_id = str(tool_call.get("toolCallId") or "")
         cached = self._tool_calls.get(tc_id, {})
         for key in ("title", "rawInput", "humanReadable", "risks"):
@@ -1616,6 +1612,14 @@ class RenameSessionPayload(BaseModel):
 async def rename_session(session_id: str, payload: RenameSessionPayload) -> JsonDict:
     """Set (or clear, when blank) the user title override for a session."""
     await asyncio.to_thread(sessions.set_title, session_id, payload.title)
+    # Write the title through to vibe's own session metadata (ext method, vibe
+    # ≥2.23) so it also shows up wherever vibe surfaces the session. Best-effort:
+    # the registry override above is what the UI reads, and vibe may not be
+    # running (it starts lazily with the first chat socket).
+    title = payload.title.strip()
+    if title:
+        with contextlib.suppress(Exception):
+            await _client.request("session/set_title", {"sessionId": session_id, "title": title})
     return {"ok": True}
 
 

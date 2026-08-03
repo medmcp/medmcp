@@ -420,6 +420,16 @@ def vibe_chain_tip(session_id: str) -> str:
     return tip if isinstance(tip, str) and tip else session_id
 
 
+def vibe_session_title(session_id: str) -> str | None:
+    """Read a session's title from its dir's ``meta.json`` (``None`` if absent)."""
+    d = find_vibe_session_dir(session_id)
+    if d is None:
+        return None
+    data = _read_session_meta(d)
+    title = data.get("title") if data is not None else None
+    return title if isinstance(title, str) and title.strip() else None
+
+
 def list_provenance_sessions() -> list[str]:
     """Return the session ids that currently have a provenance directory."""
     root = VIBE_HOME / "provenance"

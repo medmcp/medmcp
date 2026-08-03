@@ -286,6 +286,38 @@ def test_vibe_chain_tip_without_chain_is_identity(tmp_path: Path) -> None:
         assert provenance.vibe_chain_tip("99999999-x") == "99999999-x"
 
 
+def test_chain_walk_stops_at_forks(tmp_path: Path) -> None:
+    """A fork (stop id) is not treated as its source's continuation.
+
+    Forks carry the same parent_session_id backlink as compaction
+    continuations; without the stop set, resuming the source would land in
+    the fork and purging the source would delete it.
+    """
+    original = _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)
+    fork = _make_vibe_session(tmp_path, "20260101_010000", CONT_ID, parent_id=SESSION_ID)
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        assert provenance.find_vibe_session_dirs(SESSION_ID, stop_ids={CONT_ID}) == [original]
+        assert provenance.vibe_chain_tip(SESSION_ID, stop_ids={CONT_ID}) == SESSION_ID
+        # The fork's own chain still walks (its own id never stops itself).
+        assert provenance.find_vibe_session_dirs(CONT_ID, stop_ids={CONT_ID}) == [fork]
+
+        provenance.purge_session(SESSION_ID, stop_ids={CONT_ID})
+
+        assert not original.exists()
+        assert fork.exists()  # the branched chat survives its source's deletion
+
+
+def test_chain_walk_stops_only_at_fork_boundary(tmp_path: Path) -> None:
+    """A compaction continuation *behind* a fork boundary is still excluded."""
+    _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)
+    _make_vibe_session(tmp_path, "20260101_010000", CONT_ID, parent_id=SESSION_ID)
+    # CONT2 continues the fork (e.g. the fork later compacted) — not ours.
+    _make_vibe_session(tmp_path, "20260101_020000", CONT2_ID, parent_id=CONT_ID)
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        dirs = provenance.find_vibe_session_dirs(SESSION_ID, stop_ids={CONT_ID})
+        assert [d.name.split("_")[-1] for d in dirs] == [SESSION_ID[:8]]
+
+
 def test_purge_session_removes_compaction_continuations(tmp_path: Path) -> None:
     """Purging a chat also deletes the transcript dirs compaction rolled over to."""
     original = _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)

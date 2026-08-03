@@ -451,12 +451,24 @@ export const Chat = memo(function Chat({
           setItems((prev) => [...prev, { kind: 'error', text: frame.message }])
           break
         case 'user':
-          // A replayed user turn from a resumed session (live sends are added
-          // locally in send(), so this only fires during history replay).
-          setItems((prev) => [
-            ...prev,
-            { kind: 'user', text: frame.text, messageId: frame.messageId },
-          ])
+          // Two sources: history replay on resume, and vibe ≥2.23's echo of a
+          // *live* prompt. Live sends are already rendered locally in send(),
+          // so when the echo matches the newest id-less user bubble, merge its
+          // messageId into that bubble instead of appending a duplicate — this
+          // is also what gives live turns a rewind anchor without a reload.
+          setItems((prev) => {
+            for (let j = prev.length - 1; j >= 0; j--) {
+              const it = prev[j]
+              if (it.kind !== 'user') continue
+              if (!it.messageId && it.text === frame.text) {
+                const next = prev.slice()
+                next[j] = { ...it, messageId: frame.messageId }
+                return next
+              }
+              break // newest user turn differs — a genuine replayed frame
+            }
+            return [...prev, { kind: 'user', text: frame.text, messageId: frame.messageId }]
+          })
           break
         case 'ready':
           // (Re)connect: the server is the transcript's source of truth — a

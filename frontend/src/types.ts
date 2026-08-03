@@ -196,8 +196,8 @@ export interface RewindResult {
 export type ServerFrame =
   | { type: 'ready'; sessionId: string; model?: string }
   | { type: 'chunk'; text: string }
-  // Replayed user turn from a resumed session (session/load); live prompts are
-  // rendered locally on send and are not echoed by the server.
+  // A user turn: replayed from a resumed session (session/load), or vibe's
+  // echo of a live prompt (merged into the locally-rendered bubble by id).
   | { type: 'user'; text: string; messageId?: string }
   | {
       type: 'tool_call'

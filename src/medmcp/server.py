@@ -1608,13 +1608,14 @@ async def rename_session(session_id: str, payload: RenameSessionPayload) -> Json
     """Set (or clear, when blank) the user title override for a session."""
     await asyncio.to_thread(sessions.set_title, session_id, payload.title)
     # Write the title through to vibe's own session metadata (ext method, vibe
-    # ≥2.23) so it also shows up wherever vibe surfaces the session. Best-effort:
-    # the registry override above is what the UI reads, and vibe may not be
-    # running (it starts lazily with the first chat socket).
+    # ≥2.23; ACP extension methods are underscore-prefixed on the wire) so it
+    # also shows up wherever vibe surfaces the session. Best-effort: the registry
+    # override above is what the UI reads, and vibe may not be running (it
+    # starts lazily with the first chat socket).
     title = payload.title.strip()
     if title:
         with contextlib.suppress(Exception):
-            await _client.request("session/set_title", {"sessionId": session_id, "title": title})
+            await _client.request("_session/set_title", {"sessionId": session_id, "title": title})
     return {"ok": True}
 
 
@@ -1639,7 +1640,7 @@ async def delete_session(session_id: str) -> JsonDict:
     # doesn't go stale. Best-effort — the purge below sweeps whatever remains on
     # disk (provenance plus any compaction continuations) either way.
     with contextlib.suppress(Exception):
-        await _client.request("session/delete", {"sessionId": session_id})
+        await _client.request("_session/delete", {"sessionId": session_id})
 
     def _delete() -> None:
         provenance.purge_session(session_id)

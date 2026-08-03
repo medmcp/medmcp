@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { archiveSession, deleteSession, fetchSessions, renameSession } from '../api'
+import { archiveSession, deleteSession, fetchSessions, forkSession, renameSession } from '../api'
 import type { SessionInfo } from '../types'
-import { ArchiveIcon, PencilIcon, TrashIcon } from './icons'
+import { ArchiveIcon, BranchIcon, PencilIcon, TrashIcon } from './icons'
 
 interface ChatsMenuProps {
   /** The session the chat is currently showing (highlighted in the list). */
@@ -98,6 +98,13 @@ export function ChatsMenu({ currentSessionId, onSelectSession, onCurrentDeleted 
     setOpen(false)
   }
 
+  const branch = (id: string) => {
+    // Only offered on the open chat's row — vibe forks live sessions only.
+    forkSession(id)
+      .then((forkId) => select(forkId))
+      .catch((e: unknown) => setError(String(e)))
+  }
+
   const active = (list ?? []).filter((s) => !s.archived)
   const archived = (list ?? []).filter((s) => s.archived)
 
@@ -133,6 +140,15 @@ export function ChatsMenu({ currentSessionId, onSelectSession, onCurrentDeleted 
           <span className="session-time">{timeLabel(s.updatedAt)}</span>
         </span>
         <span className="session-actions" onClick={(e) => e.stopPropagation()}>
+          {!isArchived && s.id === currentSessionId && (
+            <button
+              className="btn-icon"
+              title="Branch this chat (duplicate to try a different path)"
+              onClick={() => branch(s.id)}
+            >
+              <BranchIcon size={14} />
+            </button>
+          )}
           {!isArchived && (
             <button
               className="btn-icon"

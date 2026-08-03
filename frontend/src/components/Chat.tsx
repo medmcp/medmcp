@@ -5,7 +5,7 @@ import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import { ChatSocket } from '../chatSocket'
 import type { ChatSocketStatus } from '../chatSocket'
-import { forkSession, previewRewind, rewindTo } from '../api'
+import { previewRewind, rewindTo } from '../api'
 import type { ChatItem, PermissionRequest, ServerFrame, ToolCallState } from '../types'
 import { ChatsMenu } from './ChatsMenu'
 import { ShieldIcon } from './icons'
@@ -524,22 +524,6 @@ export const Chat = memo(function Chat({
     }
   }
 
-  const branch = async () => {
-    const sid = sessionIdRef.current
-    if (!sid) return
-    try {
-      const forkId = await forkSession(sid)
-      // The parent remounts this component to resume the fork (same mechanism
-      // as picking a chat from the menu).
-      onSelectSession?.(forkId)
-    } catch (e) {
-      setItems((prev) => [
-        ...prev,
-        { kind: 'error', text: `Branch failed: ${(e as Error).message}` },
-      ])
-    }
-  }
-
   const askRewind = async (messageId: string) => {
     const sid = sessionIdRef.current
     if (!sid) return
@@ -580,16 +564,6 @@ export const Chat = memo(function Chat({
           {onNewChat && (
             <button className="btn-plain chat-new-btn" onClick={onNewChat} title="Start a new chat">
               ＋ New chat
-            </button>
-          )}
-          {onSelectSession && items.length > 0 && (
-            <button
-              className="btn-plain chat-new-btn"
-              onClick={() => void branch()}
-              disabled={busy}
-              title="Duplicate this chat into a new session (try a different path)"
-            >
-              ⑂ Branch
             </button>
           )}
           {onSelectSession && (

@@ -19,6 +19,7 @@ were previously duplicated across ``server.py`` and ``distill.py``.
 from __future__ import annotations
 
 import re
+from typing import Any, cast
 
 # The note is always appended last, separated by a blank line, so the strip
 # pattern cuts from its marker to the end of the text — this also handles a title
@@ -43,3 +44,23 @@ def build_workspace_note(absolute_path: str) -> str:
 def strip_workspace_note(text: str) -> str:
     """Remove the appended ``[workspace context: …]`` note from *text*."""
     return _NOTE_RE.sub("", text).strip()
+
+
+def display_content_text(display: dict[str, Any]) -> str:
+    """Join the text blocks of a ``user_display_content`` payload (``""`` if none).
+
+    The payload is the ``{version, host, content: [...]}`` dict the server sends
+    with a prompt; vibe persists it on the user message and echoes it in replayed
+    ``user_message_chunk`` frames, so both the server (replay) and distillation
+    (the seed request) can recover the note-free user text from it.
+    """
+    blocks = display.get("content")
+    if not isinstance(blocks, list):
+        return ""
+    parts: list[str] = []
+    for block in cast("list[object]", blocks):
+        if isinstance(block, dict):
+            b = cast("dict[str, Any]", block)
+            if b.get("type") == "text":
+                parts.append(str(b.get("text") or ""))
+    return "\n\n".join(p for p in parts if p).strip()

@@ -34,7 +34,7 @@ import yaml
 
 from medmcp import provenance
 from medmcp.workflow import Recipe, RecipeStep, StackRequirement, WorkflowInput
-from medmcp.workspace_note import strip_workspace_note
+from medmcp.workspace_note import display_content_text, strip_workspace_note
 
 JsonDict = dict[str, Any]
 
@@ -109,14 +109,21 @@ def parse_messages_file(path: Path) -> list[JsonDict]:
 def _first_user_message(messages: list[JsonDict]) -> str:
     """Return the first non-injected user message, for context/naming.
 
-    The workspace server appends a "[workspace context: …]" note to the prompt
-    text so the agent can resolve "this image" (server.py:_workspace_note). That
-    note is live-turn metadata, not part of the user's request, so it is stripped
-    here (via :func:`strip_workspace_note`) — it would otherwise pollute the
-    distilled workflow's name and description.
+    The workspace server sends a "[workspace context: …]" note with the prompt
+    so the agent can resolve "this image" (server.py:_workspace_note). That note
+    is live-turn metadata, not part of the user's request — it would otherwise
+    pollute the distilled workflow's name and description. vibe ≥2.23 persists
+    the note-free text on the message (``user_display_content``), which is
+    preferred; older transcripts fall back to stripping the note from the stored
+    text (via :func:`strip_workspace_note`).
     """
     for msg in messages:
         if msg.get("role") == "user" and not msg.get("injected"):
+            display = msg.get("user_display_content")
+            if isinstance(display, dict):
+                text = display_content_text(cast("JsonDict", display))
+                if text:
+                    return text
             content = msg.get("content")
             if isinstance(content, str) and content.strip():
                 return strip_workspace_note(content)

@@ -63,7 +63,7 @@ from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict, VibeAcpClient
 from medmcp.backend_broker import BackendBroker
 from medmcp.backend_pool import BackendPool, BackendSpec
 from medmcp.reasoning import ThoughtStripper
-from medmcp.workspace_note import build_workspace_note, strip_workspace_note
+from medmcp.workspace_note import build_workspace_note, display_content_text, strip_workspace_note
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
 log: logging.Logger = logging.getLogger(__name__)
@@ -1048,12 +1048,7 @@ def _replayed_user_text(update: JsonDict) -> str:
     if isinstance(meta, dict):
         display = cast("JsonDict", meta).get("user_display_content")
         if isinstance(display, dict):
-            parts = [
-                str(cast("JsonDict", block).get("text") or "")
-                for block in cast("list[object]", cast("JsonDict", display).get("content") or [])
-                if isinstance(block, dict) and cast("JsonDict", block).get("type") == "text"
-            ]
-            text = "\n\n".join(p for p in parts if p)
+            text = display_content_text(cast("JsonDict", display))
             if text:
                 return text
     content = cast("JsonDict", update.get("content") or {})
@@ -1639,6 +1634,12 @@ async def archive_session(session_id: str, payload: ArchiveSessionPayload) -> Js
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str) -> JsonDict:
     """Delete a session for good: its transcript, provenance, and UI metadata."""
+    # Let vibe drop the session first (ext method, vibe ≥2.23: closes a live
+    # attachment and deletes its stored copy) so a running agent's session list
+    # doesn't go stale. Best-effort — the purge below sweeps whatever remains on
+    # disk (provenance plus any compaction continuations) either way.
+    with contextlib.suppress(Exception):
+        await _client.request("session/delete", {"sessionId": session_id})
 
     def _delete() -> None:
         provenance.purge_session(session_id)

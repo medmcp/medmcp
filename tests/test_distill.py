@@ -249,6 +249,37 @@ class TestFirstUserMessage:
         """A message with no note is returned, trimmed."""
         assert distill._first_user_message([{"role": "user", "content": "  do it  "}]) == "do it"
 
+    def test_prefers_persisted_display_content(self) -> None:
+        """The note-free user_display_content (vibe ≥2.23) wins over the stored text."""
+        messages = [
+            {
+                "role": "user",
+                "content": "Skull strip this scan\n\n[workspace context: …]",
+                "user_display_content": {
+                    "version": "1",
+                    "host": "medmcp",
+                    "content": [{"type": "text", "text": "Skull strip this scan"}],
+                },
+            }
+        ]
+        assert distill._first_user_message(messages) == "Skull strip this scan"
+
+    def test_empty_display_content_falls_back_to_stripping(self) -> None:
+        """A present-but-empty display payload does not blank the seed request."""
+        empty: list[object] = []
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Register this scan\n\n"
+                    '[workspace context: the file "/data/t1.nii.gz" is currently open '
+                    "in the viewer]"
+                ),
+                "user_display_content": {"version": "1", "host": "medmcp", "content": empty},
+            }
+        ]
+        assert distill._first_user_message(messages) == "Register this scan"
+
 
 class TestRenderSkillMd:
     """render_skill_md produces a valid SKILL.md with or without prose."""

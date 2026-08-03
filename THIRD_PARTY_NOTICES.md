@@ -9,34 +9,34 @@ This file is generated — do not edit it by hand. Regenerate with `just notices
 after changing a runtime dependency. The model and base OS/CUDA layers are not
 package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 
-## Python (95 packages, runtime closure)
+## Python (96 packages, runtime closure)
 
 | Component | Version | License |
 | --- | --- | --- |
-| agent-client-protocol | 0.10.1 | Apache-2.0 |
+| agent-client-protocol | 0.11.0 | Apache-2.0 |
 | annotated-doc | 0.0.4 | MIT |
 | annotated-types | 0.7.0 | MIT |
-| anyio | 4.13.0 | MIT |
+| anyio | 4.14.1 | MIT |
 | attrs | 26.1.0 | MIT |
 | beautifulsoup4 | 4.14.3 | MIT |
 | cachetools | 7.0.6 | MIT |
-| certifi | 2026.4.22 | MPL-2.0 |
+| certifi | 2026.6.17 | MPL-2.0 |
 | cffi | 2.0.0 | MIT |
 | charset-normalizer | 3.4.7 | MIT |
 | click | 8.3.3 | BSD-3-Clause |
 | cryptography | 48.0.1 | Apache-2.0 OR BSD-3-Clause |
 | eval-type-backport | 0.3.1 | MIT |
-| fastapi | 0.138.0 | MIT |
+| fastapi | 0.141.1 | MIT |
 | gitdb | 4.0.12 | BSD-3-Clause |
-| gitpython | 3.1.47 | BSD-3-Clause |
-| giturlparse | 0.14.0 | Apache-2.0 |
+| gitpython | 3.1.53 | BSD-3-Clause |
+| giturlparse | 0.15.0 | Apache-2.0 |
 | google-auth | 2.49.2 | Apache-2.0 |
 | googleapis-common-protos | 1.74.0 | Apache-2.0 |
 | h11 | 0.16.0 | MIT |
 | httpcore | 1.0.9 | BSD-3-Clause |
 | httpx | 0.28.1 | BSD-3-Clause |
 | httpx-sse | 0.4.3 | MIT |
-| humanize | 4.15.0 | MIT |
+| humanize | 4.16.0 | MIT |
 | idna | 3.18 | BSD-3-Clause |
 | importlib-metadata | 8.7.1 | Apache-2.0 |
 | jaraco-classes | 3.4.0 | MIT |
@@ -51,12 +51,12 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | keyring | 25.7.0 | MIT |
 | linkify-it-py | 2.1.0 | MIT |
 | markdown-it-py | 4.0.0 | MIT |
-| markdownify | 1.2.2 | MIT |
-| mcp | 1.28.0 | MIT |
+| markdownify | 1.2.3 | MIT |
+| mcp | 1.28.1 | MIT |
 | mdit-py-plugins | 0.5.0 | MIT |
 | mdurl | 0.1.2 | MIT |
-| mistral-vibe | 2.17.1 | Apache-2.0 |
-| mistralai | 2.4.11 | Apache-2.0 |
+| mistral-vibe | 2.23.2 | Apache-2.0 |
+| mistralai | 2.6.0 | Apache-2.0 |
 | more-itertools | 11.0.2 | MIT |
 | opentelemetry-api | 1.39.1 | Apache-2.0 |
 | opentelemetry-exporter-otlp-proto-common | 1.39.1 | Apache-2.0 |
@@ -69,12 +69,12 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | platformdirs | 4.9.6 | MIT |
 | protobuf | 6.33.6 | BSD-3-Clause |
 | ptyprocess | 0.7.0 | ISC |
-| pyasn1 | 0.6.3 | BSD-2-Clause |
+| pyasn1 | 0.6.4 | BSD-2-Clause |
 | pyasn1-modules | 0.4.2 | BSD-2-Clause |
 | pycparser | 3.0 | BSD-3-Clause |
-| pydantic | 2.13.3 | MIT |
-| pydantic-core | 2.46.3 | MIT |
-| pydantic-settings | 2.14.0 | MIT |
+| pydantic | 2.13.4 | MIT |
+| pydantic-core | 2.46.4 | MIT |
+| pydantic-settings | 2.14.2 | MIT |
 | pygments | 2.20.0 | BSD-2-Clause |
 | pyjwt | 2.13.0 | MIT |
 | pyperclip | 1.11.0 | BSD-3-Clause |
@@ -83,20 +83,21 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | python-multipart | 0.0.32 | Apache-2.0 |
 | pyyaml | 6.0.3 | MIT |
 | referencing | 0.37.0 | MIT |
-| requests | 2.33.1 | Apache-2.0 |
+| requests | 2.34.2 | Apache-2.0 |
 | rich | 15.0.0 | MIT |
 | rpds-py | 0.30.0 | MIT |
 | secretstorage | 3.5.0 | BSD-3-Clause |
+| sentry-sdk | 2.64.0 | MIT |
 | six | 1.17.0 | MIT |
 | smmap | 5.0.3 | BSD-3-Clause |
 | sounddevice | 0.5.5 | MIT |
-| soupsieve | 2.8.3 | MIT |
+| soupsieve | 2.8.4 | MIT |
 | sse-starlette | 3.4.1 | BSD-3-Clause |
-| starlette | 1.0.0 | BSD-3-Clause |
-| textual | 8.2.7 | MIT |
+| starlette | 1.3.1 | BSD-3-Clause |
+| textual | 8.2.8 | MIT |
 | textual-speedups | 0.2.1 | see package |
 | tomli-w | 1.2.0 | MIT |
-| tree-sitter | 0.25.2 | MIT |
+| tree-sitter | 0.26.0 | MIT |
 | tree-sitter-bash | 0.25.1 | MIT |
 | truststore | 0.10.4 | MIT |
 | typing-extensions | 4.15.0 | PSF-2.0 |
@@ -104,7 +105,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | uc-micro-py | 2.0.0 | MIT |
 | urllib3 | 2.7.0 | MIT |
 | uvicorn | 0.46.0 | BSD-3-Clause |
-| watchfiles | 1.1.1 | MIT |
+| watchfiles | 1.2.0 | MIT |
 | websockets | 16.0 | BSD-3-Clause |
 | zipp | 3.23.1 | MIT |
 | zstandard | 0.25.0 | BSD-3-Clause |

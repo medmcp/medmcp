@@ -1392,7 +1392,9 @@ class _ChatConnection:
                     if visible:
                         await self._send({"type": "chunk", "text": visible})
             elif update_type == "user_message_chunk":
-                # Replayed user turns (session/load); live prompts are not echoed.
+                # Replayed user turns (session/load) — and, since vibe 2.23, an
+                # echo of the *live* prompt carrying its messageId; the browser
+                # merges that echo into the locally-rendered bubble.
                 text = _replayed_user_text(update)
                 if text:
                     frame: JsonDict = {"type": "user", "text": text}

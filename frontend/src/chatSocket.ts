@@ -95,4 +95,11 @@ export class ChatSocket {
     }
     this.ws?.close()
   }
+
+  /** Drop the connection and reattach to the same session (server-side state
+   * changed under us — e.g. a rewind truncated the transcript — and the
+   * reconnect's history replay is the clean way to rebuild it). */
+  reconnect(): void {
+    this.ws?.close()
+  }
 }

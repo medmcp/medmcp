@@ -5,6 +5,7 @@ import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import { ChatSocket } from '../chatSocket'
 import type { ChatSocketStatus } from '../chatSocket'
+import { previewRewind, rewindTo } from '../api'
 import type { ChatItem, PermissionRequest, ServerFrame, ToolCallState } from '../types'
 import { ChatsMenu } from './ChatsMenu'
 import { ShieldIcon } from './icons'
@@ -320,6 +321,13 @@ export const Chat = memo(function Chat({
   const [model, setModel] = useState<string | null>(null)
   const [usage, setUsage] = useState<{ used: number; size: number | null } | null>(null)
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
+  // Pending rewind confirmation: set after the preview call, cleared on
+  // confirm/cancel/reconnect. `paths` are the workspace files a rewind restores.
+  const [rewind, setRewind] = useState<{
+    messageId: string
+    paths: string[]
+    busy: boolean
+  } | null>(null)
   const socketRef = useRef<ChatSocket | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -445,7 +453,10 @@ export const Chat = memo(function Chat({
         case 'user':
           // A replayed user turn from a resumed session (live sends are added
           // locally in send(), so this only fires during history replay).
-          setItems((prev) => [...prev, { kind: 'user', text: frame.text }])
+          setItems((prev) => [
+            ...prev,
+            { kind: 'user', text: frame.text, messageId: frame.messageId },
+          ])
           break
         case 'ready':
           // (Re)connect: the server is the transcript's source of truth — a
@@ -462,6 +473,7 @@ export const Chat = memo(function Chat({
           setToolCalls({})
           setBusy(false)
           setPermission(null)
+          setRewind(null)
           if (frame.model) setModel(frame.model)
           onSessionEstablishedRef.current?.(frame.sessionId)
           break
@@ -512,6 +524,38 @@ export const Chat = memo(function Chat({
     }
   }
 
+  const askRewind = async (messageId: string) => {
+    const sid = sessionIdRef.current
+    if (!sid) return
+    try {
+      const res = await previewRewind(sid, messageId)
+      setRewind({ messageId, paths: res.paths ?? [], busy: false })
+    } catch (e) {
+      setItems((prev) => [
+        ...prev,
+        { kind: 'error', text: `Rewind preview failed: ${(e as Error).message}` },
+      ])
+    }
+  }
+
+  const doRewind = async () => {
+    const sid = sessionIdRef.current
+    if (!rewind || !sid) return
+    setRewind({ ...rewind, busy: true })
+    try {
+      await rewindTo(sid, rewind.messageId)
+      // The transcript is truncated server-side; the reconnect's history
+      // replay is the clean rebuild (ready clears items and rewind state).
+      socketRef.current?.reconnect()
+    } catch (e) {
+      setRewind(null)
+      setItems((prev) => [
+        ...prev,
+        { kind: 'error', text: `Rewind failed: ${(e as Error).message}` },
+      ])
+    }
+  }
+
   return (
     <div className="panel">
       <div className="panel-header">
@@ -546,10 +590,56 @@ export const Chat = memo(function Chat({
             return tc ? <ToolCard key={i} tc={tc} /> : null
           }
           if (item.kind === 'user') {
+            const mid = item.messageId
             return (
-              <div key={i} className="msg msg-user">
-                <div className="msg-avatar avatar-user">You</div>
-                <div className="msg-bubble bubble-user">{item.text}</div>
+              <div key={i} className="user-turn">
+                <div className="msg msg-user">
+                  {mid && !busy && (
+                    <button
+                      className="btn-icon rewind-btn"
+                      title="Rewind the chat to before this message"
+                      onClick={() => void askRewind(mid)}
+                    >
+                      ↺
+                    </button>
+                  )}
+                  <div className="msg-avatar avatar-user">You</div>
+                  <div className="msg-bubble bubble-user">{item.text}</div>
+                </div>
+                {rewind && rewind.messageId === mid && (
+                  <div className="rewind-confirm">
+                    <div className="rewind-confirm-title">Rewind to before this message?</div>
+                    <div>
+                      The conversation from here on is discarded.
+                      {rewind.paths.length > 0
+                        ? ` ${rewind.paths.length} workspace file(s) will be restored:`
+                        : ' No workspace files need restoring.'}
+                    </div>
+                    {rewind.paths.length > 0 && (
+                      <ul className="rewind-paths">
+                        {rewind.paths.map((p) => (
+                          <li key={p}>{p}</li>
+                        ))}
+                      </ul>
+                    )}
+                    <div className="rewind-actions">
+                      <button
+                        className="btn-plain"
+                        disabled={rewind.busy}
+                        onClick={() => setRewind(null)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="btn-danger"
+                        disabled={rewind.busy}
+                        onClick={() => void doRewind()}
+                      >
+                        {rewind.busy ? 'Rewinding…' : 'Rewind'}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )
           }

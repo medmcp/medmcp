@@ -46,7 +46,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from medmcp import (
     batchplan,
@@ -1395,7 +1395,12 @@ class _ChatConnection:
                 # Replayed user turns (session/load); live prompts are not echoed.
                 text = _replayed_user_text(update)
                 if text:
-                    await self._send({"type": "user", "text": text})
+                    frame: JsonDict = {"type": "user", "text": text}
+                    # The message id anchors per-turn actions (rewind targets).
+                    mid = update.get("messageId")
+                    if isinstance(mid, str) and mid:
+                        frame["messageId"] = mid
+                    await self._send(frame)
             elif update_type == "tool_call":
                 tc_id = str(update.get("toolCallId") or "")
                 title = str(update.get("title") or "tool")
@@ -1709,6 +1714,47 @@ async def rename_session(session_id: str, payload: RenameSessionPayload) -> Json
             tip = await asyncio.to_thread(provenance.vibe_chain_tip, session_id)
             await _client.request("_session/set_title", {"sessionId": tip, "title": title})
     return {"ok": True}
+
+
+class RewindPayload(BaseModel):
+    """Request body for previewing/performing a chat rewind."""
+
+    message_id: str = Field(alias="messageId")
+    preview: bool = False
+    restore_files: bool = Field(default=True, alias="restoreFiles")
+
+
+@app.post("/api/sessions/{session_id}/rewind")
+async def rewind_session(session_id: str, payload: RewindPayload) -> JsonDict:
+    """Preview or perform an in-place rewind of a live chat (vibe ≥2.23 ext method).
+
+    ``preview`` returns the workspace files a rewind would restore; without it
+    the conversation is truncated to before ``messageId`` (and, with
+    ``restoreFiles``, the files are restored). Requires the chat to be open —
+    vibe only rewinds live sessions — and targets the chain tip (the id vibe
+    holds live). The UI must confirm with the user before the non-preview call:
+    it truncates conversation history and rewrites workspace files.
+    """
+    await _client.ensure_started()
+    tip = await asyncio.to_thread(provenance.vibe_chain_tip, session_id)
+    if payload.preview:
+        method = "_rewind/preview"
+        params: JsonDict = {"sessionId": tip, "messageId": payload.message_id}
+    else:
+        _audit.info("rewind requested: %s -> message %s", session_id, payload.message_id)
+        method = "_rewind/to"
+        params = {
+            "sessionId": tip,
+            "messageId": payload.message_id,
+            "restoreFiles": payload.restore_files,
+        }
+    resp = await _client.request(method, params)
+    if "error" in resp:
+        err = cast("JsonDict", resp["error"])
+        raise HTTPException(status_code=409, detail=str(err.get("message", err)))
+    if not payload.preview:
+        _audit.info("rewind performed: %s -> message %s", session_id, payload.message_id)
+    return cast("JsonDict", resp.get("result") or {})
 
 
 class ArchiveSessionPayload(BaseModel):

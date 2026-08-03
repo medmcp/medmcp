@@ -178,10 +178,19 @@ export type ReplayFrame =
 
 /** Ordered chat transcript entries. Tool calls render as inline cards. */
 export type ChatItem =
-  | { kind: 'user'; text: string }
+  // messageId (replayed turns only) anchors per-turn actions like rewind.
+  | { kind: 'user'; text: string; messageId?: string }
   | { kind: 'assistant'; text: string }
   | { kind: 'tool'; toolCallId: string }
   | { kind: 'error'; text: string }
+
+/** What a rewind would restore (preview) / did restore (perform). */
+export interface RewindResult {
+  paths?: string[]
+  messageContent?: string
+  restoredPaths?: string[]
+  restoreErrors?: string[]
+}
 
 /** Frames the server sends over /ws/chat. */
 export type ServerFrame =
@@ -189,7 +198,7 @@ export type ServerFrame =
   | { type: 'chunk'; text: string }
   // Replayed user turn from a resumed session (session/load); live prompts are
   // rendered locally on send and are not echoed by the server.
-  | { type: 'user'; text: string }
+  | { type: 'user'; text: string; messageId?: string }
   | {
       type: 'tool_call'
       toolCallId: string

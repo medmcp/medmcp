@@ -642,7 +642,11 @@ async def post_distill(payload: DistillPayload) -> JsonDict:
     while; distillation itself never hard-fails on a model outage.
     """
     try:
-        draft_dir = await asyncio.to_thread(distill.distill_session, payload.session_id)
+        draft_dir = await asyncio.to_thread(
+            lambda: distill.distill_session(
+                payload.session_id, chain_stop_ids=_chain_stop_ids(payload.session_id)
+            )
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     _audit.info("workflow distilled: %s", draft_dir.name)
@@ -1193,7 +1197,11 @@ class _ChatConnection:
         _client.unregister_session(self.session_id)
         if not self._prompted and not self._resumed:
             with contextlib.suppress(Exception):
-                await asyncio.to_thread(provenance.purge_session, self.canonical_id)
+                await asyncio.to_thread(
+                    lambda: provenance.purge_session(
+                        self.canonical_id, stop_ids=_chain_stop_ids(self.canonical_id)
+                    )
+                )
 
     async def _cancel_prompt(self) -> None:
         """Cancel the running prompt task and tell vibe-acp to abort its loop."""
@@ -1600,6 +1608,18 @@ class _ChatConnection:
 # ── Sessions API ───────────────────────────────────────────
 
 
+def _chain_stop_ids(session_id: str) -> set[str]:
+    """Registry ids that end a chain walk from *session_id* (reads a file).
+
+    A fork carries the same ``parent_session_id`` backlink as a compaction
+    continuation; its registry entry (created at fork time) marks it as its
+    own chat, so the resume tip-mapping, purge, and distillation must not
+    walk into it. The walked session's own entry (e.g. a renamed root) never
+    stops its own chain. File I/O — call via ``asyncio.to_thread``.
+    """
+    return set(sessions.load_registry()) - {session_id}
+
+
 def _chain_root(sid: str, parents: dict[str, str], listed: set[str]) -> str:
     """Walk ``parent_session_id`` backlinks up to the topmost *listed* ancestor."""
     seen: set[str] = set()
@@ -1713,7 +1733,9 @@ async def rename_session(session_id: str, payload: RenameSessionPayload) -> Json
     title = payload.title.strip()
     if title:
         with contextlib.suppress(Exception):
-            tip = await asyncio.to_thread(provenance.vibe_chain_tip, session_id)
+            tip = await asyncio.to_thread(
+                lambda: provenance.vibe_chain_tip(session_id, stop_ids=_chain_stop_ids(session_id))
+            )
             await _client.request("_session/set_title", {"sessionId": tip, "title": title})
     return {"ok": True}
 
@@ -1731,7 +1753,9 @@ async def fork_session(session_id: str) -> JsonDict:
     live sessions); targets the chain tip, the id vibe holds live.
     """
     await _client.ensure_started()
-    tip = await asyncio.to_thread(provenance.vibe_chain_tip, session_id)
+    tip = await asyncio.to_thread(
+        lambda: provenance.vibe_chain_tip(session_id, stop_ids=_chain_stop_ids(session_id))
+    )
     resp = await _client.request(
         "session/fork", {"sessionId": tip, "cwd": str(WORKSPACE_ROOT), "mcpServers": []}
     )
@@ -1778,7 +1802,9 @@ async def rewind_session(session_id: str, payload: RewindPayload) -> JsonDict:
     it truncates conversation history and rewrites workspace files.
     """
     await _client.ensure_started()
-    tip = await asyncio.to_thread(provenance.vibe_chain_tip, session_id)
+    tip = await asyncio.to_thread(
+        lambda: provenance.vibe_chain_tip(session_id, stop_ids=_chain_stop_ids(session_id))
+    )
     if payload.preview:
         method = "_rewind/preview"
         params: JsonDict = {"sessionId": tip, "messageId": payload.message_id}
@@ -1821,11 +1847,13 @@ async def delete_session(session_id: str) -> JsonDict:
     # sweeps whatever remains on disk (provenance plus the whole transcript
     # chain) either way.
     with contextlib.suppress(Exception):
-        tip = await asyncio.to_thread(provenance.vibe_chain_tip, session_id)
+        tip = await asyncio.to_thread(
+            lambda: provenance.vibe_chain_tip(session_id, stop_ids=_chain_stop_ids(session_id))
+        )
         await _client.request("_session/delete", {"sessionId": tip})
 
     def _delete() -> None:
-        provenance.purge_session(session_id)
+        provenance.purge_session(session_id, stop_ids=_chain_stop_ids(session_id))
         sessions.remove(session_id)
 
     await asyncio.to_thread(_delete)
@@ -1887,7 +1915,9 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
             # carries the summary plus everything since. The browser keeps the
             # root id (canonical) — ready reports it, provenance keys on it —
             # and only the vibe RPC target is the tip.
-            tip = await asyncio.to_thread(provenance.vibe_chain_tip, resume)
+            tip = await asyncio.to_thread(
+                lambda: provenance.vibe_chain_tip(resume, stop_ids=_chain_stop_ids(resume))
+            )
             queue = _client.register_session(tip)
             load = await _client.request(
                 "session/load",

@@ -30,6 +30,7 @@ import subprocess
 import sys
 import time
 import tomllib
+from collections.abc import Collection
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -340,7 +341,7 @@ def find_vibe_session_dir(session_id: str) -> Path | None:
     return candidates[0] if candidates else None
 
 
-def find_vibe_session_dirs(session_id: str) -> list[Path]:
+def find_vibe_session_dirs(session_id: str, *, stop_ids: Collection[str] = ()) -> list[Path]:
     """Locate *session_id*'s log dir plus its compaction continuations, in order.
 
     On context compaction vibe rolls the conversation over to a fresh session id
@@ -348,6 +349,14 @@ def find_vibe_session_dirs(session_id: str) -> list[Path]:
     ``meta.json``. Following those backlinks (vibe ≥2.21 writes them) yields the
     whole chain — original first, then each continuation in creation order — so
     purge and distillation see one chat, not just its pre-compaction prefix.
+
+    ``stop_ids`` marks children that are chats in their own right and must not
+    be walked into: a **fork** carries the same ``parent_session_id`` backlink
+    as a compaction continuation, so without the stop set a branched chat would
+    be treated as its source's continuation (resume would land in the fork,
+    purge would delete it, distillation would mix it in). Callers pass the UI
+    session registry's ids — a fork is registered there at creation, while a
+    pure continuation never is. *session_id* itself is never a stop.
     """
     root = find_vibe_session_dir(session_id)
     if root is None:
@@ -365,13 +374,14 @@ def find_vibe_session_dirs(session_id: str) -> list[Path]:
         parent_id = data.get("parent_session_id")
         if isinstance(child_id, str) and isinstance(parent_id, str) and parent_id:
             children.setdefault(parent_id, []).append((candidate, child_id))
+    stop = set(stop_ids) - {session_id}
     chain: list[Path] = [root]
     queue: list[str] = [session_id]
     seen: set[str] = {session_id}
     while queue:
         for child_dir, child_id in children.get(queue.pop(0), []):
-            if child_id in seen:  # defensive: malformed metas must not loop
-                continue
+            if child_id in seen or child_id in stop:
+                continue  # already walked, or another chat (fork) — not ours
             seen.add(child_id)
             chain.append(child_dir)
             queue.append(child_id)
@@ -403,16 +413,17 @@ def vibe_session_parents() -> dict[str, str]:
     return parents
 
 
-def vibe_chain_tip(session_id: str) -> str:
+def vibe_chain_tip(session_id: str, *, stop_ids: Collection[str] = ()) -> str:
     """Follow compaction continuations from *session_id* to the newest link.
 
     Returns *session_id* itself when it has no continuation (or is unknown).
     Resuming the tip instead of the root restores the post-compaction context;
-    the root dir only holds the pre-compaction prefix. With several children
-    (defensive — pure compaction rolls over to at most one) the newest dir in
-    the chain wins.
+    the root dir only holds the pre-compaction prefix. ``stop_ids`` keeps the
+    walk out of forks (see :func:`find_vibe_session_dirs`). With several
+    children (defensive — pure compaction rolls over to at most one) the
+    newest dir in the chain wins.
     """
-    dirs = find_vibe_session_dirs(session_id)
+    dirs = find_vibe_session_dirs(session_id, stop_ids=stop_ids)
     if len(dirs) < 2:
         return session_id
     data = _read_session_meta(dirs[-1])
@@ -455,18 +466,19 @@ def purge_orphans(referenced_ids: set[str]) -> list[str]:
     return purged
 
 
-def purge_session(session_id: str) -> None:
+def purge_session(session_id: str, *, stop_ids: Collection[str] = ()) -> None:
     """Delete all on-disk logs for *session_id*.
 
     Removes the provenance directory and every vibe transcript dir in the
     session's chain (the original plus compaction continuations, see
-    :func:`find_vibe_session_dirs`), so deleting a chat leaves nothing orphaned
-    on disk. Best-effort: missing paths are ignored.
+    :func:`find_vibe_session_dirs` — ``stop_ids`` keeps forks alive), so
+    deleting a chat leaves nothing orphaned on disk. Best-effort: missing
+    paths are ignored.
     """
     pdir = provenance_dir(session_id)
     if pdir.exists():
         shutil.rmtree(pdir, ignore_errors=True)
-    for vibe_dir in find_vibe_session_dirs(session_id):
+    for vibe_dir in find_vibe_session_dirs(session_id, stop_ids=stop_ids):
         shutil.rmtree(vibe_dir, ignore_errors=True)
 
 

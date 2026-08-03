@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any, cast
 
@@ -660,19 +661,21 @@ def distill_session(
     *,
     use_llm: bool = True,
     workflows_root: Path | None = None,
+    chain_stop_ids: Collection[str] = (),
 ) -> Path:
     """Distill *session_id* into a draft workflow directory and return its path.
 
     Reads the session's ``messages.jsonl`` — concatenated across the session's
     compaction chain (vibe rolls a compacted conversation over to a new dir;
     see :func:`provenance.find_vibe_session_dirs`), so tool calls made after a
-    compaction distill too — builds a parameterized recipe, adds a (hybrid)
+    compaction distill too — ``chain_stop_ids`` keeps the walk out of forks
+    (pass the UI session registry's ids) — builds a parameterized recipe, adds a (hybrid)
     prose narrative, and writes ``recipe.yaml`` + ``SKILL.md`` into
     ``<workflows_root>/draft/<name>/`` for human review.
 
     Raises ``FileNotFoundError`` if the session's raw log cannot be located.
     """
-    session_dirs = provenance.find_vibe_session_dirs(session_id)
+    session_dirs = provenance.find_vibe_session_dirs(session_id, stop_ids=chain_stop_ids)
     if not session_dirs:
         raise FileNotFoundError(f"no vibe session log found for session {session_id!r}")
     message_paths = [d / "messages.jsonl" for d in session_dirs if (d / "messages.jsonl").exists()]

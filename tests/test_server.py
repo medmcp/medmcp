@@ -751,7 +751,8 @@ class TestSessionsApi:
         """DELETE …/{id} purges the transcript/provenance and drops the registry entry."""
         calls: list[tuple[str, str]] = []
 
-        def _purge(session_id: str) -> None:
+        def _purge(session_id: str, *, stop_ids: Iterable[str] = ()) -> None:
+            del stop_ids
             calls.append(("purge", session_id))
 
         def _remove(session_id: str) -> None:

@@ -28,6 +28,7 @@ disabled_agents = []
 skill_paths = []
 enabled_skills = []
 disabled_skills = [
+    "skill-creator",
     "vibe",
 ]
 

@@ -32,7 +32,10 @@ enabled_agents = []
 disabled_agents = []
 skill_paths = []
 enabled_skills = []
-disabled_skills = []
+disabled_skills = [
+    "skill-creator",
+    "vibe",
+]
 applied_migrations = [
     "bash_read_only_defaults_v1",
 ]

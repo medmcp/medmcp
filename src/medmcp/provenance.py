@@ -378,6 +378,48 @@ def find_vibe_session_dirs(session_id: str) -> list[Path]:
     return chain
 
 
+def vibe_session_parents() -> dict[str, str]:
+    """Map each vibe session id to its ``parent_session_id`` backlink.
+
+    Only sessions that *have* a parent appear as keys. Both compaction
+    continuations and explicit forks carry the backlink — callers that must
+    distinguish them need an additional signal (the UI session registry: a
+    chat the user can see is never a hidden continuation).
+    """
+    sessions_root = VIBE_HOME / "logs" / "session"
+    if not sessions_root.is_dir():
+        return {}
+    parents: dict[str, str] = {}
+    for candidate in sessions_root.iterdir():
+        if not candidate.is_dir():
+            continue
+        data = _read_session_meta(candidate)
+        if data is None:
+            continue
+        child = data.get("session_id")
+        parent = data.get("parent_session_id")
+        if isinstance(child, str) and isinstance(parent, str) and parent:
+            parents[child] = parent
+    return parents
+
+
+def vibe_chain_tip(session_id: str) -> str:
+    """Follow compaction continuations from *session_id* to the newest link.
+
+    Returns *session_id* itself when it has no continuation (or is unknown).
+    Resuming the tip instead of the root restores the post-compaction context;
+    the root dir only holds the pre-compaction prefix. With several children
+    (defensive — pure compaction rolls over to at most one) the newest dir in
+    the chain wins.
+    """
+    dirs = find_vibe_session_dirs(session_id)
+    if len(dirs) < 2:
+        return session_id
+    data = _read_session_meta(dirs[-1])
+    tip = data.get("session_id") if data is not None else None
+    return tip if isinstance(tip, str) and tip else session_id
+
+
 def list_provenance_sessions() -> list[str]:
     """Return the session ids that currently have a provenance directory."""
     root = VIBE_HOME / "provenance"

@@ -1113,6 +1113,7 @@ class _ChatConnection:
         servers: list[JsonDict],
         *,
         resumed: bool = False,
+        canonical_id: str | None = None,
     ) -> None:
         """Bind the websocket to its registered session queue.
 
@@ -1121,9 +1122,13 @@ class _ChatConnection:
         cannot go stale within a connection's lifetime. ``resumed`` marks a
         session reattached via ``session/load`` — it already has a transcript,
         so it must not be purged as an abandoned empty session on close.
+        ``canonical_id`` is the chain-root id the browser and provenance key
+        on; it differs from ``session_id`` (the vibe RPC target) when a resume
+        was mapped onto a compaction continuation (see ``ws_chat``).
         """
         self.ws = ws
         self.session_id = session_id
+        self.canonical_id = canonical_id or session_id
         self.queue = queue
         self.servers = servers
         self._resumed = resumed
@@ -1188,7 +1193,7 @@ class _ChatConnection:
         _client.unregister_session(self.session_id)
         if not self._prompted and not self._resumed:
             with contextlib.suppress(Exception):
-                await asyncio.to_thread(provenance.purge_session, self.session_id)
+                await asyncio.to_thread(provenance.purge_session, self.canonical_id)
 
     async def _cancel_prompt(self) -> None:
         """Cancel the running prompt task and tell vibe-acp to abort its loop."""
@@ -1290,7 +1295,7 @@ class _ChatConnection:
                 with contextlib.suppress(Exception):
                     await asyncio.to_thread(
                         lambda: provenance.write_manifest(
-                            self.session_id,
+                            self.canonical_id,
                             servers=self.servers,
                             model_name=settings.OLLAMA_MODEL,
                         )
@@ -1439,7 +1444,7 @@ class _ChatConnection:
                         with contextlib.suppress(Exception):
                             await asyncio.to_thread(
                                 lambda: provenance.record_tool_event(
-                                    self.session_id,
+                                    self.canonical_id,
                                     tc_id,
                                     event_info,
                                     [str(s["name"]) for s in self.servers],
@@ -1578,7 +1583,7 @@ class _ChatConnection:
 
         def _mirror() -> None:
             if settings.load_provenance_enabled():
-                provenance.log_permission(self.session_id, title=str(title), decision=decision)
+                provenance.log_permission(self.canonical_id, title=str(title), decision=decision)
 
         with contextlib.suppress(Exception):
             await asyncio.to_thread(_mirror)
@@ -1588,17 +1593,58 @@ class _ChatConnection:
 # ── Sessions API ───────────────────────────────────────────
 
 
+def _chain_root(sid: str, parents: dict[str, str], listed: set[str]) -> str:
+    """Walk ``parent_session_id`` backlinks up to the topmost *listed* ancestor."""
+    seen: set[str] = set()
+    cur = sid
+    while cur in parents and cur not in seen:
+        seen.add(cur)
+        parent = parents[cur]
+        if parent not in listed:
+            break
+        cur = parent
+    return cur
+
+
 def _merge_session_registry(raw: list[JsonDict]) -> list[JsonDict]:
     """Overlay UI metadata (title override, archived, provenance) onto vibe's list.
 
-    Runs off the event loop: it reads the registry file and stats a provenance
-    directory per session.
+    Compaction rolls a chat over to a fresh session dir, so vibe lists one chat
+    as several sessions. Continuations — entries whose ``parent_session_id``
+    chain reaches another listed session — are folded into their root: hidden
+    from the list, with the root carrying the newest ``updatedAt`` of the chain.
+    An entry with a UI-registry record is never folded (registry entries mean
+    the user sees that chat as its own — e.g. a deliberate fork — while pure
+    continuations never acquire one).
+
+    Runs off the event loop: it reads the registry file, scans session metas,
+    and stats a provenance directory per session.
     """
     registry = sessions.load_registry()
+    parents = provenance.vibe_session_parents()
+    ids = {
+        sid
+        for s in raw
+        if isinstance(sid := (s.get("sessionId") or s.get("session_id")), str) and sid
+    }
+    # First pass: fold continuations into their roots, keeping the newest stamp.
+    newest_updated: dict[str, str] = {}
+    hidden: set[str] = set()
+    for s in raw:
+        sid = s.get("sessionId") or s.get("session_id")
+        if not (isinstance(sid, str) and sid) or sid in registry:
+            continue
+        root = _chain_root(sid, parents, ids)
+        if root == sid:
+            continue
+        hidden.add(sid)
+        updated = s.get("updatedAt") or s.get("updated_at")
+        if isinstance(updated, str) and updated > newest_updated.get(root, ""):
+            newest_updated[root] = updated
     out: list[JsonDict] = []
     for s in raw:
         sid = s.get("sessionId") or s.get("session_id")
-        if not (isinstance(sid, str) and sid):
+        if not (isinstance(sid, str) and sid) or sid in hidden:
             continue
         entry = registry.get(sid, {})
         override = entry.get("title")
@@ -1607,11 +1653,15 @@ def _merge_session_registry(raw: list[JsonDict]) -> list[JsonDict]:
         else:
             raw_title = s.get("title")
             title = _strip_workspace_note(str(raw_title)) if raw_title else ""
+        updated = s.get("updatedAt") or s.get("updated_at")
+        folded = newest_updated.get(sid)
+        if folded is not None and (not isinstance(updated, str) or folded > updated):
+            updated = folded
         out.append(
             {
                 "id": sid,
                 "title": title or None,
-                "updatedAt": s.get("updatedAt") or s.get("updated_at"),
+                "updatedAt": updated,
                 "archived": bool(entry.get("archived")),
                 "hasProvenance": provenance.provenance_dir(sid).is_dir(),
             }
@@ -1649,13 +1699,15 @@ async def rename_session(session_id: str, payload: RenameSessionPayload) -> Json
     await asyncio.to_thread(sessions.set_title, session_id, payload.title)
     # Write the title through to vibe's own session metadata (ext method, vibe
     # ≥2.23; ACP extension methods are underscore-prefixed on the wire) so it
-    # also shows up wherever vibe surfaces the session. Best-effort: the registry
-    # override above is what the UI reads, and vibe may not be running (it
-    # starts lazily with the first chat socket).
+    # also shows up wherever vibe surfaces the session. Targets the chain tip —
+    # that is the session vibe has live/attached after a compaction. Best-effort:
+    # the registry override above is what the UI reads, and vibe may not be
+    # running (it starts lazily with the first chat socket).
     title = payload.title.strip()
     if title:
         with contextlib.suppress(Exception):
-            await _client.request("_session/set_title", {"sessionId": session_id, "title": title})
+            tip = await asyncio.to_thread(provenance.vibe_chain_tip, session_id)
+            await _client.request("_session/set_title", {"sessionId": tip, "title": title})
     return {"ok": True}
 
 
@@ -1676,11 +1728,13 @@ async def archive_session(session_id: str, payload: ArchiveSessionPayload) -> Js
 async def delete_session(session_id: str) -> JsonDict:
     """Delete a session for good: its transcript, provenance, and UI metadata."""
     # Let vibe drop the session first (ext method, vibe ≥2.23: closes a live
-    # attachment and deletes its stored copy) so a running agent's session list
-    # doesn't go stale. Best-effort — the purge below sweeps whatever remains on
-    # disk (provenance plus any compaction continuations) either way.
+    # attachment and deletes its stored copy). Targets the chain tip — after a
+    # compaction that is the id vibe holds live. Best-effort — the purge below
+    # sweeps whatever remains on disk (provenance plus the whole transcript
+    # chain) either way.
     with contextlib.suppress(Exception):
-        await _client.request("_session/delete", {"sessionId": session_id})
+        tip = await asyncio.to_thread(provenance.vibe_chain_tip, session_id)
+        await _client.request("_session/delete", {"sessionId": tip})
 
     def _delete() -> None:
         provenance.purge_session(session_id)
@@ -1737,18 +1791,26 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
         # a fresh session if the id is gone/unloadable.
         replayed = False
         session_id = ""
+        canonical_id: str | None = None
         queue: asyncio.Queue[JsonDict] | None = None
         if resume:
-            queue = _client.register_session(resume)
+            # Resume the chain *tip*, not the requested root: after a compaction
+            # the root dir only holds the pre-compaction prefix, while the tip
+            # carries the summary plus everything since. The browser keeps the
+            # root id (canonical) — ready reports it, provenance keys on it —
+            # and only the vibe RPC target is the tip.
+            tip = await asyncio.to_thread(provenance.vibe_chain_tip, resume)
+            queue = _client.register_session(tip)
             load = await _client.request(
                 "session/load",
-                {"cwd": str(WORKSPACE_ROOT), "mcpServers": [], "sessionId": resume},
+                {"cwd": str(WORKSPACE_ROOT), "mcpServers": [], "sessionId": tip},
             )
             if "error" in load:
-                _client.unregister_session(resume)
+                _client.unregister_session(tip)
                 queue = None
             else:
-                session_id = resume
+                session_id = tip
+                canonical_id = resume
                 replayed = True
         if not session_id:
             session_id = await _new_session()
@@ -1759,10 +1821,12 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
             queue = _client.register_session(session_id)
 
         assert queue is not None
-        conn = _ChatConnection(ws, session_id, queue, servers, resumed=replayed)
+        conn = _ChatConnection(
+            ws, session_id, queue, servers, resumed=replayed, canonical_id=canonical_id
+        )
         _connections.add(conn)
         await ws.send_json(
-            {"type": "ready", "sessionId": session_id, "model": settings.OLLAMA_MODEL}
+            {"type": "ready", "sessionId": conn.canonical_id, "model": settings.OLLAMA_MODEL}
         )
         if replayed:
             await conn.replay_history()

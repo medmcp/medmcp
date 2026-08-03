@@ -9,7 +9,7 @@ exercisable without a live vibe-acp subprocess.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, cast
 
@@ -533,6 +533,15 @@ class TestVisiblePermissionOptions:
         assert server._visible_permission_options(options) == options
 
 
+def _prov_dir_in(tmp_path: Path) -> Callable[[str], Path]:
+    """Return a provenance_dir substitute rooted at *tmp_path*."""
+
+    def _prov_dir(session_id: str) -> Path:
+        return tmp_path / session_id
+
+    return _prov_dir
+
+
 class TestSessionsApi:
     """GET /api/sessions maps vibe-acp's session/list to the UI shape."""
 
@@ -623,6 +632,94 @@ class TestSessionsApi:
         assert rows["s2"]["title"] == "kept"
         assert rows["s2"]["archived"] is True
         assert rows["s2"]["hasProvenance"] is False
+
+    def test_folds_compaction_continuations(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A continuation is hidden; its root carries the chain's newest updatedAt."""
+        self._stub_client(
+            monkeypatch,
+            {
+                "result": {
+                    "sessions": [
+                        {"sessionId": "root", "title": "Chat", "updatedAt": "t1"},
+                        {"sessionId": "cont", "title": None, "updatedAt": "t9"},
+                        {"sessionId": "other", "title": "Other", "updatedAt": "t2"},
+                    ]
+                }
+            },
+        )
+        monkeypatch.setattr(sessions, "load_registry", dict)
+        monkeypatch.setattr(provenance, "vibe_session_parents", lambda: {"cont": "root"})
+        monkeypatch.setattr(provenance, "provenance_dir", _prov_dir_in(tmp_path))
+        client = TestClient(server.app)
+        rows = client.get("/api/sessions").json()["sessions"]
+        assert [s["id"] for s in rows] == ["root", "other"]
+        assert rows[0]["updatedAt"] == "t9"
+        assert rows[1]["updatedAt"] == "t2"
+
+    def test_multi_hop_chain_folds_to_root(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Several compactions still collapse into the one root entry."""
+        self._stub_client(
+            monkeypatch,
+            {
+                "result": {
+                    "sessions": [
+                        {"sessionId": "root", "title": "Chat", "updatedAt": "t1"},
+                        {"sessionId": "c1", "title": None, "updatedAt": "t5"},
+                        {"sessionId": "c2", "title": None, "updatedAt": "t9"},
+                    ]
+                }
+            },
+        )
+        monkeypatch.setattr(sessions, "load_registry", dict)
+        monkeypatch.setattr(provenance, "vibe_session_parents", lambda: {"c1": "root", "c2": "c1"})
+        monkeypatch.setattr(provenance, "provenance_dir", _prov_dir_in(tmp_path))
+        client = TestClient(server.app)
+        rows = client.get("/api/sessions").json()["sessions"]
+        assert [s["id"] for s in rows] == ["root"]
+        assert rows[0]["updatedAt"] == "t9"
+
+    def test_registry_entry_is_never_folded(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A child the user can see (registry record — e.g. a fork) stays listed."""
+        self._stub_client(
+            monkeypatch,
+            {
+                "result": {
+                    "sessions": [
+                        {"sessionId": "root", "title": "Chat", "updatedAt": "t1"},
+                        {"sessionId": "fork", "title": None, "updatedAt": "t9"},
+                    ]
+                }
+            },
+        )
+        monkeypatch.setattr(sessions, "load_registry", lambda: {"fork": {"title": "My branch"}})
+        monkeypatch.setattr(provenance, "vibe_session_parents", lambda: {"fork": "root"})
+        monkeypatch.setattr(provenance, "provenance_dir", _prov_dir_in(tmp_path))
+        client = TestClient(server.app)
+        rows = client.get("/api/sessions").json()["sessions"]
+        assert [s["id"] for s in rows] == ["root", "fork"]
+        assert rows[0]["updatedAt"] == "t1"  # nothing folded into the root
+        assert rows[1]["title"] == "My branch"
+
+    def test_child_of_unlisted_parent_stays(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A backlink to a session outside this workspace's list does not hide it."""
+        self._stub_client(
+            monkeypatch,
+            {"result": {"sessions": [{"sessionId": "c1", "title": "Solo", "updatedAt": "t1"}]}},
+        )
+        monkeypatch.setattr(sessions, "load_registry", dict)
+        monkeypatch.setattr(provenance, "vibe_session_parents", lambda: {"c1": "elsewhere"})
+        monkeypatch.setattr(provenance, "provenance_dir", _prov_dir_in(tmp_path))
+        client = TestClient(server.app)
+        rows = client.get("/api/sessions").json()["sessions"]
+        assert [s["id"] for s in rows] == ["c1"]
 
     def test_rename_sets_title(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """POST …/rename forwards to the registry's set_title."""

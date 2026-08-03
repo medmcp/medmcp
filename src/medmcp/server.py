@@ -1716,6 +1716,41 @@ async def rename_session(session_id: str, payload: RenameSessionPayload) -> Json
     return {"ok": True}
 
 
+@app.post("/api/sessions/{session_id}/fork")
+async def fork_session(session_id: str) -> JsonDict:
+    """Branch the live chat: fork its whole history into a new session.
+
+    Uses vibe's ``session/fork`` (vibe ≥2.23), which copies the transcript into
+    a fresh session without attaching it; the browser then opens the fork via
+    the normal resume flow. The fork is registered in the UI session registry
+    immediately — the entry names it *and* keeps the chain-collapse folding
+    from hiding it (forks carry the same ``parent_session_id`` backlink as
+    compaction continuations). Requires the chat to be open (vibe only forks
+    live sessions); targets the chain tip, the id vibe holds live.
+    """
+    await _client.ensure_started()
+    tip = await asyncio.to_thread(provenance.vibe_chain_tip, session_id)
+    resp = await _client.request(
+        "session/fork", {"sessionId": tip, "cwd": str(WORKSPACE_ROOT), "mcpServers": []}
+    )
+    if "error" in resp:
+        err = cast("JsonDict", resp["error"])
+        raise HTTPException(status_code=409, detail=str(err.get("message", err)))
+    result = cast("JsonDict", resp.get("result") or {})
+    new_id = str(result.get("sessionId") or "")
+    if not new_id:
+        raise HTTPException(status_code=502, detail="fork returned no session id")
+    _audit.info("chat branched: %s -> %s", session_id, new_id)
+
+    def _register() -> None:
+        src_title = sessions.load_registry().get(session_id, {}).get("title")
+        title = f"{src_title} (branch)" if isinstance(src_title, str) and src_title else "Branch"
+        sessions.set_title(new_id, title)
+
+    await asyncio.to_thread(_register)
+    return {"id": new_id}
+
+
 class RewindPayload(BaseModel):
     """Request body for previewing/performing a chat rewind."""
 

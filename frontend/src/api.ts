@@ -147,6 +147,12 @@ export async function archiveSession(id: string, archived: boolean): Promise<voi
   await postJson(`/api/sessions/${encodeURIComponent(id)}/archive`, { archived })
 }
 
+/** Branch the live chat into a new session; returns the fork's id. */
+export async function forkSession(id: string): Promise<string> {
+  const res = await postJson(`/api/sessions/${encodeURIComponent(id)}/fork`, {})
+  return ((await res.json()) as { id: string }).id
+}
+
 /** Preview a rewind: which workspace files would be restored. */
 export async function previewRewind(id: string, messageId: string): Promise<RewindResult> {
   const res = await postJson(`/api/sessions/${encodeURIComponent(id)}/rewind`, {

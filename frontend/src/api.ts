@@ -4,6 +4,7 @@ import type {
   GpuInfo,
   InstalledStack,
   ReplayPreviewStep,
+  RewindResult,
   SessionInfo,
   SettingsState,
   TreeNode,
@@ -144,6 +145,21 @@ export async function renameSession(id: string, title: string): Promise<void> {
 
 export async function archiveSession(id: string, archived: boolean): Promise<void> {
   await postJson(`/api/sessions/${encodeURIComponent(id)}/archive`, { archived })
+}
+
+/** Preview a rewind: which workspace files would be restored. */
+export async function previewRewind(id: string, messageId: string): Promise<RewindResult> {
+  const res = await postJson(`/api/sessions/${encodeURIComponent(id)}/rewind`, {
+    messageId,
+    preview: true,
+  })
+  return (await res.json()) as RewindResult
+}
+
+/** Rewind the live chat to before a message (truncates + restores files). */
+export async function rewindTo(id: string, messageId: string): Promise<RewindResult> {
+  const res = await postJson(`/api/sessions/${encodeURIComponent(id)}/rewind`, { messageId })
+  return (await res.json()) as RewindResult
 }
 
 /** Delete a session for good (transcript + provenance + UI metadata). */

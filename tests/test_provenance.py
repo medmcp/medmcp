@@ -260,6 +260,32 @@ def test_find_vibe_session_dirs_unknown_session(tmp_path: Path) -> None:
         assert provenance.find_vibe_session_dirs(SESSION_ID) == []
 
 
+def test_vibe_session_parents_maps_backlinks(tmp_path: Path) -> None:
+    """Only sessions with a parent_session_id appear, mapped child -> parent."""
+    _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)
+    _make_vibe_session(tmp_path, "20260101_010000", CONT_ID, parent_id=SESSION_ID)
+    _make_vibe_session(tmp_path, "20260101_020000", CONT2_ID, parent_id=CONT_ID)
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        assert provenance.vibe_session_parents() == {CONT_ID: SESSION_ID, CONT2_ID: CONT_ID}
+
+
+def test_vibe_chain_tip_follows_to_newest_link(tmp_path: Path) -> None:
+    """The tip of a compaction chain is the newest continuation's id."""
+    _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)
+    _make_vibe_session(tmp_path, "20260101_010000", CONT_ID, parent_id=SESSION_ID)
+    _make_vibe_session(tmp_path, "20260101_020000", CONT2_ID, parent_id=CONT_ID)
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        assert provenance.vibe_chain_tip(SESSION_ID) == CONT2_ID
+
+
+def test_vibe_chain_tip_without_chain_is_identity(tmp_path: Path) -> None:
+    """A session with no continuation (or unknown) maps to itself."""
+    _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        assert provenance.vibe_chain_tip(SESSION_ID) == SESSION_ID
+        assert provenance.vibe_chain_tip("99999999-x") == "99999999-x"
+
+
 def test_purge_session_removes_compaction_continuations(tmp_path: Path) -> None:
     """Purging a chat also deletes the transcript dirs compaction rolled over to."""
     original = _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)

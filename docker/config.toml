@@ -86,38 +86,7 @@ denylist = []
 
 [tools.bash]
 permission = "ask"
-allowlist = [
-    "basename",
-    "cat",
-    "cut",
-    "date",
-    "df",
-    "diff",
-    "dirname",
-    "du",
-    "echo",
-    "file",
-    "find",
-    "fold",
-    "grep",
-    "head",
-    "ls",
-    "md5sum",
-    "nl",
-    "od",
-    "ps",
-    "pwd",
-    "readlink",
-    "sha256sum",
-    "sort",
-    "stat",
-    "tail",
-    "tr",
-    "uname",
-    "uniq",
-    "wc",
-    "which",
-]
+allowlist = []
 denylist_standalone = []
 sensitive_patterns = [
     "sudo",

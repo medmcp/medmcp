@@ -134,25 +134,7 @@ denylist = []
 
 [tools.bash]
 permission = "ask"
-allowlist = [
-    "ls",
-    "find",
-    "cat",
-    "head",
-    "tail",
-    "wc",
-    "stat",
-    "file",
-    "pwd",
-    "which",
-    "ps",
-    "du",
-    "df",
-    "echo",
-    "sort",
-    "uniq",
-    "diff",
-]
+allowlist = []
 denylist_standalone = []
 sensitive_patterns = [
     "sudo",

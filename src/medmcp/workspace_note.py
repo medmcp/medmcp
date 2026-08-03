@@ -1,12 +1,15 @@
 """The viewer "workspace context" note and its inverse.
 
-When a file is open in the viewer, the workspace server appends a
-``[workspace context: …]`` note to the prompt text it sends the agent. The note
+When a file is open in the viewer, the workspace server sends a
+``[workspace context: …]`` note with the prompt (as a content block flagged
+``automatic``, which vibe ≥2.23 keeps out of auto-title derivation). The note
 lets the agent resolve references like "this image" *and* hands it the absolute
 on-disk path the stack tools expect (the workspace is bind-mounted at the
 identical absolute path — path parity). The note is live-turn metadata, not part
-of the user's request, so it is stripped wherever the prompt text resurfaces:
-session titles, replayed turns, and workflow distillation.
+of the user's request: replayed turns carry the note-free text natively (the
+prompt's ``user_display_content`` meta), while the persisted prompt text still
+contains the note, so :func:`strip_workspace_note` remains the fallback for
+pre-2.23 transcripts and for distillation's seed request.
 
 The note's format (:func:`build_workspace_note`) and the pattern that removes it
 (:func:`strip_workspace_note`) live here together so they stay in sync — they

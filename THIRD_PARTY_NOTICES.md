@@ -55,7 +55,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | mcp | 1.28.1 | MIT |
 | mdit-py-plugins | 0.5.0 | MIT |
 | mdurl | 0.1.2 | MIT |
-| mistral-vibe | 2.23.2 | Apache-2.0 |
+| mistral-vibe | 2.23.3 | Apache-2.0 |
 | mistralai | 2.6.0 | Apache-2.0 |
 | more-itertools | 11.0.2 | MIT |
 | opentelemetry-api | 1.39.1 | Apache-2.0 |

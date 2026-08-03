@@ -772,7 +772,7 @@ test = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "mistral-vibe", specifier = ">=2.23.2,<3" },
+    { name = "mistral-vibe", specifier = ">=2.23.3,<3" },
     { name = "python-multipart", specifier = ">=0.0.18" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "tomli-w", specifier = ">=1.0" },

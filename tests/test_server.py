@@ -8,8 +8,10 @@ exercisable without a live vibe-acp subprocess.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 import yaml
@@ -436,6 +438,79 @@ class TestReplayedUserText:
             "content": {"type": "image", "data": "…"},
         }
         assert server._replayed_user_text(update) == ""
+
+
+class _StubWs:
+    """Collects frames a _ChatConnection would send to the browser."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, object]] = []
+
+    async def send_json(self, msg: dict[str, object]) -> None:
+        self.sent.append(msg)
+
+
+class TestIdlePump:
+    """Unsolicited vibe frames (e.g. MCP failure notices) reach the browser."""
+
+    @pytest.mark.asyncio
+    async def test_pump_relays_queued_notice(self) -> None:
+        """A warm-up agent message queued before any prompt is forwarded."""
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        conn = server._ChatConnection(cast("Any", _StubWs()), "sid", cast("Any", queue), [])
+        await queue.put(
+            {
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {
+                            "type": "text",
+                            "text": "The following MCP servers failed to connect:\n- x: boom",
+                        },
+                    }
+                },
+            }
+        )
+        conn.start_idle_pump()
+        await asyncio.sleep(0.05)
+        await conn._stop_idle_pump()
+        ws = cast("_StubWs", conn.ws)
+        assert any(
+            m.get("type") == "chunk" and "failed to connect" in str(m.get("text")) for m in ws.sent
+        )
+
+    @pytest.mark.asyncio
+    async def test_stop_is_idempotent_and_halts_relay(self) -> None:
+        """After stopping, queued frames stay queued (drained by the turn loop)."""
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        conn = server._ChatConnection(cast("Any", _StubWs()), "sid", cast("Any", queue), [])
+        conn.start_idle_pump()
+        await conn._stop_idle_pump()
+        await conn._stop_idle_pump()  # no error
+        await queue.put({"method": "session/update", "params": {}})
+        await asyncio.sleep(0.05)
+        assert cast("_StubWs", conn.ws).sent == []
+        assert queue.qsize() == 1
+
+
+class TestUsageWindow:
+    """The context meter denominator: Ollama's num_ctx wins over vibe's registry figure."""
+
+    def test_fetched_ollama_value_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A fetched num_ctx beats the frame's size (vibe reports its registry figure)."""
+        monkeypatch.setattr(settings, "_context_window_tokens", 131072)
+        assert server._usage_window({"used": 1, "size": 200000}) == 131072
+
+    def test_frame_size_stands_in_before_first_fetch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Before the cache is warmed, vibe's size beats the static default."""
+        monkeypatch.setattr(settings, "_context_window_tokens", None)
+        assert server._usage_window({"size": 200000}) == 200000
+
+    def test_static_default_last(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With no fetch and no frame size, the static default applies."""
+        monkeypatch.setattr(settings, "_context_window_tokens", None)
+        assert server._usage_window({}) == settings.DEFAULT_CONTEXT_WINDOW
 
 
 class TestVisiblePermissionOptions:

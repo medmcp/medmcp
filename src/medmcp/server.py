@@ -1057,6 +1057,25 @@ def _replayed_user_text(update: JsonDict) -> str:
     return _strip_workspace_note(str(content.get("text") or ""))
 
 
+def _usage_window(update: JsonDict) -> int:
+    """Pick the context-window size for a usage frame (no I/O).
+
+    Ollama's ``num_ctx`` is the deployment truth, so the fetched value wins
+    (vibe's ``size`` comes from its model registry — e.g. 200k for a Gemma
+    served with a 131072 window). The frame's size only stands in before the
+    first successful fetch, ahead of the static default. Never an inline
+    fetch here: it would stall the relay of every queued frame behind an
+    Ollama round-trip; the cache is warmed at connect time in ws_chat.
+    """
+    fetched = settings.fetched_context_window()
+    if fetched is not None:
+        return fetched
+    size_raw = update.get("size")
+    if isinstance(size_raw, int) and size_raw > 0:
+        return size_raw
+    return settings.cached_context_window()
+
+
 def _visible_permission_options(options: list[JsonDict]) -> list[JsonDict]:
     """Drop permission options that would create a durable auto-approval.
 
@@ -1108,6 +1127,8 @@ class _ChatConnection:
         self.queue = queue
         self.servers = servers
         self._resumed = resumed
+        # Relays unsolicited frames before the first prompt (see start_idle_pump).
+        self._idle_pump: asyncio.Task[None] | None = None
         self._pending_perms: dict[int, asyncio.Future[str | None]] = {}
         self._prompt_task: asyncio.Task[None] | None = None
         # Tool-call state accumulated across frames, keyed by toolCallId; feeds
@@ -1132,6 +1153,8 @@ class _ChatConnection:
                     continue
                 viewed = data.get("viewedPath")
                 viewed_path = viewed if isinstance(viewed, str) and viewed else None
+                # The warm-up pump must not race the turn loop for the queue.
+                await self._stop_idle_pump()
                 # A new prompt while one is streaming cancels the old one.
                 await self._cancel_prompt()
                 self._prompt_task = asyncio.create_task(self._run_prompt(text, viewed_path))
@@ -1143,6 +1166,7 @@ class _ChatConnection:
                         option_id = data.get("optionId")
                         fut.set_result(option_id if isinstance(option_id, str) else None)
             elif kind == "cancel":
+                await self._stop_idle_pump()
                 await self._cancel_prompt()
                 # A cancelled task no longer emits its own `done` (a stale one
                 # would clobber a newer turn's state), so an intentional Stop
@@ -1157,6 +1181,7 @@ class _ChatConnection:
         resumed session is never purged on close — it already has history the
         user came back to view.
         """
+        await self._stop_idle_pump()
         await self._cancel_prompt()
         for task in list(self._explain_tasks):
             task.cancel()
@@ -1217,6 +1242,32 @@ class _ChatConnection:
             except asyncio.QueueEmpty:
                 break
             await self._forward_frame(msg, replay=True)
+
+    def start_idle_pump(self) -> None:
+        """Relay unsolicited frames until the first prompt arrives.
+
+        vibe ≥2.21 pushes messages outside any turn — MCP discovery-failure and
+        OAuth notices on session warm-up, plus (on resume) frames landing after
+        ``replay_history``'s non-blocking drain. Without a pump they would sit
+        in the queue until the first prompt, where ``_drain_stale_frames``
+        discards them. The pump stops at the first prompt (or Stop) and never
+        restarts: between turns the queue must stay drainable, because frames
+        trickling in after a cancel belong to the dead turn and must not be
+        relayed as fresh output.
+        """
+        self._idle_pump = asyncio.create_task(self._pump_frames())
+
+    async def _pump_frames(self) -> None:
+        while True:
+            await self._forward_frame(await self.queue.get())
+
+    async def _stop_idle_pump(self) -> None:
+        task = self._idle_pump
+        self._idle_pump = None
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     async def _run_prompt(self, text: str, viewed_path: str | None = None) -> None:
         """Send one ``session/prompt`` and stream its frames to the browser.
@@ -1402,18 +1453,7 @@ class _ChatConnection:
             elif update_type == "usage_update":
                 used = update.get("used")
                 if isinstance(used, int):
-                    # vibe ≥2.23 reports the model's context window on the frame;
-                    # fall back to the cached Ollama fetch (a no-I/O accessor: an
-                    # inline fetch_context_window() here would stall the relay of
-                    # every queued frame behind an Ollama round-trip; the cache is
-                    # warmed at connect time in ws_chat).
-                    size_raw = update.get("size")
-                    size = (
-                        size_raw
-                        if isinstance(size_raw, int) and size_raw > 0
-                        else settings.cached_context_window()
-                    )
-                    await self._send({"type": "usage", "used": used, "size": size})
+                    await self._send({"type": "usage", "used": used, "size": _usage_window(update)})
         elif method == "session/request_permission":
             await self._handle_permission(msg)
 
@@ -1726,6 +1766,7 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
         )
         if replayed:
             await conn.replay_history()
+        conn.start_idle_pump()
         await conn.run()
     except WebSocketDisconnect:
         pass

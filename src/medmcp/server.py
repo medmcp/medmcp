@@ -1744,7 +1744,12 @@ async def fork_session(session_id: str) -> JsonDict:
 
     def _register() -> None:
         src_title = sessions.load_registry().get(session_id, {}).get("title")
-        title = f"{src_title} (branch)" if isinstance(src_title, str) and src_title else "Branch"
+        if not (isinstance(src_title, str) and src_title):
+            # No user title — inherit vibe's auto-title (note-stripped: old
+            # transcripts derived titles from the raw prompt text).
+            auto = provenance.vibe_session_title(tip)
+            src_title = _strip_workspace_note(auto) if auto else None
+        title = f"{src_title} (branch)" if src_title else "Branch"
         sessions.set_title(new_id, title)
 
     await asyncio.to_thread(_register)

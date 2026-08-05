@@ -1,10 +1,17 @@
 name: Images
 
-# On push to main: build base + core and push to the private GHCR (ghcr.io/medmcp).
-# On pull_request: build only (validates the Dockerfiles) — no login, no push.
+# On push to main: build base + core on a NATIVE runner per architecture, push
+# arch-suffixed tags, then merge them into multi-arch manifest lists. Consumers
+# keep using the bare tag (ghcr.io/medmcp/core:main) and resolve to their own
+# arch — so the README quickstart works unchanged on amd64 nodes and on aarch64
+# boxes (DGX Spark / GB10), which previously pulled an unrunnable amd64 image.
+# On pull_request: build + smoke test only — no login, no push, no merge.
 # Plain `docker build` on the runner's daemon so core can FROM the just-built base
-# without a registry round-trip. amd64 only — build arm64 natively on an aarch64
-# runner (QEMU is too slow for the CUDA/torch compiles).
+# without a registry round-trip. Each arch builds natively because QEMU is far too
+# slow for the CUDA/torch compiles — do NOT collapse this into a single buildx
+# --platform linux/amd64,linux/arm64 build.
+# NOTE: ubuntu-24.04-arm is free for public repos; private repos need a paid Team
+# or Enterprise plan. Without one, swap that runner for a self-hosted aarch64 one.
 on:
   push:
     branches: [main]
@@ -20,7 +27,17 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Don't cancel the sibling arch on failure — a broken arm64 build should
+      # still leave a diagnosable amd64 run, and vice versa.
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
       - name: Build base + core
@@ -56,27 +73,67 @@ jobs:
       - name: Smoke test cleanup
         if: always()
         run: docker rm -f medmcp-smoke 2>/dev/null || true
-      - name: Push to GHCR (main only)
+      - name: Push arch-suffixed tags to GHCR (main only)
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # These -amd64/-arm64 tags are an internal handoff to the merge job, which
+          # folds them into manifest lists under the bare :main / :<sha> tags.
+          # Nothing outside this workflow should consume a suffixed tag.
           for img in base core; do
-            docker tag "medmcp-$img:ci" "ghcr.io/medmcp/$img:${{ github.sha }}"
-            docker tag "medmcp-$img:ci" "ghcr.io/medmcp/$img:main"
-            docker push "ghcr.io/medmcp/$img:${{ github.sha }}"
-            docker push "ghcr.io/medmcp/$img:main"
+            for tag in "${{ github.sha }}" main; do
+              docker tag "medmcp-$img:ci" "ghcr.io/medmcp/$img:$tag-${{ matrix.arch }}"
+              docker push "ghcr.io/medmcp/$img:$tag-${{ matrix.arch }}"
+            done
           done
-      - name: Publish deploy compose as an OCI artifact (main only)
-        if: github.event_name != 'pull_request'
+
+  # Runs once, after BOTH arches have pushed. Merging the per-arch images into a
+  # manifest list is what makes the bare tag multi-arch; without this job the
+  # suffixed tags exist but ghcr.io/medmcp/core:main would point at a single arch.
+  merge:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Merge arch tags into multi-arch manifest lists
+        run: |
+          for img in base core; do
+            for tag in "${{ github.sha }}" main; do
+              docker buildx imagetools create -t "ghcr.io/medmcp/$img:$tag" \
+                "ghcr.io/medmcp/$img:$tag-amd64" \
+                "ghcr.io/medmcp/$img:$tag-arm64"
+            done
+          done
+      - name: Verify both platforms resolve
+        run: |
+          # Guards the failure mode this whole change exists to fix: a tag that
+          # pulls fine on the runner but is unrunnable on the user's arch.
+          for img in base core; do
+            insp=$(docker buildx imagetools inspect "ghcr.io/medmcp/$img:main")
+            echo "$insp"
+            for plat in linux/amd64 linux/arm64; do
+              echo "$insp" | grep -q "$plat" \
+                || { echo "::error::ghcr.io/medmcp/$img:main is missing $plat"; exit 1; }
+            done
+          done
+          echo "both platforms present on base + core"
+      - name: Publish deploy compose as an OCI artifact
         run: |
           # Publish the self-contained deploy compose so nodes can run it with no
           # checkout:  docker compose -f oci://ghcr.io/medmcp/compose:main up -d
-          # Reuses the docker login from the push step above. MEDMCP_WORKSPACE is
-          # set only to satisfy publish-time interpolation of its required
-          # ${...:?} value; it is NOT baked into the artifact (no --with-env), so
-          # consumers still supply their own path at `up` time.
+          # Reuses the docker login from the step above. Lives here rather than in
+          # `build` so it runs exactly once (not once per arch) and only after the
+          # manifest lists its image refs resolve to actually exist.
+          # MEDMCP_WORKSPACE is set only to satisfy publish-time interpolation of
+          # its required ${...:?} value; it is NOT baked into the artifact (no
+          # --with-env), so consumers still supply their own path at `up` time.
           # `yes |` answers the separate "publish these bind mount declarations?"
           # prompt, which -y does not cover; without it the TTY-less runner reads
           # EOF, defaults to No, and silently skips the publish (exit 0).

@@ -217,3 +217,77 @@ class TestCatalog:
             patch("medmcp.settings.CATALOG_URL", ""),
         ):
             assert settings.load_catalog() == []
+
+
+class TestStackIsolation:
+    """Container stacks launch with egress denied and privileges dropped.
+
+    The safety model assumes the local model can be steered by prompt injection, so
+    a tool call must not become a data-exfiltration path: stacks bake their weights
+    at build time and get no network. These assertions are the enforcement point —
+    if the launch contract regresses, this is what catches it.
+    """
+
+    def test_install_denies_egress_and_drops_privileges(self, stacks_dir: Path) -> None:
+        """A freshly installed stack records the full isolation flag set."""
+        with (
+            patch("medmcp.settings._run_docker", _fake_docker(LABEL)),
+            patch("medmcp.settings._image_present", lambda _img: True),
+            patch("medmcp.settings._extract_image_skills", _fake_extract),
+        ):
+            settings.install_stack_image("img:tag")
+        args = _read_manifest(stacks_dir, "medmcp-foo")["args"]
+        assert args[0] == "run"
+        for flag, value in (
+            ("--network", "none"),
+            ("--cap-drop", "ALL"),
+            ("--security-opt", "no-new-privileges"),
+        ):
+            assert args[args.index(flag) + 1] == value
+        assert "--pids-limit" in args
+        # Isolation must precede the image reference, or docker treats it as an
+        # argument to the container rather than to `run`.
+        assert args.index("--network") < args.index("img:tag")
+
+    def test_network_opt_in_is_preserved(self, stacks_dir: Path) -> None:
+        """A stack declaring "network": true keeps egress instead of being clamped."""
+        label = '{"name": "medmcp-net", "gpu": false, "network": true}'
+        with (
+            patch("medmcp.settings._run_docker", _fake_docker(label)),
+            patch("medmcp.settings._image_present", lambda _img: True),
+            patch("medmcp.settings._extract_image_skills", _fake_extract),
+        ):
+            settings.install_stack_image("img:tag")
+        args = _read_manifest(stacks_dir, "medmcp-net")["args"]
+        assert args[args.index("--network") + 1] == "bridge"
+        assert "none" not in args
+        # Opting into egress must not opt out of the rest.
+        assert "--cap-drop" in args and "no-new-privileges" in args
+
+    def test_legacy_manifest_is_hardened_on_load(self, stacks_dir: Path) -> None:
+        """A manifest written before this existed is isolated without a reinstall.
+
+        stacks.d manifests are written once at install, so without the load-time
+        pass an upgrade would silently leave already-installed stacks unisolated.
+        """
+        stacks_dir.mkdir(parents=True, exist_ok=True)
+        (stacks_dir / "medmcp-old.toml").write_text(
+            'name = "medmcp-old"\n'
+            'command = "docker"\n'
+            'args = ["run", "--rm", "-i", "-v", "/w:/w", "img:tag"]\n'
+        )
+        entry = next(m for m in settings._load_stack_manifests() if m["name"] == "medmcp-old")
+        args = entry["args"]
+        assert args[args.index("--network") + 1] == "none"
+        assert "--cap-drop" in args
+        assert args[-1] == "img:tag"
+
+    def test_hardening_is_idempotent(self) -> None:
+        """Re-applying the hardening does not duplicate flags."""
+        once = settings._harden_stack_run_args(["run", "--rm", "-i"])
+        assert settings._harden_stack_run_args(once) == once
+        assert once.count("--network") == 1
+
+    def test_non_run_args_untouched(self) -> None:
+        """Only `docker run` argument lists are rewritten."""
+        assert settings._harden_stack_run_args(["pull", "img:tag"]) == ["pull", "img:tag"]

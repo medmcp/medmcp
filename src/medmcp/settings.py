@@ -258,6 +258,45 @@ def call_entry_point(python: Path, module: str, attr: str) -> object:
     return json.loads(result.stdout)
 
 
+# Isolation applied to every container-stack launch. Stacks bake their weights at
+# build time and are offline at runtime (verified: all shipped stacks initialise and
+# register their tools under `--network none`), so egress is denied by default — the
+# safety model assumes the local model can be steered by prompt injection, and a tool
+# call must not become a data-exfiltration path. A stack that genuinely needs egress
+# sets "network": true in its org.medmcp.stack label, which writes an explicit
+# `--network bridge` at install time; that is detected and preserved here.
+#
+# The MCP server inside a stack is a plain Python process over stdio: it needs no
+# capabilities, no privilege escalation, and no unbounded process count.
+_STACK_RUN_HARDENING: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("--network", ("--network", "none")),
+    ("--cap-drop", ("--cap-drop", "ALL")),
+    ("--security-opt", ("--security-opt", "no-new-privileges")),
+    ("--pids-limit", ("--pids-limit", "512")),
+)
+
+
+def _harden_stack_run_args(args: list[str]) -> list[str]:
+    """Insert container-isolation flags into a ``docker run`` argument list.
+
+    Idempotent — a flag already present (written by a newer install, or by a stack
+    that opted into egress) is left untouched. Flags are inserted directly after
+    ``run`` so they precede the image reference and anything after it.
+
+    This runs at manifest *load* time as well as install time, so stacks installed
+    before this existed are hardened without requiring a reinstall. ``stacks.d``
+    manifests are the launch recipe and are written once at install; without the
+    load-time pass, an upgrade would silently leave existing stacks unisolated.
+    """
+    if not args or args[0] != "run":
+        return args
+    missing: list[str] = []
+    for flag, addition in _STACK_RUN_HARDENING:
+        if flag not in args:
+            missing += addition
+    return [args[0], *missing, *args[1:]] if missing else args
+
+
 def _load_stack_manifests() -> list[JsonDict]:
     """Read container-stack manifests from :data:`STACKS_D_PATH`.
 
@@ -287,9 +326,12 @@ def _load_stack_manifests() -> list[JsonDict]:
             log.warning("Stack manifest %s missing 'name'/'command'; skipping", path)
             continue
         args = [os.path.expandvars(str(a)) for a in cast("list[Any]", raw.get("args", []))]
+        expanded_command = os.path.expandvars(command)
+        if Path(expanded_command).name == "docker":
+            args = _harden_stack_run_args(args)
         entry: JsonDict = {
             "name": name,
-            "command": os.path.expandvars(command),
+            "command": expanded_command,
             "args": args,
             "env": dict(cast("dict[str, str]", raw.get("env", {}))),
         }
@@ -698,6 +740,11 @@ def install_stack_image(image: str, on_progress: ProgressFn | None = None) -> st
         # ${MEDMCP_GPU} is expanded at load time (defaults to "all"), so the GPU
         # can be re-pinned via env without reinstalling the stack.
         args += ["--device", "nvidia.com/gpu=${MEDMCP_GPU}"]
+    if meta.get("network"):
+        # Opt-in egress, recorded explicitly so _harden_stack_run_args leaves it
+        # alone rather than clamping it to none on every load.
+        args += ["--network", "bridge"]
+    args = _harden_stack_run_args(args)
     args += ["-v", "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}", image]
     entry: JsonDict = {"name": name, "command": "docker", "args": args}
 

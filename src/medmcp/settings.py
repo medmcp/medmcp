@@ -23,6 +23,7 @@ import contextlib
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -566,6 +567,54 @@ def _run_docker(args: list[str], *, timeout: float = 600.0) -> subprocess.Comple
     return result
 
 
+# Docker reports "amd64"/"arm64"; uname reports "x86_64"/"aarch64". Normalise both
+# so a host can be compared against an image manifest.
+_ARCH_ALIASES = {
+    "aarch64": "arm64",
+    "arm64": "arm64",
+    "x86_64": "amd64",
+    "amd64": "amd64",
+}
+
+
+def _normalise_arch(value: str) -> str:
+    """Map a uname- or docker-style architecture onto docker's spelling."""
+    v = value.strip().lower()
+    return _ARCH_ALIASES.get(v, v)
+
+
+def host_arch() -> str:
+    """This host's architecture in docker's spelling ("amd64", "arm64", …)."""
+    return _normalise_arch(platform.machine())
+
+
+def check_image_arch(image: str) -> None:
+    """Raise if *image* was built for a different architecture than this host.
+
+    Docker pulls and creates containers from a foreign-architecture image with only
+    a warning, then fails at exec time — under compose it reports the stack as *up*
+    while the container never starts, which reads as a working install. Checking the
+    image manifest at install time converts that into an actionable error.
+
+    The architecture is read from the image itself rather than from the
+    ``org.medmcp.stack`` label: the manifest cannot be wrong or forgotten, and a
+    multi-arch tag resolves to the host's architecture automatically.
+
+    Raises:
+        RuntimeError: the image cannot execute on this host.
+    """
+    out = _run_docker(["image", "inspect", "--format", "{{.Architecture}}", image], timeout=30)
+    image_arch = _normalise_arch(out.stdout)
+    host = host_arch()
+    if not image_arch or image_arch == host:
+        return
+    raise RuntimeError(
+        f"{image} is built for linux/{image_arch}, but this host is linux/{host}. "
+        "It cannot run here. Ask the stack's maintainer to publish a multi-arch "
+        "image, or build it locally for this architecture."
+    )
+
+
 def read_stack_label(image: str) -> JsonDict:
     """Return the parsed ``org.medmcp.stack`` label of *image*, pulling it if absent.
 
@@ -728,6 +777,10 @@ def install_stack_image(image: str, on_progress: ProgressFn | None = None) -> st
     if not _image_present(image):
         report(f"Pulling {image}…")
         _pull_streaming(image, on_progress)
+
+    # Refuse a foreign-architecture image here rather than letting it install
+    # cleanly and fail at first tool call with "exec format error".
+    check_image_arch(image)
 
     report("Reading stack metadata…")
     meta = read_stack_label(image)

@@ -37,6 +37,11 @@ def _fake_docker(label: str | None) -> Callable[..., subprocess.CompletedProcess
     return fake
 
 
+def _always_present(_image: str) -> bool:
+    """Stub for `_image_present`: pretend the image is already pulled."""
+    return True
+
+
 def _fake_extract(image: str, in_image_path: str, into_dir: Path) -> None:
     """Stub extraction: create into_dir/<basename> like a real `docker cp` of a dir."""
     (into_dir / Path(in_image_path).name).mkdir(parents=True, exist_ok=True)
@@ -232,7 +237,7 @@ class TestStackIsolation:
         """A freshly installed stack records the full isolation flag set."""
         with (
             patch("medmcp.settings._run_docker", _fake_docker(LABEL)),
-            patch("medmcp.settings._image_present", lambda _img: True),
+            patch("medmcp.settings._image_present", _always_present),
             patch("medmcp.settings._extract_image_skills", _fake_extract),
         ):
             settings.install_stack_image("img:tag")
@@ -254,7 +259,7 @@ class TestStackIsolation:
         label = '{"name": "medmcp-net", "gpu": false, "network": true}'
         with (
             patch("medmcp.settings._run_docker", _fake_docker(label)),
-            patch("medmcp.settings._image_present", lambda _img: True),
+            patch("medmcp.settings._image_present", _always_present),
             patch("medmcp.settings._extract_image_skills", _fake_extract),
         ):
             settings.install_stack_image("img:tag")
@@ -276,7 +281,7 @@ class TestStackIsolation:
             'command = "docker"\n'
             'args = ["run", "--rm", "-i", "-v", "/w:/w", "img:tag"]\n'
         )
-        entry = next(m for m in settings._load_stack_manifests() if m["name"] == "medmcp-old")
+        entry = next(m for m in settings._load_stack_manifests() if m["name"] == "medmcp-old")  # pyright: ignore[reportPrivateUsage]  # testing an internal on purpose
         args = entry["args"]
         assert args[args.index("--network") + 1] == "none"
         assert "--cap-drop" in args
@@ -284,10 +289,70 @@ class TestStackIsolation:
 
     def test_hardening_is_idempotent(self) -> None:
         """Re-applying the hardening does not duplicate flags."""
-        once = settings._harden_stack_run_args(["run", "--rm", "-i"])
-        assert settings._harden_stack_run_args(once) == once
+        once = settings._harden_stack_run_args(["run", "--rm", "-i"])  # pyright: ignore[reportPrivateUsage]  # testing an internal on purpose
+        assert settings._harden_stack_run_args(once) == once  # pyright: ignore[reportPrivateUsage]  # testing an internal on purpose
         assert once.count("--network") == 1
 
     def test_non_run_args_untouched(self) -> None:
         """Only `docker run` argument lists are rewritten."""
-        assert settings._harden_stack_run_args(["pull", "img:tag"]) == ["pull", "img:tag"]
+        assert settings._harden_stack_run_args(["pull", "img:tag"]) == ["pull", "img:tag"]  # pyright: ignore[reportPrivateUsage]  # testing an internal on purpose
+
+
+class TestImageArchitecture:
+    """A stack image built for another architecture is rejected at install.
+
+    Docker pulls and creates containers from a foreign-arch image with only a
+    warning, then fails at exec; under compose the stack reports as *up* while the
+    container never starts. These tests pin the early, actionable failure.
+    """
+
+    def _fake_docker_arch(self, arch: str) -> Callable[..., subprocess.CompletedProcess[str]]:
+        """`_run_docker` stub whose `inspect --format {{.Architecture}}` yields *arch*."""
+
+        def fake(args: list[str], *, timeout: float = 600.0) -> subprocess.CompletedProcess[str]:
+            out = ""
+            if "--format" in args and "{{.Architecture}}" in args:
+                out = arch
+            elif args[0] == "inspect" and "--format" in args:
+                out = LABEL
+            elif args[0] == "create":
+                out = "deadbeef"
+            return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+
+        return fake
+
+    def test_mismatched_arch_is_rejected(self, stacks_dir: Path) -> None:
+        """An amd64 image on an arm64 host raises, and installs nothing."""
+        with (
+            patch("medmcp.settings.platform.machine", lambda: "aarch64"),
+            patch("medmcp.settings._run_docker", self._fake_docker_arch("amd64")),
+            patch("medmcp.settings._image_present", _always_present),
+            patch("medmcp.settings._extract_image_skills", _fake_extract),
+            pytest.raises(RuntimeError, match=r"linux/amd64.*linux/arm64"),
+        ):
+            settings.install_stack_image("img:tag")
+        assert not (stacks_dir.is_dir() and list(stacks_dir.glob("*.toml")))
+
+    def test_matching_arch_installs(self, stacks_dir: Path) -> None:
+        """A matching image installs normally."""
+        with (
+            patch("medmcp.settings.platform.machine", lambda: "aarch64"),
+            patch("medmcp.settings._run_docker", self._fake_docker_arch("arm64")),
+            patch("medmcp.settings._image_present", _always_present),
+            patch("medmcp.settings._extract_image_skills", _fake_extract),
+        ):
+            assert settings.install_stack_image("img:tag") == "medmcp-foo"
+
+    def test_uname_and_docker_spellings_agree(self) -> None:
+        """Uname's x86_64/aarch64 normalise onto docker's amd64/arm64."""
+        for uname, docker in (("x86_64", "amd64"), ("aarch64", "arm64")):
+            with patch("medmcp.settings.platform.machine", lambda u=uname: u):
+                assert settings.host_arch() == docker
+
+    def test_unreadable_arch_does_not_block(self) -> None:
+        """An architecture we cannot parse is not treated as a mismatch."""
+        with (
+            patch("medmcp.settings.platform.machine", lambda: "aarch64"),
+            patch("medmcp.settings._run_docker", self._fake_docker_arch("")),
+        ):
+            settings.check_image_arch("img:tag")  # must not raise

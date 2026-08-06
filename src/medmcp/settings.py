@@ -269,9 +269,18 @@ def call_entry_point(python: Path, module: str, attr: str) -> object:
 #
 # The MCP server inside a stack is a plain Python process over stdio: it needs no
 # capabilities, no privilege escalation, and no unbounded process count.
+# DAC_OVERRIDE is added back deliberately. The workspace is bind-mounted from the
+# host, where its files are owned by the invoking user, while the stack runs as root
+# inside the container. Root normally bypasses the permission check via
+# CAP_DAC_OVERRIDE; dropping it makes every tool fail to write its results into a
+# host-owned directory ("cannot open output file ..."), which drops all of ALL's
+# other capabilities while keeping the stack functional. The proper fix is to run
+# stacks as the invoking uid, which removes the need for this entirely — see the
+# non-root work tracked separately.
 _STACK_RUN_HARDENING: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("--network", ("--network", "none")),
     ("--cap-drop", ("--cap-drop", "ALL")),
+    ("--cap-add", ("--cap-add", "DAC_OVERRIDE")),
     ("--security-opt", ("--security-opt", "no-new-privileges")),
     ("--pids-limit", ("--pids-limit", "512")),
 )

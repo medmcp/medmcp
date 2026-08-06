@@ -246,6 +246,9 @@ class TestStackIsolation:
         for flag, value in (
             ("--network", "none"),
             ("--cap-drop", "ALL"),
+            # Kept so a future tightening cannot silently break every tool's ability
+            # to write results into the host-owned workspace.
+            ("--cap-add", "DAC_OVERRIDE"),
             ("--security-opt", "no-new-privileges"),
         ):
             assert args[args.index(flag) + 1] == value

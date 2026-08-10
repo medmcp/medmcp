@@ -23,6 +23,7 @@ import contextlib
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -258,6 +259,54 @@ def call_entry_point(python: Path, module: str, attr: str) -> object:
     return json.loads(result.stdout)
 
 
+# Isolation applied to every container-stack launch. Stacks bake their weights at
+# build time and are offline at runtime (verified: all shipped stacks initialise and
+# register their tools under `--network none`), so egress is denied by default — the
+# safety model assumes the local model can be steered by prompt injection, and a tool
+# call must not become a data-exfiltration path. A stack that genuinely needs egress
+# sets "network": true in its org.medmcp.stack label, which writes an explicit
+# `--network bridge` at install time; that is detected and preserved here.
+#
+# The MCP server inside a stack is a plain Python process over stdio: it needs no
+# capabilities, no privilege escalation, and no unbounded process count.
+# DAC_OVERRIDE is added back deliberately. The workspace is bind-mounted from the
+# host, where its files are owned by the invoking user, while the stack runs as root
+# inside the container. Root normally bypasses the permission check via
+# CAP_DAC_OVERRIDE; dropping it makes every tool fail to write its results into a
+# host-owned directory ("cannot open output file ..."), which drops all of ALL's
+# other capabilities while keeping the stack functional. The proper fix is to run
+# stacks as the invoking uid, which removes the need for this entirely — see the
+# non-root work tracked separately.
+_STACK_RUN_HARDENING: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("--network", ("--network", "none")),
+    ("--cap-drop", ("--cap-drop", "ALL")),
+    ("--cap-add", ("--cap-add", "DAC_OVERRIDE")),
+    ("--security-opt", ("--security-opt", "no-new-privileges")),
+    ("--pids-limit", ("--pids-limit", "512")),
+)
+
+
+def _harden_stack_run_args(args: list[str]) -> list[str]:
+    """Insert container-isolation flags into a ``docker run`` argument list.
+
+    Idempotent — a flag already present (written by a newer install, or by a stack
+    that opted into egress) is left untouched. Flags are inserted directly after
+    ``run`` so they precede the image reference and anything after it.
+
+    This runs at manifest *load* time as well as install time, so stacks installed
+    before this existed are hardened without requiring a reinstall. ``stacks.d``
+    manifests are the launch recipe and are written once at install; without the
+    load-time pass, an upgrade would silently leave existing stacks unisolated.
+    """
+    if not args or args[0] != "run":
+        return args
+    missing: list[str] = []
+    for flag, addition in _STACK_RUN_HARDENING:
+        if flag not in args:
+            missing += addition
+    return [args[0], *missing, *args[1:]] if missing else args
+
+
 def _load_stack_manifests() -> list[JsonDict]:
     """Read container-stack manifests from :data:`STACKS_D_PATH`.
 
@@ -287,9 +336,12 @@ def _load_stack_manifests() -> list[JsonDict]:
             log.warning("Stack manifest %s missing 'name'/'command'; skipping", path)
             continue
         args = [os.path.expandvars(str(a)) for a in cast("list[Any]", raw.get("args", []))]
+        expanded_command = os.path.expandvars(command)
+        if Path(expanded_command).name == "docker":
+            args = _harden_stack_run_args(args)
         entry: JsonDict = {
             "name": name,
-            "command": os.path.expandvars(command),
+            "command": expanded_command,
             "args": args,
             "env": dict(cast("dict[str, str]", raw.get("env", {}))),
         }
@@ -524,6 +576,54 @@ def _run_docker(args: list[str], *, timeout: float = 600.0) -> subprocess.Comple
     return result
 
 
+# Docker reports "amd64"/"arm64"; uname reports "x86_64"/"aarch64". Normalise both
+# so a host can be compared against an image manifest.
+_ARCH_ALIASES = {
+    "aarch64": "arm64",
+    "arm64": "arm64",
+    "x86_64": "amd64",
+    "amd64": "amd64",
+}
+
+
+def _normalise_arch(value: str) -> str:
+    """Map a uname- or docker-style architecture onto docker's spelling."""
+    v = value.strip().lower()
+    return _ARCH_ALIASES.get(v, v)
+
+
+def host_arch() -> str:
+    """This host's architecture in docker's spelling ("amd64", "arm64", …)."""
+    return _normalise_arch(platform.machine())
+
+
+def check_image_arch(image: str) -> None:
+    """Raise if *image* was built for a different architecture than this host.
+
+    Docker pulls and creates containers from a foreign-architecture image with only
+    a warning, then fails at exec time — under compose it reports the stack as *up*
+    while the container never starts, which reads as a working install. Checking the
+    image manifest at install time converts that into an actionable error.
+
+    The architecture is read from the image itself rather than from the
+    ``org.medmcp.stack`` label: the manifest cannot be wrong or forgotten, and a
+    multi-arch tag resolves to the host's architecture automatically.
+
+    Raises:
+        RuntimeError: the image cannot execute on this host.
+    """
+    out = _run_docker(["image", "inspect", "--format", "{{.Architecture}}", image], timeout=30)
+    image_arch = _normalise_arch(out.stdout)
+    host = host_arch()
+    if not image_arch or image_arch == host:
+        return
+    raise RuntimeError(
+        f"{image} is built for linux/{image_arch}, but this host is linux/{host}. "
+        "It cannot run here. Ask the stack's maintainer to publish a multi-arch "
+        "image, or build it locally for this architecture."
+    )
+
+
 def read_stack_label(image: str) -> JsonDict:
     """Return the parsed ``org.medmcp.stack`` label of *image*, pulling it if absent.
 
@@ -687,6 +787,10 @@ def install_stack_image(image: str, on_progress: ProgressFn | None = None) -> st
         report(f"Pulling {image}…")
         _pull_streaming(image, on_progress)
 
+    # Refuse a foreign-architecture image here rather than letting it install
+    # cleanly and fail at first tool call with "exec format error".
+    check_image_arch(image)
+
     report("Reading stack metadata…")
     meta = read_stack_label(image)
     name = str(meta["name"]).strip()
@@ -698,6 +802,11 @@ def install_stack_image(image: str, on_progress: ProgressFn | None = None) -> st
         # ${MEDMCP_GPU} is expanded at load time (defaults to "all"), so the GPU
         # can be re-pinned via env without reinstalling the stack.
         args += ["--device", "nvidia.com/gpu=${MEDMCP_GPU}"]
+    if meta.get("network"):
+        # Opt-in egress, recorded explicitly so _harden_stack_run_args leaves it
+        # alone rather than clamping it to none on every load.
+        args += ["--network", "bridge"]
+    args = _harden_stack_run_args(args)
     args += ["-v", "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}", image]
     entry: JsonDict = {"name": name, "command": "docker", "args": args}
 

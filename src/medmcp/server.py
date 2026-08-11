@@ -965,7 +965,7 @@ async def ws_replay(ws: WebSocket) -> None:
 #     {"type": "tool_call", "toolCallId": str, "title": str, "status": str,
 #      "kind": str | None, "rawInput": object}
 #     {"type": "tool_call_update", "toolCallId": str, "status": str | None,
-#      "output": str | None}
+#      "output": str | None, "rawInput": object | None}
 #     {"type": "usage", "used": int}
 #     {"type": "permission_request", "requestId": int, "toolCall": {...},
 #      "options": [{"optionId": str, "name": str, "kind": str}],
@@ -1421,10 +1421,19 @@ class _ChatConnection:
                 if not output and raw_output is not None:
                     output = str(raw_output)
                 status = update.get("status")
+                # A tool call is announced before the model has finished streaming
+                # its arguments, so the opening `tool_call` frame can carry an empty
+                # or partial rawInput; vibe re-sends the completed arguments on the
+                # first update whose detail changed. Overwrite (not set-if-absent)
+                # or the placeholder sticks — which leaves the approval box with no
+                # arguments to show and the provenance event with no `arguments`.
+                raw_input = update.get("rawInput")
                 info = self._tool_calls.get(tc_id)
                 if info is not None:
                     if isinstance(status, str):
                         info["status"] = status
+                    if raw_input is not None:
+                        info["rawInput"] = raw_input
                     if raw_output is not None:
                         info["rawOutput"] = raw_output
                     elif output:
@@ -1435,6 +1444,7 @@ class _ChatConnection:
                         "toolCallId": tc_id,
                         "status": status,
                         "output": output[:2000] if output else None,
+                        "rawInput": raw_input,
                     }
                 )
                 if status in ("completed", "failed") and info is not None:

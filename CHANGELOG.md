@@ -47,6 +47,11 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Fixed
 
+- The approval dialog shows the tool call's arguments again. The agent announces
+  a call before it has finished writing its arguments, so they arrived a moment
+  later and were dropped — leaving you to approve an action with only its name
+  visible. Tool-call cards fill in the same way, and provenance records the
+  arguments again (so those sessions distill into working workflows) (#102).
 - Sent messages no longer appear twice (the agent runtime echoes live prompts
   since vibe 2.23; the echo is now merged into the already-rendered bubble) —
   as a side effect, messages sent in the current session become rewindable

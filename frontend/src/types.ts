@@ -198,7 +198,14 @@ export type ServerFrame =
       kind?: string | null
       rawInput?: unknown
     }
-  | { type: 'tool_call_update'; toolCallId: string; status?: string | null; output?: string | null }
+  | {
+      type: 'tool_call_update'
+      toolCallId: string
+      status?: string | null
+      output?: string | null
+      /** Completed arguments, re-sent once the model finished streaming them. */
+      rawInput?: unknown
+    }
   | { type: 'usage'; used: number; size?: number }
   | {
       type: 'permission_request'

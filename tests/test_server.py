@@ -471,6 +471,88 @@ class TestIdlePump:
         assert queue.qsize() == 1
 
 
+class TestToolCallRawInput:
+    """Arguments streamed in after the call is announced still reach the UI.
+
+    vibe announces a tool call before the model has finished streaming its
+    arguments, so the opening ``tool_call`` frame can carry an empty rawInput and
+    the completed one arrives on a later ``tool_call_update``. Missing that
+    second copy leaves the approval box with no arguments to show and the
+    provenance event with no ``arguments`` — see ``_effect_progress_updates`` in
+    vibe's session_updates (rawInput is re-sent only when the detail changed).
+    """
+
+    @staticmethod
+    def _update(payload: dict[str, object]) -> dict[str, object]:
+        return {"method": "session/update", "params": {"update": payload}}
+
+    @pytest.mark.asyncio
+    async def test_late_arguments_overwrite_the_partial_placeholder(self) -> None:
+        """The completed rawInput replaces the empty one from the opening frame."""
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        conn = server._ChatConnection(cast("Any", _StubWs()), "sid", cast("Any", queue), [])
+        await queue.put(
+            self._update(
+                {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_1",
+                    "title": "medmcp-neuro-core_skull_strip",
+                    "status": "pending",
+                    "rawInput": {},
+                }
+            )
+        )
+        await queue.put(
+            self._update(
+                {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call_1",
+                    "status": "in_progress",
+                    "rawInput": {"image": "/data/T1.nii.gz"},
+                }
+            )
+        )
+        conn.start_idle_pump()
+        await asyncio.sleep(0.05)
+        await conn._stop_idle_pump()
+
+        assert conn._tool_calls["call_1"]["rawInput"] == {"image": "/data/T1.nii.gz"}
+        sent = cast("_StubWs", conn.ws).sent
+        update_frame = next(m for m in sent if m.get("type") == "tool_call_update")
+        assert update_frame["rawInput"] == {"image": "/data/T1.nii.gz"}
+
+    @pytest.mark.asyncio
+    async def test_update_without_arguments_keeps_the_known_ones(self) -> None:
+        """A status-only update (vibe sends rawInput only when detail changed)."""
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        conn = server._ChatConnection(cast("Any", _StubWs()), "sid", cast("Any", queue), [])
+        await queue.put(
+            self._update(
+                {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_1",
+                    "title": "bash",
+                    "status": "pending",
+                    "rawInput": {"command": "ls"},
+                }
+            )
+        )
+        await queue.put(
+            self._update(
+                {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call_1",
+                    "status": "in_progress",
+                }
+            )
+        )
+        conn.start_idle_pump()
+        await asyncio.sleep(0.05)
+        await conn._stop_idle_pump()
+
+        assert conn._tool_calls["call_1"]["rawInput"] == {"command": "ls"}
+
+
 class TestUsageWindow:
     """The context meter denominator: Ollama's num_ctx wins over vibe's registry figure."""
 

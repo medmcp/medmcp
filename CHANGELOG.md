@@ -30,6 +30,10 @@ Notable, user-visible changes to MedMCP. Format follows
   `num_ctx`), not the model family's nominal maximum (#89).
 - Replayed chats show the user's message text without the internal
   `[workspace context: …]` viewer note, natively (#89).
+- Overlaying a segmentation is now drag-and-drop only: drag the volume from the
+  file explorer onto the image. The dropdown of every volume in the workspace is
+  gone, and the bar above the image appears only once something is overlaid —
+  showing that volume's name, its opacity, and a button to remove it (#99).
 
 ### Fixed
 

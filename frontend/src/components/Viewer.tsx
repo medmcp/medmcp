@@ -1,8 +1,8 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
-import { fetchTree, rawUrl } from '../api'
+import { rawUrl } from '../api'
 import { getDraggedFilePath } from '../dragState'
-import { DRAG_PATH_MIME, type TreeNode } from '../types'
+import { DRAG_PATH_MIME } from '../types'
 import { DownloadIcon, GearIcon, XIcon } from './icons'
 import { ViewerSettingsPanel } from './ViewerSettings'
 
@@ -165,29 +165,15 @@ function classify(path: string): FileKind {
   return 'other'
 }
 
-/** Flatten the explorer tree into the workspace-relative paths of all volumes. */
-function collectVolumePaths(nodes: TreeNode[], out: string[] = []): string[] {
-  for (const node of nodes) {
-    if (node.children) {
-      collectVolumePaths(node.children, out)
-    } else if (VOLUME_EXT.test(node.name.toLowerCase())) {
-      out.push(node.id)
-    }
-  }
-  return out
-}
-
 /**
  * Niivue-backed volume view: multiplanar slices + 3D render, wheel scrolls
- * slices. A second volume (e.g. a segmentation mask) can be overlaid — picked
- * from the dropdown or dragged from the file explorer onto the image. The
- * overlay is rendered with a label colormap (distinct color per integer label)
- * and adjustable opacity.
+ * slices. A second volume (e.g. a segmentation mask) is overlaid by dragging it
+ * from the file explorer onto the image; it renders with a label colormap
+ * (distinct color per integer label) and adjustable opacity.
  */
 function VolumeView({
   path,
   settings,
-  refreshSignal,
   isResizing,
   overlayPath,
   overlayOpacity,
@@ -196,7 +182,6 @@ function VolumeView({
 }: {
   path: string
   settings: ViewerSettings
-  refreshSignal?: number
   isResizing?: boolean
   overlayPath: string
   overlayOpacity: number
@@ -210,7 +195,6 @@ function VolumeView({
   const nvRef = useRef<Niivue | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const [volumePaths, setVolumePaths] = useState<string[]>([])
   const [dragOver, setDragOver] = useState(false)
   // Read inside the url-keyed load effect (constructor seeding + post-load) and
   // the live-settings effect without making settings a dependency of the load
@@ -353,19 +337,6 @@ function VolumeView({
     }
   }, [url])
 
-  // Candidate overlays: every other volume in the workspace. refreshSignal
-  // picks up volumes the agent or a replay just produced; the trailing
-  // debounce collapses a turn's burst of signals into one tree fetch
-  // (matching FileExplorer's reload).
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      fetchTree()
-        .then((tree) => setVolumePaths(collectVolumePaths(tree).filter((p) => p !== path)))
-        .catch(() => setVolumePaths([]))
-    }, 300)
-    return () => window.clearTimeout(timer)
-  }, [path, refreshSignal])
-
   // Apply live setting changes to the open volume. `antialias` and
   // `renderScale` are excluded here — both are creation-time, so changing them
   // remounts this view via its key (see Viewer). The guard skips the initial
@@ -448,40 +419,30 @@ function VolumeView({
 
   return (
     <div className="volume-view">
-      <div className="overlay-bar">
-        <span className="overlay-label">Overlay</span>
-        <select
-          className="overlay-select"
-          value={overlayPath}
-          title="Pick a volume, or drag one from the file explorer onto the image"
-          onChange={(e) => setOverlay(e.target.value)}
-        >
-          <option value="">none — or drag a file here</option>
-          {volumePaths.map((p) => (
-            <option key={p} value={p}>
-              {p}
-            </option>
-          ))}
-        </select>
-        {overlayPath && (
-          <>
-            <span className="overlay-opacity-label">Opacity</span>
-            <input
-              className="overlay-opacity"
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={overlayOpacity}
-              title={`Opacity ${Math.round(overlayOpacity * 100)}%`}
-              onChange={(e) => setOpacity(Number(e.target.value))}
-            />
-            <button className="btn-icon" title="Remove overlay" onClick={() => setOverlay('')}>
-              <XIcon size={13} />
-            </button>
-          </>
-        )}
-      </div>
+      {/* Only rendered once something is actually overlaid: with drag-and-drop
+          as the only way in, an always-present bar would be a permanent strip of
+          controls for a state the viewer is usually not in. */}
+      {overlayPath && (
+        <div className="overlay-bar">
+          <span className="overlay-label" title={overlayPath}>
+            {overlayPath.split('/').pop()}
+          </span>
+          <span className="overlay-opacity-label">Opacity</span>
+          <input
+            className="overlay-opacity"
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={overlayOpacity}
+            title={`Opacity ${Math.round(overlayOpacity * 100)}%`}
+            onChange={(e) => setOpacity(Number(e.target.value))}
+          />
+          <button className="btn-icon" title="Remove overlay" onClick={() => setOverlay('')}>
+            <XIcon size={13} />
+          </button>
+        </div>
+      )}
       {loadError && <div className="panel-error">{loadError}</div>}
       <div className="niivue-sizer" ref={sizerRef}>
         <div
@@ -525,16 +486,13 @@ function TextView({ url }: { url: string }) {
 
 /** Routes the selected file to the right renderer (volume / PDF / image / text). */
 // Memoized so a separator drag doesn't re-render the viewer (and its WebGL/React
-// subtree) every frame; props from App are stable except when the open file or
-// fs version actually changes.
+// subtree) every frame; props from App are stable except when the open file
+// actually changes.
 export const Viewer = memo(function Viewer({
   path,
-  refreshSignal,
   isResizing,
 }: {
   path: string | null
-  /** Bumped when the workspace may have changed; refreshes the overlay list. */
-  refreshSignal?: number
   /** True while a separator is being dragged; freezes the volume canvas size. */
   isResizing?: boolean
 }) {
@@ -642,7 +600,6 @@ export const Viewer = memo(function Viewer({
               key={`${path}#${resizeGen}#${settings.antialias ? 'aa' : 'noaa'}#${settings.renderScale}`}
               path={path}
               settings={settings}
-              refreshSignal={refreshSignal}
               isResizing={isResizing}
               overlayPath={overlayPath}
               overlayOpacity={overlayOpacity}

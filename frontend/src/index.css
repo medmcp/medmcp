@@ -1380,6 +1380,40 @@ button:hover {
   margin: 20px 0 4px;
 }
 
+/* Disclosure for settings that should be reachable but not browsed past. Mirrors
+   the viewer settings popover's own Advanced row (.vs-advanced-toggle). */
+.settings-advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 20px;
+  padding: 10px 0 4px;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.settings-advanced-toggle:hover {
+  /* Neutralize the global button:hover fade, as .vs-advanced-toggle does: on a
+     full-width, border-top-only row it reads as a shimmer. */
+  background: none;
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.settings-chevron {
+  transition: transform 0.12s ease;
+}
+
+.settings-chevron.open {
+  transform: rotate(90deg);
+}
+
 .settings-row {
   display: flex;
   align-items: center;

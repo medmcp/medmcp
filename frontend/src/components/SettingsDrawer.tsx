@@ -8,7 +8,7 @@ import {
   uninstallStack,
 } from '../api'
 import type { CatalogEntry, GpuInfo, InstalledStack, SettingsState } from '../types'
-import { XIcon } from './icons'
+import { ChevronRightIcon, XIcon } from './icons'
 
 interface SettingsDrawerProps {
   open: boolean
@@ -91,6 +91,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [advanced, setAdvanced] = useState(false)
 
   useEffect(() => {
     if (!open) return
@@ -218,12 +219,6 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                 hint="Adds a plain-language explanation and risk tags to each permission prompt."
                 checked={state.explain_tools}
                 onChange={(v) => apply({ ...state, explain_tools: v })}
-              />
-              <Row
-                label="Record provenance"
-                hint="Keeps a replayable record of what each chat did (manifest, tool log, permissions)."
-                checked={state.record_provenance}
-                onChange={(v) => apply({ ...state, record_provenance: v })}
               />
               <Row
                 label="Personal workflows"
@@ -372,6 +367,29 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                     />
                   ))}
                 </>
+              )}
+
+              {/* Provenance is on, and meant to stay on — it is the record of what
+                  the agent did to the data. The switch survives for the rare case
+                  that needs it, one disclosure away from being reached by accident. */}
+              <button
+                type="button"
+                className="settings-advanced-toggle"
+                onClick={() => setAdvanced((v) => !v)}
+              >
+                <ChevronRightIcon
+                  size={12}
+                  className={advanced ? 'settings-chevron open' : 'settings-chevron'}
+                />
+                Advanced
+              </button>
+              {advanced && (
+                <Row
+                  label="Record provenance"
+                  hint="Keeps a replayable record of what each chat did (manifest, tool log, permissions). Turning this off means a chat leaves no audit trail and cannot be distilled into a workflow."
+                  checked={state.record_provenance}
+                  onChange={(v) => apply({ ...state, record_provenance: v })}
+                />
               )}
 
               <div className="drawer-footnote">

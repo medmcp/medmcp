@@ -34,6 +34,10 @@ Notable, user-visible changes to MedMCP. Format follows
   file explorer onto the image. The dropdown of every volume in the workspace is
   gone, and the bar above the image appears only once something is overlaid —
   showing that volume's name, its opacity, and a button to remove it (#99).
+- Provenance recording is treated as always-on: its off switch moved out of the
+  settings drawer's General list into a collapsed **Advanced** section at the
+  bottom, so a chat's audit trail is no longer one stray click from stopping
+  (#100).
 
 ### Fixed
 

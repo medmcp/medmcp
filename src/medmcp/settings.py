@@ -259,51 +259,95 @@ def call_entry_point(python: Path, module: str, attr: str) -> object:
     return json.loads(result.stdout)
 
 
-# Isolation applied to every container-stack launch. Stacks bake their weights at
-# build time and are offline at runtime (verified: all shipped stacks initialise and
-# register their tools under `--network none`), so egress is denied by default — the
-# safety model assumes the local model can be steered by prompt injection, and a tool
-# call must not become a data-exfiltration path. A stack that genuinely needs egress
-# sets "network": true in its org.medmcp.stack label, which writes an explicit
-# `--network bridge` at install time; that is detected and preserved here.
-#
-# The MCP server inside a stack is a plain Python process over stdio: it needs no
-# capabilities, no privilege escalation, and no unbounded process count.
-# DAC_OVERRIDE is added back deliberately. The workspace is bind-mounted from the
-# host, where its files are owned by the invoking user, while the stack runs as root
-# inside the container. Root normally bypasses the permission check via
-# CAP_DAC_OVERRIDE; dropping it makes every tool fail to write its results into a
-# host-owned directory ("cannot open output file ..."), which drops all of ALL's
-# other capabilities while keeping the stack functional. The proper fix is to run
-# stacks as the invoking uid, which removes the need for this entirely — see the
-# non-root work tracked separately.
-_STACK_RUN_HARDENING: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("--network", ("--network", "none")),
-    ("--cap-drop", ("--cap-drop", "ALL")),
-    ("--cap-add", ("--cap-add", "DAC_OVERRIDE")),
-    ("--security-opt", ("--security-opt", "no-new-privileges")),
-    ("--pids-limit", ("--pids-limit", "512")),
-)
+def _stack_pids_limit() -> int:
+    """Return the per-stack task limit, scaled to this host's CPU count.
+
+    ``pids.max`` counts *threads*, not just processes, and the imaging stacks are
+    deliberately parallel: nnUNet-style inference forks a pool of preprocessing
+    workers, and each worker then opens an OpenMP/BLAS pool sized to the core
+    count. The peak is therefore roughly quadratic in cores, so any fixed number
+    is wrong somewhere — 512 was comfortable on a laptop and throttled a 20-core
+    DGX Spark, where a single LST-AI run peaked at 629 tasks and died with
+    ``pthread_create() is 11`` (EAGAIN). nnUNet reports that as "Background
+    workers died ... your RAM was full", which sends you looking at memory.
+
+    256 per core keeps ~6x headroom over that measured peak while still bounding
+    a runaway fork loop far below the kernel's ``pid_max``; the floor covers hosts
+    that report very few cores (containers with a small ``cpuset``) where the
+    stack can still be asked to process a full-resolution volume.
+    """
+    return max(4096, (os.cpu_count() or 8) * 256)
+
+
+# Flags whose *value* is a floor rather than a fixed setting: an existing lower
+# value is raised, an existing higher one is left alone. Everything else in
+# _STACK_RUN_HARDENING is presence-checked only, so a deliberate opt-out (a stack
+# that sets "network": true and installs with `--network bridge`) survives.
+_STACK_RUN_MINIMUMS: tuple[str, ...] = ("--pids-limit",)
+
+
+def _stack_run_hardening() -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Container-isolation flags applied to every container-stack launch.
+
+    Stacks bake their weights at build time and are offline at runtime (verified:
+    all shipped stacks initialise and register their tools under ``--network
+    none``), so egress is denied by default — the safety model assumes the local
+    model can be steered by prompt injection, and a tool call must not become a
+    data-exfiltration path.
+
+    The MCP server inside a stack is a plain Python process over stdio: it needs no
+    capabilities and no privilege escalation. DAC_OVERRIDE is added back
+    deliberately. The workspace is bind-mounted from the host, where its files are
+    owned by the invoking user, while the stack runs as root inside the container.
+    Root normally bypasses the permission check via CAP_DAC_OVERRIDE; dropping it
+    makes every tool fail to write its results into a host-owned directory
+    ("cannot open output file ..."), which drops all of ALL's other capabilities
+    while keeping the stack functional. The proper fix is to run stacks as the
+    invoking uid, which removes the need for this entirely — see the non-root work
+    tracked separately.
+    """
+    return (
+        ("--network", ("--network", "none")),
+        ("--cap-drop", ("--cap-drop", "ALL")),
+        ("--cap-add", ("--cap-add", "DAC_OVERRIDE")),
+        ("--security-opt", ("--security-opt", "no-new-privileges")),
+        ("--pids-limit", ("--pids-limit", str(_stack_pids_limit()))),
+    )
 
 
 def _harden_stack_run_args(args: list[str]) -> list[str]:
     """Insert container-isolation flags into a ``docker run`` argument list.
 
     Idempotent — a flag already present (written by a newer install, or by a stack
-    that opted into egress) is left untouched. Flags are inserted directly after
-    ``run`` so they precede the image reference and anything after it.
+    that opted into egress) is left untouched, except for the value floors in
+    :data:`_STACK_RUN_MINIMUMS`, which are raised in place. Flags are inserted
+    directly after ``run`` so they precede the image reference and anything after
+    it.
 
     This runs at manifest *load* time as well as install time, so stacks installed
     before this existed are hardened without requiring a reinstall. ``stacks.d``
     manifests are the launch recipe and are written once at install; without the
-    load-time pass, an upgrade would silently leave existing stacks unisolated.
+    load-time pass, an upgrade would silently leave existing stacks unisolated —
+    and, for the floors, would pin them to whatever value was correct on the day
+    they were installed.
     """
     if not args or args[0] != "run":
         return args
+    args = list(args)
     missing: list[str] = []
-    for flag, addition in _STACK_RUN_HARDENING:
+    for flag, addition in _stack_run_hardening():
         if flag not in args:
             missing += addition
+            continue
+        if flag not in _STACK_RUN_MINIMUMS:
+            continue
+        # Raise a stale or hand-lowered value to the current floor. A malformed
+        # value is left alone: docker will reject it with a clearer message than
+        # anything guessed here.
+        index = args.index(flag) + 1
+        if index < len(args):
+            with contextlib.suppress(ValueError):
+                args[index] = str(max(int(args[index]), int(addition[1])))
     return [args[0], *missing, *args[1:]] if missing else args
 
 

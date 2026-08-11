@@ -76,23 +76,14 @@ export interface CatalogEntry {
   installed: boolean
 }
 
-export interface WorkflowInfo {
-  name: string
-  description: string
-  kind: 'active' | 'draft'
-  active: boolean
-}
-
 export interface SettingsState {
   explain_tools: boolean
   record_provenance: boolean
-  workflows_enabled: boolean
   /** Selected GPU (CDI device id) for container stacks; "all" = every GPU. */
   gpu: string
   /** GPU the LLM container was created with (deploy-time; read-only here). */
   llm_gpu: string
   stacks: StackInfo[]
-  workflows: WorkflowInfo[]
 }
 
 /** One GPU from GET /api/gpus (best-effort enumeration). */

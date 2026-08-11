@@ -78,8 +78,6 @@ async def test_lifespan_enabled_starts_and_stops_broker(
     monkeypatch.setenv("MEDMCP_STACK_POOL", "1")
     monkeypatch.setenv("MEDMCP_WORKSPACE", str(tmp_path))
     monkeypatch.setattr(settings, "VIBE_HOME", tmp_path)
-    monkeypatch.setattr(settings, "WORKFLOWS_ENABLED_PATH", tmp_path / "workflows_enabled.json")
-    monkeypatch.setattr(settings, "ACTIVE_WORKFLOWS_PATH", tmp_path / "active_workflows.json")
     monkeypatch.setattr(settings, "get_uv_tool_dir", lambda: None)
     settings.load_mcp_servers.cache_clear()
     monkeypatch.setattr(server, "_pool", None)

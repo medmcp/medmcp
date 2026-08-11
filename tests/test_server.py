@@ -200,31 +200,27 @@ class TestWorkspaceNote:
 
 
 class TestSettingsMerge:
-    """The settings PUT merges the drawer's known lists with the current state.
+    """The settings PUT merges the drawer's known stack list with the current state.
 
-    The drawer submits every entry it knew about (name + active). Entries it
-    never saw (e.g. a workflow distilled while the drawer was open) must keep
-    their current active state rather than being dropped.
+    The drawer submits every stack it knew about (name + active). Stacks it never
+    saw (e.g. one installed while the drawer was open) must keep their current
+    active state rather than being dropped.
     """
 
     @pytest.fixture
     def harness(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, set[str]]:
         """Stub settings persistence and the vibe restart; capture what's saved.
 
-        ``old`` seeds the current active sets; ``saved`` records the merged sets
-        the endpoint persists. The vibe-acp restart and config sync are stubbed
-        so the endpoint can run without a subprocess.
+        ``old_stacks`` seeds the current active set; ``saved`` records the merged
+        set the endpoint persists. The vibe-acp restart and config sync are
+        stubbed so the endpoint can run without a subprocess.
         """
         old_stacks = {"alpha", "beta"}
-        old_workflows = {"wf-keep"}
         saved: dict[str, set[str]] = {}
 
         # Strict pyright rejects untyped lambdas, so the stubs are typed defs.
         def _save_stacks(names: Iterable[str]) -> None:
             saved["stacks"] = set(names)
-
-        def _save_workflows(names: Iterable[str]) -> None:
-            saved["workflows"] = set(names)
 
         def _noop_bool(_value: bool) -> None:
             return None
@@ -239,13 +235,9 @@ class TestSettingsMerge:
             return None
 
         monkeypatch.setattr(settings, "load_active_server_names", lambda: set(old_stacks))
-        monkeypatch.setattr(settings, "load_active_workflow_names", lambda: set(old_workflows))
-        monkeypatch.setattr(settings, "load_workflows_enabled", lambda: True)
         monkeypatch.setattr(settings, "save_explain_enabled", _noop_bool)
         monkeypatch.setattr(settings, "save_provenance_enabled", _noop_bool)
-        monkeypatch.setattr(settings, "save_workflows_enabled", _noop_bool)
         monkeypatch.setattr(settings, "save_active_server_names", _save_stacks)
-        monkeypatch.setattr(settings, "save_active_workflow_names", _save_workflows)
         monkeypatch.setattr(settings, "sync_servers_to_vibe_config", _noop_sync)
         monkeypatch.setattr(settings, "active_servers", _active_servers)
         monkeypatch.setattr(server, "_restart_vibe", _no_restart)
@@ -256,9 +248,7 @@ class TestSettingsMerge:
         body: dict[str, object] = {
             "explain_tools": True,
             "record_provenance": False,
-            "workflows_enabled": True,
             "stacks": [],
-            "workflows": [],
         }
         body.update(overrides)
         resp = client.put("/api/settings", json=body)
@@ -283,27 +273,14 @@ class TestSettingsMerge:
         assert harness["stacks"] == {"beta"}
         assert result["restarted"] is True
 
-    def test_workflows_master_toggle_triggers_restart(self, harness: dict[str, set[str]]) -> None:
-        """Flipping the workflows master switch restarts vibe even if sets match."""
-        client = TestClient(server.app)
-        result = self._put(
-            client,
-            workflows_enabled=False,
-            stacks=[{"name": "alpha", "active": True}, {"name": "beta", "active": True}],
-            workflows=[{"name": "wf-keep", "active": True}],
-        )
-        assert result["restarted"] is True
-
     def test_no_restart_when_nothing_changes(self, harness: dict[str, set[str]]) -> None:
         """Re-submitting the current state is a no-op restart-wise."""
         client = TestClient(server.app)
         result = self._put(
             client,
             stacks=[{"name": "alpha", "active": True}, {"name": "beta", "active": True}],
-            workflows=[{"name": "wf-keep", "active": True}],
         )
         assert harness["stacks"] == {"alpha", "beta"}
-        assert harness["workflows"] == {"wf-keep"}
         assert result["restarted"] is False
 
 

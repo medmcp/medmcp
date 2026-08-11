@@ -123,12 +123,8 @@ def fetched_context_window() -> int | None:
 
 # Tracks which discovered stacks are enabled; defaults to all when absent.
 ACTIVE_STACKS_PATH: Path = VIBE_HOME / "active_stacks.json"
-# Tracks which personal workflows are enabled (loaded as skills); all when absent.
-ACTIVE_WORKFLOWS_PATH: Path = VIBE_HOME / "active_workflows.json"
 # Persists the provenance-capture on/off preference; defaults to on when absent.
 PROVENANCE_ENABLED_PATH: Path = VIBE_HOME / "provenance_enabled.json"
-# Master on/off for the personal-workflows feature; defaults to on when absent.
-WORKFLOWS_ENABLED_PATH: Path = VIBE_HOME / "workflows_enabled.json"
 # Persists the explain-tool-calls on/off preference; defaults to on when absent.
 EXPLAIN_ENABLED_PATH: Path = VIBE_HOME / "explain_enabled.json"
 
@@ -955,27 +951,6 @@ def discover_workflows() -> list[JsonDict]:
     return list(found.values())
 
 
-def load_active_workflow_names() -> set[str]:
-    """Return the set of workflow names currently enabled (loaded as skills).
-
-    When ``.vibe/active_workflows.json`` is absent every discovered workflow is
-    active, so a freshly distilled/promoted workflow is on by default.
-    """
-    all_names = {w["name"] for w in discover_workflows()}
-    if not ACTIVE_WORKFLOWS_PATH.exists():
-        return all_names
-    try:
-        data = cast("dict[str, Any]", json.loads(ACTIVE_WORKFLOWS_PATH.read_text()))
-        return set(cast("list[str]", data.get("active", list(all_names))))
-    except (json.JSONDecodeError, OSError):
-        return all_names
-
-
-def save_active_workflow_names(names: set[str]) -> None:
-    """Persist the active workflow set to ``.vibe/active_workflows.json``."""
-    _atomic_write_json(ACTIVE_WORKFLOWS_PATH, {"active": sorted(names)})
-
-
 def _load_flag(path: Path) -> bool:
     """Read an ``{"enabled": bool}`` preference file (default ``True`` when unset)."""
     if not path.exists():
@@ -1000,20 +975,6 @@ def load_provenance_enabled() -> bool:
 def save_provenance_enabled(enabled: bool) -> None:
     """Persist the provenance-capture on/off preference to disk."""
     _save_flag(PROVENANCE_ENABLED_PATH, enabled)
-
-
-def load_workflows_enabled() -> bool:
-    """Return whether the personal-workflows feature is enabled (default ``True``).
-
-    The master switch: when off, no personal workflow is loaded as a skill and
-    the UIs hide their workflow controls (see ``sync_servers_to_vibe_config``).
-    """
-    return _load_flag(WORKFLOWS_ENABLED_PATH)
-
-
-def save_workflows_enabled(enabled: bool) -> None:
-    """Persist the personal-workflows master on/off preference to disk."""
-    _save_flag(WORKFLOWS_ENABLED_PATH, enabled)
 
 
 def load_explain_enabled() -> bool:
@@ -1197,36 +1158,22 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
 
     # Collect skills_path values from discovered servers and write them to
     # skill_paths so vibe-acp loads the bundled skill docs automatically.
-    skill_paths = [srv["skills_path"] for srv in servers if srv.get("skills_path")]
-    # The personal-workflows feature can be turned off entirely by the master
-    # toggle; when off, no workflow dir is added to skill_paths and every workflow
-    # is listed in disabled_skills, so nothing personal is loaded.
-    workflows_enabled = load_workflows_enabled()
-    if workflows_enabled:
-        # Promoted, reusable workflows live here as <name>/SKILL.md; include the
-        # directory so distilled workflows are discoverable as skills (Tier 3).
-        workflows_active = VIBE_HOME / "workflows" / "active"
-        if workflows_active.is_dir():
-            skill_paths.append(str(workflows_active))
-        # Draft workflows are loaded too, so a draft can be tested (invoked as
-        # `/<name>`) before it is promoted. Promotion just moves the draft into
-        # active/ to keep it permanently; both dirs hold <name>/SKILL.md entries.
-        workflows_draft = VIBE_HOME / "workflows" / "draft"
-        if workflows_draft.is_dir():
-            skill_paths.append(str(workflows_draft))
-    cfg["skill_paths"] = skill_paths
+    #
+    # Personal workflows are deliberately NOT here. A distilled workflow is a
+    # recorded sequence of tool calls, replayed verbatim by replay.py on new
+    # inputs — its value is that it does exactly what it did last time. Exposing
+    # it as a skill handed it back to the agent as prose to reinterpret, which is
+    # the opposite guarantee, and put a second, unreviewed path to the same tools
+    # next to the deterministic one. The replay engine is the only way to run one.
+    cfg["skill_paths"] = [srv["skills_path"] for srv in servers if srv.get("skills_path")]
 
-    # Personal workflows toggled off in the gear are disabled by name so vibe-acp
-    # skips loading them, without removing them from disk. With the master toggle
-    # off, all of them are disabled. Non-workflow entries in disabled_skills (if
-    # any were set manually) are preserved.
-    all_workflows = {w["name"] for w in discover_workflows()}
-    deactivated = (
-        all_workflows if not workflows_enabled else (all_workflows - load_active_workflow_names())
-    )
+    # Workflow names were listed in disabled_skills to keep deactivated ones from
+    # loading. With no workflow dir in skill_paths there is nothing to disable, so
+    # drop those entries — but preserve the rest (e.g. vibe's own skill-creator,
+    # disabled so distillation stays the single skill-authoring path).
+    workflow_names = {w["name"] for w in discover_workflows()}
     existing_disabled = cast("list[str]", cfg.get("disabled_skills", []))
-    preserved = [s for s in existing_disabled if s not in all_workflows]
-    cfg["disabled_skills"] = sorted(set(preserved) | deactivated)
+    cfg["disabled_skills"] = sorted(s for s in existing_disabled if s not in workflow_names)
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     # A unique temp name (not a fixed .tmp path) so a concurrent writer in

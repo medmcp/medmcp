@@ -14,10 +14,8 @@ from medmcp.settings import (
     load_active_server_names,
     load_mcp_servers,
     load_provenance_enabled,
-    load_workflows_enabled,
     save_active_server_names,
     save_provenance_enabled,
-    save_workflows_enabled,
     sync_servers_to_vibe_config,
 )
 
@@ -147,71 +145,43 @@ class TestProvenanceEnabled:
             assert load_provenance_enabled() is True
 
 
-# ── personal-workflows master toggle ──────────────────────────────────────────
+# ── personal workflows are never loaded as skills ─────────────────────────────
 
 
-class TestWorkflowsEnabled:
-    """_load/save_workflows_enabled round-trip and default to on."""
+class TestWorkflowsAreNotSkills:
+    """Workflows belong to the replay engine; vibe-acp never sees them."""
 
-    def test_defaults_to_true_when_absent(self, tmp_path: Path) -> None:
-        """Without the file, the workflows feature is enabled by default."""
-        with patch("medmcp.settings.WORKFLOWS_ENABLED_PATH", tmp_path / "workflows_enabled.json"):
-            assert load_workflows_enabled() is True
-
-    def test_round_trip_false(self, tmp_path: Path) -> None:
-        """A saved disabled preference reads back as False."""
-        path = tmp_path / "workflows_enabled.json"
-        with patch("medmcp.settings.WORKFLOWS_ENABLED_PATH", path):
-            save_workflows_enabled(False)
-            assert load_workflows_enabled() is False
-        assert json.loads(path.read_text()) == {"enabled": False}
-
-    def test_corrupt_file_defaults_to_true(self, tmp_path: Path) -> None:
-        """A corrupt preference file falls back to enabled."""
-        path = tmp_path / "workflows_enabled.json"
-        path.write_text("not json{{{")
-        with patch("medmcp.settings.WORKFLOWS_ENABLED_PATH", path):
-            assert load_workflows_enabled() is True
-
-
-class TestWorkflowSkillPathsGating:
-    """sync_servers_to_vibe_config honors the workflows master toggle."""
-
-    def test_enabled_adds_skill_paths(self, tmp_path: Path) -> None:
-        """With the feature on, workflow dirs are added to skill_paths."""
+    def test_workflow_dirs_are_never_added_to_skill_paths(self, tmp_path: Path) -> None:
+        """Neither draft/ nor active/ reaches skill_paths, promoted or not."""
         _make_workflow(tmp_path, "active", "wf-promoted")
         _make_workflow(tmp_path, "draft", "wf-draft")
         cfg_path = tmp_path / "config.toml"
-        with (
-            patch("medmcp.settings.VIBE_HOME", tmp_path),
-            patch("medmcp.settings.WORKFLOWS_ENABLED_PATH", tmp_path / "workflows_enabled.json"),
-            patch("medmcp.settings.ACTIVE_WORKFLOWS_PATH", tmp_path / "active_workflows.json"),
-        ):
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
             sync_servers_to_vibe_config([])
         cfg = tomllib.loads(cfg_path.read_text())
-        skill_paths = cfg["skill_paths"]
-        assert str(tmp_path / "workflows" / "active") in skill_paths
-        assert str(tmp_path / "workflows" / "draft") in skill_paths
-        # All discovered workflows are active by default, so none disabled.
-        assert cfg["disabled_skills"] == []
+        assert cfg["skill_paths"] == []
 
-    def test_disabled_drops_skill_paths_and_disables_all(self, tmp_path: Path) -> None:
-        """With the feature off, no workflow dir loads and all are disabled."""
+    def test_stack_skill_paths_still_load(self, tmp_path: Path) -> None:
+        """A stack's own bundled skills are unaffected — only workflows are excluded."""
         _make_workflow(tmp_path, "active", "wf-promoted")
+        cfg_path = tmp_path / "config.toml"
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
+            sync_servers_to_vibe_config(
+                [{"name": "neuro", "command": "/bin/neuro", "skills_path": "/opt/neuro/skills"}]
+            )
+        cfg = tomllib.loads(cfg_path.read_text())
+        assert cfg["skill_paths"] == ["/opt/neuro/skills"]
+
+    def test_stale_workflow_names_are_dropped_from_disabled_skills(self, tmp_path: Path) -> None:
+        """Names left in disabled_skills by the old gating are cleaned up."""
         _make_workflow(tmp_path, "draft", "wf-draft")
         cfg_path = tmp_path / "config.toml"
-        with (
-            patch("medmcp.settings.VIBE_HOME", tmp_path),
-            patch("medmcp.settings.WORKFLOWS_ENABLED_PATH", tmp_path / "workflows_enabled.json"),
-            patch("medmcp.settings.ACTIVE_WORKFLOWS_PATH", tmp_path / "active_workflows.json"),
-        ):
-            save_workflows_enabled(False)
+        cfg_path.write_text('disabled_skills = ["wf-draft", "skill-creator"]\n')
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
             sync_servers_to_vibe_config([])
         cfg = tomllib.loads(cfg_path.read_text())
-        skill_paths = cfg["skill_paths"]
-        assert str(tmp_path / "workflows" / "active") not in skill_paths
-        assert str(tmp_path / "workflows" / "draft") not in skill_paths
-        assert cfg["disabled_skills"] == ["wf-draft", "wf-promoted"]
+        # The workflow goes; the deliberately-disabled builtin stays.
+        assert cfg["disabled_skills"] == ["skill-creator"]
 
 
 # ── active_servers ───────────────────────────────────────────────────────────
@@ -393,28 +363,6 @@ class TestSyncServersToVibeConfig:
 
         assert result.get("skill_paths") == []
 
-    def test_active_workflows_dir_added_to_skill_paths(self, tmp_path: Path) -> None:
-        """A promoted-workflows active/ dir is included in skill_paths."""
-        (tmp_path / "workflows" / "active").mkdir(parents=True)
-        with patch("medmcp.settings.VIBE_HOME", tmp_path):
-            sync_servers_to_vibe_config(_TWO_SERVERS)
-
-        with (tmp_path / "config.toml").open("rb") as f:
-            result = tomllib.load(f)
-
-        assert str(tmp_path / "workflows" / "active") in result["skill_paths"]
-
-    def test_draft_workflows_dir_added_to_skill_paths(self, tmp_path: Path) -> None:
-        """The draft/ dir is included in skill_paths so drafts can be tested."""
-        (tmp_path / "workflows" / "draft").mkdir(parents=True)
-        with patch("medmcp.settings.VIBE_HOME", tmp_path):
-            sync_servers_to_vibe_config(_TWO_SERVERS)
-
-        with (tmp_path / "config.toml").open("rb") as f:
-            result = tomllib.load(f)
-
-        assert str(tmp_path / "workflows" / "draft") in result["skill_paths"]
-
     def test_skill_paths_updated_when_partial_deactivation(self, tmp_path: Path) -> None:
         """skill_paths reflects only the active servers after partial deactivation."""
         cfg_path = tmp_path / "config.toml"
@@ -470,55 +418,3 @@ class TestDiscoverWorkflows:
             found = [w for w in discover_workflows() if w["name"] == "dup"]
         assert len(found) == 1
         assert found[0]["kind"] == "active"
-
-
-class TestWorkflowDisabledSkills:
-    """Deactivated workflows are written to disabled_skills on config sync."""
-
-    def test_deactivated_workflow_disabled(self, tmp_path: Path) -> None:
-        """A workflow not in the active set is written to disabled_skills."""
-        _make_workflow(tmp_path, "active", "keep-me")
-        _make_workflow(tmp_path, "active", "turn-off")
-        active_path = tmp_path / "active_workflows.json"
-        active_path.write_text(json.dumps({"active": ["keep-me"]}))
-
-        with (
-            patch("medmcp.settings.VIBE_HOME", tmp_path),
-            patch("medmcp.settings.ACTIVE_WORKFLOWS_PATH", active_path),
-        ):
-            sync_servers_to_vibe_config([])
-
-        with (tmp_path / "config.toml").open("rb") as f:
-            result = tomllib.load(f)
-        assert result["disabled_skills"] == ["turn-off"]
-
-    def test_all_active_means_none_disabled(self, tmp_path: Path) -> None:
-        """With no active_workflows.json, every workflow is active (none disabled)."""
-        _make_workflow(tmp_path, "active", "a")
-        _make_workflow(tmp_path, "draft", "b")
-        with (
-            patch("medmcp.settings.VIBE_HOME", tmp_path),
-            patch("medmcp.settings.ACTIVE_WORKFLOWS_PATH", tmp_path / "active_workflows.json"),
-        ):
-            sync_servers_to_vibe_config([])
-        with (tmp_path / "config.toml").open("rb") as f:
-            result = tomllib.load(f)
-        assert result["disabled_skills"] == []
-
-    def test_preserves_non_workflow_disabled_skills(self, tmp_path: Path) -> None:
-        """A manually-disabled non-workflow skill survives the sync."""
-        _make_workflow(tmp_path, "active", "wf-a")
-        cfg = tmp_path / "config.toml"
-        cfg.write_text('disabled_skills = ["some-builtin"]\n')
-        active_path = tmp_path / "active_workflows.json"
-        active_path.write_text(json.dumps({"active": []}))  # wf-a deactivated
-
-        with (
-            patch("medmcp.settings.VIBE_HOME", tmp_path),
-            patch("medmcp.settings.ACTIVE_WORKFLOWS_PATH", active_path),
-        ):
-            sync_servers_to_vibe_config([])
-
-        with cfg.open("rb") as f:
-            result = tomllib.load(f)
-        assert set(result["disabled_skills"]) == {"some-builtin", "wf-a"}

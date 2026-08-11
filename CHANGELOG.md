@@ -38,6 +38,12 @@ Notable, user-visible changes to MedMCP. Format follows
   settings drawer's General list into a collapsed **Advanced** section at the
   bottom, so a chat's audit trail is no longer one stray click from stopping
   (#100).
+- Saved workflows now belong to the replay engine alone. The agent can no longer
+  invoke one as a skill — a workflow runs from the workflow panel, replaying its
+  recorded tool calls exactly, or it does not run. Promoting a draft now just
+  marks it reviewed and worth keeping. The settings drawer's "Personal
+  workflows" master switch and per-workflow switches are gone with the skill
+  loading they controlled (#101).
 
 ### Fixed
 

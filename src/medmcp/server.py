@@ -295,52 +295,37 @@ class ToggleEntry(BaseModel):
 class SettingsPayload(BaseModel):
     """Full settings state as submitted by the UI's settings drawer.
 
-    ``stacks``/``workflows`` carry every entry the drawer knew about (name +
-    active), so the server can tell "deactivated" apart from "unknown to this
-    drawer" and preserve the state of entries created after the drawer
-    fetched (e.g. a draft distilled while it was open).
+    ``stacks`` carries every entry the drawer knew about (name + active), so the
+    server can tell "deactivated" apart from "unknown to this drawer" and
+    preserve the state of stacks installed after the drawer fetched.
     """
 
     explain_tools: bool
     record_provenance: bool
-    workflows_enabled: bool
     # Selected GPU (CDI device id) for container stacks; "" = leave unchanged.
     gpu: str = ""
     stacks: list[ToggleEntry]
-    workflows: list[ToggleEntry]
 
 
 def _settings_state() -> JsonDict:
     """Assemble the current settings state (runs blocking discovery)."""
     stacks = settings.load_mcp_servers()
     active = settings.load_active_server_names()
-    workflows = settings.discover_workflows()
-    active_wf = settings.load_active_workflow_names()
     return {
         "explain_tools": settings.load_explain_enabled(),
         "record_provenance": settings.load_provenance_enabled(),
-        "workflows_enabled": settings.load_workflows_enabled(),
         "gpu": settings.load_gpu_selection(),
         "llm_gpu": settings.LLM_GPU,
         "stacks": [
             {"name": s["name"], "version": s.get("version"), "active": s["name"] in active}
             for s in stacks
         ],
-        "workflows": [
-            {
-                "name": w["name"],
-                "description": w["description"],
-                "kind": w["kind"],
-                "active": w["name"] in active_wf,
-            }
-            for w in workflows
-        ],
     }
 
 
 @app.get("/api/settings")
 async def get_settings() -> JsonDict:
-    """Return toggles plus the discovered stacks/workflows with active state."""
+    """Return toggles plus the discovered stacks with active state."""
     return await asyncio.to_thread(_settings_state)
 
 
@@ -348,15 +333,13 @@ async def get_settings() -> JsonDict:
 async def put_settings(payload: SettingsPayload) -> JsonDict:
     """Persist settings; restart vibe-acp when its config inputs changed.
 
-    Stack and workflow changes are baked into ``.vibe/config.toml`` at session
-    start, so applying them requires a fresh vibe-acp process. All live chat
-    sockets are closed; each client auto-reconnects into a new session.
+    Stack changes are baked into ``.vibe/config.toml`` at session start, so
+    applying them requires a fresh vibe-acp process. All live chat sockets are
+    closed; each client auto-reconnects into a new session.
     """
 
     def _apply() -> tuple[bool, set[str], set[str]]:
         old_stacks = settings.load_active_server_names()
-        old_workflows = settings.load_active_workflow_names()
-        old_wf_enabled = settings.load_workflows_enabled()
 
         # An empty gpu means "leave unchanged"; a new value re-pins stack containers.
         gpu_changed = bool(payload.gpu) and payload.gpu != settings.load_gpu_selection()
@@ -365,24 +348,13 @@ async def put_settings(payload: SettingsPayload) -> JsonDict:
 
         settings.save_explain_enabled(payload.explain_tools)
         settings.save_provenance_enabled(payload.record_provenance)
-        settings.save_workflows_enabled(payload.workflows_enabled)
         # Merge instead of overwrite: entries the drawer never saw keep their
         # current active state instead of being silently deactivated.
         known_stacks = {t.name for t in payload.stacks}
         new_stacks = {t.name for t in payload.stacks if t.active} | (old_stacks - known_stacks)
-        known_workflows = {t.name for t in payload.workflows}
-        new_workflows = {t.name for t in payload.workflows if t.active} | (
-            old_workflows - known_workflows
-        )
         settings.save_active_server_names(new_stacks)
-        settings.save_active_workflow_names(new_workflows)
 
-        restart = (
-            new_stacks != old_stacks
-            or new_workflows != old_workflows
-            or payload.workflows_enabled != old_wf_enabled
-            or gpu_changed
-        )
+        restart = new_stacks != old_stacks or gpu_changed
         if restart:
             settings.sync_servers_to_vibe_config(settings.active_servers())
         return restart, new_stacks - old_stacks, old_stacks - new_stacks
@@ -617,15 +589,8 @@ def _workflow_detail(name: str) -> JsonDict:
 
 @app.get("/api/workflows")
 async def get_workflows() -> JsonDict:
-    """List personal workflows plus the master-toggle state."""
-
-    def _state() -> JsonDict:
-        return {
-            "enabled": settings.load_workflows_enabled(),
-            "workflows": settings.discover_workflows(),
-        }
-
-    return await asyncio.to_thread(_state)
+    """List the personal workflows available to the replay engine."""
+    return {"workflows": await asyncio.to_thread(settings.discover_workflows)}
 
 
 class DistillPayload(BaseModel):
@@ -1000,7 +965,7 @@ async def ws_replay(ws: WebSocket) -> None:
 #     {"type": "tool_call", "toolCallId": str, "title": str, "status": str,
 #      "kind": str | None, "rawInput": object}
 #     {"type": "tool_call_update", "toolCallId": str, "status": str | None,
-#      "output": str | None}
+#      "output": str | None, "rawInput": object | None}
 #     {"type": "usage", "used": int}
 #     {"type": "permission_request", "requestId": int, "toolCall": {...},
 #      "options": [{"optionId": str, "name": str, "kind": str}],
@@ -1080,16 +1045,35 @@ def _usage_window(update: JsonDict) -> int:
     return settings.cached_context_window()
 
 
-def _visible_permission_options(options: list[JsonDict]) -> list[JsonDict]:
-    """Drop permission options that would create a durable auto-approval.
+# Permission options that approve more than the call being asked about:
+# ``allow_always`` ("Allow for remainder of this session") auto-approves every
+# later call of that tool in the session, and ``allow_always_permanent``
+# ("Always allow") persists the approval into ``.vibe/config.toml`` so it
+# outlives the session entirely. Both are auto-approval paths, which medmcp
+# does not offer — every tool call is gated on its own.
+_AUTO_APPROVE_OPTIONS = frozenset({"allow_always", "allow_always_permanent"})
 
-    vibe ≥2.23 offers ``allow_always_permanent`` ("Always allow"), which
-    persists the approval into ``.vibe/config.toml`` — every future call of
-    that tool would then bypass the permission flow entirely. medmcp's posture
-    is interactive gating only, so the option is never shown to the browser
-    (per-session "allow always" remains available).
+
+def _visible_permission_options(options: list[JsonDict]) -> list[JsonDict]:
+    """Reduce vibe's permission options to a per-call allow/deny pair.
+
+    Every option that would auto-approve anything beyond the call in hand is
+    dropped (see :data:`_AUTO_APPROVE_OPTIONS`), leaving ``allow_once`` and
+    ``reject_once``. With no "always" variant left to contrast against,
+    "Allow once" is relabelled to plain **"Allow"** — the scope is no longer a
+    choice the user makes, so naming it only invites the question.
+
+    Renaming here rather than in the browser keeps one source for the label:
+    the frontend renders whatever ``name`` the frame carries.
     """
-    return [o for o in options if o.get("optionId") != "allow_always_permanent"]
+    visible: list[JsonDict] = []
+    for option in options:
+        if option.get("optionId") in _AUTO_APPROVE_OPTIONS:
+            continue
+        if option.get("optionId") == "allow_once":
+            option = {**option, "name": "Allow"}
+        visible.append(option)
+    return visible
 
 
 def _workspace_note(viewed_path: str) -> str:
@@ -1437,10 +1421,19 @@ class _ChatConnection:
                 if not output and raw_output is not None:
                     output = str(raw_output)
                 status = update.get("status")
+                # A tool call is announced before the model has finished streaming
+                # its arguments, so the opening `tool_call` frame can carry an empty
+                # or partial rawInput; vibe re-sends the completed arguments on the
+                # first update whose detail changed. Overwrite (not set-if-absent)
+                # or the placeholder sticks — which leaves the approval box with no
+                # arguments to show and the provenance event with no `arguments`.
+                raw_input = update.get("rawInput")
                 info = self._tool_calls.get(tc_id)
                 if info is not None:
                     if isinstance(status, str):
                         info["status"] = status
+                    if raw_input is not None:
+                        info["rawInput"] = raw_input
                     if raw_output is not None:
                         info["rawOutput"] = raw_output
                     elif output:
@@ -1451,6 +1444,7 @@ class _ChatConnection:
                         "toolCallId": tc_id,
                         "status": status,
                         "output": output[:2000] if output else None,
+                        "rawInput": raw_input,
                     }
                 )
                 if status in ("completed", "failed") and info is not None:

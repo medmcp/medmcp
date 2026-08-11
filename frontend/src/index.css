@@ -440,29 +440,17 @@ button:hover {
   flex-shrink: 0;
 }
 
+/* The overlaid volume's filename. Takes the free space and truncates, so a long
+   name pushes the opacity control off the bar instead of wrapping it. */
 .overlay-label {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-.overlay-select {
-  background: var(--card);
-  color: var(--text);
-  border: 1px solid var(--border2);
-  border-radius: 6px;
-  padding: 3px 8px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--mono);
   font-size: 11.5px;
-  max-width: 280px;
-  min-width: 0;
-}
-
-.overlay-select:focus {
-  outline: none;
-  border-color: rgba(127, 168, 245, 0.4);
+  color: var(--text);
 }
 
 /* Viewer settings: gear in the panel header opens a popover. Positioned within
@@ -1390,6 +1378,40 @@ button:hover {
   text-transform: uppercase;
   color: var(--blue-l);
   margin: 20px 0 4px;
+}
+
+/* Disclosure for settings that should be reachable but not browsed past. Mirrors
+   the viewer settings popover's own Advanced row (.vs-advanced-toggle). */
+.settings-advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 20px;
+  padding: 10px 0 4px;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.settings-advanced-toggle:hover {
+  /* Neutralize the global button:hover fade, as .vs-advanced-toggle does: on a
+     full-width, border-top-only row it reads as a shimmer. */
+  background: none;
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.settings-chevron {
+  transition: transform 0.12s ease;
+}
+
+.settings-chevron.open {
+  transform: rotate(90deg);
 }
 
 .settings-row {

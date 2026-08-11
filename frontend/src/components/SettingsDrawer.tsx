@@ -8,7 +8,7 @@ import {
   uninstallStack,
 } from '../api'
 import type { CatalogEntry, GpuInfo, InstalledStack, SettingsState } from '../types'
-import { XIcon } from './icons'
+import { ChevronRightIcon, XIcon } from './icons'
 
 interface SettingsDrawerProps {
   open: boolean
@@ -75,9 +75,8 @@ function Row({
 
 /**
  * Right-side drawer with the chat control panels: feature toggles, MCP stack
- * switches, and personal-workflow switches. Every change is saved
- * immediately; stack/workflow changes restart the agent (the chat reconnects
- * into a fresh session).
+ * switches, and the stack GPU. Every change is saved immediately; stack and GPU
+ * changes restart the agent (the chat reconnects into a fresh session).
  */
 export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [state, setState] = useState<SettingsState | null>(null)
@@ -91,6 +90,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [advanced, setAdvanced] = useState(false)
 
   useEffect(() => {
     if (!open) return
@@ -219,18 +219,6 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                 checked={state.explain_tools}
                 onChange={(v) => apply({ ...state, explain_tools: v })}
               />
-              <Row
-                label="Record provenance"
-                hint="Keeps a replayable record of what each chat did (manifest, tool log, permissions)."
-                checked={state.record_provenance}
-                onChange={(v) => apply({ ...state, record_provenance: v })}
-              />
-              <Row
-                label="Personal workflows"
-                hint="Master switch for distilled workflows; off hides and unloads all of them."
-                checked={state.workflows_enabled}
-                onChange={(v) => apply({ ...state, workflows_enabled: v })}
-              />
               <div className="settings-row">
                 <div className="settings-row-text">
                   <div className="settings-row-label">GPU</div>
@@ -349,34 +337,32 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                 <InstallProgress line={installProgress} />
               )}
 
-              {state.workflows_enabled && (
-                <>
-                  <div className="settings-section">Workflows</div>
-                  {state.workflows.length === 0 && (
-                    <div className="settings-row-hint">No workflows saved yet.</div>
-                  )}
-                  {state.workflows.map((w) => (
-                    <Row
-                      key={w.name}
-                      label={w.name}
-                      hint={w.description || (w.kind === 'draft' ? 'draft' : undefined)}
-                      checked={w.active}
-                      onChange={(v) =>
-                        apply({
-                          ...state,
-                          workflows: state.workflows.map((x) =>
-                            x.name === w.name ? { ...x, active: v } : x,
-                          ),
-                        })
-                      }
-                    />
-                  ))}
-                </>
+              {/* Provenance is on, and meant to stay on — it is the record of what
+                  the agent did to the data. The switch survives for the rare case
+                  that needs it, one disclosure away from being reached by accident. */}
+              <button
+                type="button"
+                className="settings-advanced-toggle"
+                onClick={() => setAdvanced((v) => !v)}
+              >
+                <ChevronRightIcon
+                  size={12}
+                  className={advanced ? 'settings-chevron open' : 'settings-chevron'}
+                />
+                Advanced
+              </button>
+              {advanced && (
+                <Row
+                  label="Record provenance"
+                  hint="Keeps a replayable record of what each chat did (manifest, tool log, permissions). Turning this off means a chat leaves no audit trail and cannot be distilled into a workflow."
+                  checked={state.record_provenance}
+                  onChange={(v) => apply({ ...state, record_provenance: v })}
+                />
               )}
 
               <div className="drawer-footnote">
-                Stack and workflow changes restart the agent; open chats reconnect into a fresh
-                session.{saving ? ' Saving…' : ''}
+                Stack and GPU changes restart the agent; open chats reconnect into a fresh session.
+                {saving ? ' Saving…' : ''}
               </div>
             </>
           )}

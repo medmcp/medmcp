@@ -415,6 +415,9 @@ export const Chat = memo(function Chat({
                 ...tc,
                 status: frame.status ?? tc.status,
                 output: frame.output ?? tc.output,
+                // Sent again once the model finished streaming the arguments;
+                // the opening frame's copy can be empty or partial.
+                rawInput: frame.rawInput ?? tc.rawInput,
               },
             }
           })

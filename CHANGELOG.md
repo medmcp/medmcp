@@ -30,9 +30,28 @@ Notable, user-visible changes to MedMCP. Format follows
   `num_ctx`), not the model family's nominal maximum (#89).
 - Replayed chats show the user's message text without the internal
   `[workspace context: …]` viewer note, natively (#89).
+- Overlaying a segmentation is now drag-and-drop only: drag the volume from the
+  file explorer onto the image. The dropdown of every volume in the workspace is
+  gone, and the bar above the image appears only once something is overlaid —
+  showing that volume's name, its opacity, and a button to remove it (#99).
+- Provenance recording is treated as always-on: its off switch moved out of the
+  settings drawer's General list into a collapsed **Advanced** section at the
+  bottom, so a chat's audit trail is no longer one stray click from stopping
+  (#100).
+- Saved workflows now belong to the replay engine alone. The agent can no longer
+  invoke one as a skill — a workflow runs from the workflow panel, replaying its
+  recorded tool calls exactly, or it does not run. Promoting a draft now just
+  marks it reviewed and worth keeping. The settings drawer's "Personal
+  workflows" master switch and per-workflow switches are gone with the skill
+  loading they controlled (#101).
 
 ### Fixed
 
+- The approval dialog shows the tool call's arguments again. The agent announces
+  a call before it has finished writing its arguments, so they arrived a moment
+  later and were dropped — leaving you to approve an action with only its name
+  visible. Tool-call cards fill in the same way, and provenance records the
+  arguments again (so those sessions distill into working workflows) (#102).
 - Sent messages no longer appear twice (the agent runtime echoes live prompts
   since vibe 2.23; the echo is now merged into the already-rendered bubble) —
   as a side effect, messages sent in the current session become rewindable
@@ -47,9 +66,10 @@ Notable, user-visible changes to MedMCP. Format follows
 - Every bash command the agent runs now requires interactive approval: the
   read-only allowlist was removed after finding that an output redirect from an
   allowlisted command (e.g. `echo "" > file`) wrote files without a prompt (#89).
-- The permission dialog no longer offers the durable "Always allow" option
-  vibe 2.23 introduced (it would persist an auto-approval into the config) —
-  per-session approval remains (#89).
+- The permission dialog no longer offers any way to approve more than the call
+  in front of you: both "Always allow" (which persisted an auto-approval into
+  the config) and "Allow for remainder of this session" are gone, leaving
+  **Allow** and **Deny**. Every tool call is approved on its own (#89, #98).
 - The agent's built-in `skill-creator` skill is disabled: workflow distillation
   stays the single, reviewable skill-authoring path (#89).
 

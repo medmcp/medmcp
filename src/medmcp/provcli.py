@@ -62,19 +62,19 @@ def _distill(session_id: str, *, use_llm: bool) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"Draft workflow written to: {draft_dir}")
-    print("Review and edit, then promote it into a skill_paths directory to reuse it.")
+    print("Review and edit it, then promote it to keep it.")
     return 0
 
 
 def _promote(name: str) -> int:
-    """Move a reviewed draft workflow into ``active/`` so it loads as a skill."""
+    """Move a reviewed draft workflow into ``active/``."""
     try:
         dst = distill.promote_draft(name)
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"Promoted workflow to: {dst}")
-    print("Restart the UI to pick it up; it will be available via the skill system.")
+    print("Run it from the workspace UI's workflow panel.")
     return 0
 
 

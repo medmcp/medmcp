@@ -200,31 +200,27 @@ class TestWorkspaceNote:
 
 
 class TestSettingsMerge:
-    """The settings PUT merges the drawer's known lists with the current state.
+    """The settings PUT merges the drawer's known stack list with the current state.
 
-    The drawer submits every entry it knew about (name + active). Entries it
-    never saw (e.g. a workflow distilled while the drawer was open) must keep
-    their current active state rather than being dropped.
+    The drawer submits every stack it knew about (name + active). Stacks it never
+    saw (e.g. one installed while the drawer was open) must keep their current
+    active state rather than being dropped.
     """
 
     @pytest.fixture
     def harness(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, set[str]]:
         """Stub settings persistence and the vibe restart; capture what's saved.
 
-        ``old`` seeds the current active sets; ``saved`` records the merged sets
-        the endpoint persists. The vibe-acp restart and config sync are stubbed
-        so the endpoint can run without a subprocess.
+        ``old_stacks`` seeds the current active set; ``saved`` records the merged
+        set the endpoint persists. The vibe-acp restart and config sync are
+        stubbed so the endpoint can run without a subprocess.
         """
         old_stacks = {"alpha", "beta"}
-        old_workflows = {"wf-keep"}
         saved: dict[str, set[str]] = {}
 
         # Strict pyright rejects untyped lambdas, so the stubs are typed defs.
         def _save_stacks(names: Iterable[str]) -> None:
             saved["stacks"] = set(names)
-
-        def _save_workflows(names: Iterable[str]) -> None:
-            saved["workflows"] = set(names)
 
         def _noop_bool(_value: bool) -> None:
             return None
@@ -239,13 +235,9 @@ class TestSettingsMerge:
             return None
 
         monkeypatch.setattr(settings, "load_active_server_names", lambda: set(old_stacks))
-        monkeypatch.setattr(settings, "load_active_workflow_names", lambda: set(old_workflows))
-        monkeypatch.setattr(settings, "load_workflows_enabled", lambda: True)
         monkeypatch.setattr(settings, "save_explain_enabled", _noop_bool)
         monkeypatch.setattr(settings, "save_provenance_enabled", _noop_bool)
-        monkeypatch.setattr(settings, "save_workflows_enabled", _noop_bool)
         monkeypatch.setattr(settings, "save_active_server_names", _save_stacks)
-        monkeypatch.setattr(settings, "save_active_workflow_names", _save_workflows)
         monkeypatch.setattr(settings, "sync_servers_to_vibe_config", _noop_sync)
         monkeypatch.setattr(settings, "active_servers", _active_servers)
         monkeypatch.setattr(server, "_restart_vibe", _no_restart)
@@ -256,9 +248,7 @@ class TestSettingsMerge:
         body: dict[str, object] = {
             "explain_tools": True,
             "record_provenance": False,
-            "workflows_enabled": True,
             "stacks": [],
-            "workflows": [],
         }
         body.update(overrides)
         resp = client.put("/api/settings", json=body)
@@ -283,27 +273,14 @@ class TestSettingsMerge:
         assert harness["stacks"] == {"beta"}
         assert result["restarted"] is True
 
-    def test_workflows_master_toggle_triggers_restart(self, harness: dict[str, set[str]]) -> None:
-        """Flipping the workflows master switch restarts vibe even if sets match."""
-        client = TestClient(server.app)
-        result = self._put(
-            client,
-            workflows_enabled=False,
-            stacks=[{"name": "alpha", "active": True}, {"name": "beta", "active": True}],
-            workflows=[{"name": "wf-keep", "active": True}],
-        )
-        assert result["restarted"] is True
-
     def test_no_restart_when_nothing_changes(self, harness: dict[str, set[str]]) -> None:
         """Re-submitting the current state is a no-op restart-wise."""
         client = TestClient(server.app)
         result = self._put(
             client,
             stacks=[{"name": "alpha", "active": True}, {"name": "beta", "active": True}],
-            workflows=[{"name": "wf-keep", "active": True}],
         )
         assert harness["stacks"] == {"alpha", "beta"}
-        assert harness["workflows"] == {"wf-keep"}
         assert result["restarted"] is False
 
 
@@ -494,6 +471,88 @@ class TestIdlePump:
         assert queue.qsize() == 1
 
 
+class TestToolCallRawInput:
+    """Arguments streamed in after the call is announced still reach the UI.
+
+    vibe announces a tool call before the model has finished streaming its
+    arguments, so the opening ``tool_call`` frame can carry an empty rawInput and
+    the completed one arrives on a later ``tool_call_update``. Missing that
+    second copy leaves the approval box with no arguments to show and the
+    provenance event with no ``arguments`` — see ``_effect_progress_updates`` in
+    vibe's session_updates (rawInput is re-sent only when the detail changed).
+    """
+
+    @staticmethod
+    def _update(payload: dict[str, object]) -> dict[str, object]:
+        return {"method": "session/update", "params": {"update": payload}}
+
+    @pytest.mark.asyncio
+    async def test_late_arguments_overwrite_the_partial_placeholder(self) -> None:
+        """The completed rawInput replaces the empty one from the opening frame."""
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        conn = server._ChatConnection(cast("Any", _StubWs()), "sid", cast("Any", queue), [])
+        await queue.put(
+            self._update(
+                {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_1",
+                    "title": "medmcp-neuro-core_skull_strip",
+                    "status": "pending",
+                    "rawInput": {},
+                }
+            )
+        )
+        await queue.put(
+            self._update(
+                {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call_1",
+                    "status": "in_progress",
+                    "rawInput": {"image": "/data/T1.nii.gz"},
+                }
+            )
+        )
+        conn.start_idle_pump()
+        await asyncio.sleep(0.05)
+        await conn._stop_idle_pump()
+
+        assert conn._tool_calls["call_1"]["rawInput"] == {"image": "/data/T1.nii.gz"}
+        sent = cast("_StubWs", conn.ws).sent
+        update_frame = next(m for m in sent if m.get("type") == "tool_call_update")
+        assert update_frame["rawInput"] == {"image": "/data/T1.nii.gz"}
+
+    @pytest.mark.asyncio
+    async def test_update_without_arguments_keeps_the_known_ones(self) -> None:
+        """A status-only update (vibe sends rawInput only when detail changed)."""
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        conn = server._ChatConnection(cast("Any", _StubWs()), "sid", cast("Any", queue), [])
+        await queue.put(
+            self._update(
+                {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_1",
+                    "title": "bash",
+                    "status": "pending",
+                    "rawInput": {"command": "ls"},
+                }
+            )
+        )
+        await queue.put(
+            self._update(
+                {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call_1",
+                    "status": "in_progress",
+                }
+            )
+        )
+        conn.start_idle_pump()
+        await asyncio.sleep(0.05)
+        await conn._stop_idle_pump()
+
+        assert conn._tool_calls["call_1"]["rawInput"] == {"command": "ls"}
+
+
 class TestUsageWindow:
     """The context meter denominator: Ollama's num_ctx wins over vibe's registry figure."""
 
@@ -514,22 +573,37 @@ class TestUsageWindow:
 
 
 class TestVisiblePermissionOptions:
-    """The durable auto-approval option is never offered to the browser."""
+    """No auto-approval option is ever offered to the browser."""
 
-    def test_drops_allow_always_permanent(self) -> None:
-        """``allow_always_permanent`` is filtered; the interactive options stay."""
-        options = [
+    @staticmethod
+    def _vibe_options() -> list[dict[str, object]]:
+        """The four options vibe-acp offers on every permission request."""
+        return [
             {"optionId": "allow_once", "name": "Allow once"},
             {"optionId": "allow_always", "name": "Allow for remainder of this session"},
             {"optionId": "allow_always_permanent", "name": "Always allow"},
             {"optionId": "reject_once", "name": "Deny"},
         ]
-        visible = server._visible_permission_options(options)
-        assert [o["optionId"] for o in visible] == ["allow_once", "allow_always", "reject_once"]
+
+    def test_drops_both_auto_approve_options(self) -> None:
+        """Session-scoped and permanent "always" both go; allow/deny remain."""
+        visible = server._visible_permission_options(self._vibe_options())
+        assert [o["optionId"] for o in visible] == ["allow_once", "reject_once"]
+
+    def test_relabels_allow_once(self) -> None:
+        """With no "always" variant to contrast against, the scope drops from the label."""
+        visible = server._visible_permission_options(self._vibe_options())
+        assert [o["name"] for o in visible] == ["Allow", "Deny"]
+
+    def test_does_not_mutate_input(self) -> None:
+        """The relabel copies — the caller's option dicts are left untouched."""
+        options = self._vibe_options()
+        server._visible_permission_options(options)
+        assert options[0]["name"] == "Allow once"
 
     def test_passes_unknown_options_through(self) -> None:
-        """Only the durable option is dropped — future option ids are relayed."""
-        options = [{"optionId": "allow_once"}, {"optionId": "something_new"}]
+        """Only the auto-approve ids are dropped — future option ids are relayed."""
+        options = [{"optionId": "reject_once"}, {"optionId": "something_new"}]
         assert server._visible_permission_options(options) == options
 
 

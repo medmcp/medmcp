@@ -6,9 +6,9 @@ calls, and lifts concrete file paths into named placeholders to produce a
 :class:`~medmcp.workflow.Recipe`. The recipe is emitted two ways from one
 distillation (Option C):
 
-- ``recipe.yaml`` — machine-readable + replayable.
-- ``SKILL.md``    — frontmatter + ``## Steps`` / ``## Gotchas``, droppable into a
-  ``skill_paths`` directory so it plugs into the existing skill system.
+- ``recipe.yaml`` — machine-readable + replayable; what the replay engine runs.
+- ``SKILL.md``    — frontmatter + ``## Steps`` / ``## Gotchas``: the human-facing
+  description of the workflow, shown in the UI and carried by an export.
 
 The prose (workflow name, description, narrative steps, gotchas) is written by a
 hybrid pass: the step sequence is extracted deterministically, then the local
@@ -16,8 +16,10 @@ Ollama model is asked to write the human-facing narrative. If the model is
 unavailable the narrative falls back to a mechanical rendering so distillation
 never hard-fails.
 
-Output lands in ``.vibe/workflows/draft/<name>/`` for human review; promotion to
-an active ``skill_paths`` location is a separate, deliberate step.
+Output lands in ``.vibe/workflows/draft/<name>/`` for human review; promoting it
+to ``active/`` — marking it reviewed and worth keeping — is a separate,
+deliberate step. Neither directory is ever loaded as a skill: a workflow runs
+through :mod:`medmcp.replay`, never by the agent deciding to invoke it.
 """
 
 from __future__ import annotations
@@ -714,8 +716,9 @@ def distill_session(
 def promote_draft(name: str, *, workflows_root: Path | None = None) -> Path:
     """Move draft workflow *name* into ``active/`` and return the new path.
 
-    Promotion makes the workflow discoverable as a skill (the active directory is
-    added to ``skill_paths``). Raises ``FileNotFoundError`` if no such draft exists.
+    Promotion marks the workflow as reviewed and worth keeping; both directories
+    are replayable, and neither is loaded as a skill. Raises ``FileNotFoundError``
+    if no such draft exists.
     """
     src = _draft_dir(name, workflows_root)
     if not (src / "SKILL.md").exists():

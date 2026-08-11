@@ -118,7 +118,7 @@ export default function App() {
             </Panel>
             <Separator className="sep sep-v" />
             <Panel minSize="30%">
-              <Viewer path={openPath} refreshSignal={fsVersion} isResizing={resizing} />
+              <Viewer path={openPath} isResizing={resizing} />
             </Panel>
           </Group>
         </Panel>

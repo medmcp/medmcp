@@ -81,15 +81,13 @@ export async function fetchSettings(): Promise<SettingsState> {
 
 /** Persist the full settings state; returns whether the agent was restarted. */
 export async function saveSettings(state: SettingsState): Promise<boolean> {
-  // Send the full known lists (not just the active names) so the server
-  // can preserve entries this drawer never saw (created after it fetched).
+  // Send the full known list (not just the active names) so the server can
+  // preserve stacks this drawer never saw (installed after it fetched).
   const res = await sendJson('PUT', '/api/settings', {
     explain_tools: state.explain_tools,
     record_provenance: state.record_provenance,
-    workflows_enabled: state.workflows_enabled,
     gpu: state.gpu,
     stacks: state.stacks.map((s) => ({ name: s.name, active: s.active })),
-    workflows: state.workflows.map((w) => ({ name: w.name, active: w.active })),
   })
   const body = (await res.json()) as { restarted: boolean }
   return body.restarted
@@ -175,12 +173,9 @@ export async function deleteSession(id: string): Promise<void> {
 
 // ── Workflows ────────────────────────────────────────────────
 
-export async function fetchWorkflows(): Promise<{
-  enabled: boolean
-  workflows: WorkflowListEntry[]
-}> {
+export async function fetchWorkflows(): Promise<WorkflowListEntry[]> {
   const res = await check(await fetch('/api/workflows'))
-  return (await res.json()) as { enabled: boolean; workflows: WorkflowListEntry[] }
+  return ((await res.json()) as { workflows: WorkflowListEntry[] }).workflows
 }
 
 export async function fetchWorkflowDetail(name: string): Promise<WorkflowDetail> {

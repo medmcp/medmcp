@@ -32,8 +32,6 @@ _DICOM: JsonDict = {
 
 def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, pool: bool) -> None:
     monkeypatch.setattr(settings, "VIBE_HOME", tmp_path)
-    monkeypatch.setattr(settings, "WORKFLOWS_ENABLED_PATH", tmp_path / "workflows_enabled.json")
-    monkeypatch.setattr(settings, "ACTIVE_WORKFLOWS_PATH", tmp_path / "active_workflows.json")
     if pool:
         monkeypatch.setenv("MEDMCP_STACK_POOL", "1")
     else:

@@ -410,7 +410,6 @@ export const WorkflowPanel = memo(function WorkflowPanel({
   selectedPaths?: string[]
 }) {
   const [workflows, setWorkflows] = useState<WorkflowListEntry[] | null>(null)
-  const [enabled, setEnabled] = useState(true)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [detail, setDetail] = useState<WorkflowDetail | null>(null)
   const [mode, setMode] = useState<Mode>({ kind: 'view' })
@@ -425,9 +424,8 @@ export const WorkflowPanel = memo(function WorkflowPanel({
   const reload = useCallback(
     () =>
       fetchWorkflows()
-        .then((res) => {
-          setEnabled(res.enabled)
-          setWorkflows(res.workflows)
+        .then((list) => {
+          setWorkflows(list)
           setError(null)
         })
         .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e))),
@@ -893,7 +891,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
               <>
                 <button
                   className="btn-plain"
-                  title="Keep permanently; loads as a skill in new chat sessions"
+                  title="Mark as reviewed and keep permanently"
                   onClick={() => void promote(d.name)}
                 >
                   Promote
@@ -1309,11 +1307,6 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         </span>
       </div>
       <div className="panel-body wf-body">
-        {!enabled && (
-          <div className="viewer-message">
-            Personal workflows are turned off — enable them in Settings.
-          </div>
-        )}
         {error && <div className="panel-error">{error}</div>}
         {busy && (
           <div className="wf-busy">
@@ -1328,14 +1321,13 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             {mode.kind === 'running' ? renderRunning(mode) : renderDone(mode)}
           </div>
         )}
-        {enabled && workflows !== null && workflows.length === 0 && !busy && (
+        {workflows !== null && workflows.length === 0 && !busy && (
           <div className="viewer-message">
             No saved workflows yet. Run an analysis in the chat, then click{' '}
             <BookmarkPlusIcon size={12} /> to turn it into a reusable, replayable workflow.
           </div>
         )}
-        {enabled &&
-          workflows?.map((w) => (
+        {workflows?.map((w) => (
             <div key={w.name} className="wf-item">
               <button className="wf-row" onClick={() => void openDetail(w.name)}>
                 <ChevronRightIcon

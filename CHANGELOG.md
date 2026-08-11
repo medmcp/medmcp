@@ -47,9 +47,10 @@ Notable, user-visible changes to MedMCP. Format follows
 - Every bash command the agent runs now requires interactive approval: the
   read-only allowlist was removed after finding that an output redirect from an
   allowlisted command (e.g. `echo "" > file`) wrote files without a prompt (#89).
-- The permission dialog no longer offers the durable "Always allow" option
-  vibe 2.23 introduced (it would persist an auto-approval into the config) —
-  per-session approval remains (#89).
+- The permission dialog no longer offers any way to approve more than the call
+  in front of you: both "Always allow" (which persisted an auto-approval into
+  the config) and "Allow for remainder of this session" are gone, leaving
+  **Allow** and **Deny**. Every tool call is approved on its own (#89, #98).
 - The agent's built-in `skill-creator` skill is disabled: workflow distillation
   stays the single, reviewable skill-authoring path (#89).
 

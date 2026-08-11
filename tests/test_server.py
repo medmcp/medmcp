@@ -514,22 +514,37 @@ class TestUsageWindow:
 
 
 class TestVisiblePermissionOptions:
-    """The durable auto-approval option is never offered to the browser."""
+    """No auto-approval option is ever offered to the browser."""
 
-    def test_drops_allow_always_permanent(self) -> None:
-        """``allow_always_permanent`` is filtered; the interactive options stay."""
-        options = [
+    @staticmethod
+    def _vibe_options() -> list[dict[str, object]]:
+        """The four options vibe-acp offers on every permission request."""
+        return [
             {"optionId": "allow_once", "name": "Allow once"},
             {"optionId": "allow_always", "name": "Allow for remainder of this session"},
             {"optionId": "allow_always_permanent", "name": "Always allow"},
             {"optionId": "reject_once", "name": "Deny"},
         ]
-        visible = server._visible_permission_options(options)
-        assert [o["optionId"] for o in visible] == ["allow_once", "allow_always", "reject_once"]
+
+    def test_drops_both_auto_approve_options(self) -> None:
+        """Session-scoped and permanent "always" both go; allow/deny remain."""
+        visible = server._visible_permission_options(self._vibe_options())
+        assert [o["optionId"] for o in visible] == ["allow_once", "reject_once"]
+
+    def test_relabels_allow_once(self) -> None:
+        """With no "always" variant to contrast against, the scope drops from the label."""
+        visible = server._visible_permission_options(self._vibe_options())
+        assert [o["name"] for o in visible] == ["Allow", "Deny"]
+
+    def test_does_not_mutate_input(self) -> None:
+        """The relabel copies — the caller's option dicts are left untouched."""
+        options = self._vibe_options()
+        server._visible_permission_options(options)
+        assert options[0]["name"] == "Allow once"
 
     def test_passes_unknown_options_through(self) -> None:
-        """Only the durable option is dropped — future option ids are relayed."""
-        options = [{"optionId": "allow_once"}, {"optionId": "something_new"}]
+        """Only the auto-approve ids are dropped — future option ids are relayed."""
+        options = [{"optionId": "reject_once"}, {"optionId": "something_new"}]
         assert server._visible_permission_options(options) == options
 
 

@@ -1080,16 +1080,35 @@ def _usage_window(update: JsonDict) -> int:
     return settings.cached_context_window()
 
 
-def _visible_permission_options(options: list[JsonDict]) -> list[JsonDict]:
-    """Drop permission options that would create a durable auto-approval.
+# Permission options that approve more than the call being asked about:
+# ``allow_always`` ("Allow for remainder of this session") auto-approves every
+# later call of that tool in the session, and ``allow_always_permanent``
+# ("Always allow") persists the approval into ``.vibe/config.toml`` so it
+# outlives the session entirely. Both are auto-approval paths, which medmcp
+# does not offer — every tool call is gated on its own.
+_AUTO_APPROVE_OPTIONS = frozenset({"allow_always", "allow_always_permanent"})
 
-    vibe ≥2.23 offers ``allow_always_permanent`` ("Always allow"), which
-    persists the approval into ``.vibe/config.toml`` — every future call of
-    that tool would then bypass the permission flow entirely. medmcp's posture
-    is interactive gating only, so the option is never shown to the browser
-    (per-session "allow always" remains available).
+
+def _visible_permission_options(options: list[JsonDict]) -> list[JsonDict]:
+    """Reduce vibe's permission options to a per-call allow/deny pair.
+
+    Every option that would auto-approve anything beyond the call in hand is
+    dropped (see :data:`_AUTO_APPROVE_OPTIONS`), leaving ``allow_once`` and
+    ``reject_once``. With no "always" variant left to contrast against,
+    "Allow once" is relabelled to plain **"Allow"** — the scope is no longer a
+    choice the user makes, so naming it only invites the question.
+
+    Renaming here rather than in the browser keeps one source for the label:
+    the frontend renders whatever ``name`` the frame carries.
     """
-    return [o for o in options if o.get("optionId") != "allow_always_permanent"]
+    visible: list[JsonDict] = []
+    for option in options:
+        if option.get("optionId") in _AUTO_APPROVE_OPTIONS:
+            continue
+        if option.get("optionId") == "allow_once":
+            option = {**option, "name": "Allow"}
+        visible.append(option)
+    return visible
 
 
 def _workspace_note(viewed_path: str) -> str:

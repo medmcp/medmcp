@@ -290,6 +290,53 @@ class TestStackIsolation:
         assert "--cap-drop" in args
         assert args[-1] == "img:tag"
 
+    def test_pids_limit_scales_with_cpu_count(self) -> None:
+        """The task limit tracks core count instead of being a fixed number.
+
+        Peak task usage is roughly quadratic in cores (a pool of workers, each
+        opening a pool of threads), so a value that fits a laptop throttles a
+        many-core host: 512 killed LST-AI mid-run on a 20-core box at 629 tasks.
+        """
+        with patch("medmcp.settings.os.cpu_count", return_value=128):
+            assert settings._stack_pids_limit() == 128 * 256  # pyright: ignore[reportPrivateUsage]  # testing an internal on purpose
+        # Floor applies where the host reports very few cores (small cpuset), which
+        # does not make a full-resolution volume any less demanding.
+        with patch("medmcp.settings.os.cpu_count", return_value=2):
+            assert settings._stack_pids_limit() == 4096  # pyright: ignore[reportPrivateUsage]  # testing an internal on purpose
+        # cpu_count() returns None on hosts it cannot determine; must not crash.
+        with patch("medmcp.settings.os.cpu_count", return_value=None):
+            assert settings._stack_pids_limit() == 4096  # pyright: ignore[reportPrivateUsage]  # testing an internal on purpose
+
+    def test_stale_pids_limit_is_raised_on_load(self, stacks_dir: Path) -> None:
+        """An already-installed manifest gets its too-low task limit raised.
+
+        The presence check alone is not enough here: every stack installed before
+        this fix carries `--pids-limit 512`, so without raising the value in place
+        they would keep the limit that killed them until someone reinstalled.
+        """
+        stacks_dir.mkdir(parents=True, exist_ok=True)
+        (stacks_dir / "medmcp-stale.toml").write_text(
+            'name = "medmcp-stale"\n'
+            'command = "docker"\n'
+            'args = ["run", "--pids-limit", "512", "--rm", "-i", "img:tag"]\n'
+        )
+        loaded = settings._load_stack_manifests()  # pyright: ignore[reportPrivateUsage]  # testing an internal on purpose
+        entry = next(m for m in loaded if m["name"] == "medmcp-stale")
+        args = entry["args"]
+        assert int(args[args.index("--pids-limit") + 1]) == settings._stack_pids_limit()  # pyright: ignore[reportPrivateUsage]  # testing an internal on purpose
+        assert args.count("--pids-limit") == 1
+
+    def test_higher_pids_limit_is_preserved(self) -> None:
+        """A deliberately raised limit is a floor, not a target — it is not lowered."""
+        raised = str(settings._stack_pids_limit() * 4)  # pyright: ignore[reportPrivateUsage]  # testing an internal on purpose
+        args = settings._harden_stack_run_args(["run", "--pids-limit", raised, "img:tag"])  # pyright: ignore[reportPrivateUsage]  # testing an internal on purpose
+        assert args[args.index("--pids-limit") + 1] == raised
+
+    def test_malformed_pids_limit_is_left_alone(self) -> None:
+        """A non-numeric value is passed through for docker to reject clearly."""
+        args = settings._harden_stack_run_args(["run", "--pids-limit", "lots", "img:tag"])  # pyright: ignore[reportPrivateUsage]  # testing an internal on purpose
+        assert args[args.index("--pids-limit") + 1] == "lots"
+
     def test_hardening_is_idempotent(self) -> None:
         """Re-applying the hardening does not duplicate flags."""
         once = settings._harden_stack_run_args(["run", "--rm", "-i"])  # pyright: ignore[reportPrivateUsage]  # testing an internal on purpose

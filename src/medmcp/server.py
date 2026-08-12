@@ -629,7 +629,7 @@ async def get_workflow(name: str) -> JsonDict:
 
 @app.post("/api/workflows/{name}/promote")
 async def post_promote_workflow(name: str) -> JsonDict:
-    """Promote a draft to active/ (loaded as a skill for new sessions)."""
+    """Promote a draft to active/, marking it reviewed and worth keeping."""
     try:
         await asyncio.to_thread(distill.promote_draft, name)
     except FileNotFoundError as exc:

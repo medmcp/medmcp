@@ -46,9 +46,9 @@ auths = data.get("auths", {})
 json.dump({"auths": auths}, open(dst, "w"))
 if not auths:
     sys.stderr.write(
-        "medmcp-entrypoint: WARNING: mounted docker config has no plaintext auths "
-        "(host likely uses a credential helper) — private stack image pulls will "
-        "fail; pre-pull them on the host or provide a token.\n"
+        "medmcp-entrypoint: note: mounted docker config has no plaintext auths "
+        "(host likely uses a credential helper). Published stack images pull "
+        "anonymously; only non-public ones need a token or a host-side pre-pull.\n"
     )
 PY
 fi

@@ -49,7 +49,7 @@ OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "gemma4-medmcp")
 
 # GPU selector (CDI device id) substituted into container-stack manifests' ${MEDMCP_GPU}.
 # Default so os.path.expandvars (no ":-" support) never leaves the literal placeholder;
-# "all" = every GPU, override with an index/UUID (e.g. "4") to pin. LLM_GPU captures
+# "all" = every GPU, override with an index/UUID (e.g. "0") to pin. LLM_GPU captures
 # the value the LLM container was created with (deploy-time) before a persisted runtime
 # selection overrides MEDMCP_GPU for stacks (see load/save_gpu_selection).
 os.environ.setdefault("MEDMCP_GPU", "all")
@@ -263,7 +263,7 @@ def _stack_pids_limit() -> int:
     workers, and each worker then opens an OpenMP/BLAS pool sized to the core
     count. The peak is therefore roughly quadratic in cores, so any fixed number
     is wrong somewhere — 512 was comfortable on a laptop and throttled a 20-core
-    DGX Spark, where a single LST-AI run peaked at 629 tasks and died with
+    host, where a single LST-AI run peaked at 629 tasks and died with
     ``pthread_create() is 11`` (EAGAIN). nnUNet reports that as "Background
     workers died ... your RAM was full", which sends you looking at memory.
 

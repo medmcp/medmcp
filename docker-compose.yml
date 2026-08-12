@@ -76,11 +76,11 @@ services:
     environment:
       OLLAMA_BASE_URL: "http://llm:11434"
       MEDMCP_WORKSPACE: "${MEDMCP_WORKSPACE:?set MEDMCP_WORKSPACE to an absolute host path}"
-      # Catalog source: empty = bundled catalog.json (local :dev images). For a
-      # private GHCR fleet, set MEDMCP_CATALOG_URL=/app/catalog.ghcr.json.
+      # Catalog source: empty = bundled catalog.json (local :dev images). To pull
+      # the published images, set MEDMCP_CATALOG_URL=/app/catalog.ghcr.json.
       MEDMCP_CATALOG_URL: "${MEDMCP_CATALOG_URL:-}"
       # GPU the LLM + GPU stacks target (CDI device id). "all" = every GPU; pin
-      # with an index/UUID, e.g. MEDMCP_GPU=4.
+      # with an index/UUID, e.g. MEDMCP_GPU=0.
       MEDMCP_GPU: "${MEDMCP_GPU:-all}"
       # Optional registry login inside the core — for credential-helper hosts
       # that mount no plaintext auths. Leave empty to use the mounted config.
@@ -121,8 +121,9 @@ services:
       # Host registry creds, read-only at a staging path — the entrypoint copies
       # only `auths` to /root/.docker/config.json, dropping the host's
       # `currentContext` (which would break every in-container stack pull/run).
-      # Run `docker login ghcr.io` on the host first. (If the host uses a
-      # credential helper rather than plain auths, pre-pull on the host instead.)
+      # Published images pull anonymously; for non-public ones, `docker login
+      # ghcr.io` on the host first. (If the host uses a credential helper rather
+      # than plain auths, pre-pull on the host instead.)
       - "${HOME}/.docker/config.json:/run/host-docker-config.json:ro"
     restart: unless-stopped
 

@@ -53,7 +53,7 @@ setup: install-uv install-ollama
     uv sync
     uv run pre-commit install
     # .vibe/config.toml is tracked in git but also written at runtime by
-    # _sync_servers_to_vibe_config (resolves MCP server command paths).
+    # sync_servers_to_vibe_config (resolves MCP server command paths).
     # skip-worktree prevents those local writes from showing up as dirty.
     git update-index --skip-worktree .vibe/config.toml || true
 
@@ -65,7 +65,7 @@ pull-config:
     git update-index --skip-worktree .vibe/config.toml
 
 # Install a stack package into its own isolated uv environment.
-# _load_mcp_servers() discovers it automatically by scanning uv tool envs for
+# load_mcp_servers() discovers it automatically by scanning uv tool envs for
 # [medmcp.stacks] entry points — no changes to config files needed.
 # Resolution is deterministic from the stack's committed lock: stacks pin their
 # own CUDA build in pyproject (e.g. medmcp-neuro pins the cu128 PyTorch index), so
@@ -144,7 +144,7 @@ report SESSION:
 distill SESSION *ARGS:
     uv run medmcp distill {{SESSION}} {{ARGS}}
 
-# Promote a reviewed draft workflow into active/ so it loads as a skill
+# Promote a reviewed draft workflow into active/ (marks it reviewed; replay-only)
 # Usage: just promote <workflow-name>
 promote NAME:
     uv run medmcp promote {{NAME}}
@@ -168,7 +168,7 @@ export-workflow NAME *ARGS:
 import-workflow FILE:
     uv run medmcp import {{FILE}}
 
-# Launch the workspace UI (explorer + viewer + chat) at http://localhost:8100
+# Launch the workspace UI (explorer + viewer + workflows + chat) at http://localhost:8100
 workspace:
     uv run medmcp-workspace
 
@@ -221,7 +221,7 @@ compose-up:
     docker compose up -d --build
 
 # Bring up the stack from the PUBLISHED GHCR images (pulls core, builds nothing).
-# Run `docker login ghcr.io` first. Pin a release with MEDMCP_TAG=<git-sha>.
+# Pin a release with MEDMCP_TAG=<git-sha>.
 compose-up-ghcr:
     MEDMCP_WORKSPACE="${MEDMCP_WORKSPACE:-$(pwd)/data}" \
     OLLAMA_MODELS_DIR="${OLLAMA_MODELS_DIR:-$HOME/.ollama}" \

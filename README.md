@@ -1,4 +1,6 @@
-![](https://capsule-render.vercel.app/api?type=waving&height=200&color=0:D22229,100:2B4FA3&text=MedMCP&reversal=false&fontSize=46&fontAlignY=28&desc=An%20Agentic%20Framework%20for%20Democratizing%20Medical%20Imaging%20Pipelines&descSize=24&descAlignY=55&fontColor=FFFFFF)
+<p align="center">
+  <img src="assets/medmcp.png" alt="The MedMCP workspace: file explorer, medical-image viewer, workflow manager, and agent chat" width="100%">
+</p>
 
 <p align="center">
   <a href="https://medmcp.ai"><b>medmcp.ai</b></a> ·
@@ -11,10 +13,6 @@ MedMCP is an open, community-driven agentic framework that exposes validated med
 It is designed to enable clinicians, radiologists, and domain researchers to apply state-of-the-art image analysis methods without requiring expertise in command-line interfaces, Python environment management, or library-specific APIs.
 
 Everything runs **on-premise**: a locally served model plans and sequences the work, all computation is delegated to tested implementations, and no imaging data, patient metadata, or results leave your infrastructure. You work through a single workspace that contains a *file explorer, image viewer, replay engine for personal workflows, and the chat interface*.
-
-<p align="center">
-  <img src="assets/medmcp.png" alt="The MedMCP workspace: file explorer, medical-image viewer, workflow manager, and agent chat" width="100%">
-</p>
 
 > [!WARNING]
 > MedMCP is under active development and **not licensed for clinical use**.
@@ -80,8 +78,8 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)** to set up a development environment a
 <table>
   <tbody>
     <tr>
-      <td align="center" valign="top" width="14.28%"><a href="https://jqmcginnis.github.io/"><img src="https://avatars.githubusercontent.com/u/33037028?v=4?s=100" width="100px;" alt="Julian McGinnis"/><br /><sub><b>Julian McGinnis</b></sub></a><br /><a href="https://github.com/medmcp/medmcp/commits?author=jqmcginnis" title="Code">💻</a> <a href="#ideas-jqmcginnis" title="Ideas, Planning, & Feedback">🤔</a> <a href="https://github.com/medmcp/medmcp/commits?author=jqmcginnis" title="Documentation">📖</a> <a href="https://github.com/medmcp/medmcp/issues?q=author%3Ajqmcginnis" title="Bug reports">🐛</a> <a href="https://github.com/medmcp/medmcp/pulls?q=is%3Apr+reviewed-by%3Ajqmcginnis" title="Reviewed Pull Requests">👀</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://pfriedri.github.io"><img src="https://avatars.githubusercontent.com/u/101359393?v=4?s=100" width="100px;" alt="Paul Friedrich"/><br /><sub><b>Paul Friedrich</b></sub></a><br /><a href="https://github.com/medmcp/medmcp/commits?author=pfriedri" title="Code">💻</a> <a href="#ideas-pfriedri" title="Ideas, Planning, & Feedback">🤔</a> <a href="https://github.com/medmcp/medmcp/commits?author=pfriedri" title="Documentation">📖</a> <a href="https://github.com/medmcp/medmcp/issues?q=author%3Apfriedri" title="Bug reports">🐛</a> <a href="https://github.com/medmcp/medmcp/pulls?q=is%3Apr+reviewed-by%3Apfriedri" title="Reviewed Pull Requests">👀</a> <a href="#maintenance-pfriedri" title="Maintenance">🚧</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://jqmcginnis.github.io/"><img src="https://avatars.githubusercontent.com/u/33037028?v=4?s=100" width="100px;" alt="Julian McGinnis"/><br /><sub><b>Julian McGinnis</b></sub></a><br /><a href="https://github.com/medmcp/medmcp/commits?author=jqmcginnis" title="Code">💻</a> <a href="#ideas-jqmcginnis" title="Ideas, Planning, & Feedback">🤔</a> <a href="https://github.com/medmcp/medmcp/commits?author=jqmcginnis" title="Documentation">📖</a> <a href="https://github.com/medmcp/medmcp/issues?q=author%3Ajqmcginnis" title="Bug reports">🐛</a> <a href="https://github.com/medmcp/medmcp/pulls?q=is%3Apr+reviewed-by%3Ajqmcginnis" title="Reviewed Pull Requests">👀</a></td>
     </tr>
   </tbody>
 </table>
@@ -99,11 +97,11 @@ This project follows the [all-contributors](https://allcontributors.org) specifi
 
 MedMCP builds on a lot of open-source work. In particular:
 
-- **Agent runtime** — [mistral-vibe](https://github.com/mistralai/mistral-vibe) over the [Agent Client Protocol](https://github.com/agentclientprotocol/python-sdk)
-- **Web server** — [FastAPI](https://github.com/fastapi/fastapi), [Starlette](https://github.com/Kludex/starlette), and [Uvicorn](https://github.com/Kludex/uvicorn)
-- **Frontend** — [React](https://github.com/facebook/react) and [Vite](https://github.com/vitejs/vite), with [Niivue](https://github.com/niivue/niivue) for the medical-image viewer and [react-markdown](https://github.com/remarkjs/react-markdown) for chat rendering
-- **Typefaces** — [Inter](https://github.com/rsms/inter) and [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono)
-- **Local inference** — [Ollama](https://github.com/ollama/ollama), serving [Google Gemma](https://ai.google.dev/gemma) by default (subject to the [Gemma Terms of Use](https://ai.google.dev/gemma/terms))
+- **Agent runtime**: [mistral-vibe](https://github.com/mistralai/mistral-vibe) over the [Agent Client Protocol](https://github.com/agentclientprotocol/python-sdk)
+- **Web server**: [FastAPI](https://github.com/fastapi/fastapi), [Starlette](https://github.com/Kludex/starlette), and [Uvicorn](https://github.com/Kludex/uvicorn)
+- **Frontend**: [React](https://github.com/facebook/react) and [Vite](https://github.com/vitejs/vite), with [Niivue](https://github.com/niivue/niivue) for the medical-image viewer and [react-markdown](https://github.com/remarkjs/react-markdown) for chat rendering
+- **Typefaces**: [Inter](https://github.com/rsms/inter) and [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono)
+- **Local inference**: [Ollama](https://github.com/ollama/ollama), serving [Google Gemma](https://ai.google.dev/gemma) by default (subject to the [Gemma Terms of Use](https://ai.google.dev/gemma/terms))
 
 A complete list of bundled components and their licenses is in
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md); model and base-layer

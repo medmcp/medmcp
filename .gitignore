@@ -233,3 +233,10 @@ frontend/dist/
 # UI install flow; keep only the directory (README) in git.
 stacks.d/*
 !stacks.d/README.md
+
+# Local-only developer files: AI-assistant instructions/settings and scratch
+# compose overrides. Not part of the project's published surface.
+CLAUDE.md
+.claude/
+docker-compose.*.local.yml
+docker-compose.localtest.yml

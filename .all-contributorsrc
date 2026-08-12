@@ -13,19 +13,6 @@
   "contributorsSortAlphabetically": false,
   "contributors": [
     {
-      "login": "jqmcginnis",
-      "name": "Julian McGinnis",
-      "avatar_url": "https://avatars.githubusercontent.com/u/33037028?v=4",
-      "profile": "https://jqmcginnis.github.io/",
-      "contributions": [
-        "code",
-        "ideas",
-        "doc",
-        "bug",
-        "review"
-      ]
-    },
-    {
       "login": "pfriedri",
       "name": "Paul Friedrich",
       "avatar_url": "https://avatars.githubusercontent.com/u/101359393?v=4",
@@ -37,6 +24,19 @@
         "bug",
         "review",
         "maintenance"
+      ]
+    },
+    {
+      "login": "jqmcginnis",
+      "name": "Julian McGinnis",
+      "avatar_url": "https://avatars.githubusercontent.com/u/33037028?v=4",
+      "profile": "https://jqmcginnis.github.io/",
+      "contributions": [
+        "code",
+        "ideas",
+        "doc",
+        "bug",
+        "review"
       ]
     }
   ],

@@ -1,11 +1,13 @@
-# Deployment compose: runs the PUBLISHED images from the private GHCR — builds
-# nothing. Fully self-contained (the Modelfile is inlined into llm-init below),
-# so a node needs NO repo checkout. This file is also published as an OCI artifact
-# by CI, so it can run straight from the registry:
+# Deployment compose: runs the PUBLISHED images from GHCR — builds nothing.
+# Fully self-contained (the Modelfile is inlined into llm-init below), so a node
+# needs NO repo checkout. This file is also published as an OCI artifact by CI,
+# so it can run straight from the registry:
 #
-#   docker login ghcr.io                       # read:packages token
 #   MEDMCP_WORKSPACE=/abs/path \
 #     docker compose -f oci://ghcr.io/medmcp/compose:main up -d
+#
+# The published images pull anonymously. `docker login ghcr.io` is needed only
+# for a private mirror or for stack images you publish yourself.
 #
 # From a checkout you can equivalently point at this file (`just compose-up-ghcr`).
 # Pin a release with MEDMCP_TAG=<git-sha> (default :main). GPU uses CDI (rootless);
@@ -90,7 +92,7 @@ services:
       # Default to the GHCR catalog baked into the core image.
       MEDMCP_CATALOG_URL: "${MEDMCP_CATALOG_URL:-/app/catalog.ghcr.json}"
       # GPU the LLM + GPU stacks target (CDI device id). "all" = every GPU; pin
-      # with an index/UUID, e.g. MEDMCP_GPU=4.
+      # with an index/UUID, e.g. MEDMCP_GPU=0.
       MEDMCP_GPU: "${MEDMCP_GPU:-all}"
       # Optional registry login inside the core — for credential-helper hosts
       # that mount no plaintext auths. Leave empty to use the mounted config.

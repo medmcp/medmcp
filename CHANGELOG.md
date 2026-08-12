@@ -6,73 +6,74 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
-### Added
+_Nothing yet._
 
-- **Rewind**: hover a user message in a resumed chat to rewind the conversation
-  to before it — previews which workspace files would be restored, asks for
-  confirmation, then truncates in place (#93).
-- **Branch a chat**: a git-branch icon on the open chat's row in the Chats menu
-  duplicates its full history into a new session, for trying a second analysis
-  path on the same context; branches inherit the source's title (#92).
-- Stack connection failures now surface as a chat message on session start
-  ("The following MCP servers failed to connect: …") instead of tools being
-  silently missing (#89).
+## 0.1.0
 
-### Changed
+First public release. MedMCP is an on-premise agentic framework that exposes
+validated medical imaging tools through a natural-language interface: a locally
+served model plans and sequences the work, every computation is delegated to a
+tested implementation, and no imaging data, patient metadata, or results leave
+your infrastructure.
 
-- One chat, one entry: context compaction no longer splits a chat into multiple
-  sessions in the Chats menu, and reopening a compacted chat restores the full
-  post-compaction context — including after an agent restart (#90).
-- Deleting a chat now removes everything it produced: the whole transcript
-  chain, the provenance record, and the agent's own stored copy (#89, #90).
-- Renaming a chat writes the title into the agent's session metadata too (#89).
-- The context meter reports the model's actually-served window (Ollama
-  `num_ctx`), not the model family's nominal maximum (#89).
-- Replayed chats show the user's message text without the internal
-  `[workspace context: …]` viewer note, natively (#89).
-- Overlaying a segmentation is now drag-and-drop only: drag the volume from the
-  file explorer onto the image. The dropdown of every volume in the workspace is
-  gone, and the bar above the image appears only once something is overlaid —
-  showing that volume's name, its opacity, and a button to remove it (#99).
-- Provenance recording is treated as always-on: its off switch moved out of the
-  settings drawer's General list into a collapsed **Advanced** section at the
-  bottom, so a chat's audit trail is no longer one stray click from stopping
-  (#100).
-- Saved workflows now belong to the replay engine alone. The agent can no longer
-  invoke one as a skill — a workflow runs from the workflow panel, replaying its
-  recorded tool calls exactly, or it does not run. Promoting a draft now just
-  marks it reviewed and worth keeping. The settings drawer's "Personal
-  workflows" master switch and per-workflow switches are gone with the skill
-  loading they controlled (#101).
+**Not licensed for clinical use.**
 
-### Fixed
+### Workspace
 
-- The approval dialog shows the tool call's arguments again. The agent announces
-  a call before it has finished writing its arguments, so they arrived a moment
-  later and were dropped — leaving you to approve an action with only its name
-  visible. Tool-call cards fill in the same way, and provenance records the
-  arguments again (so those sessions distill into working workflows) (#102).
-- Sent messages no longer appear twice (the agent runtime echoes live prompts
-  since vibe 2.23; the echo is now merged into the already-rendered bubble) —
-  as a side effect, messages sent in the current session become rewindable
-  immediately instead of after a reload (#94).
-- A branched chat and its original are now truly independent: opening the
-  original no longer attaches to the branch, deleting the original no longer
-  deletes the branch, and workflow distillation no longer mixes the two (#94).
-- Workflow distillation covers tool calls made after a context compaction (#89).
+- A single browser workspace at `http://localhost:8100` with four resizable
+  panels: file explorer, medical-image viewer, workflow manager, and agent chat.
+- **File explorer** over your workspace directory — multi-select, rename, delete,
+  new folder, upload, and drag-and-drop into the viewer and workflow inputs.
+- **Image viewer** — volumes (`.nii.gz`, `.nrrd`, `.dcm`, …) rendered with
+  Niivue as multiplanar slices plus a 3D view, with PDF, image, and text preview
+  for everything else. Drag a segmentation from the explorer onto the image to
+  overlay it with a per-label colormap and adjustable opacity.
+- **Chat** with a local model over Ollama (`gemma4-medmcp` by default), with
+  streamed responses, tool-call cards, and a context meter. Chats persist and
+  can be resumed, renamed, archived, deleted, branched into a parallel session,
+  or rewound to before an earlier message (restoring the files it touched).
+
+### Imaging tool stacks
+
+- Imaging capabilities install as **tool stacks** — containerized MCP servers
+  browsed and installed from the settings drawer, or installed host-native as
+  isolated `uv` tools. Stacks are discovered automatically; no config editing.
+- Stacks bake their model weights at build time and run offline.
+
+### Provenance and reusable workflows
+
+- Every session records an append-only **provenance** trail: an environment
+  manifest, one normalized event per completed tool call, and a persisted
+  mirror of every permission decision, rendered on demand as a report.
+- **Distill** a session into a reusable workflow: MedMCP filters the exploratory
+  and failed calls, lifts concrete file paths into named inputs, and writes a
+  recipe plus a readable description of what it does.
+- **Replay** a workflow deterministically on new data with no model in the loop
+  — including in batch over a whole cohort — after previewing and confirming the
+  resolved steps.
+- **Share** a workflow as one self-contained `.workflow.yaml` file, and import
+  one you were sent as a reviewable draft.
+
+### Deployment
+
+- Runs from prebuilt images with a single `docker compose` command, or
+  host-native via `just` recipes.
+- Multi-architecture images (x86-64 and ARM) built on one shared CUDA base, with
+  GPU access through the NVIDIA Container Toolkit's CDI interface, so rootless
+  Docker is supported.
 
 ### Security
 
-- Every bash command the agent runs now requires interactive approval: the
-  read-only allowlist was removed after finding that an output redirect from an
-  allowlisted command (e.g. `echo "" > file`) wrote files without a prompt (#89).
-- The permission dialog no longer offers any way to approve more than the call
-  in front of you: both "Always allow" (which persisted an auto-approval into
-  the config) and "Allow for remainder of this session" are gone, leaving
-  **Allow** and **Deny**. Every tool call is approved on its own (#89, #98).
-- The agent's built-in `skill-creator` skill is disabled: workflow distillation
-  stays the single, reviewable skill-authoring path (#89).
-
-### Dependencies
-
-- mistral-vibe 2.17 → 2.23.3, fastapi 0.141, ruff 0.16 (#84, #88, #89).
+- **No auto-approval.** Every tool call — bash, file writes, web fetches —
+  requires an explicit click. There is no "always allow" and no session-wide
+  approval; each call is approved on its own. The approval dialog shows the
+  call's arguments alongside a generated plain-language risk summary.
+- **No data egress.** `web_search` is disabled and `web_fetch` requires
+  approval. Tool stacks run with networking denied, all Linux capabilities
+  dropped, and no privilege escalation — a tool call cannot reach the network
+  even if the agent is steered into attempting one.
+- **Localhost only.** The server binds to the loopback interface and has no
+  authentication; the containerized deployment publishes its port only to the
+  host loopback. Do not expose it to a network without adding real auth.
+- The filesystem API refuses any path resolving outside the workspace root.
+- Permission decisions are written to an audit trail that cannot be silenced.

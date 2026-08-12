@@ -138,6 +138,21 @@ class TestWorkspaceBoundary:
         (finding,) = pathcheck.check_tool_call_paths(args, workspace)
         assert finding["status"] == "outside_workspace"
 
+    def test_in_image_path_is_not_called_an_error(self, workspace: Path) -> None:
+        """A path inside the stack image is unverifiable here, not wrong.
+
+        A stack's own bundled reference data (e.g. the MNI template baked into the
+        neuro image) is invisible to the core but perfectly visible to the tool. The
+        check cannot tell that apart from a host path the stack cannot see, so it
+        must not claim either — hence a warning, and a note that asserts nothing
+        about what the stack can reach.
+        """
+        args = {"template_path": "/root/.medmcp_neuro_core/templates/MNI152.nii.gz"}
+        (finding,) = pathcheck.check_tool_call_paths(args, workspace)
+        assert finding["status"] == "outside_workspace"
+        assert finding["severity"] == "warning"
+        assert "cannot be verified" in finding["note"]
+
 
 class TestArgumentShapes:
     """rawInput arrives in more than one shape."""

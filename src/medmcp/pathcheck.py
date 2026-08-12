@@ -131,14 +131,18 @@ def _check_one(param: str, value: str, workspace: Path) -> PathFinding:
             "note": note,
         }
 
-    # Outside the workspace is worth saying regardless of role: the agent's tools are
-    # meant to operate on the mounted workspace, and a stack container will not see
-    # anything else even when the path exists on the host.
+    # Outside the workspace, this check is answering from the wrong filesystem and
+    # says so rather than guessing. The core and a stack container share only the
+    # workspace bind-mount (at an identical path); beyond it their views diverge, so
+    # such a path is either a host path the stack cannot see or a path inside the
+    # stack image that the core cannot see -- e.g. a tool's own bundled reference
+    # data. Nothing here can tell those apart, so the note claims neither, and this
+    # stays a warning rather than an error.
     if not _within(resolved, workspace):
         return finding(
             "outside_workspace",
             "warning",
-            "outside the workspace — a tool stack will not be able to see it",
+            "outside the workspace — cannot be verified from here",
         )
 
     exists = resolved.exists()

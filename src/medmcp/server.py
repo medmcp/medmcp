@@ -1511,14 +1511,18 @@ class _ChatConnection:
         risk_keys: list[str] = cast("list[str]", tool_call.get("risks") or [])
         explaining = explanation is None and settings.load_explain_enabled()
 
-        # Existence check on the call's path arguments. Deterministic and local (a
-        # few stat calls), so unlike the explanation above it ships *with* the
-        # dialog rather than being pushed in later, and it cannot itself be wrong
-        # about what is on disk. Advisory only — it annotates the decision, it
-        # never makes one. Best-effort: a failure here must not block the prompt.
+        # Existence check on the call's path arguments. Deterministic and local, so
+        # unlike the explanation above it ships *with* the dialog rather than being
+        # pushed in later, and it cannot itself be wrong about what is on disk.
+        # Advisory only — it annotates the decision, it never makes one.
+        #
+        # Off the event loop for the same reason /api/tree is: these are stat calls,
+        # and on a network-mounted workspace a single slow one would stall every
+        # chat socket, not just this turn. Best-effort — a failure here must leave
+        # the approval box exactly as it would have been without the check.
         try:
-            path_findings = pathcheck.check_tool_call_paths(
-                tool_call.get("rawInput"), WORKSPACE_ROOT
+            path_findings = await asyncio.to_thread(
+                pathcheck.check_tool_call_paths, tool_call.get("rawInput"), WORKSPACE_ROOT
             )
         except Exception:
             log.warning("path check failed for %s", title, exc_info=True)

@@ -37,6 +37,12 @@ export interface PathFinding {
   status: 'ok' | 'missing' | 'parent_missing' | 'will_overwrite' | 'outside_workspace'
   severity: 'error' | 'warning' | 'info'
   note: string
+  /** For a missing path: nearest existing folder ('.' is the workspace root),
+   *  a capped sample of what it holds, and how many entries there are. Seeing
+   *  the neighbours is what makes a missing path actionable. Empty otherwise. */
+  nearest: string
+  entries: string[]
+  entry_total: number
 }
 
 /** A permission request awaiting the user's decision. */

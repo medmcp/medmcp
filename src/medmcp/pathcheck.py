@@ -9,6 +9,11 @@ the approval dialog can say so *before* the call runs.
 Unlike the risk tags beside it in that dialog, nothing here goes through the LLM:
 this is a handful of ``stat`` calls and cannot itself hallucinate.
 
+Being told a file is absent rarely helps on its own, so a missing path also carries
+a listing of the nearest folder that *does* exist. That is usually enough to show
+the intended path at a glance — the model tends to get the directory right and the
+filename wrong, or to invent one subject id in an otherwise correct tree.
+
 **Why role matters.** Checking "does this path exist?" is the wrong question for
 half the arguments a tool takes. An ``output_dir`` is *supposed* not to exist yet.
 Flagging those would put a warning on essentially every call, and a warning that
@@ -35,7 +40,13 @@ Severity = Literal["error", "warning", "info"]
 
 
 class PathFinding(TypedDict):
-    """One checked path argument, as sent to the browser."""
+    """One checked path argument, as sent to the browser.
+
+    When a path is missing, the last three fields carry a look at where it *would*
+    have been: knowing a file is absent rarely helps, whereas seeing what sits in
+    the nearest folder that does exist usually shows the intended path at a glance.
+    They are empty for every other status.
+    """
 
     param: str
     value: str
@@ -43,6 +54,12 @@ class PathFinding(TypedDict):
     status: PathStatus
     severity: Severity
     note: str
+    # Workspace-relative directory the listing came from ("." is the root).
+    nearest: str
+    # A ranked, capped sample of what that directory holds; directories end in "/".
+    entries: list[str]
+    # How many entries it holds (a floor: the scan itself is bounded).
+    entry_total: int
 
 
 # Name tokens that unambiguously mark a parameter as one or the other. Anything
@@ -67,6 +84,12 @@ _TOKEN_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]+|\d+")
 # Cap the number of findings so a pathological argument object can't produce an
 # unreadable dialog (or a large frame). Tool calls carry a handful of paths.
 _MAX_FINDINGS = 24
+
+# How many sibling names to show, and how many directory entries to look at to
+# find them. The scan bound keeps a directory holding tens of thousands of files
+# from turning one approval dialog into a long walk.
+_MAX_ENTRIES = 12
+_MAX_SCAN = 2000
 
 
 def _tokens(name: str) -> frozenset[str]:
@@ -116,12 +139,60 @@ def _within(path: Path, workspace: Path) -> bool:
     return path == workspace or path.is_relative_to(workspace)
 
 
+def _nearest_existing_dir(path: Path, workspace: Path) -> Path | None:
+    """Return the closest ancestor of *path* that exists, never leaving *workspace*.
+
+    ``None`` when the walk would step outside the workspace before finding one,
+    so a listing is never produced for a directory the workspace does not own.
+    """
+    for candidate in path.parents:
+        if not candidate.is_relative_to(workspace):
+            return None
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _sample_entries(directory: Path, like: Path) -> tuple[list[str], int]:
+    """Return up to :data:`_MAX_ENTRIES` names from *directory*, and how many it holds.
+
+    Entries sharing *like*'s suffix sort first: in a folder of mixed derivatives,
+    alphabetical order alone would often truncate away the very file the caller
+    meant. Uses ``scandir`` so the directory flag comes from the directory entry
+    rather than a ``stat`` per name.
+    """
+    names: list[str] = []
+    try:
+        with os.scandir(directory) as it:
+            for entry in it:
+                names.append(entry.name + ("/" if entry.is_dir(follow_symlinks=False) else ""))
+                if len(names) >= _MAX_SCAN:
+                    break
+    except OSError:
+        # Unreadable directory: the check is advisory, so degrade to no listing.
+        return [], 0
+    # ".nii.gz" rather than just ".gz" — the double suffix is what distinguishes
+    # imaging volumes from the archives beside them.
+    suffix = "".join(like.suffixes[-2:])
+    names.sort(key=lambda n: (0 if suffix and n.endswith(suffix) else 1, n.lower()))
+    return names[:_MAX_ENTRIES], len(names)
+
+
 def _check_one(param: str, value: str, workspace: Path) -> PathFinding:
     """Check a single path argument and describe what was found."""
     role = classify_role(param)
     resolved = _resolve(value, workspace)
 
-    def finding(status: PathStatus, severity: Severity, note: str) -> PathFinding:
+    def finding(
+        status: PathStatus, severity: Severity, note: str, *, show_siblings: bool = False
+    ) -> PathFinding:
+        nearest, entries, total = "", cast("list[str]", []), 0
+        if show_siblings:
+            found = _nearest_existing_dir(resolved, workspace)
+            if found is not None:
+                entries, total = _sample_entries(found, resolved)
+                rel = found.relative_to(workspace)
+                nearest = str(rel) if str(rel) != "." else "."
         return {
             "param": param,
             "value": value,
@@ -129,6 +200,9 @@ def _check_one(param: str, value: str, workspace: Path) -> PathFinding:
             "status": status,
             "severity": severity,
             "note": note,
+            "nearest": nearest,
+            "entries": entries,
+            "entry_total": total,
         }
 
     # Outside the workspace, this check is answering from the wrong filesystem and
@@ -150,7 +224,7 @@ def _check_one(param: str, value: str, workspace: Path) -> PathFinding:
     if role == "input":
         if exists:
             return finding("ok", "info", "exists")
-        return finding("missing", "error", "does not exist")
+        return finding("missing", "error", "does not exist", show_siblings=True)
 
     if role == "output":
         parent = resolved.parent
@@ -159,6 +233,7 @@ def _check_one(param: str, value: str, workspace: Path) -> PathFinding:
                 "parent_missing",
                 "error",
                 f"the containing folder {parent.name or parent} does not exist",
+                show_siblings=True,
             )
         if exists:
             return finding("will_overwrite", "warning", "already exists and would be overwritten")
@@ -169,7 +244,9 @@ def _check_one(param: str, value: str, workspace: Path) -> PathFinding:
     # would erode trust in the ones that are right.
     if exists:
         return finding("ok", "info", "exists")
-    return finding("missing", "info", "does not exist yet (this tool may create it)")
+    return finding(
+        "missing", "info", "does not exist yet (this tool may create it)", show_siblings=True
+    )
 
 
 def _coerce_arguments(raw_input: object) -> dict[str, Any]:

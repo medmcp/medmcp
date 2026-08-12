@@ -108,6 +108,58 @@ class TestOutputPaths:
         assert finding["severity"] == "warning"
 
 
+class TestAncestorListing:
+    """A missing path carries a look at the nearest folder that does exist."""
+
+    def test_missing_input_lists_its_would_be_folder(self, workspace: Path) -> None:
+        """The sibling that was probably meant shows up next to the error."""
+        args = {"input_path": str(workspace / "sub-01" / "t1_typo.nii.gz")}
+        (finding,) = pathcheck.check_tool_call_paths(args, workspace)
+        assert finding["nearest"] == "sub-01"
+        assert finding["entries"] == ["t1.nii.gz"]
+        assert finding["entry_total"] == 1
+
+    def test_walks_up_past_several_missing_levels(self, workspace: Path) -> None:
+        """An invented subject id resolves to the closest real ancestor."""
+        args = {"input_path": str(workspace / "sub-99" / "ses-01" / "t1.nii.gz")}
+        (finding,) = pathcheck.check_tool_call_paths(args, workspace)
+        assert finding["nearest"] == "."
+        assert "sub-01/" in finding["entries"]
+
+    def test_same_suffix_entries_are_listed_first(self, workspace: Path) -> None:
+        """Alphabetical order alone would truncate away the file that was meant."""
+        target = workspace / "many"
+        target.mkdir()
+        for i in range(20):
+            (target / f"aaa_{i:02d}.txt").write_text("")
+        (target / "zzz_scan.nii.gz").write_bytes(b"")
+        args = {"input_path": str(target / "missing.nii.gz")}
+        (finding,) = pathcheck.check_tool_call_paths(args, workspace)
+        assert finding["entries"][0] == "zzz_scan.nii.gz"
+        assert len(finding["entries"]) <= 12
+        assert finding["entry_total"] == 21
+
+    def test_output_with_missing_parent_lists_too(self, workspace: Path) -> None:
+        """The same help applies when a destination folder is wrong."""
+        args = {"output_dir": str(workspace / "derivs" / "run-01")}
+        (finding,) = pathcheck.check_tool_call_paths(args, workspace)
+        assert finding["nearest"] == "."
+        assert "derivatives/" in finding["entries"]
+
+    def test_present_paths_carry_no_listing(self, workspace: Path) -> None:
+        """Nothing to help with, so no noise."""
+        args = {"input_path": str(workspace / "sub-01" / "t1.nii.gz")}
+        (finding,) = pathcheck.check_tool_call_paths(args, workspace)
+        assert finding["entries"] == []
+        assert finding["nearest"] == ""
+
+    def test_outside_workspace_never_lists(self, workspace: Path) -> None:
+        """The workspace boundary holds: no peeking at directories it does not own."""
+        (finding,) = pathcheck.check_tool_call_paths({"input_path": "/etc/nope.conf"}, workspace)
+        assert finding["entries"] == []
+        assert finding["nearest"] == ""
+
+
 class TestUnknownRole:
     """An unclassifiable parameter is reported, never judged."""
 

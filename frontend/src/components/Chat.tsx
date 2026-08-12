@@ -226,7 +226,20 @@ function PermissionCard({
                 {p.severity === 'error' ? '✕' : p.severity === 'warning' ? '!' : '✓'}
               </span>
               <code className="path-param">{p.param}</code>
-              <span className="path-note">{p.note}</span>
+              <span className="path-note">
+                {p.note}
+                {p.entries.length > 0 && (
+                  // What sits where the file was expected. Usually the intended
+                  // path is right here, so it reads as the answer, not a dump.
+                  <span className="path-siblings">
+                    {' — '}
+                    <code>{p.nearest === '.' ? 'workspace' : p.nearest}</code> contains{' '}
+                    {p.entries.join(', ')}
+                    {p.entry_total > p.entries.length &&
+                      ` … (${p.entry_total - p.entries.length} more)`}
+                  </span>
+                )}
+              </span>
             </li>
           ))}
         </ul>

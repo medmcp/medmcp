@@ -1360,6 +1360,17 @@ button:hover {
   overflow-wrap: anywhere;
 }
 
+/* The sibling listing is supporting detail: readable, but it must not compete
+   with the finding it hangs off (which is colour-coded by severity). */
+.path-siblings {
+  color: var(--muted);
+}
+
+.path-siblings code {
+  font-family: var(--mono);
+  color: var(--muted2);
+}
+
 .path-info .path-mark {
   color: var(--ok);
 }

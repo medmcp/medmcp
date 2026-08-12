@@ -73,8 +73,11 @@ your infrastructure.
   after you had already approved it. The approval dialog now says, for each path
   the call would use, whether it is actually there: an input that does not exist
   is flagged in red, a destination folder that is missing likewise, and a file
-  that would be silently overwritten is called out. Paths pointing outside the
-  workspace are flagged too, since a tool stack cannot see them. The check is a
+  that would be silently overwritten is called out. A missing path also shows
+  what the nearest real folder actually contains, which usually makes the
+  intended path obvious — the model tends to get the folder right and the
+  filename wrong, or to invent one subject in an otherwise correct tree. Paths
+  pointing outside the workspace are flagged as unverifiable. The check is a
   plain filesystem lookup — it never asks a model, so unlike the risk summary
   beside it, it cannot be wrong about what is on disk. It is advice, not a gate:
   the decision stays yours.

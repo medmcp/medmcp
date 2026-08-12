@@ -1,3 +1,4 @@
+# MedMCP: An Open Agentic Ecosystem for Medical Imaging Workflows
 <p align="center">
   <img src="assets/medmcp.png" alt="The MedMCP workspace: file explorer, medical-image viewer, workflow manager, and agent chat" width="100%">
 </p>

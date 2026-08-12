@@ -28,6 +28,17 @@ export interface RiskTag {
   severity: 'low' | 'medium' | 'high'
 }
 
+/** One path argument of a pending tool call, checked against the filesystem.
+ *  Deterministic (no LLM), so unlike `explanation` it arrives with the request. */
+export interface PathFinding {
+  param: string
+  value: string
+  role: 'input' | 'output' | 'unknown'
+  status: 'ok' | 'missing' | 'parent_missing' | 'will_overwrite' | 'outside_workspace'
+  severity: 'error' | 'warning' | 'info'
+  note: string
+}
+
 /** A permission request awaiting the user's decision. */
 export interface PermissionRequest {
   requestId: number
@@ -42,6 +53,8 @@ export interface PermissionRequest {
   /** True while the server is still generating the LLM explanation. */
   explaining?: boolean
   risks?: RiskTag[]
+  /** Existence check on the call's path arguments; empty when it takes none. */
+  paths?: PathFinding[]
 }
 
 /** One prior chat session, as served by GET /api/sessions. */

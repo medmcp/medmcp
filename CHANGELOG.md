@@ -68,6 +68,16 @@ your infrastructure.
   requires an explicit click. There is no "always allow" and no session-wide
   approval; each call is approved on its own. The approval dialog shows the
   call's arguments alongside a generated plain-language risk summary.
+- **File paths are checked before you approve.** Local models invent
+  plausible-looking paths, and until now the first sign was the tool failing
+  after you had already approved it. The approval dialog now says, for each path
+  the call would use, whether it is actually there: an input that does not exist
+  is flagged in red, a destination folder that is missing likewise, and a file
+  that would be silently overwritten is called out. Paths pointing outside the
+  workspace are flagged too, since a tool stack cannot see them. The check is a
+  plain filesystem lookup — it never asks a model, so unlike the risk summary
+  beside it, it cannot be wrong about what is on disk. It is advice, not a gate:
+  the decision stays yours.
 - **No data egress.** `web_search` is disabled and `web_fetch` requires
   approval. Tool stacks run with networking denied, all Linux capabilities
   dropped, and no privilege escalation — a tool call cannot reach the network

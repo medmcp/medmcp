@@ -52,6 +52,7 @@ from medmcp import (
     batchplan,
     distill,
     explain,
+    pathcheck,
     provenance,
     replay,
     sessions,
@@ -970,7 +971,9 @@ async def ws_replay(ws: WebSocket) -> None:
 #     {"type": "permission_request", "requestId": int, "toolCall": {...},
 #      "options": [{"optionId": str, "name": str, "kind": str}],
 #      "explanation": str | None, "explaining": bool,
-#      "risks": [{"key": str, "label": str, "severity": str}]}
+#      "risks": [{"key": str, "label": str, "severity": str}],
+#      "paths": [{"param": str, "value": str, "role": str, "status": str,
+#                 "severity": str, "note": str}]}
 #     {"type": "permission_update", "requestId": int,
 #      "explanation": str | None, "risks": [...]}
 #     {"type": "done"} | {"type": "error", "message": str}
@@ -1508,6 +1511,25 @@ class _ChatConnection:
         risk_keys: list[str] = cast("list[str]", tool_call.get("risks") or [])
         explaining = explanation is None and settings.load_explain_enabled()
 
+        # Existence check on the call's path arguments. Deterministic and local (a
+        # few stat calls), so unlike the explanation above it ships *with* the
+        # dialog rather than being pushed in later, and it cannot itself be wrong
+        # about what is on disk. Advisory only — it annotates the decision, it
+        # never makes one. Best-effort: a failure here must not block the prompt.
+        try:
+            path_findings = pathcheck.check_tool_call_paths(
+                tool_call.get("rawInput"), WORKSPACE_ROOT
+            )
+        except Exception:
+            log.warning("path check failed for %s", title, exc_info=True)
+            path_findings = []
+        if any(f["severity"] == "error" for f in path_findings):
+            _audit.info(
+                "permission request has unresolvable paths: %s — %s",
+                title,
+                ", ".join(f"{f['param']}={f['value']!r} ({f['status']})" for f in path_findings),
+            )
+
         _audit.info("permission requested: %s", title)
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[str | None] = loop.create_future()
@@ -1521,6 +1543,7 @@ class _ChatConnection:
                 "explanation": explanation,
                 "explaining": explaining,
                 "risks": explain.resolve_risks(risk_keys),
+                "paths": path_findings,
             }
         )
         if explaining:

@@ -215,6 +215,22 @@ function PermissionCard({
       {perm.toolCall.rawInput != null && (
         <pre className="approval-input">{formatToolInput(perm.toolCall.rawInput)}</pre>
       )}
+      {perm.paths && perm.paths.length > 0 && (
+        // Sits directly under the arguments it describes. Every checked path is
+        // listed, not just the problems: confirming that an input really is there
+        // is worth as much as flagging one that isn't.
+        <ul className="approval-paths">
+          {perm.paths.map((p, i) => (
+            <li key={`${p.param}-${i}`} className={`path-${p.severity}`} title={p.value}>
+              <span className="path-mark" aria-hidden="true">
+                {p.severity === 'error' ? '✕' : p.severity === 'warning' ? '!' : '✓'}
+              </span>
+              <code className="path-param">{p.param}</code>
+              <span className="path-note">{p.note}</span>
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="approval-btns">
         {perm.options.map((opt) => (
           <button

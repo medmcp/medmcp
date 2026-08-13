@@ -2,10 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Group, Panel, Separator } from 'react-resizable-panels'
 import { Chat } from './components/Chat'
 import { FileExplorer } from './components/FileExplorer'
+import { StackMarketplace } from './components/StackMarketplace'
 import { SettingsDrawer } from './components/SettingsDrawer'
 import { Viewer } from './components/Viewer'
 import { WorkflowPanel } from './components/WorkflowPanel'
-import { GearIcon } from './components/icons'
+import { GearIcon, StoreIcon } from './components/icons'
 
 /** localStorage key holding the last active chat session id (for auto-resume). */
 const ACTIVE_SESSION_KEY = 'medmcp.activeSession'
@@ -19,6 +20,7 @@ export default function App() {
   // Files multi-selected in the explorer — feeds the workflow batch editor.
   const [selectedPaths, setSelectedPaths] = useState<string[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [marketOpen, setMarketOpen] = useState(false)
   // The vibe session that received the last prompt — what "Save chat as
   // workflow" distills. Survives a reconnect (which starts an empty session).
   const [distillSessionId, setDistillSessionId] = useState<string | null>(null)
@@ -89,13 +91,17 @@ export default function App() {
         <span className="app-subtitle">workspace</span>
         <button
           className="btn-icon app-header-gear"
-          title="Settings"
-          onClick={() => setSettingsOpen(true)}
+          title="Tool stacks"
+          onClick={() => setMarketOpen(true)}
         >
+          <StoreIcon />
+        </button>
+        <button className="btn-icon" title="Settings" onClick={() => setSettingsOpen(true)}>
           <GearIcon />
         </button>
       </header>
       <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <StackMarketplace open={marketOpen} onClose={() => setMarketOpen(false)} />
       <Group
         orientation="vertical"
         className="app-main"

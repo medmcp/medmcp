@@ -1689,8 +1689,41 @@ button:hover {
   background: rgba(255, 255, 255, 0.04);
 }
 
+/* The open chat. A background wash alone was too close to :hover to pick out
+   at a glance, so the row also carries a brand-blue edge and an "open" tag —
+   position, colour and text, rather than colour by itself. */
 .session-row.current {
-  background: rgba(43, 79, 163, 0.18);
+  position: relative;
+  background: rgba(43, 79, 163, 0.22);
+  padding-left: 13px;
+}
+
+.session-row.current::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 6px;
+  bottom: 6px;
+  width: 2.5px;
+  border-radius: 2px;
+  background: var(--blue-xl);
+}
+
+.session-row.current .session-title {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.session-current-tag {
+  margin-left: 7px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--blue-xl);
+  background: rgba(43, 79, 163, 0.3);
 }
 
 .prov-dot {

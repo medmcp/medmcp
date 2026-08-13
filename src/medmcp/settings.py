@@ -1071,6 +1071,15 @@ def _llm_image() -> str:
     return next((n.strip() for n in ps.stdout.splitlines() if n.strip()), "")
 
 
+# Enumerating GPUs costs a throwaway container spawn (~1s), and the answer cannot
+# change while the process lives — the hardware is fixed. Cached so opening the
+# settings drawer does not pay for it every time. Only a non-empty result is kept:
+# an empty one may mean docker was briefly unavailable, and caching that would
+# require a restart to recover, whereas a host with no GPUs takes the fast path
+# above (no LLM image, so no container to spawn).
+_gpu_cache: list[JsonDict] | None = None
+
+
 def list_gpus() -> list[JsonDict]:
     """Best-effort list of GPUs as ``{index, uuid, name}`` for the settings picker.
 
@@ -1081,6 +1090,9 @@ def list_gpus() -> list[JsonDict]:
     present CUDA image). Returns ``[]`` when not enumerable — the UI falls back to
     free text.
     """
+    global _gpu_cache
+    if _gpu_cache is not None:
+        return list(_gpu_cache)
     image = _llm_image()
     if not image:
         return []
@@ -1106,7 +1118,9 @@ def list_gpus() -> list[JsonDict]:
         parts = [p.strip() for p in line.split(",")]
         if len(parts) >= 3 and parts[0]:
             gpus.append({"index": parts[0], "uuid": parts[1], "name": parts[2]})
-    return gpus
+    if gpus:
+        _gpu_cache = gpus
+    return list(gpus)
 
 
 # Serializes the config.toml read-modify-write within this process: the

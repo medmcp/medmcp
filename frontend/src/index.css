@@ -1428,14 +1428,34 @@ button:hover {
   padding: 6px 18px 18px;
 }
 
-.drawer-notice {
+/* Pinned to the bottom of the drawer and out of the flow, so confirming a save
+   never moves the controls above it. */
+.drawer-toast {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
   font-size: 12px;
   color: var(--blue-xl);
-  background: rgba(43, 79, 163, 0.1);
-  border: 1px solid rgba(127, 168, 245, 0.15);
+  background: rgba(24, 28, 37, 0.96);
+  border: 1px solid rgba(127, 168, 245, 0.25);
   border-radius: 8px;
-  padding: 8px 12px;
-  margin: 12px 0 0;
+  padding: 9px 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  animation: drawer-toast-in 140ms ease-out;
+}
+
+@keyframes drawer-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer-toast {
+    animation: none;
+  }
 }
 
 .drawer-footnote {

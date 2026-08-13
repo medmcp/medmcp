@@ -92,18 +92,32 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
   const [saving, setSaving] = useState(false)
   const [advanced, setAdvanced] = useState(false)
 
+  // Clear the toast on its own: it confirms something that already happened, so
+  // leaving it up implies a state that still needs attention.
+  useEffect(() => {
+    if (!notice) return
+    const t = window.setTimeout(() => setNotice(null), 4000)
+    return () => window.clearTimeout(t)
+  }, [notice])
+
   useEffect(() => {
     if (!open) return
-    Promise.all([fetchSettings(), fetchInstalledStacks(), fetchCatalog(), fetchGpus()])
-      .then(([s, inst, cat, gpuList]) => {
+    // The three cheap calls gate the panel; the GPU list does not. Enumerating
+    // GPUs costs a container spawn on the server, and waiting on it inside a
+    // Promise.all made opening the drawer take about a second even though
+    // everything else was already there. It fills the picker in when it lands.
+    Promise.all([fetchSettings(), fetchInstalledStacks(), fetchCatalog()])
+      .then(([s, inst, cat]) => {
         setState(s)
         setInstalled(inst)
         setCatalog(cat)
-        setGpus(gpuList)
         setError(null)
         setNotice(null)
       })
       .catch((e: unknown) => setError(String(e)))
+    fetchGpus()
+      .then(setGpus)
+      .catch(() => setGpus([])) // best-effort: the field falls back to free text
   }, [open])
 
   const apply = (next: SettingsState) => {
@@ -207,7 +221,6 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
         </div>
         <div className="drawer-body">
           {error && <div className="panel-error">{error}</div>}
-          {notice && <div className="drawer-notice">{notice}</div>}
           {!state ? (
             <div className="viewer-message">Loading…</div>
           ) : (
@@ -367,6 +380,16 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
             </>
           )}
         </div>
+        {/* Pinned over the drawer rather than placed in the flow. As the first
+            child of the body it pushed every control down the moment a setting
+            was saved — so the row you had just clicked moved out from under the
+            pointer, which is both disorienting and a way to mis-click the next
+            toggle. Overlaying costs no layout. */}
+        {notice && (
+          <div className="drawer-toast" role="status">
+            {notice}
+          </div>
+        )}
       </aside>
     </>
   )

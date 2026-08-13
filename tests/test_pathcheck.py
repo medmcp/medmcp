@@ -191,6 +191,32 @@ class TestWorkspaceBoundary:
         (finding,) = pathcheck.check_tool_call_paths(args, workspace)
         assert finding["status"] == "outside_workspace"
 
+    def test_wrong_prefix_suggests_the_real_file(self, workspace: Path) -> None:
+        """The reported bug: a hallucinated home directory on an otherwise right path.
+
+        ``/home/<wrong-user>/…/sub-01/t1.nii.gz`` lands outside the workspace, so the
+        check used to shrug at it with a bland warning. The tail still matches a real
+        file, which is both proof it was invented and the fix.
+        """
+        args = {"input_path": "/home/someone-else/data/sub-01/t1.nii.gz"}
+        (finding,) = pathcheck.check_tool_call_paths(args, workspace)
+        assert finding["status"] == "outside_workspace"
+        assert finding["severity"] == "error"
+        assert "did you mean sub-01/t1.nii.gz" in finding["note"]
+
+    def test_longest_matching_tail_wins(self, workspace: Path) -> None:
+        """More agreeing components means less chance the match is coincidence."""
+        (workspace / "t1.nii.gz").write_bytes(b"")  # also matches the 1-component tail
+        args = {"input_path": "/elsewhere/sub-01/t1.nii.gz"}
+        (finding,) = pathcheck.check_tool_call_paths(args, workspace)
+        assert "did you mean sub-01/t1.nii.gz" in finding["note"]
+
+    def test_existing_host_path_says_the_stack_cannot_see_it(self, workspace: Path) -> None:
+        """Existing on this filesystem proves it is a host path, not image data."""
+        (finding,) = pathcheck.check_tool_call_paths({"input_path": "/etc/hostname"}, workspace)
+        assert finding["severity"] == "warning"
+        assert "will not be able to see it" in finding["note"]
+
     def test_in_image_path_is_not_called_an_error(self, workspace: Path) -> None:
         """A path inside the stack image is unverifiable here, not wrong.
 

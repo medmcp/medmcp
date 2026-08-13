@@ -167,6 +167,29 @@ def _safe_is_dir(path: Path) -> bool:
         return False
 
 
+# How many trailing components of an outside path to try re-rooting at the
+# workspace. Bounded so an absurdly deep value cannot cost a stat per level.
+_MAX_TAIL_TRIES = 8
+
+
+def _did_you_mean(path: Path, workspace: Path) -> Path | None:
+    """Longest tail of *path* that names something real inside *workspace*.
+
+    A model that invents a path usually gets the *prefix* wrong and the rest right
+    -- a mistyped home directory, a stale mount point -- leaving a tail that still
+    matches the real layout. Re-rooting successive tails at the workspace turns
+    that into a concrete suggestion instead of a shrug. Longest match wins, since
+    the more components agree the less likely the match is a coincidence.
+    """
+    parts = path.parts
+    start = max(1, len(parts) - _MAX_TAIL_TRIES)
+    for i in range(start, len(parts)):
+        candidate = workspace.joinpath(*parts[i:])
+        if _safe_exists(candidate):
+            return candidate
+    return None
+
+
 def _nearest_existing_dir(path: Path, workspace: Path) -> Path | None:
     """Return the closest ancestor of *path* that exists, never leaving *workspace*.
 
@@ -233,14 +256,32 @@ def _check_one(param: str, value: str, workspace: Path) -> PathFinding:
             "entry_total": total,
         }
 
-    # Outside the workspace, this check is answering from the wrong filesystem and
-    # says so rather than guessing. The core and a stack container share only the
-    # workspace bind-mount (at an identical path); beyond it their views diverge, so
-    # such a path is either a host path the stack cannot see or a path inside the
-    # stack image that the core cannot see -- e.g. a tool's own bundled reference
-    # data. Nothing here can tell those apart, so the note claims neither, and this
-    # stays a warning rather than an error.
+    # Outside the workspace splits into three cases that deserve different answers.
+    # Collapsing them into one bland warning is what let a hallucinated home
+    # directory -- /home/<wrong-user>/… instead of /home/<user>/… -- sail through
+    # looking harmless.
     if not _within(resolved, workspace):
+        # 1. The same tail names a real file *inside* the workspace. A wrong prefix
+        #    on an otherwise correct path is the signature of an invented path, and
+        #    the match is the answer, so this is an error and it names the fix.
+        suggestion = _did_you_mean(resolved, workspace)
+        if suggestion is not None:
+            rel = suggestion.relative_to(workspace)
+            return finding(
+                "outside_workspace",
+                "error",
+                f"outside the workspace — did you mean {rel}?",
+            )
+        # 2. It exists on this filesystem. Existence proves it is a host path rather
+        #    than something inside a stack image, so the claim is now safe to make.
+        if _safe_exists(resolved):
+            return finding(
+                "outside_workspace",
+                "warning",
+                "outside the workspace — a tool stack will not be able to see it",
+            )
+        # 3. Neither. Could still be a stack's own bundled data (the core cannot see
+        #    inside the image), so this one genuinely cannot be judged from here.
         return finding(
             "outside_workspace",
             "warning",

@@ -54,17 +54,23 @@ function NodeRow({
   onMenu: (e: ReactMouseEvent, node: NodeApi<TreeNode>) => void
 }) {
   const isDir = !node.isLeaf
+  // While the inline rename input is open the row must stop behaving like a row.
+  // Leaving the drag handle attached makes a mouse-drag inside the input drag the
+  // file instead of selecting text, and the row's own click/double-click would
+  // toggle the folder or open the file when you click into the name or
+  // double-click a word in it.
+  const editing = node.isEditing
   return (
     <div
-      ref={dragHandle}
+      ref={editing ? undefined : dragHandle}
       style={style}
       className={`tree-row${node.isSelected ? ' selected' : ''}`}
       onClick={() => {
-        if (isDir) node.toggle()
+        if (!editing && isDir) node.toggle()
       }}
       onContextMenu={(e) => onMenu(e, node)}
       onDoubleClick={() => {
-        if (!isDir) node.activate()
+        if (!editing && !isDir) node.activate()
       }}
       onDragStart={(e) => {
         // Carry the workspace-relative path so drop targets outside the tree
@@ -85,6 +91,14 @@ function NodeRow({
         <input
           autoFocus
           defaultValue={node.data.name}
+          onFocus={(e) => {
+            // Preselect the name without its suffix, as a file manager does — a
+            // rename almost always means changing the name, not ".nii.gz". Cut at
+            // the first dot so double suffixes come off whole. A click into the
+            // input still places the caret where you clicked.
+            const dot = node.data.name.indexOf('.')
+            e.currentTarget.setSelectionRange(0, dot > 0 ? dot : node.data.name.length)
+          }}
           onBlur={() => node.reset()}
           onKeyDown={(e) => {
             if (e.key === 'Escape') node.reset()

@@ -211,6 +211,26 @@ class TestWorkspaceBoundary:
         (finding,) = pathcheck.check_tool_call_paths(args, workspace)
         assert "did you mean sub-01/t1.nii.gz" in finding["note"]
 
+    def test_nonexistent_neighbour_of_the_workspace_is_an_error(self, workspace: Path) -> None:
+        """Reported from live use: a wrong path with no matching tail still got through.
+
+        ``/home/<wrong-user>/nothing.nii.gz`` has nothing behind it and no tail
+        matching the workspace, so it fell into the unverifiable bucket and was only
+        a warning — which the guard does not act on. Sharing the workspace's
+        top-level directory is what marks it as aiming at the workspace and missing.
+        """
+        # Built from the workspace's own top-level dir so the test does not depend
+        # on where pytest puts tmp_path.
+        neighbour = Path(*workspace.parts[:2]) / "not-a-real-dir" / "nothing_at_all.nii.gz"
+        (finding,) = pathcheck.check_tool_call_paths({"input_path": str(neighbour)}, workspace)
+        assert finding["severity"] == "error"
+
+    def test_far_away_path_stays_unjudged(self, workspace: Path) -> None:
+        """A stack's own bundled data lives nowhere near the workspace."""
+        args = {"template_path": "/root/.medmcp_neuro_core/templates/MNI152.nii.gz"}
+        (finding,) = pathcheck.check_tool_call_paths(args, workspace)
+        assert finding["severity"] == "warning"
+
     def test_existing_host_path_says_the_stack_cannot_see_it(self, workspace: Path) -> None:
         """Existing on this filesystem proves it is a host path, not image data."""
         (finding,) = pathcheck.check_tool_call_paths({"input_path": "/etc/hostname"}, workspace)

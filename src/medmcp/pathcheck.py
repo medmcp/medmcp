@@ -190,6 +190,18 @@ def _did_you_mean(path: Path, workspace: Path) -> Path | None:
     return None
 
 
+def _shares_top_level_with(path: Path, workspace: Path) -> bool:
+    """True if *path* sits under the same first-level directory as *workspace*.
+
+    Separates "meant the workspace and missed" from "somewhere else entirely".
+    ``/home/<wrong-user>/scan.nii.gz`` shares ``/home`` with a workspace at
+    ``/home/<user>/data`` and is a mistyped path; ``/root/…/MNI152.nii.gz`` shares
+    only the root and is plausibly a stack image's own bundled data.
+    """
+    p, w = path.parts, workspace.parts
+    return len(p) > 1 and len(w) > 1 and p[:2] == w[:2]
+
+
 def _nearest_existing_dir(path: Path, workspace: Path) -> Path | None:
     """Return the closest ancestor of *path* that exists, never leaving *workspace*.
 
@@ -280,8 +292,21 @@ def _check_one(param: str, value: str, workspace: Path) -> PathFinding:
                 "warning",
                 "outside the workspace — a tool stack will not be able to see it",
             )
-        # 3. Neither. Could still be a stack's own bundled data (the core cannot see
-        #    inside the image), so this one genuinely cannot be judged from here.
+        # 3. Neither -- nothing here and nothing like it in the workspace. Whether
+        #    that is a wrong path or a stack's own bundled data turns on where it
+        #    points. A path sharing the workspace's top-level directory is aiming
+        #    at the workspace's neighbourhood and missing (/home/<wrong-user>/… for
+        #    /home/<user>/…), which no image ever does: a stack sees only the
+        #    workspace bind-mount and its own image, and image data lives under
+        #    /app, /opt, /root and the like. So that is an error; anything further
+        #    afield stays unjudged.
+        if _shares_top_level_with(resolved, workspace):
+            return finding(
+                "outside_workspace",
+                "error",
+                "outside the workspace, and nothing is there",
+                show_siblings=True,
+            )
         return finding(
             "outside_workspace",
             "warning",

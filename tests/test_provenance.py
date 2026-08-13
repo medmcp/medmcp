@@ -53,22 +53,20 @@ class TestManifest:
         """A written manifest reads back with stacks and model populated."""
         servers = [{"name": "medmcp-neuro", "version": "0.2.0", "command": "/x/bin/neuro"}]
         with patch.object(provenance, "VIBE_HOME", tmp_path):
-            path = provenance.write_manifest(
-                SESSION_ID, servers=servers, model_name="gemma4-medmcp"
-            )
+            path = provenance.write_manifest(SESSION_ID, servers=servers, model_name="muse-medmcp")
             assert path.exists()
             manifest = provenance.read_manifest(SESSION_ID)
 
         assert manifest is not None
         assert manifest["session_id"] == SESSION_ID
         assert manifest["stacks"][0]["version"] == "0.2.0"
-        assert manifest["model"]["name"] == "gemma4-medmcp"
+        assert manifest["model"]["name"] == "muse-medmcp"
         assert "python" in manifest["platform"]
 
     def test_model_params_pulled_from_config(self, tmp_path: Path) -> None:
         """Model temperature/thinking are pulled from config.toml by alias."""
         (tmp_path / "config.toml").write_text(
-            '[[models]]\nname = "gemma4-medmcp"\nalias = "local"\n'
+            '[[models]]\nname = "muse-medmcp"\nalias = "local"\n'
             'temperature = 1.0\nthinking = "medium"\ninput_price = 0.0\n'
         )
         with patch.object(provenance, "VIBE_HOME", tmp_path):
@@ -382,7 +380,7 @@ class TestReport:
         """The report shows the model, stacks, and each recorded tool call."""
         servers = [{"name": "medmcp-neuro", "version": "0.2.0", "command": "/x"}]
         with patch.object(provenance, "VIBE_HOME", tmp_path):
-            provenance.write_manifest(SESSION_ID, servers=servers, model_name="gemma4-medmcp")
+            provenance.write_manifest(SESSION_ID, servers=servers, model_name="muse-medmcp")
             provenance.append_run_event(
                 SESSION_ID,
                 {
@@ -396,7 +394,7 @@ class TestReport:
             )
             report = provenance.render_report(SESSION_ID)
 
-        assert "gemma4-medmcp" in report
+        assert "muse-medmcp" in report
         assert "medmcp-neuro 0.2.0" in report
         assert "`medmcp-neuro:skull_strip` — completed" in report
         assert "decision: allow" in report

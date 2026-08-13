@@ -10,8 +10,8 @@ disable_welcome_banner_animation = false
 autocopy_to_clipboard = true
 file_watcher_for_autocomplete = false
 # Token count at which the agent summarises the conversation and starts a fresh
-# context. It must sit below the model's window (131072 for both gemma4-medmcp
-# and muse-medmcp, per Modelfile num_ctx) or proactive compaction never fires:
+# context. It must sit below the model's window (131072 for muse-medmcp, per
+# Modelfile num_ctx) or proactive compaction never fires:
 # vibe's default of 200000 is above the ceiling, so the context would instead
 # grow until the backend rejected it and vibe recovered through its
 # ContextTooLongError path — a failed turn and a retry on every overflow rather
@@ -123,7 +123,7 @@ project_id = ""
 region = ""
 
 [[models]]
-name = "gemma4-medmcp"
+name = "muse-medmcp"
 provider = "ollama"
 alias = "local"
 temperature = 1.0

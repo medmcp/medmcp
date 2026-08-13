@@ -42,7 +42,7 @@ from medmcp.workspace_note import display_content_text, strip_workspace_note
 JsonDict = dict[str, Any]
 
 OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "gemma4-medmcp")
+OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "muse-medmcp")
 PROSE_TIMEOUT: float = 60.0
 
 # Read-only / orchestration tools that carry no reusable workflow meaning; they

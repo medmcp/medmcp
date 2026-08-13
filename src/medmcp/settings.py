@@ -45,7 +45,7 @@ log: logging.Logger = logging.getLogger(__name__)
 # Ollama endpoint + model, used for the agent's auxiliary LLM calls
 # (tool-call explanations, distillation prose) and the provenance manifest.
 OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "gemma4-medmcp")
+OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "muse-medmcp")
 
 # GPU selector (CDI device id) substituted into container-stack manifests' ${MEDMCP_GPU}.
 # Default so os.path.expandvars (no ":-" support) never leaves the literal placeholder;
@@ -66,7 +66,7 @@ if GPU_SELECTION_PATH.exists():
         os.environ["MEDMCP_GPU"] = _gpu_sel
 
 # Context window size used when Ollama hasn't been queried (yet) — the value
-# set in Modelfile.gemma4.
+# set in Modelfile.muse.
 DEFAULT_CONTEXT_WINDOW: int = 131_072
 
 # Cached context window size fetched from Ollama /api/show. None = not yet

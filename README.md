@@ -32,7 +32,7 @@ MEDMCP_WORKSPACE="$HOME/medmcp-data" \
 ```
 Then open **http://localhost:8100**.
 
-**Requirements:** Linux OS with an NVIDIA GPU (≥ 24 GB VRAM recommended for the local Gemma 4 26B model), a recent driver (≥ R570 / CUDA 12.8), and Docker with GPU access via the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/) (CDI; rootless Docker works).
+**Requirements:** Linux OS with an NVIDIA GPU (≥ 24 GB VRAM recommended for the local Muse Glimmer 30B model), a recent driver (≥ R570 / CUDA 12.8), and Docker with GPU access via the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/) (CDI; rootless Docker works).
 
 **Stop** with `docker compose -f oci://ghcr.io/medmcp/compose:main down`.
 
@@ -102,7 +102,7 @@ MedMCP builds on a lot of open-source work. In particular:
 - **Web server**: [FastAPI](https://github.com/fastapi/fastapi), [Starlette](https://github.com/Kludex/starlette), and [Uvicorn](https://github.com/Kludex/uvicorn)
 - **Frontend**: [React](https://github.com/facebook/react) and [Vite](https://github.com/vitejs/vite), with [Niivue](https://github.com/niivue/niivue) for the medical-image viewer and [react-markdown](https://github.com/remarkjs/react-markdown) for chat rendering
 - **Typefaces**: [Inter](https://github.com/rsms/inter) and [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono)
-- **Local inference**: [Ollama](https://github.com/ollama/ollama), serving [Google Gemma](https://ai.google.dev/gemma) by default (subject to the [Gemma Terms of Use](https://ai.google.dev/gemma/terms))
+- **Local inference**: [Ollama](https://github.com/ollama/ollama), serving Meta's [Muse Glimmer](https://huggingface.co/meta-models/Muse-Glimmer-30B) by default (Apache 2.0)
 
 A complete list of bundled components and their licenses is in
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md); model and base-layer

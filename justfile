@@ -121,10 +121,11 @@ notices-check:
     uv run python scripts/gen_third_party_notices.py
     git diff --exit-code THIRD_PARTY_NOTICES.md
 
-# Pull Gemma 4 26B and build custom gemma4-medmcp
+# Pull Muse Glimmer 30B and build the custom muse-medmcp model.
+# Needs Ollama >= 0.32.9; older builds reject the manifest with a 412.
 pull-model:
-    ollama pull gemma4:26b
-    ollama create gemma4-medmcp -f Modelfile.gemma4
+    ollama pull muse-glimmer:30b
+    ollama create muse-medmcp -f Modelfile.muse
 
 # Launch mistral-vibe CLI (reads .vibe/config.toml)
 vibe *ARGS:
@@ -184,7 +185,7 @@ workspace-dev:
 serve-ollama:
     ollama serve
 
-# One-shot: install everything, pull Gemma 4 model, start Ollama, launch the UI
+# One-shot: install everything, pull the model, start Ollama, launch the UI
 medmcp: setup pull-model workspace-build
     @echo "Starting Ollama server..."
     @ollama serve &
@@ -214,7 +215,7 @@ docker-base-multiarch TAG PLATFORMS="linux/amd64,linux/arm64" CUDA_TAG="12.8.1":
         --platform {{PLATFORMS}} -t {{TAG}} --push .
 
 # Bring up the full stack (llm + core). Defaults: workspace=./data, models=host ~/.ollama
-# (so the bundled Ollama reuses an already-pulled gemma4-medmcp instead of a 15 GB download).
+# (so the bundled Ollama reuses an already-pulled muse-medmcp instead of an 18 GB download).
 compose-up:
     MEDMCP_WORKSPACE="${MEDMCP_WORKSPACE:-$(pwd)/data}" \
     OLLAMA_MODELS_DIR="${OLLAMA_MODELS_DIR:-$HOME/.ollama}" \

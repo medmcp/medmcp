@@ -35,7 +35,7 @@ COPY --from=frontend /app/frontend/dist ./frontend/dist
 COPY docker/config.toml ./.vibe/config.toml
 COPY docker/hooks.toml ./.vibe/hooks.toml
 COPY .vibe/prompts ./.vibe/prompts
-COPY Modelfile.gemma4 ./Modelfile.gemma4
+COPY Modelfile.muse ./Modelfile.muse
 COPY catalog.json ./catalog.json
 COPY catalog.ghcr.json ./catalog.ghcr.json
 COPY docker/entrypoint.sh /usr/local/bin/medmcp-entrypoint

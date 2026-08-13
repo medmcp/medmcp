@@ -28,7 +28,8 @@ your infrastructure.
   Niivue as multiplanar slices plus a 3D view, with PDF, image, and text preview
   for everything else. Drag a segmentation from the explorer onto the image to
   overlay it with a per-label colormap and adjustable opacity.
-- **Chat** with a local model over Ollama (`gemma4-medmcp` by default), with
+- **Chat** with a local model over Ollama (Meta's Muse Glimmer 30B by
+  default — open-weight, Apache 2.0, and built for tool use), with
   streamed responses, tool-call cards, and a context meter. Chats persist and
   can be resumed, renamed, archived, deleted, branched into a parallel session,
   or rewound to before an earlier message (restoring the files it touched).
@@ -36,8 +37,9 @@ your infrastructure.
 ### Imaging tool stacks
 
 - Imaging capabilities install as **tool stacks** — containerized MCP servers
-  browsed and installed from the settings drawer, or installed host-native as
-  isolated `uv` tools. Stacks are discovered automatically; no config editing.
+  browsed and installed from a searchable stacks window, or installed
+  host-native as isolated `uv` tools. Stacks are discovered automatically; no
+  config editing.
 - Stacks bake their model weights at build time and run offline.
 
 ### Provenance and reusable workflows

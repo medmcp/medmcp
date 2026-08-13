@@ -1035,7 +1035,7 @@ def _usage_window(update: JsonDict) -> int:
     """Pick the context-window size for a usage frame (no I/O).
 
     Ollama's ``num_ctx`` is the deployment truth, so the fetched value wins
-    (vibe's ``size`` comes from its model registry — e.g. 200k for a Gemma
+    (vibe's ``size`` comes from its model registry — e.g. 200k for a model
     served with a 131072 window). The frame's size only stands in before the
     first successful fetch, ahead of the static default. Never an inline
     fetch here: it would stall the relay of every queued frame behind an

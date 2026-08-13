@@ -18,7 +18,7 @@ services:
   llm:
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
     environment:
-      # Keep gemma4-medmcp resident in VRAM (-1) so it isn't evicted after the
+      # Keep the model resident in VRAM (-1) so it isn't evicted after the
       # 5-minute idle default and reloaded on the next prompt. Override with a
       # duration (e.g. 30m) on shared GPUs to release VRAM when idle.
       OLLAMA_KEEP_ALIVE: "${OLLAMA_KEEP_ALIVE:--1}"
@@ -44,14 +44,13 @@ services:
       # the previous behaviour exactly; setting both switches models without
       # editing this file. The core reads the same OLLAMA_MODEL, so the model the
       # agent chats with and the one built here cannot drift apart.
-      MEDMCP_MODEL: "${OLLAMA_MODEL:-gemma4-medmcp}"
-      MEDMCP_BASE_MODEL: "${MEDMCP_BASE_MODEL:-gemma4:26b}"
+      MEDMCP_MODEL: "${OLLAMA_MODEL:-muse-medmcp}"
+      MEDMCP_BASE_MODEL: "${MEDMCP_BASE_MODEL:-muse-glimmer:30b}"
     entrypoint: ["/bin/sh", "-c"]
     # The Modelfile is inlined (not bind-mounted) so this compose file is fully
     # self-contained and can run straight from the OCI registry with no checkout.
-    # Keep these PARAMETERs in sync with Modelfile.gemma4 and Modelfile.muse —
-    # the source of truth for the host-native `just pull-model` path. They are
-    # deliberately identical for both models, so only the base tag varies here.
+    # Keep these PARAMETERs in sync with Modelfile.muse — the source of truth
+    # for the host-native `just pull-model` path.
     command:
       - |
         if ollama list | grep -q "$$MEDMCP_MODEL"; then exit 0; fi
@@ -77,7 +76,7 @@ services:
         condition: service_completed_successfully
     environment:
       OLLAMA_HOST: "http://llm:11434"
-      MEDMCP_MODEL: "${OLLAMA_MODEL:-gemma4-medmcp}"
+      MEDMCP_MODEL: "${OLLAMA_MODEL:-muse-medmcp}"
     entrypoint: ["/bin/sh", "-c"]
     # Preload the model into VRAM at startup so the first prompt is instant
     # instead of paying the cold-load latency. Nothing depends on this service,
@@ -99,7 +98,7 @@ services:
       # Names the model for both the agent's chat (the entrypoint writes it into
       # config.toml, which has no env expansion) and the auxiliary calls —
       # tool-call explanations and distillation prose — which read it directly.
-      OLLAMA_MODEL: "${OLLAMA_MODEL:-gemma4-medmcp}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-muse-medmcp}"
       MEDMCP_WORKSPACE: "${MEDMCP_WORKSPACE:?set MEDMCP_WORKSPACE to an absolute host path}"
       # Default to the GHCR catalog baked into the core image.
       MEDMCP_CATALOG_URL: "${MEDMCP_CATALOG_URL:-/app/catalog.ghcr.json}"

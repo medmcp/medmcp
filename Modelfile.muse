@@ -8,9 +8,6 @@
 # Temperature 0.3 for more deterministic instruction-following and structured output.
 # repeat_penalty + repeat_last_n guard against open-ended generation loops.
 #
-# Sampling matches Modelfile.gemma4 so switching between the two compares the
-# models rather than their settings.
-#
 # Needs Ollama >= 0.32.9; older builds reject the manifest with a 412.
 #
 # Build with:

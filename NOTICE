@@ -10,16 +10,17 @@ Models
 
 MedMCP is model-agnostic: it talks to whatever model the local Ollama server
 serves and does not redistribute any model weights. The default configuration
-(Modelfile.gemma4) builds on Google's Gemma. When Gemma is used, it is provided
-under and subject to the Gemma Terms of Use; that model and any derivative of it
-(including the custom "gemma4-medmcp" build) carry Google's attribution and
-use-restriction obligations:
+(Modelfile.muse) builds on Meta's Muse Glimmer, released under the Apache
+License 2.0 — the same licence as MedMCP itself, so the custom "muse-medmcp"
+build carries no use restrictions beyond those already in LICENSE:
 
-  - Gemma Terms of Use:   https://ai.google.dev/gemma/terms
-  - Prohibited Use Policy: https://ai.google.dev/gemma/prohibited_use_policy
+  - Muse Glimmer:  https://huggingface.co/meta-models/Muse-Glimmer-30B
 
 Operators who swap in a different model are responsible for complying with that
-model's own license and use terms.
+model's own license and use terms. Some open-weight models — Google's Gemma
+among them — ship under bespoke terms carrying attribution and use-restriction
+obligations that travel with the model and any derivative of it. Check before
+substituting one.
 
 ------------------------------------------------------------------------------
 Container base layers

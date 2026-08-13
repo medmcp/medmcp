@@ -1,6 +1,6 @@
 # MedMCP deployment reference (also backs the devcontainer).
 #
-#   llm       — bundled Ollama, GPU via CDI, serves gemma4-medmcp.
+#   llm       — bundled Ollama, GPU via CDI, serves muse-medmcp.
 #   llm-init  — one-shot: ensures the custom model exists (idempotent).
 #   medmcp    — core workspace server; launches stack containers over the
 #               mounted (rootless) docker socket.
@@ -15,7 +15,7 @@ services:
   llm:
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
     environment:
-      # Keep gemma4-medmcp resident in VRAM (-1) so it isn't evicted after the
+      # Keep the model resident in VRAM (-1) so it isn't evicted after the
       # 5-minute idle default and reloaded on the next prompt. Override with a
       # duration (e.g. 30m) on shared GPUs to release VRAM when idle.
       OLLAMA_KEEP_ALIVE: "${OLLAMA_KEEP_ALIVE:--1}"
@@ -40,10 +40,9 @@ services:
       # Which model to build, and from which Modelfile. Switching models is then
       # an env change rather than an edit here, and the core reads the same
       # OLLAMA_MODEL so the two cannot drift apart.
-      MEDMCP_MODEL: "${OLLAMA_MODEL:-gemma4-medmcp}"
-      MEDMCP_MODELFILE: "${MEDMCP_MODELFILE:-/Modelfile.gemma4}"
+      MEDMCP_MODEL: "${OLLAMA_MODEL:-muse-medmcp}"
+      MEDMCP_MODELFILE: "${MEDMCP_MODELFILE:-/Modelfile.muse}"
     volumes:
-      - "./Modelfile.gemma4:/Modelfile.gemma4:ro"
       - "./Modelfile.muse:/Modelfile.muse:ro"
     entrypoint: ["/bin/sh", "-c"]
     # Idempotent: skipped when the model is already built. The base tag is read
@@ -61,7 +60,7 @@ services:
         condition: service_completed_successfully
     environment:
       OLLAMA_HOST: "http://llm:11434"
-      MEDMCP_MODEL: "${OLLAMA_MODEL:-gemma4-medmcp}"
+      MEDMCP_MODEL: "${OLLAMA_MODEL:-muse-medmcp}"
     entrypoint: ["/bin/sh", "-c"]
     # Preload the model into VRAM at startup so the first prompt is instant
     # instead of paying the cold-load latency. Nothing depends on this service,
@@ -87,7 +86,7 @@ services:
       # Names the model for both the agent's chat (the entrypoint writes it into
       # config.toml, which has no env expansion) and the auxiliary calls —
       # tool-call explanations and distillation prose — which read it directly.
-      OLLAMA_MODEL: "${OLLAMA_MODEL:-gemma4-medmcp}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-muse-medmcp}"
       MEDMCP_WORKSPACE: "${MEDMCP_WORKSPACE:?set MEDMCP_WORKSPACE to an absolute host path}"
       # Catalog source: empty = bundled catalog.json (local :dev images). To pull
       # the published images, set MEDMCP_CATALOG_URL=/app/catalog.ghcr.json.

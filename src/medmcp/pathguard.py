@@ -121,6 +121,27 @@ def build_reason(findings: list[PathFinding], workspace: Path) -> str:
     return "\n".join(lines)
 
 
+def is_containerized_tool(tool_name: str) -> bool:
+    """True if *tool_name* belongs to a stack that runs as a container.
+
+    MCP tools arrive as ``<server>_<tool>``, and a container stack is exactly one
+    with a ``stacks.d/<server>.toml`` manifest. Read by globbing that directory
+    rather than through :mod:`medmcp.settings`, whose stack discovery spawns a
+    subprocess per uv-tool stack -- far too much for a hook on every tool call.
+
+    A uv-tool stack (local development) runs on this filesystem like a builtin, and
+    correctly reports False.
+    """
+    root = os.environ.get("MEDMCP_STACKS_D")
+    stacks_d = Path(root) if root else Path(__file__).resolve().parents[2] / "stacks.d"
+    try:
+        names = [p.stem for p in stacks_d.glob("*.toml")]
+    except OSError:
+        return False
+    # Longest first so a stack whose name prefixes another cannot mis-bind.
+    return any(tool_name.startswith(f"{n}_") for n in sorted(names, key=len, reverse=True))
+
+
 def decide(invocation: dict[str, Any]) -> dict[str, Any]:
     """Return the hook response for one ``pre_tool`` invocation."""
     tool_name = str(invocation.get("tool_name") or "")
@@ -134,7 +155,9 @@ def decide(invocation: dict[str, Any]) -> dict[str, Any]:
         return {"decision": "allow"}
     workspace = Path(root)
 
-    findings = check_tool_call_paths(tool_input, workspace)
+    findings = check_tool_call_paths(
+        tool_input, workspace, containerized=is_containerized_tool(tool_name)
+    )
     errors = [f for f in findings if f["severity"] == "error"]
     if not errors:
         return {"decision": "allow"}

@@ -39,6 +39,7 @@ import os
 import shutil
 import time
 from collections.abc import AsyncGenerator
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -53,6 +54,7 @@ from medmcp import (
     distill,
     explain,
     pathcheck,
+    pathguard,
     provenance,
     replay,
     sessions,
@@ -1521,8 +1523,14 @@ class _ChatConnection:
         # chat socket, not just this turn. Best-effort — a failure here must leave
         # the approval box exactly as it would have been without the check.
         try:
+            containerized = pathguard.is_containerized_tool(str(tool_call.get("title") or ""))
             path_findings = await asyncio.to_thread(
-                pathcheck.check_tool_call_paths, tool_call.get("rawInput"), WORKSPACE_ROOT
+                partial(
+                    pathcheck.check_tool_call_paths,
+                    tool_call.get("rawInput"),
+                    WORKSPACE_ROOT,
+                    containerized=containerized,
+                )
             )
         except Exception:
             log.warning("path check failed for %s", title, exc_info=True)

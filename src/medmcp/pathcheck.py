@@ -241,7 +241,7 @@ def _sample_entries(directory: Path, like: Path) -> tuple[list[str], int]:
     return names[:_MAX_ENTRIES], len(names)
 
 
-def _check_one(param: str, value: str, workspace: Path) -> PathFinding:
+def _check_one(param: str, value: str, workspace: Path, containerized: bool) -> PathFinding:
     """Check a single path argument and describe what was found."""
     role = classify_role(param)
     resolved = _resolve(value, workspace)
@@ -284,13 +284,22 @@ def _check_one(param: str, value: str, workspace: Path) -> PathFinding:
                 "error",
                 f"outside the workspace — did you mean {rel}?",
             )
-        # 2. It exists on this filesystem. Existence proves it is a host path rather
-        #    than something inside a stack image, so the claim is now safe to make.
+        # 2. It exists here. For a containerized stack that settles it: the only
+        #    host directory mounted into a stack is the workspace, so a path outside
+        #    it is provably unreachable and the call would fail. A builtin tool runs
+        #    in this process and can read it, so there the concern is policy rather
+        #    than failure, and the person decides.
         if _safe_exists(resolved):
+            if containerized:
+                return finding(
+                    "outside_workspace",
+                    "error",
+                    "outside the workspace — a tool stack cannot see it",
+                )
             return finding(
                 "outside_workspace",
                 "warning",
-                "outside the workspace — a tool stack will not be able to see it",
+                "outside the workspace",
             )
         # 3. Neither -- nothing here and nothing like it in the workspace. Whether
         #    that is a wrong path or a stack's own bundled data turns on where it
@@ -307,10 +316,21 @@ def _check_one(param: str, value: str, workspace: Path) -> PathFinding:
                 "outside the workspace, and nothing is there",
                 show_siblings=True,
             )
+        if not containerized:
+            # A builtin runs against this very filesystem, so "not here" is the
+            # whole answer -- there is no other place for it to be.
+            return finding(
+                "outside_workspace",
+                "error",
+                "outside the workspace, and nothing is there",
+            )
+        # The one case nothing here can settle: a containerized stack may carry this
+        # path inside its own image (its baked reference data), which the core has
+        # no view of. Left to the person rather than guessed at.
         return finding(
             "outside_workspace",
             "warning",
-            "outside the workspace — cannot be verified from here",
+            "outside the workspace — may be data inside the tool's image",
         )
 
     exists = _safe_exists(resolved)
@@ -366,17 +386,26 @@ def _coerce_arguments(raw_input: object) -> dict[str, Any]:
     return {}
 
 
-def check_tool_call_paths(raw_input: object, workspace: Path) -> list[PathFinding]:
+def check_tool_call_paths(
+    raw_input: object, workspace: Path, *, containerized: bool = False
+) -> list[PathFinding]:
     """Check every path-looking argument in *raw_input* against the filesystem.
 
-    Best-effort and non-blocking: this annotates the approval dialog, it never
-    decides anything. Any argument that cannot be interpreted is skipped rather
-    than reported, so a finding always refers to a real string argument.
+    Any argument that cannot be interpreted is skipped rather than reported, so a
+    finding always refers to a real string argument.
+
+    ``severity`` carries the distinction that matters to a caller acting on this:
+    ``error`` means the call is *provably* going to fail, ``warning`` means it is a
+    judgement call. Only the former is safe to refuse on someone's behalf.
 
     Args:
         raw_input: The tool call's arguments — a mapping, or the JSON-string form.
         workspace: Root that relative paths resolve against and that paths are
             expected to stay inside.
+        containerized: True when the tool runs inside a stack container, which sees
+            only the workspace bind-mount plus its own image; False for a builtin
+            running against this filesystem. It decides which paths outside the
+            workspace are provably unreachable and which merely cannot be judged.
 
     Returns:
         One finding per checked path, in argument order, capped at a readable
@@ -393,7 +422,7 @@ def check_tool_call_paths(raw_input: object, workspace: Path) -> list[PathFindin
             if not (looks_like_path(item) or _PATH_NAME_RE.search(param)):
                 continue
             try:
-                findings.append(_check_one(param, item, workspace))
+                findings.append(_check_one(param, item, workspace, containerized))
             except Exception:
                 # Per-argument, so one unusable value costs only its own finding.
                 # Checking the whole call inside a single guard would mean a single

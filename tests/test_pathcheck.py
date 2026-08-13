@@ -225,32 +225,31 @@ class TestWorkspaceBoundary:
         (finding,) = pathcheck.check_tool_call_paths({"input_path": str(neighbour)}, workspace)
         assert finding["severity"] == "error"
 
-    def test_far_away_path_stays_unjudged(self, workspace: Path) -> None:
-        """A stack's own bundled data lives nowhere near the workspace."""
-        args = {"template_path": "/root/.medmcp_neuro_core/templates/MNI152.nii.gz"}
-        (finding,) = pathcheck.check_tool_call_paths(args, workspace)
-        assert finding["severity"] == "warning"
+    def test_existing_host_path_is_fatal_only_for_a_container(self, workspace: Path) -> None:
+        """A stack mounts the workspace and nothing else, so it provably cannot read it.
 
-    def test_existing_host_path_says_the_stack_cannot_see_it(self, workspace: Path) -> None:
-        """Existing on this filesystem proves it is a host path, not image data."""
-        (finding,) = pathcheck.check_tool_call_paths({"input_path": "/etc/hostname"}, workspace)
-        assert finding["severity"] == "warning"
-        assert "will not be able to see it" in finding["note"]
+        A builtin runs on this filesystem and can, so there it is the person's call.
+        """
+        args = {"input_path": "/etc/hostname"}
+        (stack,) = pathcheck.check_tool_call_paths(args, workspace, containerized=True)
+        assert stack["severity"] == "error"
+        assert "cannot see it" in stack["note"]
+        (builtin,) = pathcheck.check_tool_call_paths(args, workspace, containerized=False)
+        assert builtin["severity"] == "warning"
 
-    def test_in_image_path_is_not_called_an_error(self, workspace: Path) -> None:
-        """A path inside the stack image is unverifiable here, not wrong.
+    def test_far_away_missing_path_is_fatal_only_for_a_builtin(self, workspace: Path) -> None:
+        """The one case nothing can settle: image data, which only a container has.
 
-        A stack's own bundled reference data (e.g. the MNI template baked into the
-        neuro image) is invisible to the core but perfectly visible to the tool. The
-        check cannot tell that apart from a host path the stack cannot see, so it
-        must not claim either — hence a warning, and a note that asserts nothing
-        about what the stack can reach.
+        A builtin reads this filesystem, so "not here" is the whole answer. A stack
+        may carry the path inside its own image — the MNI template baked into the
+        neuro image is exactly that — and the core has no view of it.
         """
         args = {"template_path": "/root/.medmcp_neuro_core/templates/MNI152.nii.gz"}
-        (finding,) = pathcheck.check_tool_call_paths(args, workspace)
-        assert finding["status"] == "outside_workspace"
-        assert finding["severity"] == "warning"
-        assert "cannot be verified" in finding["note"]
+        (stack,) = pathcheck.check_tool_call_paths(args, workspace, containerized=True)
+        assert stack["severity"] == "warning"
+        assert "inside the tool's image" in stack["note"]
+        (builtin,) = pathcheck.check_tool_call_paths(args, workspace, containerized=False)
+        assert builtin["severity"] == "error"
 
 
 class TestUnanswerableFilesystem:

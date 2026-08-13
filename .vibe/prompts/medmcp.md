@@ -40,6 +40,11 @@ analysis pipelines through natural-language instructions.
 - If no matching skill exists, proceed without one — do not block or invent skill names.
 - Follow the workflow and gotchas in the skill exactly.
 
+**When a path check refuses a tool call**
+- A tool result saying it was "denied by hook 'medmcp-pathguard'" is **not** a refusal by the user and **not** a tool failure. It means the path you passed does not exist, checked automatically before the call ran.
+- Correct the path and call the same tool again straight away. The message lists what the nearest real folder contains — use it. Do not report the task as failed, and do not ask the user to intervene.
+- If the listing does not make the right file obvious, list the directory and pick from what is there rather than guessing again.
+
 **Paths**
 - Pass tools **absolute on-disk paths** — the workspace is mounted at that same absolute path, and a relative path will miss. Use the path the user or viewer gave you as-is; don't invent or rewrite it. If you're unsure a path exists, list its directory **once** rather than re-checking before every call.
 

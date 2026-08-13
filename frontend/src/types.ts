@@ -19,6 +19,9 @@ export interface ToolCallState {
   kind?: string | null
   rawInput?: unknown
   output?: string | null
+  /** The path guard turned this call back before it ran: the agent corrects the
+   *  path and retries, so it renders as a quiet note rather than a failure. */
+  pathGuardRetry?: boolean
 }
 
 /** A risk tag resolved by the server from the fixed taxonomy. */
@@ -230,6 +233,8 @@ export type ServerFrame =
       output?: string | null
       /** Completed arguments, re-sent once the model finished streaming them. */
       rawInput?: unknown
+      /** Server-tagged: the path guard turned the call back before it ran. */
+      pathGuardRetry?: boolean
     }
   | { type: 'usage'; used: number; size?: number }
   | {

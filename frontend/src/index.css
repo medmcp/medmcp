@@ -1136,6 +1136,17 @@ button:hover {
   font-size: 12.5px;
 }
 
+/* A call the path guard turned back: deliberately not a card. It explains an
+   extra attempt without looking like something went wrong or needs attention. */
+.tool-retry-note {
+  align-self: stretch;
+  max-width: none;
+  padding: 1px 14px;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-style: italic;
+}
+
 .tool-card-head {
   display: flex;
   align-items: center;

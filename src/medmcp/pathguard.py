@@ -103,20 +103,34 @@ def build_reason(findings: list[PathFinding], workspace: Path) -> str:
     material needed to fix it (a suggestion, or what the nearest real folder
     holds), and says plainly what to do next.
     """
-    lines = ["These path arguments do not resolve, so the call was not run:"]
+    # Leads with the instruction. vibe wraps this as "Tool 'X' was denied by hook
+    # ...", which reads like a refusal -- the shape of a user saying no, after which
+    # retrying would be wrong -- so the correction has to be the first thing said,
+    # and the fact that nobody refused anything has to be said outright.
+    lines = [
+        "RETRY THIS CALL WITH A CORRECTED PATH.",
+        "",
+        "Nobody refused this call and the tool did not fail. It was not run because "
+        "the path below does not exist, which is an automatic check you can satisfy "
+        "yourself. Fix the path and call the same tool again immediately. Do not ask "
+        "the user, and do not report this as a failure.",
+        "",
+    ]
     for f in findings:
-        lines.append(f"  - {f['param']} = {f['value']!r}: {f['note']}")
+        lines.append(f"  {f['param']} = {f['value']!r}")
+        lines.append(f"    problem: {f['note']}")
         if f["entries"]:
             where = "the workspace root" if f["nearest"] == "." else f["nearest"]
             listed = ", ".join(f["entries"])
             more = ""
             if f["entry_total"] > len(f["entries"]):
                 more = f", and {f['entry_total'] - len(f['entries'])} more"
-            lines.append(f"    {where} contains: {listed}{more}")
+            lines.append(f"    {where} actually contains: {listed}{more}")
+    lines.append("")
     lines.append(
-        f"Re-check the paths against the workspace at {workspace} and call the tool "
-        "again with ones that exist. Do not invent a path; if you are unsure, list "
-        "the directory first."
+        f"Every path must be absolute and inside {workspace}. If the listing above "
+        "does not make the right file obvious, list the directory and choose from "
+        "what is actually there — do not guess another path."
     )
     return "\n".join(lines)
 

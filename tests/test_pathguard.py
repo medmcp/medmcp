@@ -55,8 +55,11 @@ class TestDecisions:
         inv = _invocation(workspace, {"input_path": str(workspace / "patient_09" / "t1.nii.gz")})
         out = pathguard.decide(inv)
         assert out["decision"] == "deny"
-        assert "do not resolve" in out["reason"]
         assert "patient_05/" in out["reason"]  # the listing that enables the fix
+        # Leads with the instruction: vibe frames this as "denied by hook", which
+        # otherwise reads as a refusal the model should not retry against.
+        assert out["reason"].startswith("RETRY THIS CALL")
+        assert "not run as a failure" not in out["reason"]
 
     def test_reported_bug_reason_names_the_real_file(self, workspace: Path) -> None:
         """A hallucinated home directory comes back with the correction inline."""

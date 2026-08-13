@@ -1050,6 +1050,16 @@ def _usage_window(update: JsonDict) -> int:
     return settings.cached_context_window()
 
 
+def _is_pathguard_denial(output: str) -> bool:
+    """True if *output* is the path guard turning a call back, not a real failure.
+
+    vibe renders a hook denial into the tool result as "Tool 'x' was denied by hook
+    '<name>': …", so the hook's own name is the marker. Matched on that rather than
+    on the reason text, which is written for the model and free to change.
+    """
+    return f"denied by hook '{settings.PATHGUARD_HOOK_NAME}'" in output
+
+
 # Permission options that approve more than the call being asked about:
 # ``allow_always`` ("Allow for remainder of this session") auto-approves every
 # later call of that tool in the session, and ``allow_always_permanent``
@@ -1443,6 +1453,10 @@ class _ChatConnection:
                         info["rawOutput"] = raw_output
                     elif output:
                         info["outputText"] = output
+                # A call the path guard turned back never ran, and the model
+                # corrects and retries on its own, so rendering it as a failure
+                # would be both untrue and alarming. Flagged here rather than left
+                # to the browser to pattern-match vibe's denial wording.
                 await self._send(
                     {
                         "type": "tool_call_update",
@@ -1450,6 +1464,7 @@ class _ChatConnection:
                         "status": status,
                         "output": output[:2000] if output else None,
                         "rawInput": raw_input,
+                        "pathGuardRetry": _is_pathguard_denial(output),
                     }
                 )
                 if status in ("completed", "failed") and info is not None:

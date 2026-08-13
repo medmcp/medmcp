@@ -32,6 +32,19 @@ function formatToolInput(raw: unknown): string {
 // Memoized so a streaming update to the newest message doesn't re-render
 // (and re-parse the markdown of) every earlier row in the transcript.
 const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
+  // The path guard turned this call back before it ran, and the agent corrects
+  // the path and calls again by itself. A red "failed" card would be untrue —
+  // nothing failed and nothing ran — and would leave you looking for a problem
+  // that has already been dealt with. One quiet line instead: enough to explain
+  // the extra attempt and any pause, without inviting you to act on it. The full
+  // record stays in the provenance log either way.
+  if (tc.pathGuardRetry) {
+    return (
+      <div className="tool-retry-note" title={tc.output ?? undefined}>
+        ↻ corrected an invalid path in {tc.title}
+      </div>
+    )
+  }
   const statusClass =
     tc.status === 'completed' ? 'ok' : tc.status === 'failed' ? 'fail' : 'busy'
   return (
@@ -447,6 +460,7 @@ export const Chat = memo(function Chat({
                 // Sent again once the model finished streaming the arguments;
                 // the opening frame's copy can be empty or partial.
                 rawInput: frame.rawInput ?? tc.rawInput,
+                pathGuardRetry: frame.pathGuardRetry || tc.pathGuardRetry,
               },
             }
           })

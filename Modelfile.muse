@@ -5,7 +5,8 @@
 #
 # num_ctx 131072; keeps room for MCP tool schemas (~1500 tokens), the system prompt, and long multi-turn dialogue.
 #
-# Temperature 0.3 for more deterministic instruction-following and structured output.
+# Temperature 1.0 — must match the [[models]] entry in the vibe config, which is
+# sent per request and would otherwise override whatever is set here.
 # repeat_penalty + repeat_last_n guard against open-ended generation loops.
 #
 # Needs Ollama >= 0.32.9; older builds reject the manifest with a 412.
@@ -14,7 +15,7 @@
 #   ollama create muse-medmcp -f Modelfile.muse
 FROM muse-glimmer:30b
 PARAMETER num_ctx 131072
-PARAMETER temperature 0.3
+PARAMETER temperature 1.0
 PARAMETER top_p 0.95
 PARAMETER top_k 64
 PARAMETER repeat_penalty 1.1

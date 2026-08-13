@@ -965,6 +965,7 @@ async def ws_replay(ws: WebSocket) -> None:
 #   server → client
 #     {"type": "ready", "sessionId": str, "model": str}
 #     {"type": "chunk", "text": str}
+#     {"type": "thought", "text": str}   (the model's reasoning, if any)
 #     {"type": "tool_call", "toolCallId": str, "title": str, "status": str,
 #      "kind": str | None, "rawInput": object}
 #     {"type": "tool_call_update", "toolCallId": str, "status": str | None,
@@ -1414,6 +1415,17 @@ class _ChatConnection:
                     visible = self._thoughts.feed(str(content.get("text") or ""))
                     if visible:
                         await self._send({"type": "chunk", "text": visible})
+            elif update_type == "agent_thought_chunk":
+                # The model's reasoning, which vibe keeps in its own channel
+                # rather than mixing into the answer. Relayed as its own frame so
+                # the browser can offer it without it ever being mistaken for the
+                # reply — it was previously dropped here, so the work the model
+                # did to reach an answer was invisible.
+                content = cast("JsonDict", update.get("content") or {})
+                if content.get("type") == "text":
+                    text = str(content.get("text") or "")
+                    if text:
+                        await self._send({"type": "thought", "text": text})
             elif update_type == "user_message_chunk":
                 # Replayed user turns (session/load) — and, since vibe 2.23, an
                 # echo of the *live* prompt carrying its messageId; the browser

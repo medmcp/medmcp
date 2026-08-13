@@ -211,6 +211,9 @@ export type ChatItem =
   // messageId (replayed turns only) anchors per-turn actions like rewind.
   | { kind: 'user'; text: string; messageId?: string }
   | { kind: 'assistant'; text: string }
+  // The model's reasoning for the turn that follows, kept separate from the
+  // answer and collapsed by default.
+  | { kind: 'thought'; text: string }
   | { kind: 'tool'; toolCallId: string }
   | { kind: 'error'; text: string }
 
@@ -226,6 +229,7 @@ export interface RewindResult {
 export type ServerFrame =
   | { type: 'ready'; sessionId: string; model?: string }
   | { type: 'chunk'; text: string }
+  | { type: 'thought'; text: string }
   // A user turn: replayed from a resumed session (session/load), or vibe's
   // echo of a live prompt (merged into the locally-rendered bubble by id).
   | { type: 'user'; text: string; messageId?: string }

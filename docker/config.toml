@@ -118,7 +118,11 @@ api_base = "http://llm:11434/v1"
 api_key_env_var = ""
 api_style = "openai"
 backend = "generic"
-reasoning_field_name = "reasoning_content"
+# Ollama returns this model's chain of thought in `reasoning`, not the
+# `reasoning_content` other providers use. Point vibe at the right field or it
+# finds nothing and emits no thought chunks — the reasoning is produced and
+# billed either way, just discarded.
+reasoning_field_name = "reasoning"
 project_id = ""
 region = ""
 
@@ -132,7 +136,9 @@ alias = "local"
 temperature = 1.0
 input_price = 0.0
 output_price = 0.0
-thinking = "medium"
+# Reasoning is surfaced in the chat as a collapsed "Thinking" block, so a higher
+# budget buys visible working-out rather than hidden latency.
+thinking = "high"
 
 [project_context]
 max_chars = 40000

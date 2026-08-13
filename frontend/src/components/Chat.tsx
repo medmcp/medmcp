@@ -137,6 +137,27 @@ const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
   )
 })
 
+/**
+ * The model's reasoning for the turn that follows.
+ *
+ * Collapsed by default and rendered as plain text, not markdown: it is
+ * working-out rather than an answer, and giving it the same weight as the reply
+ * would bury the reply. Available when you want to know why the agent did
+ * something — worth being able to inspect in a clinical tool — and out of the
+ * way when you do not.
+ */
+const ThoughtBlock = memo(function ThoughtBlock({ text }: { text: string }) {
+  return (
+    <details className="thought-block">
+      <summary>
+        <span className="thought-label">Thinking</span>
+        <span className="thought-hint">{text.length.toLocaleString()} chars</span>
+      </summary>
+      <div className="thought-body">{text}</div>
+    </details>
+  )
+})
+
 /** Render a token count compactly, e.g. 131072 → "131k". */
 function fmtTokens(n: number): string {
   if (n < 1000) return String(n)
@@ -468,6 +489,7 @@ export const Chat = memo(function Chat({
     // short timer so a long answer doesn't trigger thousands of re-renders
     // (each re-parsing the accumulated markdown).
     let chunkBuffer = ''
+    let thoughtBuffer = ''
     let flushTimer: number | null = null
     const flushChunks = () => {
       if (flushTimer != null) {
@@ -485,12 +507,40 @@ export const Chat = memo(function Chat({
         return [...prev, { kind: 'assistant', text }]
       })
     }
+    // Reasoning streams token-by-token like the answer, so it is buffered on the
+    // same timer; without that a long chain of thought re-renders the transcript
+    // once per token.
+    const flushThoughts = () => {
+      if (!thoughtBuffer) return
+      const text = thoughtBuffer
+      thoughtBuffer = ''
+      setItems((prev) => {
+        const last = prev[prev.length - 1]
+        if (last && last.kind === 'thought') {
+          return [...prev.slice(0, -1), { kind: 'thought', text: last.text + text }]
+        }
+        return [...prev, { kind: 'thought', text }]
+      })
+    }
     const onFrame = (frame: ServerFrame) => {
-      // Any non-chunk frame that appends to the transcript must flush first,
-      // or buffered text would land after the item it preceded.
-      if (frame.type !== 'chunk') flushChunks()
+      // Any streaming frame that appends to the transcript must flush first, or
+      // buffered text would land after the item it preceded.
+      if (frame.type !== 'chunk' && frame.type !== 'thought') {
+        flushChunks()
+        flushThoughts()
+      }
       switch (frame.type) {
+        case 'thought':
+          // Reasoning precedes the reply it produced, so settle any pending
+          // answer text before starting a thought block.
+          flushChunks()
+          thoughtBuffer += frame.text
+          if (flushTimer == null) {
+            flushTimer = window.setTimeout(flushThoughts, 50)
+          }
+          break
         case 'chunk':
+          flushThoughts()
           chunkBuffer += frame.text
           if (flushTimer == null) {
             flushTimer = window.setTimeout(flushChunks, 50)
@@ -725,6 +775,9 @@ export const Chat = memo(function Chat({
           <div className="viewer-message">Ask the MedMCP agent anything about your workspace.</div>
         )}
         {items.map((item, i) => {
+          if (item.kind === 'thought') {
+            return <ThoughtBlock key={i} text={item.text} />
+          }
           if (item.kind === 'tool') {
             const tc = toolCalls[item.toolCallId]
             return tc ? <ToolCard key={i} tc={tc} /> : null

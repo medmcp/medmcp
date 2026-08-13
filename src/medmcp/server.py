@@ -39,6 +39,7 @@ import os
 import shutil
 import time
 from collections.abc import AsyncGenerator
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -52,6 +53,8 @@ from medmcp import (
     batchplan,
     distill,
     explain,
+    pathcheck,
+    pathguard,
     provenance,
     replay,
     sessions,
@@ -629,7 +632,7 @@ async def get_workflow(name: str) -> JsonDict:
 
 @app.post("/api/workflows/{name}/promote")
 async def post_promote_workflow(name: str) -> JsonDict:
-    """Promote a draft to active/ (loaded as a skill for new sessions)."""
+    """Promote a draft to active/, marking it reviewed and worth keeping."""
     try:
         await asyncio.to_thread(distill.promote_draft, name)
     except FileNotFoundError as exc:
@@ -970,7 +973,9 @@ async def ws_replay(ws: WebSocket) -> None:
 #     {"type": "permission_request", "requestId": int, "toolCall": {...},
 #      "options": [{"optionId": str, "name": str, "kind": str}],
 #      "explanation": str | None, "explaining": bool,
-#      "risks": [{"key": str, "label": str, "severity": str}]}
+#      "risks": [{"key": str, "label": str, "severity": str}],
+#      "paths": [{"param": str, "value": str, "role": str, "status": str,
+#                 "severity": str, "note": str}]}
 #     {"type": "permission_update", "requestId": int,
 #      "explanation": str | None, "risks": [...]}
 #     {"type": "done"} | {"type": "error", "message": str}
@@ -1030,7 +1035,7 @@ def _usage_window(update: JsonDict) -> int:
     """Pick the context-window size for a usage frame (no I/O).
 
     Ollama's ``num_ctx`` is the deployment truth, so the fetched value wins
-    (vibe's ``size`` comes from its model registry — e.g. 200k for a Gemma
+    (vibe's ``size`` comes from its model registry — e.g. 200k for a model
     served with a 131072 window). The frame's size only stands in before the
     first successful fetch, ahead of the static default. Never an inline
     fetch here: it would stall the relay of every queued frame behind an
@@ -1043,6 +1048,32 @@ def _usage_window(update: JsonDict) -> int:
     if isinstance(size_raw, int) and size_raw > 0:
         return size_raw
     return settings.cached_context_window()
+
+
+def _tool_name(update: JsonDict) -> str:
+    """Underlying tool name for a tool-call frame, or "" if not advertised.
+
+    ACP's ``title`` is prose written for a human ("Reading todos"), so it cannot
+    identify a tool. vibe puts the real name in the frame's ``_meta``, which is
+    what the browser needs to special-case a tool's rendering. Both spellings are
+    accepted because the meta block is passed through as received rather than
+    normalised like the aliased fields around it.
+    """
+    raw = update.get("_meta") or update.get("meta")
+    if not isinstance(raw, dict):
+        return ""
+    meta = cast("JsonDict", raw)
+    return str(meta.get("tool_name") or meta.get("toolName") or "")
+
+
+def _is_pathguard_denial(output: str) -> bool:
+    """True if *output* is the path guard turning a call back, not a real failure.
+
+    vibe renders a hook denial into the tool result as "Tool 'x' was denied by hook
+    '<name>': …", so the hook's own name is the marker. Matched on that rather than
+    on the reason text, which is written for the model and free to change.
+    """
+    return f"denied by hook '{settings.PATHGUARD_HOOK_NAME}'" in output
 
 
 # Permission options that approve more than the call being asked about:
@@ -1411,6 +1442,7 @@ class _ChatConnection:
                         "title": title,
                         "status": status,
                         "kind": update.get("kind"),
+                        "toolName": _tool_name(update),
                         "rawInput": update.get("rawInput"),
                     }
                 )
@@ -1438,6 +1470,10 @@ class _ChatConnection:
                         info["rawOutput"] = raw_output
                     elif output:
                         info["outputText"] = output
+                # A call the path guard turned back never ran, and the model
+                # corrects and retries on its own, so rendering it as a failure
+                # would be both untrue and alarming. Flagged here rather than left
+                # to the browser to pattern-match vibe's denial wording.
                 await self._send(
                     {
                         "type": "tool_call_update",
@@ -1445,6 +1481,7 @@ class _ChatConnection:
                         "status": status,
                         "output": output[:2000] if output else None,
                         "rawInput": raw_input,
+                        "pathGuardRetry": _is_pathguard_denial(output),
                     }
                 )
                 if status in ("completed", "failed") and info is not None:
@@ -1508,6 +1545,35 @@ class _ChatConnection:
         risk_keys: list[str] = cast("list[str]", tool_call.get("risks") or [])
         explaining = explanation is None and settings.load_explain_enabled()
 
+        # Existence check on the call's path arguments. Deterministic and local, so
+        # unlike the explanation above it ships *with* the dialog rather than being
+        # pushed in later, and it cannot itself be wrong about what is on disk.
+        # Advisory only — it annotates the decision, it never makes one.
+        #
+        # Off the event loop for the same reason /api/tree is: these are stat calls,
+        # and on a network-mounted workspace a single slow one would stall every
+        # chat socket, not just this turn. Best-effort — a failure here must leave
+        # the approval box exactly as it would have been without the check.
+        try:
+            containerized = pathguard.is_containerized_tool(str(tool_call.get("title") or ""))
+            path_findings = await asyncio.to_thread(
+                partial(
+                    pathcheck.check_tool_call_paths,
+                    tool_call.get("rawInput"),
+                    WORKSPACE_ROOT,
+                    containerized=containerized,
+                )
+            )
+        except Exception:
+            log.warning("path check failed for %s", title, exc_info=True)
+            path_findings = []
+        if any(f["severity"] == "error" for f in path_findings):
+            _audit.info(
+                "permission request has unresolvable paths: %s — %s",
+                title,
+                ", ".join(f"{f['param']}={f['value']!r} ({f['status']})" for f in path_findings),
+            )
+
         _audit.info("permission requested: %s", title)
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[str | None] = loop.create_future()
@@ -1521,6 +1587,7 @@ class _ChatConnection:
                 "explanation": explanation,
                 "explaining": explaining,
                 "risks": explain.resolve_risks(risk_keys),
+                "paths": path_findings,
             }
         )
         if explaining:

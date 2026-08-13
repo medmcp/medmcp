@@ -46,6 +46,7 @@ Homepage = "https://medmcp.ai"
 medmcp = "medmcp.provcli:main"
 medmcp-workspace = "medmcp.server:main"
 medmcp-mcp-proxy = "medmcp.proxy:main"
+medmcp-pathguard = "medmcp.pathguard:main"
 
 [dependency-groups]
 test = [

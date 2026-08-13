@@ -17,8 +17,14 @@ export interface ToolCallState {
   title: string
   status: string
   kind?: string | null
+  /** The underlying tool's name (ACP's `title` is prose, so it cannot identify
+   *  a tool). Lets a tool with a better rendering than a generic card get one. */
+  toolName?: string
   rawInput?: unknown
   output?: string | null
+  /** The path guard turned this call back before it ran: the agent corrects the
+   *  path and retries, so it renders as a quiet note rather than a failure. */
+  pathGuardRetry?: boolean
 }
 
 /** A risk tag resolved by the server from the fixed taxonomy. */
@@ -26,6 +32,29 @@ export interface RiskTag {
   key: string
   label: string
   severity: 'low' | 'medium' | 'high'
+}
+
+/** One path argument of a pending tool call, checked against the filesystem.
+ *  Deterministic (no LLM), so unlike `explanation` it arrives with the request. */
+export interface PathFinding {
+  param: string
+  value: string
+  role: 'input' | 'output' | 'unknown'
+  status:
+    | 'ok'
+    | 'missing'
+    | 'parent_missing'
+    | 'will_overwrite'
+    | 'outside_workspace'
+    | 'unreadable'
+  severity: 'error' | 'warning' | 'info'
+  note: string
+  /** For a missing path: nearest existing folder ('.' is the workspace root),
+   *  a capped sample of what it holds, and how many entries there are. Seeing
+   *  the neighbours is what makes a missing path actionable. Empty otherwise. */
+  nearest: string
+  entries: string[]
+  entry_total: number
 }
 
 /** A permission request awaiting the user's decision. */
@@ -42,6 +71,8 @@ export interface PermissionRequest {
   /** True while the server is still generating the LLM explanation. */
   explaining?: boolean
   risks?: RiskTag[]
+  /** Existence check on the call's path arguments; empty when it takes none. */
+  paths?: PathFinding[]
 }
 
 /** One prior chat session, as served by GET /api/sessions. */
@@ -167,6 +198,14 @@ export type ReplayFrame =
   | { type: 'item_result'; item: number; ok: boolean; error?: string | null; outputs: string[] }
   | { type: 'result'; ok: boolean; error?: string | null; outputs?: string[] }
 
+/** One task in the agent's plan, from the `todo` tool's arguments. */
+export interface TodoItem {
+  id?: string
+  content: string
+  status: 'pending' | 'in_progress' | 'completed' | 'cancelled'
+  priority?: string
+}
+
 /** Ordered chat transcript entries. Tool calls render as inline cards. */
 export type ChatItem =
   // messageId (replayed turns only) anchors per-turn actions like rewind.
@@ -196,6 +235,7 @@ export type ServerFrame =
       title: string
       status: string
       kind?: string | null
+      toolName?: string
       rawInput?: unknown
     }
   | {
@@ -205,6 +245,8 @@ export type ServerFrame =
       output?: string | null
       /** Completed arguments, re-sent once the model finished streaming them. */
       rawInput?: unknown
+      /** Server-tagged: the path guard turned the call back before it ran. */
+      pathGuardRetry?: boolean
     }
   | { type: 'usage'; used: number; size?: number }
   | {

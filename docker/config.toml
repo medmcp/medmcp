@@ -9,7 +9,15 @@ vim_keybindings = false
 disable_welcome_banner_animation = false
 autocopy_to_clipboard = true
 file_watcher_for_autocomplete = false
-auto_compact_threshold = 200000
+# Token count at which the agent summarises the conversation and starts a fresh
+# context. It must sit below the model's window (131072 for muse-medmcp, per
+# Modelfile num_ctx) or proactive compaction never fires:
+# vibe's default of 200000 is above the ceiling, so the context would instead
+# grow until the backend rejected it and vibe recovered through its
+# ContextTooLongError path — a failed turn and a retry on every overflow rather
+# than a planned summary. 115000 leaves ~16k for the summary and the reply.
+# Revisit alongside num_ctx if the model changes.
+auto_compact_threshold = 115000
 context_warnings = false
 auto_approve = false
 system_prompt_id = "medmcp"
@@ -115,9 +123,12 @@ project_id = ""
 region = ""
 
 [[models]]
-name = "gemma4-medmcp"
+name = "muse-medmcp"
 provider = "ollama"
 alias = "local"
+# Must match Modelfile.muse. This value is sent on every request and a request
+# option overrides the Modelfile's PARAMETER, so the two disagreeing means the
+# Modelfile silently loses — keep them in step.
 temperature = 1.0
 input_price = 0.0
 output_price = 0.0

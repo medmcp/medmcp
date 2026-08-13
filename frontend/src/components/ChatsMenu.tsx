@@ -110,10 +110,15 @@ export function ChatsMenu({ currentSessionId, onSelectSession, onCurrentDeleted 
 
   const renderRow = (s: SessionInfo, isArchived: boolean) => {
     const editing = editingId === s.id
+    const isCurrent = s.id === currentSessionId
     return (
       <div
         key={s.id}
-        className={`session-row${s.id === currentSessionId ? ' current' : ''}`}
+        className={`session-row${isCurrent ? ' current' : ''}`}
+        // Marks the open chat for assistive tech as well as visually: the row is
+        // otherwise distinguished only by a background wash, which hover nearly
+        // matches and which conveys nothing without colour.
+        aria-current={isCurrent ? 'true' : undefined}
         onClick={() => !editing && select(s.id)}
       >
         <span
@@ -137,10 +142,15 @@ export function ChatsMenu({ currentSessionId, onSelectSession, onCurrentDeleted 
           ) : (
             <span className="session-title">{s.title || 'Untitled chat'}</span>
           )}
-          <span className="session-time">{timeLabel(s.updatedAt)}</span>
+          <span className="session-time">
+            {timeLabel(s.updatedAt)}
+            {/* Says which chat you are in, rather than leaving it to a colour a
+                hover can imitate. */}
+            {isCurrent && <span className="session-current-tag">open</span>}
+          </span>
         </span>
         <span className="session-actions" onClick={(e) => e.stopPropagation()}>
-          {!isArchived && s.id === currentSessionId && (
+          {!isArchived && isCurrent && (
             <button
               className="btn-icon"
               title="Branch this chat (duplicate to try a different path)"

@@ -879,3 +879,24 @@ def test_requirement_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "resolve_image_digest", _matching_digest)
     ok = {s["stack"]: s for s in server._requirement_statuses(recipe, servers)}
     assert ok["medmcp-neuro"]["status"] == "ok"
+
+
+class TestPathGuardDenialTagging:
+    """A guard denial is tagged so the browser need not parse vibe's wording."""
+
+    def test_recognises_a_pathguard_denial(self) -> None:
+        """The hook's own name is the marker, not the reason text."""
+        out = (
+            "Tool 'medmcp-neuro-core_skull_strip' was denied by hook "
+            "'medmcp-pathguard': RETRY THIS CALL WITH A CORRECTED PATH."
+        )
+        assert server._is_pathguard_denial(out)
+
+    def test_a_real_tool_failure_is_not_tagged(self) -> None:
+        """An actual failure must keep rendering as one."""
+        assert not server._is_pathguard_denial("Error executing tool: exit 1")
+        assert not server._is_pathguard_denial("")
+
+    def test_another_hook_is_not_tagged(self) -> None:
+        """Only this guard's denials are softened; someone else's stay visible."""
+        assert not server._is_pathguard_denial("Tool 'x' was denied by hook 'other': no")

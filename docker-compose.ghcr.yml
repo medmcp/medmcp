@@ -1,11 +1,13 @@
-# Deployment compose: runs the PUBLISHED images from the private GHCR — builds
-# nothing. Fully self-contained (the Modelfile is inlined into llm-init below),
-# so a node needs NO repo checkout. This file is also published as an OCI artifact
-# by CI, so it can run straight from the registry:
+# Deployment compose: runs the PUBLISHED images from GHCR — builds nothing.
+# Fully self-contained (the Modelfile is inlined into llm-init below), so a node
+# needs NO repo checkout. This file is also published as an OCI artifact by CI,
+# so it can run straight from the registry:
 #
-#   docker login ghcr.io                       # read:packages token
 #   MEDMCP_WORKSPACE=/abs/path \
 #     docker compose -f oci://ghcr.io/medmcp/compose:main up -d
+#
+# The published images pull anonymously. `docker login ghcr.io` is needed only
+# for a private mirror or for stack images you publish yourself.
 #
 # From a checkout you can equivalently point at this file (`just compose-up-ghcr`).
 # Pin a release with MEDMCP_TAG=<git-sha> (default :main). GPU uses CDI (rootless);
@@ -16,7 +18,7 @@ services:
   llm:
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
     environment:
-      # Keep gemma4-medmcp resident in VRAM (-1) so it isn't evicted after the
+      # Keep the model resident in VRAM (-1) so it isn't evicted after the
       # 5-minute idle default and reloaded on the next prompt. Override with a
       # duration (e.g. 30m) on shared GPUs to release VRAM when idle.
       OLLAMA_KEEP_ALIVE: "${OLLAMA_KEEP_ALIVE:--1}"
@@ -38,25 +40,31 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: "http://llm:11434"
+      # Model to build and the base tag it derives from. The defaults reproduce
+      # the previous behaviour exactly; setting both switches models without
+      # editing this file. The core reads the same OLLAMA_MODEL, so the model the
+      # agent chats with and the one built here cannot drift apart.
+      MEDMCP_MODEL: "${OLLAMA_MODEL:-muse-medmcp}"
+      MEDMCP_BASE_MODEL: "${MEDMCP_BASE_MODEL:-muse-glimmer:30b}"
     entrypoint: ["/bin/sh", "-c"]
     # The Modelfile is inlined (not bind-mounted) so this compose file is fully
     # self-contained and can run straight from the OCI registry with no checkout.
-    # Keep these PARAMETERs in sync with Modelfile.gemma4 — the source of truth
+    # Keep these PARAMETERs in sync with Modelfile.muse — the source of truth
     # for the host-native `just pull-model` path.
     command:
       - |
-        if ollama list | grep -q gemma4-medmcp; then exit 0; fi
-        ollama pull gemma4:26b
+        if ollama list | grep -q "$$MEDMCP_MODEL"; then exit 0; fi
+        ollama pull "$$MEDMCP_BASE_MODEL"
         printf '%s\n' \
-          'FROM gemma4:26b' \
+          "FROM $$MEDMCP_BASE_MODEL" \
           'PARAMETER num_ctx 131072' \
           'PARAMETER temperature 0.3' \
           'PARAMETER top_p 0.95' \
           'PARAMETER top_k 64' \
           'PARAMETER repeat_penalty 1.15' \
           'PARAMETER repeat_last_n 256' \
-          > /tmp/Modelfile.gemma4
-        ollama create gemma4-medmcp -f /tmp/Modelfile.gemma4
+          > /tmp/Modelfile.medmcp
+        ollama create "$$MEDMCP_MODEL" -f /tmp/Modelfile.medmcp
     restart: "no"
 
   llm-warmup:
@@ -68,12 +76,13 @@ services:
         condition: service_completed_successfully
     environment:
       OLLAMA_HOST: "http://llm:11434"
+      MEDMCP_MODEL: "${OLLAMA_MODEL:-muse-medmcp}"
     entrypoint: ["/bin/sh", "-c"]
     # Preload the model into VRAM at startup so the first prompt is instant
     # instead of paying the cold-load latency. Nothing depends on this service,
     # so the core UI still comes up immediately while the model warms.
     command:
-      - 'ollama run gemma4-medmcp "ok" </dev/null >/dev/null 2>&1 || true'
+      - 'ollama run "$$MEDMCP_MODEL" "ok" </dev/null >/dev/null 2>&1 || true'
     restart: "no"
 
   medmcp:
@@ -86,11 +95,15 @@ services:
         condition: service_completed_successfully
     environment:
       OLLAMA_BASE_URL: "http://llm:11434"
+      # Names the model for both the agent's chat (the entrypoint writes it into
+      # config.toml, which has no env expansion) and the auxiliary calls —
+      # tool-call explanations and distillation prose — which read it directly.
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-muse-medmcp}"
       MEDMCP_WORKSPACE: "${MEDMCP_WORKSPACE:?set MEDMCP_WORKSPACE to an absolute host path}"
       # Default to the GHCR catalog baked into the core image.
       MEDMCP_CATALOG_URL: "${MEDMCP_CATALOG_URL:-/app/catalog.ghcr.json}"
       # GPU the LLM + GPU stacks target (CDI device id). "all" = every GPU; pin
-      # with an index/UUID, e.g. MEDMCP_GPU=4.
+      # with an index/UUID, e.g. MEDMCP_GPU=0.
       MEDMCP_GPU: "${MEDMCP_GPU:-all}"
       # Optional registry login inside the core — for credential-helper hosts
       # that mount no plaintext auths. Leave empty to use the mounted config.

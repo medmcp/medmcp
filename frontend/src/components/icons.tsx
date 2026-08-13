@@ -220,3 +220,14 @@ export function TrashIcon(props: IconProps) {
     </Icon>
   )
 }
+
+/** Storefront awning — the tool-stack marketplace. */
+export function StoreIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M3 9h18l-1.5-4.5A1 1 0 0 0 18.55 4H5.45a1 1 0 0 0-.95.5L3 9Z" />
+      <path d="M4 9v10a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V9" />
+      <path d="M8 9a2.5 2.5 0 0 1-5 0M13 9a2.5 2.5 0 0 1-5 0M18 9a2.5 2.5 0 0 1-5 0M21 9a2.5 2.5 0 0 1-3 0" />
+    </Icon>
+  )
+}

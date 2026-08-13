@@ -6,7 +6,13 @@ import rehypeKatex from 'rehype-katex'
 import { ChatSocket } from '../chatSocket'
 import type { ChatSocketStatus } from '../chatSocket'
 import { previewRewind, rewindTo } from '../api'
-import type { ChatItem, PermissionRequest, ServerFrame, ToolCallState } from '../types'
+import type {
+  ChatItem,
+  PermissionRequest,
+  ServerFrame,
+  TodoItem,
+  ToolCallState,
+} from '../types'
 import { ChatsMenu } from './ChatsMenu'
 import { ShieldIcon } from './icons'
 
@@ -29,9 +35,83 @@ function formatToolInput(raw: unknown): string {
   return JSON.stringify(raw, null, 2)
 }
 
+// vibe's planning tool. Its calls each carry the whole list, so the UI treats
+// them as one evolving plan rather than a series of independent calls.
+const TODO_TOOL = 'todo'
+
+const TODO_MARK: Record<string, string> = {
+  completed: '✓',
+  in_progress: '▸',
+  cancelled: '✕',
+  pending: '·',
+}
+
+/** Read the plan out of a todo call's arguments, tolerating the string form. */
+function parsePlan(raw: unknown): TodoItem[] {
+  let value = raw
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value)
+    } catch {
+      return []
+    }
+  }
+  if (value === null || typeof value !== 'object') return []
+  const todos = (value as { todos?: unknown }).todos
+  if (!Array.isArray(todos)) return []
+  return todos.filter(
+    (x): x is TodoItem =>
+      x !== null && typeof x === 'object' && typeof (x as TodoItem).content === 'string',
+  )
+}
+
+/** The agent's plan: one checklist that updates in place as tasks progress. */
+const PlanCard = memo(function PlanCard({ items }: { items: TodoItem[] }) {
+  const done = items.filter((i) => i.status === 'completed').length
+  return (
+    <div className="plan-card">
+      <div className="plan-head">
+        <span className="plan-title">Plan</span>
+        <span className="plan-count">
+          {done}/{items.length}
+        </span>
+      </div>
+      <ul className="plan-list">
+        {items.map((i, n) => (
+          <li key={i.id ?? n} className={`plan-item plan-${i.status}`}>
+            <span className="plan-mark" aria-hidden="true">
+              {TODO_MARK[i.status] ?? '·'}
+            </span>
+            <span className="plan-text">{i.content}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+})
+
 // Memoized so a streaming update to the newest message doesn't re-render
 // (and re-parse the markdown of) every earlier row in the transcript.
 const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
+  // The path guard turned this call back before it ran, and the agent corrects
+  // the path and calls again by itself. A red "failed" card would be untrue —
+  // nothing failed and nothing ran — and would leave you looking for a problem
+  // that has already been dealt with. One quiet line instead: enough to explain
+  // the extra attempt and any pause, without inviting you to act on it. The full
+  // record stays in the provenance log either way.
+  if (tc.pathGuardRetry) {
+    return (
+      <div className="tool-retry-note" title={tc.output ?? undefined}>
+        ↻ corrected an invalid path in {tc.title}
+      </div>
+    )
+  }
+  // The plan reads as a plan, not as a tool invocation: a checklist you can
+  // glance at, rather than a card wrapping a JSON blob you have to expand.
+  if (tc.toolName === TODO_TOOL) {
+    const plan = parsePlan(tc.rawInput)
+    if (plan.length > 0) return <PlanCard items={plan} />
+  }
   const statusClass =
     tc.status === 'completed' ? 'ok' : tc.status === 'failed' ? 'fail' : 'busy'
   return (
@@ -215,6 +295,35 @@ function PermissionCard({
       {perm.toolCall.rawInput != null && (
         <pre className="approval-input">{formatToolInput(perm.toolCall.rawInput)}</pre>
       )}
+      {perm.paths && perm.paths.length > 0 && (
+        // Sits directly under the arguments it describes. Every checked path is
+        // listed, not just the problems: confirming that an input really is there
+        // is worth as much as flagging one that isn't.
+        <ul className="approval-paths">
+          {perm.paths.map((p, i) => (
+            <li key={`${p.param}-${i}`} className={`path-${p.severity}`} title={p.value}>
+              <span className="path-mark" aria-hidden="true">
+                {p.severity === 'error' ? '✕' : p.severity === 'warning' ? '!' : '✓'}
+              </span>
+              <code className="path-param">{p.param}</code>
+              <span className="path-note">
+                {p.note}
+                {p.entries.length > 0 && (
+                  // What sits where the file was expected. Usually the intended
+                  // path is right here, so it reads as the answer, not a dump.
+                  <span className="path-siblings">
+                    {' — '}
+                    <code>{p.nearest === '.' ? 'workspace' : p.nearest}</code> contains{' '}
+                    {p.entries.join(', ')}
+                    {p.entry_total > p.entries.length &&
+                      ` … (${p.entry_total - p.entries.length} more)`}
+                  </span>
+                )}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="approval-btns">
         {perm.options.map((opt) => (
           <button
@@ -353,6 +462,8 @@ export const Chat = memo(function Chat({
     // Tool-call ids that already have a transcript row (ids are unique across
     // sessions, so this only ever grows by one entry per tool call).
     const seenToolIds = new Set<string>()
+    // Ids of plan (todo) calls, so a newer plan can retire its predecessors.
+    const planIds = new Set<string>()
     // Chunks arrive near per-token; buffer them and flush into state on a
     // short timer so a long answer doesn't trigger thousands of re-renders
     // (each re-parsing the accumulated markdown).
@@ -391,7 +502,19 @@ export const Chat = memo(function Chat({
           // may re-invoke updaters (appending duplicate transcript rows).
           if (!seenToolIds.has(frame.toolCallId)) {
             seenToolIds.add(frame.toolCallId)
-            setItems((items) => [...items, { kind: 'tool', toolCallId: frame.toolCallId }])
+              // The plan supersedes itself. Every todo call carries the whole
+              // list, so each edit would otherwise stack another near-identical
+              // card and bury the conversation under copies of one checklist.
+              // Drop the earlier one and keep the newest, which lands where the
+              // plan actually changed.
+              const isPlan = frame.toolName === TODO_TOOL
+              if (isPlan) planIds.add(frame.toolCallId)
+              setItems((items) => {
+                const kept = isPlan
+                  ? items.filter((i) => !(i.kind === 'tool' && planIds.has(i.toolCallId)))
+                  : items
+                return [...kept, { kind: 'tool', toolCallId: frame.toolCallId }]
+              })
           }
           setToolCalls((prev) => ({
             ...prev,
@@ -400,6 +523,7 @@ export const Chat = memo(function Chat({
               title: frame.title,
               status: frame.status,
               kind: frame.kind,
+              toolName: frame.toolName,
               rawInput: frame.rawInput,
               output: prev[frame.toolCallId]?.output,
             },
@@ -418,6 +542,7 @@ export const Chat = memo(function Chat({
                 // Sent again once the model finished streaming the arguments;
                 // the opening frame's copy can be empty or partial.
                 rawInput: frame.rawInput ?? tc.rawInput,
+                pathGuardRetry: frame.pathGuardRetry || tc.pathGuardRetry,
               },
             }
           })

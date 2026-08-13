@@ -4,7 +4,7 @@ name: Images
 # arch-suffixed tags, then merge them into multi-arch manifest lists. Consumers
 # keep using the bare tag (ghcr.io/medmcp/core:main) and resolve to their own
 # arch — so the README quickstart works unchanged on amd64 nodes and on aarch64
-# boxes (DGX Spark / GB10), which previously pulled an unrunnable amd64 image.
+# boxes, which previously pulled an unrunnable amd64 image.
 # On pull_request: build + smoke test only — no login, no push, no merge.
 # Plain `docker build` on the runner's daemon so core can FROM the just-built base
 # without a registry round-trip. Each arch builds natively because QEMU is far too

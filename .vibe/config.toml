@@ -43,10 +43,14 @@ project_id = ""
 region = ""
 
 [[models]]
-name = "gemma4-medmcp"
+name = "muse-medmcp"
 provider = "ollama"
 alias = "local"
-temperature = 1.0
+# Must match Modelfile.muse. This value is sent on every request, and a request
+# option overrides the Modelfile's PARAMETER — so while this said 1.0 the
+# Modelfile's 0.3 never applied. Low temperature is deliberate: the model is
+# choosing tool arguments and file paths, where creativity is a defect.
+temperature = 0.3
 input_price = 0.0
 output_price = 0.0
 thinking = "medium"

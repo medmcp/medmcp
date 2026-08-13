@@ -45,11 +45,11 @@ log: logging.Logger = logging.getLogger(__name__)
 # Ollama endpoint + model, used for the agent's auxiliary LLM calls
 # (tool-call explanations, distillation prose) and the provenance manifest.
 OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "gemma4-medmcp")
+OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "muse-medmcp")
 
 # GPU selector (CDI device id) substituted into container-stack manifests' ${MEDMCP_GPU}.
 # Default so os.path.expandvars (no ":-" support) never leaves the literal placeholder;
-# "all" = every GPU, override with an index/UUID (e.g. "4") to pin. LLM_GPU captures
+# "all" = every GPU, override with an index/UUID (e.g. "0") to pin. LLM_GPU captures
 # the value the LLM container was created with (deploy-time) before a persisted runtime
 # selection overrides MEDMCP_GPU for stacks (see load/save_gpu_selection).
 os.environ.setdefault("MEDMCP_GPU", "all")
@@ -66,7 +66,7 @@ if GPU_SELECTION_PATH.exists():
         os.environ["MEDMCP_GPU"] = _gpu_sel
 
 # Context window size used when Ollama hasn't been queried (yet) — the value
-# set in Modelfile.gemma4.
+# set in Modelfile.muse.
 DEFAULT_CONTEXT_WINDOW: int = 131_072
 
 # Cached context window size fetched from Ollama /api/show. None = not yet
@@ -263,7 +263,7 @@ def _stack_pids_limit() -> int:
     workers, and each worker then opens an OpenMP/BLAS pool sized to the core
     count. The peak is therefore roughly quadratic in cores, so any fixed number
     is wrong somewhere — 512 was comfortable on a laptop and throttled a 20-core
-    DGX Spark, where a single LST-AI run peaked at 629 tasks and died with
+    host, where a single LST-AI run peaked at 629 tasks and died with
     ``pthread_create() is 11`` (EAGAIN). nnUNet reports that as "Background
     workers died ... your RAM was full", which sends you looking at memory.
 
@@ -1071,6 +1071,15 @@ def _llm_image() -> str:
     return next((n.strip() for n in ps.stdout.splitlines() if n.strip()), "")
 
 
+# Enumerating GPUs costs a throwaway container spawn (~1s), and the answer cannot
+# change while the process lives — the hardware is fixed. Cached so opening the
+# settings drawer does not pay for it every time. Only a non-empty result is kept:
+# an empty one may mean docker was briefly unavailable, and caching that would
+# require a restart to recover, whereas a host with no GPUs takes the fast path
+# above (no LLM image, so no container to spawn).
+_gpu_cache: list[JsonDict] | None = None
+
+
 def list_gpus() -> list[JsonDict]:
     """Best-effort list of GPUs as ``{index, uuid, name}`` for the settings picker.
 
@@ -1081,6 +1090,9 @@ def list_gpus() -> list[JsonDict]:
     present CUDA image). Returns ``[]`` when not enumerable — the UI falls back to
     free text.
     """
+    global _gpu_cache
+    if _gpu_cache is not None:
+        return list(_gpu_cache)
     image = _llm_image()
     if not image:
         return []
@@ -1106,13 +1118,67 @@ def list_gpus() -> list[JsonDict]:
         parts = [p.strip() for p in line.split(",")]
         if len(parts) >= 3 and parts[0]:
             gpus.append({"index": parts[0], "uuid": parts[1], "name": parts[2]})
-    return gpus
+    if gpus:
+        _gpu_cache = gpus
+    return list(gpus)
 
 
 # Serializes the config.toml read-modify-write within this process: the
 # workspace server runs the sync from a worker thread per websocket connect,
 # and several connects race after a settings-triggered restart.
 _config_write_lock = threading.Lock()
+
+
+# The pre_tool hook that refuses a tool call whose paths do not resolve, so the
+# model corrects itself before the call ever reaches the approval dialog (see
+# medmcp.pathguard). Registered here rather than left to hand-editing so it cannot
+# silently go missing from an install.
+PATHGUARD_HOOK_NAME = "medmcp-pathguard"
+
+
+def _ensure_pathguard_hook(vibe_home: Path) -> None:
+    """Register the path-guard ``pre_tool`` hook in ``<vibe_home>/hooks.toml``.
+
+    Hooks live in their own file: vibe reads ``hooks.toml`` from each project root
+    and from ``VIBE_HOME``, and never takes them from ``config.toml``. Since its
+    file sources default to ``("user",)``, no project root is consulted at all and
+    ``VIBE_HOME`` is the one location that is always read.
+
+    Matched against every tool (no ``match``): ``write_file`` and ``edit`` take
+    paths just as the imaging stacks do. ``strict`` stays false so a hook that
+    fails to run is a passthrough — a broken guard must not be able to block work.
+    Any other hook in the file is preserved.
+    """
+    path = vibe_home / "hooks.toml"
+    others: list[JsonDict] = []
+    if path.is_file():
+        try:
+            with path.open("rb") as fh:
+                raw = cast("list[JsonDict]", tomllib.load(fh).get("hooks", []))
+            others = [h for h in raw if h.get("name") != PATHGUARD_HOOK_NAME]
+        except (OSError, tomllib.TOMLDecodeError, AttributeError):
+            log.warning("could not read %s; rewriting it", path)
+    entry: JsonDict = {
+        "name": PATHGUARD_HOOK_NAME,
+        "type": "pre_tool",
+        "command": "medmcp-pathguard",
+        "timeout": 10.0,
+        "strict": False,
+        "description": (
+            "Refuse a tool call whose file paths do not resolve, handing the "
+            "reason back to the model so it can correct them."
+        ),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            tomli_w.dump({"hooks": [*others, entry]}, fh)
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
 
 
 def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
@@ -1218,6 +1284,9 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
     workflow_names = {w["name"] for w in discover_workflows()}
     existing_disabled = cast("list[str]", cfg.get("disabled_skills", []))
     cfg["disabled_skills"] = sorted(s for s in existing_disabled if s not in workflow_names)
+
+    # Hooks live in their own file next to the config, not inside it.
+    _ensure_pathguard_hook(VIBE_HOME)
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     # A unique temp name (not a fixed .tmp path) so a concurrent writer in

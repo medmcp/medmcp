@@ -1136,6 +1136,17 @@ button:hover {
   font-size: 12.5px;
 }
 
+/* A call the path guard turned back: deliberately not a card. It explains an
+   extra attempt without looking like something went wrong or needs attention. */
+.tool-retry-note {
+  align-self: stretch;
+  max-width: none;
+  padding: 1px 14px;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-style: italic;
+}
+
 .tool-card-head {
   display: flex;
   align-items: center;
@@ -1323,6 +1334,69 @@ button:hover {
   border: 1px solid rgba(210, 34, 41, 0.3);
 }
 
+/* ── Path existence checks (under the approval box's arguments) ── */
+
+.approval-paths {
+  list-style: none;
+  margin: 6px 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+}
+
+.approval-paths li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.path-mark {
+  flex: none;
+  width: 11px;
+  text-align: center;
+  font-weight: 700;
+}
+
+.path-param {
+  flex: none;
+  font-family: var(--mono);
+  color: var(--muted);
+}
+
+.path-note {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The sibling listing is supporting detail: readable, but it must not compete
+   with the finding it hangs off (which is colour-coded by severity). */
+.path-siblings {
+  color: var(--muted);
+}
+
+.path-siblings code {
+  font-family: var(--mono);
+  color: var(--muted2);
+}
+
+.path-info .path-mark {
+  color: var(--ok);
+}
+
+.path-warning .path-mark,
+.path-warning .path-note {
+  color: var(--warn);
+}
+
+.path-error .path-mark,
+.path-error .path-note {
+  color: var(--red-tint);
+  font-weight: 600;
+}
+
 /* ── Settings drawer ── */
 
 .drawer-backdrop {
@@ -1354,14 +1428,34 @@ button:hover {
   padding: 6px 18px 18px;
 }
 
-.drawer-notice {
+/* Pinned to the bottom of the drawer and out of the flow, so confirming a save
+   never moves the controls above it. */
+.drawer-toast {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
   font-size: 12px;
   color: var(--blue-xl);
-  background: rgba(43, 79, 163, 0.1);
-  border: 1px solid rgba(127, 168, 245, 0.15);
+  background: rgba(24, 28, 37, 0.96);
+  border: 1px solid rgba(127, 168, 245, 0.25);
   border-radius: 8px;
-  padding: 8px 12px;
-  margin: 12px 0 0;
+  padding: 9px 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  animation: drawer-toast-in 140ms ease-out;
+}
+
+@keyframes drawer-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer-toast {
+    animation: none;
+  }
 }
 
 .drawer-footnote {
@@ -1595,8 +1689,41 @@ button:hover {
   background: rgba(255, 255, 255, 0.04);
 }
 
+/* The open chat. A background wash alone was too close to :hover to pick out
+   at a glance, so the row also carries a brand-blue edge and an "open" tag —
+   position, colour and text, rather than colour by itself. */
 .session-row.current {
-  background: rgba(43, 79, 163, 0.18);
+  position: relative;
+  background: rgba(43, 79, 163, 0.22);
+  padding-left: 13px;
+}
+
+.session-row.current::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 6px;
+  bottom: 6px;
+  width: 2.5px;
+  border-radius: 2px;
+  background: var(--blue-xl);
+}
+
+.session-row.current .session-title {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.session-current-tag {
+  margin-left: 7px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--blue-xl);
+  background: rgba(43, 79, 163, 0.3);
 }
 
 .prov-dot {
@@ -2324,4 +2451,284 @@ textarea.wf-input {
 
 .ctx-fill.ctx-high {
   background: var(--red);
+}
+
+/* ── Stack marketplace (centred window) ── */
+
+/* Shared with the drawer's backdrop but centred: this is a window you work in,
+   not a panel attached to an edge. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 40;
+}
+
+.market {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 900px;
+  max-width: 92vw;
+  height: 640px;
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--dark2);
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  z-index: 41;
+  overflow: hidden;
+}
+
+.market-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.market-search {
+  flex: 1 1 220px;
+  min-width: 0;
+  background: var(--card);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  padding: 7px 11px;
+}
+
+.market-search:focus {
+  outline: none;
+  border-color: var(--blue-l);
+}
+
+.market-filters {
+  display: flex;
+  gap: 6px;
+}
+
+.market-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px solid var(--border2);
+  border-radius: 999px;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11.5px;
+  padding: 5px 11px;
+}
+
+.market-chip:hover {
+  color: var(--text);
+}
+
+.market-chip.on {
+  background: rgba(43, 79, 163, 0.18);
+  border-color: var(--blue-l);
+  color: var(--blue-xl);
+}
+
+.market-count {
+  font-size: 10.5px;
+  opacity: 0.75;
+}
+
+.market-msg {
+  margin: 10px 16px 0;
+}
+
+.market-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 16px;
+}
+
+/* auto-fill rather than auto-fit: with few stacks the cards keep their width
+   instead of stretching to fill the row, which looks broken at two items. */
+.market-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(255px, 1fr));
+  gap: 12px;
+}
+
+.market-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 13px;
+}
+
+.market-card.installed {
+  border-color: rgba(127, 168, 245, 0.28);
+}
+
+.market-card-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.market-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.market-state {
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  border: 1px solid var(--border2);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+
+.market-state.on {
+  color: var(--ok);
+  border-color: rgba(74, 222, 128, 0.3);
+  background: rgba(74, 222, 128, 0.1);
+}
+
+.market-desc {
+  flex: 1;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted2);
+}
+
+.market-image {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.market-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 2px;
+  min-height: 26px;
+}
+
+.market-foot {
+  display: flex;
+  gap: 8px;
+  padding: 11px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.market-foot .wf-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── Agent plan (the todo tool) ── */
+
+/* The plan is one evolving object, not a series of calls: every todo update
+   carries the whole list, so the transcript keeps only the newest and renders
+   it as a checklist instead of a card wrapping JSON. */
+.plan-card {
+  align-self: stretch;
+  max-width: none;
+  background: var(--card);
+  border: 1px solid rgba(127, 168, 245, 0.22);
+  border-radius: 10px;
+  padding: 9px 13px 10px;
+}
+
+.plan-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.plan-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--blue-xl);
+}
+
+.plan-count {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.plan-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--muted2);
+}
+
+.plan-mark {
+  flex: none;
+  width: 11px;
+  text-align: center;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.plan-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.plan-completed .plan-mark {
+  color: var(--ok);
+}
+
+/* Struck through and dimmed: done work should recede so the eye lands on what
+   is still outstanding. */
+.plan-completed .plan-text {
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-color: rgba(138, 146, 166, 0.5);
+}
+
+.plan-in_progress .plan-mark {
+  color: var(--blue-xl);
+}
+
+.plan-in_progress .plan-text {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.plan-cancelled .plan-mark,
+.plan-cancelled .plan-text {
+  color: var(--muted);
+  opacity: 0.6;
+  text-decoration: line-through;
 }

@@ -1,5 +1,5 @@
 {
-  "_comment": "Production catalog referencing the private GHCR images (ghcr.io/medmcp). Baked into the core image at /app/catalog.ghcr.json; point MEDMCP_CATALOG_URL at it on deployments that pull from GHCR (nodes must `docker login ghcr.io`). Pin :main to a specific :<sha> for reproducible fleets.",
+  "_comment": "Production catalog referencing the published GHCR images (ghcr.io/medmcp). Baked into the core image at /app/catalog.ghcr.json; point MEDMCP_CATALOG_URL at it on deployments that pull from GHCR. Pin :main to a specific :<sha> for reproducible fleets.",
   "stacks": [
     {
       "name": "medmcp-dicom",

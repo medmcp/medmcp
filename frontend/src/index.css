@@ -2638,3 +2638,97 @@ textarea.wf-input {
   flex: 1;
   min-width: 0;
 }
+
+/* ── Agent plan (the todo tool) ── */
+
+/* The plan is one evolving object, not a series of calls: every todo update
+   carries the whole list, so the transcript keeps only the newest and renders
+   it as a checklist instead of a card wrapping JSON. */
+.plan-card {
+  align-self: stretch;
+  max-width: none;
+  background: var(--card);
+  border: 1px solid rgba(127, 168, 245, 0.22);
+  border-radius: 10px;
+  padding: 9px 13px 10px;
+}
+
+.plan-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.plan-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--blue-xl);
+}
+
+.plan-count {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.plan-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--muted2);
+}
+
+.plan-mark {
+  flex: none;
+  width: 11px;
+  text-align: center;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.plan-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.plan-completed .plan-mark {
+  color: var(--ok);
+}
+
+/* Struck through and dimmed: done work should recede so the eye lands on what
+   is still outstanding. */
+.plan-completed .plan-text {
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-color: rgba(138, 146, 166, 0.5);
+}
+
+.plan-in_progress .plan-mark {
+  color: var(--blue-xl);
+}
+
+.plan-in_progress .plan-text {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.plan-cancelled .plan-mark,
+.plan-cancelled .plan-text {
+  color: var(--muted);
+  opacity: 0.6;
+  text-decoration: line-through;
+}

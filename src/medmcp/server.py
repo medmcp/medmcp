@@ -1050,6 +1050,22 @@ def _usage_window(update: JsonDict) -> int:
     return settings.cached_context_window()
 
 
+def _tool_name(update: JsonDict) -> str:
+    """Underlying tool name for a tool-call frame, or "" if not advertised.
+
+    ACP's ``title`` is prose written for a human ("Reading todos"), so it cannot
+    identify a tool. vibe puts the real name in the frame's ``_meta``, which is
+    what the browser needs to special-case a tool's rendering. Both spellings are
+    accepted because the meta block is passed through as received rather than
+    normalised like the aliased fields around it.
+    """
+    raw = update.get("_meta") or update.get("meta")
+    if not isinstance(raw, dict):
+        return ""
+    meta = cast("JsonDict", raw)
+    return str(meta.get("tool_name") or meta.get("toolName") or "")
+
+
 def _is_pathguard_denial(output: str) -> bool:
     """True if *output* is the path guard turning a call back, not a real failure.
 
@@ -1426,6 +1442,7 @@ class _ChatConnection:
                         "title": title,
                         "status": status,
                         "kind": update.get("kind"),
+                        "toolName": _tool_name(update),
                         "rawInput": update.get("rawInput"),
                     }
                 )

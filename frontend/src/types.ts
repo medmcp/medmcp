@@ -17,6 +17,9 @@ export interface ToolCallState {
   title: string
   status: string
   kind?: string | null
+  /** The underlying tool's name (ACP's `title` is prose, so it cannot identify
+   *  a tool). Lets a tool with a better rendering than a generic card get one. */
+  toolName?: string
   rawInput?: unknown
   output?: string | null
   /** The path guard turned this call back before it ran: the agent corrects the
@@ -195,6 +198,14 @@ export type ReplayFrame =
   | { type: 'item_result'; item: number; ok: boolean; error?: string | null; outputs: string[] }
   | { type: 'result'; ok: boolean; error?: string | null; outputs?: string[] }
 
+/** One task in the agent's plan, from the `todo` tool's arguments. */
+export interface TodoItem {
+  id?: string
+  content: string
+  status: 'pending' | 'in_progress' | 'completed' | 'cancelled'
+  priority?: string
+}
+
 /** Ordered chat transcript entries. Tool calls render as inline cards. */
 export type ChatItem =
   // messageId (replayed turns only) anchors per-turn actions like rewind.
@@ -224,6 +235,7 @@ export type ServerFrame =
       title: string
       status: string
       kind?: string | null
+      toolName?: string
       rawInput?: unknown
     }
   | {

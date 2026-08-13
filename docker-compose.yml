@@ -37,11 +37,19 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: "http://llm:11434"
+      # Which model to build, and from which Modelfile. Switching models is then
+      # an env change rather than an edit here, and the core reads the same
+      # OLLAMA_MODEL so the two cannot drift apart.
+      MEDMCP_MODEL: "${OLLAMA_MODEL:-gemma4-medmcp}"
+      MEDMCP_MODELFILE: "${MEDMCP_MODELFILE:-/Modelfile.gemma4}"
     volumes:
       - "./Modelfile.gemma4:/Modelfile.gemma4:ro"
+      - "./Modelfile.muse:/Modelfile.muse:ro"
     entrypoint: ["/bin/sh", "-c"]
+    # Idempotent: skipped when the model is already built. The base tag is read
+    # from the Modelfile's FROM line so this stays correct for either model.
     command:
-      - 'ollama list | grep -q gemma4-medmcp || { ollama pull gemma4:26b && ollama create gemma4-medmcp -f /Modelfile.gemma4; }'
+      - 'ollama list | grep -q "$$MEDMCP_MODEL" || { base=$$(awk "/^FROM /{print \$$2; exit}" "$$MEDMCP_MODELFILE"); ollama pull "$$base" && ollama create "$$MEDMCP_MODEL" -f "$$MEDMCP_MODELFILE"; }'
     restart: "no"
 
   llm-warmup:
@@ -53,12 +61,13 @@ services:
         condition: service_completed_successfully
     environment:
       OLLAMA_HOST: "http://llm:11434"
+      MEDMCP_MODEL: "${OLLAMA_MODEL:-gemma4-medmcp}"
     entrypoint: ["/bin/sh", "-c"]
     # Preload the model into VRAM at startup so the first prompt is instant
     # instead of paying the cold-load latency. Nothing depends on this service,
     # so the core UI still comes up immediately while the model warms.
     command:
-      - 'ollama run gemma4-medmcp "ok" </dev/null >/dev/null 2>&1 || true'
+      - 'ollama run "$$MEDMCP_MODEL" "ok" </dev/null >/dev/null 2>&1 || true'
     restart: "no"
 
   medmcp:
@@ -75,6 +84,10 @@ services:
         condition: service_completed_successfully
     environment:
       OLLAMA_BASE_URL: "http://llm:11434"
+      # Names the model for both the agent's chat (the entrypoint writes it into
+      # config.toml, which has no env expansion) and the auxiliary calls —
+      # tool-call explanations and distillation prose — which read it directly.
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-gemma4-medmcp}"
       MEDMCP_WORKSPACE: "${MEDMCP_WORKSPACE:?set MEDMCP_WORKSPACE to an absolute host path}"
       # Catalog source: empty = bundled catalog.json (local :dev images). To pull
       # the published images, set MEDMCP_CATALOG_URL=/app/catalog.ghcr.json.

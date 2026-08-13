@@ -24,6 +24,18 @@ CONFIG="${VIBE_HOME:-/app/.vibe}/config.toml"
 if [ -f "$CONFIG" ]; then
     base="${OLLAMA_BASE_URL%/}"
     sed -i -E "s#^api_base = \".*\"#api_base = \"${base}/v1\"#" "$CONFIG"
+
+    # Point the single [[models]] entry at $OLLAMA_MODEL for the same reason:
+    # config.toml has no env expansion, and the model the agent chats with is
+    # named there while the auxiliary calls (explanations, distillation prose)
+    # read the env var. Rewriting here keeps the two from drifting apart, and
+    # makes swapping models a one-variable change with no image rebuild.
+    # Scoped to the [[models]] block: [[providers]] carries its own `name` and
+    # comes first in the file, so an unanchored substitution renames the provider
+    # and the agent loses its backend entirely.
+    if [ -n "${OLLAMA_MODEL:-}" ]; then
+        sed -i -E "/^\[\[models\]\]/,/^name = / s#^name = \".*\"#name = \"${OLLAMA_MODEL}\"#" "$CONFIG"
+    fi
 fi
 
 # Sanitize the mounted host docker config: keep only `auths`, dropping the host's

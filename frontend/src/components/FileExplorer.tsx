@@ -91,6 +91,18 @@ function NodeRow({
         <input
           autoFocus
           defaultValue={node.data.name}
+          // Belt and braces with the omitted drag handle above. Detaching the
+          // handle should be enough, but the drag is wired by react-dnd rather
+          // than by a plain attribute, so guard the element under the pointer
+          // too: opt it out of being a drag source, keep mousedown from reaching
+          // the row, and cancel any drag that still tries to begin here. Without
+          // this, dragging across the text to select it drags the file instead.
+          draggable={false}
+          onMouseDown={(e) => e.stopPropagation()}
+          onDragStart={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+          }}
           onFocus={(e) => {
             // Preselect the name without its suffix, as a file manager does — a
             // rename almost always means changing the name, not ".nii.gz". Cut at

@@ -1,0 +1,20 @@
+# vibe reads hooks from hooks.toml -- in each project root's .vibe/ and in
+# VIBE_HOME -- and never from config.toml. Its file sources default to ("user",),
+# so VIBE_HOME is the location that is always consulted.
+#
+# Baked into the image so the guard is active from the first prompt;
+# sync_servers_to_vibe_config rewrites this file before every session, which
+# keeps it correct on a host install and repairs it if it is edited away.
+
+# Refuse a tool call whose file paths do not resolve, before it reaches the
+# approval dialog, and hand the reason back to the model so it corrects itself.
+# No `match`: write_file and edit take paths just as the imaging stacks do.
+# strict = false so a hook that fails to run is a passthrough -- a broken guard
+# must not be able to block work.
+[[hooks]]
+name = "medmcp-pathguard"
+type = "pre_tool"
+command = "medmcp-pathguard"
+timeout = 10.0
+strict = false
+description = "Refuse a tool call whose file paths do not resolve, handing the reason back to the model so it can correct them."

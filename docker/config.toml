@@ -132,15 +132,3 @@ max_depth = 3
 max_files = 1000
 max_dirs_per_level = 20
 timeout_seconds = 2.0
-
-# Refuse a tool call whose file paths do not resolve, before it reaches the
-# approval dialog; the reason goes back to the model so it corrects itself.
-# strict = false so a hook that fails to run is a passthrough — a broken guard
-# must not be able to block work. sync_servers_to_vibe_config keeps this present.
-[[hooks]]
-name = "medmcp-pathguard"
-type = "pre_tool"
-command = "medmcp-pathguard"
-timeout = 10.0
-strict = false
-description = "Refuse a tool call whose file paths do not resolve, handing the reason back to the model so it can correct them."

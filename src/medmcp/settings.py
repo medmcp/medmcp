@@ -1122,29 +1122,49 @@ _config_write_lock = threading.Lock()
 PATHGUARD_HOOK_NAME = "medmcp-pathguard"
 
 
-def _ensure_pathguard_hook(cfg: JsonDict) -> None:
-    """Add the path-guard ``pre_tool`` hook to *cfg*, preserving any others.
+def _ensure_pathguard_hook(vibe_home: Path) -> None:
+    """Register the path-guard ``pre_tool`` hook in ``<vibe_home>/hooks.toml``.
+
+    Hooks live in their own file: vibe reads ``hooks.toml`` from each project root
+    and from ``VIBE_HOME``, and never takes them from ``config.toml``. Since its
+    file sources default to ``("user",)``, no project root is consulted at all and
+    ``VIBE_HOME`` is the one location that is always read.
 
     Matched against every tool (no ``match``): ``write_file`` and ``edit`` take
-    paths just as the imaging stacks do. ``strict`` stays false so that a hook that
+    paths just as the imaging stacks do. ``strict`` stays false so a hook that
     fails to run is a passthrough — a broken guard must not be able to block work.
+    Any other hook in the file is preserved.
     """
-    existing = cast("list[JsonDict]", cfg.get("hooks", []))
-    others = [h for h in existing if h.get("name") != PATHGUARD_HOOK_NAME]
-    cfg["hooks"] = [
-        *others,
-        {
-            "name": PATHGUARD_HOOK_NAME,
-            "type": "pre_tool",
-            "command": "medmcp-pathguard",
-            "timeout": 10.0,
-            "strict": False,
-            "description": (
-                "Refuse a tool call whose file paths do not resolve, handing the "
-                "reason back to the model so it can correct them."
-            ),
-        },
-    ]
+    path = vibe_home / "hooks.toml"
+    others: list[JsonDict] = []
+    if path.is_file():
+        try:
+            with path.open("rb") as fh:
+                raw = cast("list[JsonDict]", tomllib.load(fh).get("hooks", []))
+            others = [h for h in raw if h.get("name") != PATHGUARD_HOOK_NAME]
+        except (OSError, tomllib.TOMLDecodeError, AttributeError):
+            log.warning("could not read %s; rewriting it", path)
+    entry: JsonDict = {
+        "name": PATHGUARD_HOOK_NAME,
+        "type": "pre_tool",
+        "command": "medmcp-pathguard",
+        "timeout": 10.0,
+        "strict": False,
+        "description": (
+            "Refuse a tool call whose file paths do not resolve, handing the "
+            "reason back to the model so it can correct them."
+        ),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            tomli_w.dump({"hooks": [*others, entry]}, fh)
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
 
 
 def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
@@ -1251,7 +1271,8 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
     existing_disabled = cast("list[str]", cfg.get("disabled_skills", []))
     cfg["disabled_skills"] = sorted(s for s in existing_disabled if s not in workflow_names)
 
-    _ensure_pathguard_hook(cfg)
+    # Hooks live in their own file next to the config, not inside it.
+    _ensure_pathguard_hook(VIBE_HOME)
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     # A unique temp name (not a fixed .tmp path) so a concurrent writer in

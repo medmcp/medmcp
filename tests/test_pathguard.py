@@ -5,8 +5,9 @@
 import json
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -133,26 +134,50 @@ class TestFailOpen:
 
 
 class TestRegistration:
-    """The guard is inert unless vibe is told about it."""
+    """The guard is inert unless vibe is told about it — in the right file.
 
-    def test_hook_is_added_to_the_config(self) -> None:
-        """A fresh config gains the pre_tool hook, matching every tool."""
-        cfg: dict[str, Any] = {}
-        settings._ensure_pathguard_hook(cfg)
-        (hook,) = cfg["hooks"]
+    vibe reads hooks from ``hooks.toml`` only; a ``[[hooks]]`` block in
+    ``config.toml`` is silently ignored, which is how the first version of this
+    shipped inert.
+    """
+
+    def _hooks(self, home: Path) -> list[dict[str, Any]]:
+        with (home / "hooks.toml").open("rb") as fh:
+            return cast("list[dict[str, Any]]", tomllib.load(fh)["hooks"])
+
+    def test_hook_is_written_to_hooks_toml(self, tmp_path: Path) -> None:
+        """Not config.toml — vibe never reads hooks from there."""
+        settings._ensure_pathguard_hook(tmp_path)
+        assert not (tmp_path / "config.toml").exists()
+        (hook,) = self._hooks(tmp_path)
         assert hook["type"] == "pre_tool"
         assert hook["command"] == "medmcp-pathguard"
         assert "match" not in hook  # every tool: write_file and edit take paths too
         assert hook["strict"] is False  # a hook that cannot run must not block work
 
-    def test_registration_is_idempotent_and_keeps_other_hooks(self) -> None:
+    def test_registration_is_idempotent_and_keeps_other_hooks(self, tmp_path: Path) -> None:
         """Re-syncing must not accumulate duplicates or drop a user's own hooks."""
-        cfg: dict[str, Any] = {"hooks": [{"name": "someone-elses", "type": "post_tool"}]}
+        (tmp_path / "hooks.toml").write_text(
+            '[[hooks]]\nname = "someone-elses"\ntype = "post_tool"\ncommand = "x"\n'
+        )
         for _ in range(3):
-            settings._ensure_pathguard_hook(cfg)
-        names = [h["name"] for h in cfg["hooks"]]
+            settings._ensure_pathguard_hook(tmp_path)
+        names = [h["name"] for h in self._hooks(tmp_path)]
         assert names.count(settings.PATHGUARD_HOOK_NAME) == 1
         assert "someone-elses" in names
+
+    def test_unparseable_file_is_rewritten(self, tmp_path: Path) -> None:
+        """A corrupt hooks.toml must not leave the guard unregistered."""
+        (tmp_path / "hooks.toml").write_text("this is not toml {{{")
+        settings._ensure_pathguard_hook(tmp_path)
+        assert [h["name"] for h in self._hooks(tmp_path)] == [settings.PATHGUARD_HOOK_NAME]
+
+    def test_the_shipped_container_file_registers_the_hook(self) -> None:
+        """The image bakes hooks.toml so the guard is live on the first prompt."""
+        shipped = Path(__file__).resolve().parents[1] / "docker" / "hooks.toml"
+        with shipped.open("rb") as fh:
+            hooks = cast("list[dict[str, Any]]", tomllib.load(fh)["hooks"])
+        assert [h["name"] for h in hooks] == [settings.PATHGUARD_HOOK_NAME]
 
 
 class TestHookContract:

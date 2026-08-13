@@ -29,13 +29,18 @@ others, and a confident wrong answer here is worse than an honest neutral one.
 """
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
+log = logging.getLogger(__name__)
+
 PathRole = Literal["input", "output", "unknown"]
-PathStatus = Literal["ok", "missing", "parent_missing", "will_overwrite", "outside_workspace"]
+PathStatus = Literal[
+    "ok", "missing", "parent_missing", "will_overwrite", "outside_workspace", "unreadable"
+]
 Severity = Literal["error", "warning", "info"]
 
 
@@ -139,6 +144,29 @@ def _within(path: Path, workspace: Path) -> bool:
     return path == workspace or path.is_relative_to(workspace)
 
 
+def _safe_exists(path: Path) -> bool | None:
+    """Whether *path* exists, or ``None`` when the filesystem cannot answer.
+
+    ``Path.exists()`` only swallows a specific set of errnos -- ENOENT, ENOTDIR,
+    ELOOP, EBADF. Others propagate: EACCES for a path under a directory the server
+    cannot read, ENAMETOOLONG for an absurdly long value. Neither says anything
+    about whether the file is there, and neither is a reason to fail the check, so
+    an unanswerable probe is reported as unknown rather than raised.
+    """
+    try:
+        return path.exists()
+    except (OSError, ValueError):
+        return None
+
+
+def _safe_is_dir(path: Path) -> bool:
+    """Whether *path* is a directory, treating an unanswerable probe as "no"."""
+    try:
+        return path.is_dir()
+    except (OSError, ValueError):
+        return False
+
+
 def _nearest_existing_dir(path: Path, workspace: Path) -> Path | None:
     """Return the closest ancestor of *path* that exists, never leaving *workspace*.
 
@@ -148,7 +176,7 @@ def _nearest_existing_dir(path: Path, workspace: Path) -> Path | None:
     for candidate in path.parents:
         if not candidate.is_relative_to(workspace):
             return None
-        if candidate.is_dir():
+        if _safe_is_dir(candidate):
             return candidate
     return None
 
@@ -219,7 +247,13 @@ def _check_one(param: str, value: str, workspace: Path) -> PathFinding:
             "outside the workspace — cannot be verified from here",
         )
 
-    exists = resolved.exists()
+    exists = _safe_exists(resolved)
+
+    # The filesystem declined to answer (unreadable parent, unusable name). Saying
+    # "missing" here would be a guess dressed as a fact, and the file may well be
+    # there — so report that it could not be checked and leave it at a warning.
+    if exists is None:
+        return finding("unreadable", "warning", "could not be checked on this filesystem")
 
     if role == "input":
         if exists:
@@ -228,7 +262,7 @@ def _check_one(param: str, value: str, workspace: Path) -> PathFinding:
 
     if role == "output":
         parent = resolved.parent
-        if not parent.exists():
+        if not _safe_exists(parent):
             return finding(
                 "parent_missing",
                 "error",
@@ -292,7 +326,15 @@ def check_tool_call_paths(raw_input: object, workspace: Path) -> list[PathFindin
                 continue
             if not (looks_like_path(item) or _PATH_NAME_RE.search(param)):
                 continue
-            findings.append(_check_one(param, item, workspace))
+            try:
+                findings.append(_check_one(param, item, workspace))
+            except Exception:
+                # Per-argument, so one unusable value costs only its own finding.
+                # Checking the whole call inside a single guard would mean a single
+                # pathological path silently discards the verdicts on every valid
+                # one beside it -- the arguments most worth reporting on.
+                log.debug("path check skipped %s=%r", param, item, exc_info=True)
+                continue
             if len(findings) >= _MAX_FINDINGS:
                 return findings
     return findings

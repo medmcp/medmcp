@@ -34,7 +34,13 @@ export interface PathFinding {
   param: string
   value: string
   role: 'input' | 'output' | 'unknown'
-  status: 'ok' | 'missing' | 'parent_missing' | 'will_overwrite' | 'outside_workspace'
+  status:
+    | 'ok'
+    | 'missing'
+    | 'parent_missing'
+    | 'will_overwrite'
+    | 'outside_workspace'
+    | 'unreadable'
   severity: 'error' | 'warning' | 'info'
   note: string
   /** For a missing path: nearest existing folder ('.' is the workspace root),

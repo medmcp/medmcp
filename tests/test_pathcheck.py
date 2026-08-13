@@ -1,6 +1,7 @@
 """Tests for the tool-call path existence check (`medmcp.pathcheck`)."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -204,6 +205,59 @@ class TestWorkspaceBoundary:
         assert finding["status"] == "outside_workspace"
         assert finding["severity"] == "warning"
         assert "cannot be verified" in finding["note"]
+
+
+class TestUnanswerableFilesystem:
+    """A probe the filesystem refuses must not sink the whole check.
+
+    ``Path.exists()`` swallows only ENOENT/ENOTDIR/ELOOP/EBADF. EACCES and
+    ENAMETOOLONG propagate, and before this was handled a single such argument
+    took down every other finding in the same call.
+    """
+
+    def test_unreadable_parent_is_reported_not_raised(self, workspace: Path) -> None:
+        """A directory the server cannot read yields a warning, not an exception."""
+        locked = workspace / "locked"
+        locked.mkdir()
+        (locked / "inner.nii.gz").write_bytes(b"")
+        os.chmod(locked, 0o000)
+        try:
+            args = {"input_path": str(locked / "inner.nii.gz")}
+            (finding,) = pathcheck.check_tool_call_paths(args, workspace)
+        finally:
+            os.chmod(locked, 0o755)
+        assert finding["status"] == "unreadable"
+        assert finding["severity"] == "warning"
+
+    def test_one_bad_path_does_not_lose_the_others(self, workspace: Path) -> None:
+        """The valid arguments beside it are the ones most worth reporting on."""
+        locked = workspace / "locked2"
+        locked.mkdir()
+        os.chmod(locked, 0o000)
+        try:
+            args = {
+                "input_path": str(locked / "inner.nii.gz"),
+                "template_path": str(workspace / "sub-01" / "t1.nii.gz"),
+            }
+            findings = pathcheck.check_tool_call_paths(args, workspace)
+        finally:
+            os.chmod(locked, 0o755)
+        by_param = {f["param"]: f["status"] for f in findings}
+        assert by_param["template_path"] == "ok"
+        assert by_param["input_path"] == "unreadable"
+
+    def test_absurdly_long_value_does_not_raise(self, workspace: Path) -> None:
+        """ENAMETOOLONG is not in the set Path.exists() forgives."""
+        args = {"input_path": "x" * 200_000 + ".nii.gz"}
+        (finding,) = pathcheck.check_tool_call_paths(args, workspace)
+        assert finding["status"] == "unreadable"
+
+    @pytest.mark.parametrize(
+        "value", ["a\x00b.nii.gz", "////", "././../../..", "a\nb.nii.gz", "/", "🧠.nii.gz"]
+    )
+    def test_hostile_values_never_raise(self, value: str, workspace: Path) -> None:
+        """Null bytes, newlines, bare separators and unicode all resolve to a verdict."""
+        assert pathcheck.check_tool_call_paths({"input_path": value}, workspace) is not None
 
 
 class TestArgumentShapes:

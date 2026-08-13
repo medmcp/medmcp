@@ -68,6 +68,15 @@ your infrastructure.
   requires an explicit click. There is no "always allow" and no session-wide
   approval; each call is approved on its own. The approval dialog shows the
   call's arguments alongside a generated plain-language risk summary.
+- **Invented file paths are sent back to the agent, not to you.** Before a tool
+  call reaches the approval dialog, MedMCP checks the paths it would use. If one
+  cannot be right — an input that does not exist, a destination folder that is
+  missing — the call is refused and the agent is told why, including what the
+  nearest real folder holds and, where the path merely had the wrong prefix,
+  which file it probably meant. The agent corrects itself and tries again, so
+  the calls you are asked to approve are ones whose paths resolve. If it fails
+  to correct after two attempts the call is passed through to you anyway, so a
+  confused agent surfaces rather than looping out of sight.
 - **File paths are checked before you approve.** Local models invent
   plausible-looking paths, and until now the first sign was the tool failing
   after you had already approved it. The approval dialog now says, for each path

@@ -1115,6 +1115,38 @@ def list_gpus() -> list[JsonDict]:
 _config_write_lock = threading.Lock()
 
 
+# The pre_tool hook that refuses a tool call whose paths do not resolve, so the
+# model corrects itself before the call ever reaches the approval dialog (see
+# medmcp.pathguard). Registered here rather than left to hand-editing so it cannot
+# silently go missing from an install.
+PATHGUARD_HOOK_NAME = "medmcp-pathguard"
+
+
+def _ensure_pathguard_hook(cfg: JsonDict) -> None:
+    """Add the path-guard ``pre_tool`` hook to *cfg*, preserving any others.
+
+    Matched against every tool (no ``match``): ``write_file`` and ``edit`` take
+    paths just as the imaging stacks do. ``strict`` stays false so that a hook that
+    fails to run is a passthrough — a broken guard must not be able to block work.
+    """
+    existing = cast("list[JsonDict]", cfg.get("hooks", []))
+    others = [h for h in existing if h.get("name") != PATHGUARD_HOOK_NAME]
+    cfg["hooks"] = [
+        *others,
+        {
+            "name": PATHGUARD_HOOK_NAME,
+            "type": "pre_tool",
+            "command": "medmcp-pathguard",
+            "timeout": 10.0,
+            "strict": False,
+            "description": (
+                "Refuse a tool call whose file paths do not resolve, handing the "
+                "reason back to the model so it can correct them."
+            ),
+        },
+    ]
+
+
 def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
     """Overwrite the ``[[mcp_servers]]`` section of ``.vibe/config.toml``.
 
@@ -1218,6 +1250,8 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
     workflow_names = {w["name"] for w in discover_workflows()}
     existing_disabled = cast("list[str]", cfg.get("disabled_skills", []))
     cfg["disabled_skills"] = sorted(s for s in existing_disabled if s not in workflow_names)
+
+    _ensure_pathguard_hook(cfg)
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     # A unique temp name (not a fixed .tmp path) so a concurrent writer in

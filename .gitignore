@@ -222,6 +222,10 @@ __marimo__/
 .vibe/gpu_selection.json
 .vibe/backends.json
 .vibe/backend.sock
+# Rewritten by sync_servers_to_vibe_config before every session (the baked
+# copy the image ships lives at docker/hooks.toml).
+.vibe/hooks.toml
+.vibe/pathguard_retries.json
 .vibe/provenance/
 .vibe/workflows/
 data/

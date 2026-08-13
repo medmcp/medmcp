@@ -79,6 +79,28 @@ class TestDecisions:
         assert pathguard.decide(inv) == {"decision": "allow"}
 
 
+class TestReasonWording:
+    """The reason lands in the transcript, so its phrasing outlives the moment."""
+
+    def test_it_does_not_forbid_asking_the_user(self, workspace: Path) -> None:
+        """A blanket prohibition here silenced the agent for the whole turn.
+
+        An earlier version said "do not ask the user", meaning about the path. The
+        model generalised it and stopped asking about anything — including the
+        transform type the registration skill explicitly tells it to put to the
+        user. Say what to do; never plant a standing prohibition.
+        """
+        inv = _invocation(workspace, {"input_path": str(workspace / "nope" / "t1.nii.gz")})
+        reason = pathguard.decide(inv)["reason"].lower()
+        for banned in ("do not ask", "don't ask", "without asking", "do not report"):
+            assert banned not in reason, f"reason plants a standing prohibition: {banned!r}"
+
+    def test_it_tells_the_agent_to_keep_the_other_arguments(self, workspace: Path) -> None:
+        """Only the path is wrong; a retry that drops other arguments is a new bug."""
+        inv = _invocation(workspace, {"input_path": str(workspace / "nope" / "t1.nii.gz")})
+        assert "keep every other argument" in pathguard.decide(inv)["reason"]
+
+
 class TestRetryCap:
     """A model that will not converge must not loop against the hook unseen."""
 

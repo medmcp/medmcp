@@ -107,13 +107,18 @@ def build_reason(findings: list[PathFinding], workspace: Path) -> str:
     # ...", which reads like a refusal -- the shape of a user saying no, after which
     # retrying would be wrong -- so the correction has to be the first thing said,
     # and the fact that nobody refused anything has to be said outright.
+    # Phrased as what to do, not as what to refrain from. An earlier version said
+    # "do not ask the user", which the model carried forward for the rest of the
+    # turn and stopped asking about anything at all -- including the choices a
+    # skill explicitly tells it to put to the user. Prohibitions land in the
+    # transcript and outlive the moment; instructions to act do not.
     lines = [
         "RETRY THIS CALL WITH A CORRECTED PATH.",
         "",
         "Nobody refused this call and the tool did not fail. It was not run because "
         "the path below does not exist, which is an automatic check you can satisfy "
-        "yourself. Fix the path and call the same tool again immediately. Do not ask "
-        "the user, and do not report this as a failure.",
+        "on your own. Fix only the path, keep every other argument exactly as it "
+        "was, and call the same tool again now.",
         "",
     ]
     for f in findings:

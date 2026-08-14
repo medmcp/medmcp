@@ -27,6 +27,10 @@ Notable, user-visible changes to MedMCP. Format follows
   permanently unable to reply. **On by default** — the failure it prevents is
   silent, so there is nothing for you to notice or search for when it happens.
   Set `MEDMCP_LLM_SHIM=0` to disable it and talk to the model server directly.
+- **Reset view** button in the image viewer. After panning, zooming, rotating the
+  3D view, or scrolling far through the slices, one click returns the volume to
+  how it looked when it opened. Your viewer settings and any overlay stay as they
+  are — only the camera moves.
 
 ## 0.1.0
 

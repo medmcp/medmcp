@@ -8,6 +8,13 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Fixed
 
+- **Tool stacks no longer go missing on the first run after installing them.**
+  A stack that takes a moment to start the first time — the usual case, since its
+  image has just been pulled and nothing is cached yet — could be given up on
+  before it answered, leaving that chat with none of its tools. Stacks are now
+  given a startup budget a cold start fits into, and existing installations are
+  repaired automatically — no reinstall needed. Starting a new chat also retries,
+  so a stack that was only slow comes back on its own.
 - **The agent no longer goes silent on multi-step requests.** Asking for a
   multi-step imaging workflow could leave the chat with no reply at all — no text,
   no error, nothing to retry. The local model server was failing to read the

@@ -145,6 +145,16 @@ PROXY_COMMAND: str = "medmcp-mcp-proxy"
 DEFAULT_IDLE_TTL_SEC: float = 120.0
 DEFAULT_STARTUP_TIMEOUT_SEC: float = 60.0
 DEFAULT_TOOL_TIMEOUT_SEC: float = 900.0
+# Startup budget for a stack launched as a container. vibe's own default is 10s,
+# which a stack image cold-starts past on the first run after a pull: the launch
+# has to read the image's Python env off disk before the server answers, and that
+# competes with whatever else is warming at the time (the model being loaded into
+# VRAM, most of all). Warm, these servers answer in under two seconds; the only
+# thing a generous budget costs is how long a genuinely hung server delays
+# warm-up, and an image that is missing or unrunnable still fails immediately
+# rather than waiting this out. Discovery runs once per agent start and a miss
+# silently drops the whole stack, so buy the headroom.
+DEFAULT_STACK_STARTUP_TIMEOUT_SEC: float = 120.0
 # Env keys the proxy layer injects into a stack's [[mcp_servers]] entry — stripped
 # again when the pool is disabled so toggling off leaves no stale routing.
 _POOL_ENV_KEYS: tuple[str, ...] = ("MEDMCP_BROKER_SOCK", "MEDMCP_WORKSPACE")
@@ -389,6 +399,8 @@ def _load_stack_manifests() -> list[JsonDict]:
             entry["skills_path"] = os.path.expandvars(str(raw["skills_path"]))
         if raw.get("tool_timeout_sec") is not None:
             entry["tool_timeout_sec"] = raw["tool_timeout_sec"]
+        if raw.get("startup_timeout_sec") is not None:
+            entry["startup_timeout_sec"] = raw["startup_timeout_sec"]
         if raw.get("idle_ttl_sec") is not None:
             entry["idle_ttl_sec"] = raw["idle_ttl_sec"]
         manifests.append(entry)
@@ -854,6 +866,13 @@ def install_stack_image(image: str, on_progress: ProgressFn | None = None) -> st
     if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
         entry["tool_timeout_sec"] = float(timeout)
 
+    startup = meta.get("startup_timeout_sec")
+    entry["startup_timeout_sec"] = (
+        float(startup)
+        if isinstance(startup, (int, float)) and not isinstance(startup, bool)
+        else DEFAULT_STACK_STARTUP_TIMEOUT_SEC
+    )
+
     # Skills live inside the image but the agent loads them from the core fs, so
     # extract them next to the manifest and point skills_path there.
     in_image_skills = meta.get("skills_path")
@@ -1193,7 +1212,8 @@ def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
     tool permissions, etc.) are left untouched.  For servers already present in
     the file, vibe-acp-specific fields such as ``startup_timeout_sec`` are
     preserved; only ``command`` and ``args`` are updated from the discovery
-    result.
+    result. An entry carrying no ``startup_timeout_sec`` at all is given one —
+    vibe's own 10s default is too tight for a stack that cold-starts a container.
     """
     with _config_write_lock:
         _sync_servers_to_vibe_config_locked(servers)
@@ -1252,6 +1272,21 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
             else:
                 entry.pop("args", None)
             new_entries.append(entry)
+
+    # vibe defaults startup_timeout_sec to 10s, and a discovery miss drops the whole
+    # stack for the session with nothing but a log line, so give every entry that
+    # does not carry one an explicit floor (see DEFAULT_STACK_STARTUP_TIMEOUT_SEC).
+    # This runs over entries preserved from config.toml too: the preserve-branch
+    # above keeps vibe-owned fields as they are, which would otherwise pin an
+    # already-installed stack to the 10s default forever. A value that is actually
+    # set — by a manifest, a package, or by hand here — is left alone.
+    for entry in new_entries:
+        if entry.get("startup_timeout_sec") is not None:
+            continue
+        is_container = Path(str(entry.get("command", ""))).name == "docker"
+        entry["startup_timeout_sec"] = (
+            DEFAULT_STACK_STARTUP_TIMEOUT_SEC if is_container else DEFAULT_STARTUP_TIMEOUT_SEC
+        )
 
     # Route every stack through the pre-warm proxy when the pool is enabled. vibe
     # then spawns the cheap `medmcp-mcp-proxy <stack>` shim, which forwards to the

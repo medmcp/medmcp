@@ -3,7 +3,7 @@ import { Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import { rawUrl } from '../api'
 import { getDraggedFilePath } from '../dragState'
 import { DRAG_PATH_MIME } from '../types'
-import { DownloadIcon, GearIcon, XIcon } from './icons'
+import { DownloadIcon, GearIcon, RecenterIcon, XIcon } from './icons'
 import { ViewerSettingsPanel } from './ViewerSettings'
 
 const VOLUME_EXT = /\.(nii|nii\.gz|mgz|mgh|nrrd|nhdr|mha|mhd|hdr|img|v16|dcm)$/
@@ -151,6 +151,28 @@ function applyViewerSettings(nv: Niivue, s: ViewerSettings): void {
   nv.drawScene()
 }
 
+// Niivue's INITIAL_SCENE_DATA, which it does not expose. Kept here so the reset
+// lands exactly where a freshly loaded volume starts.
+const INITIAL_AZIMUTH = 110
+const INITIAL_ELEVATION = 10
+
+/** Return pan, zoom, rotation, and slice position to their just-loaded state.
+ *
+ * Deliberately not Niivue's `setDefaults()`: that also replaces the whole opts
+ * object, which would undo the settings applied by `applyViewerSettings` and
+ * re-enable Niivue's own drag-and-drop handler — the one this viewer switches
+ * off so it cannot swallow overlay drops. Assigning the scene fields touches
+ * the view and nothing else.
+ */
+function resetView(nv: Niivue): void {
+  nv.scene.pan2Dxyzmm = [0, 0, 0, 1]
+  nv.scene.volScaleMultiplier = 1
+  nv.scene.renderAzimuth = INITIAL_AZIMUTH
+  nv.scene.renderElevation = INITIAL_ELEVATION
+  nv.scene.crosshairPos = [0.5, 0.5, 0.5]
+  nv.drawScene()
+}
+
 type FileKind = 'volume' | 'pdf' | 'html' | 'image' | 'text' | 'other'
 
 function classify(path: string): FileKind {
@@ -179,6 +201,7 @@ function VolumeView({
   overlayOpacity,
   onOverlayChange,
   onOpacityChange,
+  resetToken,
 }: {
   path: string
   settings: ViewerSettings
@@ -187,6 +210,8 @@ function VolumeView({
   overlayOpacity: number
   onOverlayChange: (path: string) => void
   onOpacityChange: (opacity: number) => void
+  /** Bumped by the panel's reset button; each new value restores the view. */
+  resetToken: number
 }) {
   const url = rawUrl(path)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -345,6 +370,15 @@ function VolumeView({
     const nv = nvRef.current
     if (nv && nv.volumes.length > 0) applyViewerSettings(nv, settings)
   }, [settings])
+
+  // Restore the default view when the panel's reset button fires. Token 0 is the
+  // initial mount, where the view is already at its defaults and there is nothing
+  // to undo.
+  useEffect(() => {
+    if (resetToken === 0) return
+    const nv = nvRef.current
+    if (nv && nv.volumes.length > 0) resetView(nv)
+  }, [resetToken])
 
   // Overlay operations are serialized on a promise chain, seeded with the
   // base-volume load: a switch while the previous add was still in flight
@@ -510,6 +544,7 @@ export const Viewer = memo(function Viewer({
   const didResizeRef = useRef(false)
   const [settings, setSettings] = useState<ViewerSettings>(loadViewerSettings)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [resetToken, setResetToken] = useState(0)
   // Overlay selection lives here, not in VolumeView, so it survives the
   // resize-rebuild remount (which bumps resizeGen and rebuilds VolumeView fresh).
   // It's tagged with the base file it belongs to, so it's transparently ignored
@@ -571,6 +606,15 @@ export const Viewer = memo(function Viewer({
         </span>
         <span className="panel-actions">
           {kind === 'volume' && (
+            <button
+              className="btn-icon"
+              title="Reset view"
+              onClick={() => setResetToken((t) => t + 1)}
+            >
+              <RecenterIcon />
+            </button>
+          )}
+          {kind === 'volume' && (
             <span className="viewer-settings-anchor">
               <button
                 className={settingsOpen ? 'btn-icon active' : 'btn-icon'}
@@ -601,6 +645,7 @@ export const Viewer = memo(function Viewer({
               path={path}
               settings={settings}
               isResizing={isResizing}
+              resetToken={resetToken}
               overlayPath={overlayPath}
               overlayOpacity={overlayOpacity}
               onOverlayChange={(p) =>

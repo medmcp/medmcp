@@ -18,11 +18,49 @@ export DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker.sock}"
 
 CONFIG="${VIBE_HOME:-/app/.vibe}/config.toml"
 
-# Rewrite the single [[providers]] api_base from $OLLAMA_BASE_URL. Idempotent —
+# Optionally interpose the tool-call repair shim between vibe and the LLM service.
+# Ollama's Glimmer function-calling parser drops roughly half of all tool calls and
+# truncates the stream with no finish_reason and no error — HTTP 200, empty turn,
+# which reads as a frozen chat. The shim renames the colliding tool, retries
+# truncated turns, and sanitizes malformed arguments. Opt-in, so the direct path
+# stays the default; if it fails to come up we fall back rather than strand vibe on
+# a dead port. Only vibe is routed through it: the auxiliary calls (explanations,
+# distillation prose) read OLLAMA_BASE_URL and keep talking to Ollama directly.
+LLM_TARGET_URL="$OLLAMA_BASE_URL"
+if [ -n "${MEDMCP_LLM_SHIM:-}" ] && [ "${MEDMCP_LLM_SHIM}" != "0" ]; then
+    shim_port="${MEDMCP_SHIM_PORT:-11435}"
+    MEDMCP_SHIM_UPSTREAM="$OLLAMA_BASE_URL" \
+    MEDMCP_SHIM_HOST=127.0.0.1 \
+    MEDMCP_SHIM_PORT="$shim_port" \
+        medmcp-llm-shim &
+
+    # vibe-acp starts lazily, but wait anyway so the first prompt cannot race it.
+    shim_ready=""
+    for _ in $(seq 1 50); do
+        if python3 -c "
+import socket, sys
+s = socket.socket(); s.settimeout(0.2)
+sys.exit(0 if s.connect_ex(('127.0.0.1', $shim_port)) == 0 else 1)
+" 2>/dev/null; then
+            shim_ready=1
+            break
+        fi
+        sleep 0.2
+    done
+
+    if [ -n "$shim_ready" ]; then
+        LLM_TARGET_URL="http://127.0.0.1:${shim_port}"
+        echo "medmcp-entrypoint: tool-call shim on :${shim_port} -> ${OLLAMA_BASE_URL}"
+    else
+        echo "medmcp-entrypoint: WARNING: shim did not start; using ${OLLAMA_BASE_URL} directly" >&2
+    fi
+fi
+
+# Rewrite the single [[providers]] api_base from $LLM_TARGET_URL. Idempotent —
 # runs on every start, before sync_servers_to_vibe_config (which leaves providers
 # untouched). Trailing slashes are stripped so we always emit "<base>/v1".
 if [ -f "$CONFIG" ]; then
-    base="${OLLAMA_BASE_URL%/}"
+    base="${LLM_TARGET_URL%/}"
     sed -i -E "s#^api_base = \".*\"#api_base = \"${base}/v1\"#" "$CONFIG"
 
     # Point the single [[models]] entry at $OLLAMA_MODEL for the same reason:

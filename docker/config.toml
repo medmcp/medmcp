@@ -118,7 +118,11 @@ api_base = "http://llm:11434/v1"
 api_key_env_var = ""
 api_style = "openai"
 backend = "generic"
-reasoning_field_name = "reasoning_content"
+# Ollama names the reasoning channel differently per mode: "reasoning_content" when
+# non-streaming, "reasoning" in stream deltas. vibe streams, so this must be
+# "reasoning" — otherwise the key never matches and the model's entire answer is
+# dropped (LLMMessage ignores extras), leaving turns visibly empty.
+reasoning_field_name = "reasoning"
 project_id = ""
 region = ""
 

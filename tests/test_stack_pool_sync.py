@@ -138,3 +138,55 @@ def test_toggle_off_restores_real_command_and_strips_env(
     assert neuro["command"] == "docker"  # real command restored
     assert neuro["args"][0] == "run"
     assert "MEDMCP_BROKER_SOCK" not in cast("JsonDict", neuro.get("env", {}))
+
+
+# ── startup timeout floor ────────────────────────────────────────────────────
+
+
+def test_sync_writes_startup_timeout_floor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Every entry gets a startup_timeout_sec; containers get the larger budget.
+
+    vibe's own default is 10s, which a container stack cold-starts past — and a
+    discovery miss drops the whole stack for the session.
+    """
+    _isolate(monkeypatch, tmp_path, pool=False)
+    sync_servers_to_vibe_config([_NEURO, _DICOM])
+    by = _entries_by_name(tmp_path)
+    assert by["medmcp-neuro"]["startup_timeout_sec"] == settings.DEFAULT_STACK_STARTUP_TIMEOUT_SEC
+    assert by["medmcp-dicom"]["startup_timeout_sec"] == settings.DEFAULT_STARTUP_TIMEOUT_SEC
+
+
+def test_sync_preserves_explicit_startup_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A value supplied by the manifest/package is never overwritten by the floor."""
+    _isolate(monkeypatch, tmp_path, pool=False)
+    sync_servers_to_vibe_config([{**_NEURO, "startup_timeout_sec": 15.0}])
+    assert _entries_by_name(tmp_path)["medmcp-neuro"]["startup_timeout_sec"] == 15.0
+
+
+def test_sync_repairs_existing_entry_without_startup_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A stack already in config.toml with no startup_timeout_sec is given one.
+
+    The preserve-branch keeps vibe-owned fields as they are, so without the floor
+    an already-installed stack would stay pinned to vibe's 10s default forever —
+    no reinstall would fix it. This is the regression that silently dropped a
+    container stack on first run.
+    """
+    _isolate(monkeypatch, tmp_path, pool=False)
+    # Simulate a config written before the floor existed.
+    sync_servers_to_vibe_config([_NEURO])
+    config = tmp_path / "config.toml"
+    config.write_text(
+        config.read_text().replace(
+            f"startup_timeout_sec = {settings.DEFAULT_STACK_STARTUP_TIMEOUT_SEC}\n", ""
+        )
+    )
+    assert "startup_timeout_sec" not in config.read_text()
+
+    sync_servers_to_vibe_config([_NEURO])
+    neuro = _entries_by_name(tmp_path)["medmcp-neuro"]
+    assert neuro["startup_timeout_sec"] == settings.DEFAULT_STACK_STARTUP_TIMEOUT_SEC
+    assert neuro["tool_timeout_sec"] == 7200.0  # other preserved fields survive

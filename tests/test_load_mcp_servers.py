@@ -347,6 +347,28 @@ class TestStacksDDiscovery:
         assert servers[0]["skills_path"] == "/srv/data/skills"
         assert servers[0]["tool_timeout_sec"] == 7200.0
 
+    def test_startup_timeout_passthrough(self, tmp_path: Path) -> None:
+        """A manifest's startup_timeout_sec reaches the server config.
+
+        Without it the entry falls back to vibe's 10s default, which a container
+        stack cold-starts past — dropping the whole stack for the session.
+        """
+        stacks = tmp_path / "stacks.d"
+        _make_manifest(
+            stacks,
+            "medmcp-neuro",
+            'name = "medmcp-neuro"\ncommand = "docker"\nargs = ["run", "img"]\n'
+            "startup_timeout_sec = 180.0\n",
+        )
+        with (
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.STACKS_D_PATH", stacks),
+        ):
+            servers = load_mcp_servers()
+
+        assert servers[0]["startup_timeout_sec"] == 180.0
+
     def test_uv_tool_wins_over_manifest(self, tmp_path: Path) -> None:
         """A uv-tool install overrides a manifest of the same name (local dev)."""
         _make_tool_env(tmp_path, "medmcp-neuro")

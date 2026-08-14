@@ -102,6 +102,11 @@ services:
       # warm across calls and hides pool-machinery tools (warmup) from the model.
       # 1/true to enable; empty = off (legacy per-call spawn).
       MEDMCP_STACK_POOL: "${MEDMCP_STACK_POOL:-}"
+      # Tool-call repair shim between vibe and Ollama. Works around Ollama's
+      # Glimmer parser dropping tool calls and truncating the stream silently,
+      # which shows up as a chat that answers nothing. 1/true to enable;
+      # empty = off (vibe talks to Ollama directly).
+      MEDMCP_LLM_SHIM: "${MEDMCP_LLM_SHIM:-}"
     healthcheck:
       test:
         - CMD

@@ -6,7 +6,26 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
-_Nothing yet._
+### Fixed
+
+- **The agent no longer goes silent on multi-step requests.** Asking for a
+  multi-step imaging workflow could leave the chat with no reply at all — no text,
+  no error, nothing to retry. The local model server was failing to read the
+  model's tool calls and closing the connection without reporting it, so roughly
+  half of all tool-using turns were lost. Affected turns now complete, and a turn
+  that genuinely cannot be recovered says so instead of hanging.
+- **Agent replies are no longer discarded.** Responses from the model were being
+  dropped before they reached the chat because the reasoning output was read from
+  the wrong field.
+
+### Added
+
+- **`medmcp-llm-shim`** — an optional local proxy that sits between the agent and
+  the model server and repairs the tool-call failures above: it works around the
+  name collision that triggers them, retries turns that are cut short, and
+  neutralises malformed tool arguments that would otherwise leave a chat
+  permanently unable to reply. Off by default; enable it by pointing the model
+  provider's `api_base` at it.
 
 ## 0.1.0
 

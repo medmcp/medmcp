@@ -24,8 +24,9 @@ Notable, user-visible changes to MedMCP. Format follows
   the model server and repairs the tool-call failures above: it works around the
   name collision that triggers them, retries turns that are cut short, and
   neutralises malformed tool arguments that would otherwise leave a chat
-  permanently unable to reply. Off by default; enable it by pointing the model
-  provider's `api_base` at it.
+  permanently unable to reply. **On by default** — the failure it prevents is
+  silent, so there is nothing for you to notice or search for when it happens.
+  Set `MEDMCP_LLM_SHIM=0` to disable it and talk to the model server directly.
 
 ## 0.1.0
 

@@ -25,6 +25,14 @@ Notable, user-visible changes to MedMCP. Format follows
   a `medmcp.env` file next to your compose file (or point `MEDMCP_ENV_FILE` at
   one); it is optional and read only if present.
 
+### Changed
+
+- **The agent now keeps a visible task list when you ask for more than one
+  thing.** Multi-part requests — strip this scan, register it, then report the
+  volumes — are written out as a checklist before the work starts and ticked off
+  as each part lands, so you can see what it understood you to be asking and how
+  far it has got. Single requests are unaffected.
+
 ### Fixed
 
 - **Tool stacks no longer go missing on the first run after installing them.**

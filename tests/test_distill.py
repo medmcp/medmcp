@@ -638,3 +638,87 @@ def test_refine_draft_model_failure_raises(tmp_path: Path) -> None:
         except RuntimeError:
             return
     raise AssertionError("expected RuntimeError")
+
+
+# ── derived defaults for container directories ───────────────────────────────
+
+
+def _pipeline(output_dirs: list[str], second_input: str | None = None) -> list[JsonDict]:
+    """A skull-strip → register session whose steps write to *output_dirs*."""
+    d = "/data/subj_01"
+    strip_args: JsonDict = {"input_path": f"{d}/t1.nii.gz", "output_dir": output_dirs[0]}
+    if second_input is not None:
+        strip_args["mask_path"] = second_input
+    return [
+        {"role": "user", "content": "strip and register"},
+        _assistant_call("c1", "medmcp-neuro_skull_strip", strip_args),
+        _tool_result("c1", f"ok: True\nstructured: {{'brain_path': '{d}/t1_brain.nii.gz'}}"),
+        _assistant_call(
+            "c2",
+            "medmcp-neuro_register_to_template",
+            {"input_path": f"{d}/t1_brain.nii.gz", "output_dir": output_dirs[1]},
+        ),
+        _tool_result("c2", f"ok: True\nstructured: {{'registered_path': '{d}/t1_mni.nii.gz'}}"),
+    ]
+
+
+def _recipe_from(msgs: list[JsonDict]) -> Recipe:
+    return distill.build_recipe(msgs, server_names=["medmcp-neuro"], name="n", description="d")
+
+
+def _defaults(recipe: Recipe) -> dict[str, str]:
+    return {i.name: i.default for i in recipe.inputs}
+
+
+def test_output_dir_in_the_inputs_folder_gets_a_derived_default() -> None:
+    """The folder an input already sits in should not have to be retyped.
+
+    It stays a declared input — the session had it, and a caller may want the
+    results elsewhere — but defaults to the input's folder, which also makes the
+    outputs follow the file being replayed on.
+    """
+    recipe = _recipe_from(_pipeline(["/data/subj_01", "/data/subj_01"]))
+
+    assert [i.name for i in recipe.inputs] == ["in_1", "in_2"]
+    assert _defaults(recipe) == {"in_1": "", "in_2": "{{dir(in_1)}}"}
+    # The recipe still reproduces the session: nothing was dropped or rewritten.
+    assert recipe.steps[0].arguments["output_dir"] == "{{in_2}}"
+    assert recipe.steps[1].arguments["input_path"] == "{{step1.brain_path}}"
+
+
+def test_output_dir_elsewhere_gets_no_default() -> None:
+    """A destination that is not derivable is a real decision, so it is asked for."""
+    recipe = _recipe_from(_pipeline(["/data/subj_01", "/exports/run7"]))
+    assert _defaults(recipe)["in_3"] == ""
+
+
+def test_ambiguous_folder_gets_no_default() -> None:
+    """Two inputs in one folder give no principled anchor, so none is invented.
+
+    Picking one silently would make the destination follow whichever input
+    happened to be lifted first — a wrong answer that looks like a right one.
+    """
+    recipe = _recipe_from(
+        _pipeline(["/data/subj_01", "/data/subj_01"], second_input="/data/subj_01/mask.nii.gz")
+    )
+    dir_input = next(i for i in recipe.inputs if i.example == "/data/subj_01")
+    assert dir_input.default == ""
+
+
+def test_inputs_are_never_dropped() -> None:
+    """Distillation reproduces the session; it does not decide an argument is surplus."""
+    recipe = _recipe_from(_pipeline(["/data/subj_01", "/exports/run7"]))
+    assert [i.example for i in recipe.inputs] == [
+        "/data/subj_01/t1.nii.gz",
+        "/data/subj_01",
+        "/exports/run7",
+    ]
+
+
+def test_default_survives_a_recipe_round_trip(tmp_path: Path) -> None:
+    """A default is only useful if it is still there after save/load."""
+    recipe = _recipe_from(_pipeline(["/data/subj_01", "/data/subj_01"]))
+    draft = tmp_path / "wf"
+    draft.mkdir()
+    (draft / "recipe.yaml").write_text(yaml.safe_dump(recipe.to_dict()), encoding="utf-8")
+    assert _defaults(distill.load_recipe(draft))["in_2"] == "{{dir(in_1)}}"

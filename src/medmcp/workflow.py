@@ -30,12 +30,24 @@ class WorkflowInput:
     """The concrete value seen in the originating session, kept as documentation."""
     description: str = ""
     """Optional human description of what this input is."""
+    default: str = ""
+    """Optional placeholder expression filling this input when left unbound.
+
+    Distillation sets this where the session's value was derivable from another
+    input — an ``output_dir`` that was simply the input file's folder, say. The
+    input stays declared, because the session genuinely had it and the caller may
+    want to point it elsewhere; the default only spares them retyping something
+    they have already said. Resolved by the replay engine, so it may reference
+    other inputs (e.g. ``{{dir(in_1)}}``).
+    """
 
     def to_dict(self) -> JsonDict:
         """Return a plain-dict form suitable for YAML/JSON serialization."""
         out: JsonDict = {"name": self.name, "example": self.example}
         if self.description:
             out["description"] = self.description
+        if self.default:
+            out["default"] = self.default
         return out
 
 

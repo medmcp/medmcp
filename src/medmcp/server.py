@@ -777,7 +777,9 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
         error = replay.validate(recipe, inputs, settings.active_servers())
         if error is not None:
             return {"ok": False, "error": error, "steps": []}
-        bindings: dict[str, Any] = dict(inputs)
+        # Same defaults the run will use, so the preview shows what will actually
+        # be sent rather than an unresolved placeholder the user never filled in.
+        bindings: dict[str, Any] = replay.apply_input_defaults(recipe, inputs)
         steps = [
             {
                 "index": i,

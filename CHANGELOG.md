@@ -8,6 +8,16 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Fixed
 
+- **Workflows stop asking you to retype a folder you have already given them.**
+  A workflow distilled from a session asked for the scan *and* for the directory
+  that scan sits in — so a two-decision pipeline arrived with several boxes to
+  fill. That directory is still part of the workflow, because the session had it
+  and you may want the results somewhere else, but where it was simply the input
+  file's own folder it now fills itself in: leave it blank and the outputs land
+  beside the file you are replaying on, rather than back in the folder the
+  workflow was recorded from. Type a path in and that wins, as before. Where the
+  folder can't be worked out unambiguously — two inputs sitting in the same
+  directory, say — nothing is guessed and it is asked for as usual.
 - **Tool stacks no longer go missing on the first run after installing them.**
   A stack that takes a moment to start the first time — the usual case, since its
   image has just been pulled and nothing is cached yet — could be given up on

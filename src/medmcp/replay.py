@@ -29,6 +29,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import timedelta
+from pathlib import PurePosixPath
 from typing import Any, cast
 
 import mcp.types as mcp_types
@@ -43,6 +44,27 @@ JsonDict = dict[str, Any]
 ToolCaller = Callable[[str, str, JsonDict], Awaitable[tuple[bool, JsonDict, "str | None"]]]
 
 _PLACEHOLDER_RE = re.compile(r"\{\{([^{}]+)\}\}")
+# A derived reference: ``{{dir(<ref>)}}`` is the directory holding whatever
+# ``<ref>`` resolves to. Distillation emits these instead of declaring a second
+# input for a folder the caller has already implied — asking for a file and then
+# for the directory that file sits in is one piece of information, not two, and
+# on replay the outputs should follow the new file rather than the old folder.
+_DERIVED_DIR_RE = re.compile(r"dir\((.+)\)")
+
+
+def _resolve_ref(ref: str, bindings: dict[str, Any]) -> object | None:
+    """Resolve one placeholder ref; ``None`` when it cannot be resolved.
+
+    ``None`` rather than a sentinel string so an unresolvable ref can be left
+    verbatim by the caller, which is how :func:`unresolved_refs` still sees it.
+    """
+    derived = _DERIVED_DIR_RE.fullmatch(ref)
+    if derived is not None:
+        inner = _resolve_ref(derived.group(1).strip(), bindings)
+        return None if inner is None else str(PurePosixPath(str(inner)).parent)
+    return bindings.get(ref)
+
+
 # Imaging tools (registration, segmentation) can run for minutes.
 DEFAULT_TOOL_TIMEOUT_SEC: float = 900.0
 
@@ -89,12 +111,12 @@ def resolve_value(value: object, bindings: dict[str, Any]) -> object:
     if isinstance(value, str):
         whole = _PLACEHOLDER_RE.fullmatch(value.strip())
         if whole is not None:
-            ref = whole.group(1).strip()
-            return bindings.get(ref, value)
+            resolved = _resolve_ref(whole.group(1).strip(), bindings)
+            return value if resolved is None else resolved
 
         def _sub(match: re.Match[str]) -> str:
-            ref = match.group(1).strip()
-            return str(bindings[ref]) if ref in bindings else match.group(0)
+            resolved = _resolve_ref(match.group(1).strip(), bindings)
+            return match.group(0) if resolved is None else str(resolved)
 
         return _PLACEHOLDER_RE.sub(_sub, value)
     if isinstance(value, dict):
@@ -291,13 +313,37 @@ async def mcp_caller(
 # ── Validation & execution ────────────────────────────────────────────────────
 
 
+def apply_input_defaults(recipe: Recipe, inputs: dict[str, Any]) -> dict[str, Any]:
+    """Return *inputs* with any unbound input filled in from its declared default.
+
+    A default is a placeholder expression that may reference other inputs (see
+    :class:`~medmcp.workflow.WorkflowInput`), so it is resolved against the
+    bindings accumulated so far, in declaration order. A default whose anchor is
+    itself unbound is skipped rather than substituted half-resolved, leaving the
+    input genuinely missing so :func:`validate` reports it.
+
+    An explicitly supplied value always wins: the default exists to save typing,
+    not to override a caller who pointed the workflow somewhere else.
+    """
+    bound: dict[str, Any] = dict(inputs)
+    for inp in recipe.inputs:
+        if inp.name in bound or not inp.default:
+            continue
+        resolved = resolve_value(inp.default, bound)
+        if unresolved_refs(resolved):
+            continue
+        bound[inp.name] = resolved
+    return bound
+
+
 def validate(recipe: Recipe, inputs: dict[str, Any], servers: list[JsonDict]) -> str | None:
     """Return a human-readable error if *recipe* can't be replayed, else ``None``.
 
     Checks that every declared input has a value, every referenced stack is
     installed, and that the recipe has no built-in (non-MCP) tool steps.
     """
-    missing_inputs = [i.name for i in recipe.inputs if i.name not in inputs]
+    bound = apply_input_defaults(recipe, inputs)
+    missing_inputs = [i.name for i in recipe.inputs if i.name not in bound]
     if missing_inputs:
         return f"missing values for inputs: {', '.join(missing_inputs)}"
 
@@ -337,7 +383,9 @@ async def replay_with_caller(
     *inputs* maps placeholder names (``in_1`` …) to concrete values. Outputs a
     step produces are captured and bound as ``{{stepM.<key>}}`` for later steps.
     """
-    bindings: dict[str, Any] = dict(inputs)
+    # Defaults are filled here, the one place every replay path funnels through
+    # (single run and each batch item alike), so no caller can forget them.
+    bindings: dict[str, Any] = apply_input_defaults(recipe, inputs)
     result = ReplayResult()
 
     for index, step in enumerate(recipe.steps, start=1):

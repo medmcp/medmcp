@@ -194,12 +194,15 @@ function InputField({
   description,
   value,
   onChange,
+  defaultHint = '',
 }: {
   name: string
   example: string
   description: string
   value: string
   onChange: (v: string) => void
+  /** Set when the input fills itself if left blank; shown instead of an example. */
+  defaultHint?: string
 }) {
   const [dropReady, setDropReady] = useState(false)
   return (
@@ -207,11 +210,12 @@ function InputField({
       <span className="wf-input-label">
         <code>{name}</code>
         {description && <span className="wf-input-desc">{description}</span>}
+        {defaultHint && <span className="wf-input-desc">{defaultHint}</span>}
       </span>
       <input
         className={dropReady ? 'wf-input drop-ready' : 'wf-input'}
         value={value}
-        placeholder={example ? `e.g. ${example}` : 'value'}
+        placeholder={defaultHint ? 'leave blank to derive it' : example ? `e.g. ${example}` : 'value'}
         onChange={(e) => onChange(e.target.value)}
         onDragOver={(e) => {
           if (e.dataTransfer.types.includes(DRAG_PATH_MIME) || getDraggedFilePath() !== null) {
@@ -988,6 +992,9 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       {mode.kind === 'inputs' &&
         ((m: Extract<Mode, { kind: 'inputs' }>) => {
           const inputNames = d.inputs.map((i) => i.name)
+          // An input carrying a default fills itself server-side when left
+          // blank, so requiring it here would put the typing straight back.
+          const requiredNames = d.inputs.filter((i) => !i.default).map((i) => i.name)
           const emptyRow = (): Record<string, string> =>
             Object.fromEntries(inputNames.map((n) => [n, '']))
           // Distribute the selected files across rows: every N files (N = number
@@ -1009,15 +1016,17 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             const filled = m.rows.filter((r) => Object.values(r).some((v) => v.trim()))
             setMode({ ...m, rows: [...filled, ...added] })
           }
-          const singleIncomplete = inputNames.some((n) => !(m.values[n] ?? '').trim())
-          const completeRows = m.rows.filter((r) => inputNames.every((n) => (r[n] ?? '').trim()))
+          const singleIncomplete = requiredNames.some((n) => !(m.values[n] ?? '').trim())
+          const completeRows = m.rows.filter((r) =>
+            requiredNames.every((n) => (r[n] ?? '').trim()),
+          )
           const previewDisabled = m.batch ? completeRows.length === 0 : singleIncomplete
           return (
             <form
               className="wf-form"
               onSubmit={(e) => {
                 e.preventDefault()
-                void toPreview(d.name, { batch: m.batch, values: m.values, rows: m.rows }, inputNames)
+                void toPreview(d.name, { batch: m.batch, values: m.values, rows: m.rows }, requiredNames)
               }}
             >
               <div className="wf-mode-toggle">
@@ -1049,7 +1058,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                 <>
                   <div className="wf-hint">
                     Provide a value for each input — select a file in the explorer to fill it, or
-                    type / drag a path.
+                    type / drag a path. Inputs marked optional fill themselves in.
                   </div>
                   {d.inputs.map((i) => (
                     <InputField
@@ -1057,6 +1066,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                       name={i.name}
                       example={i.example}
                       description={i.description}
+                      defaultHint={i.default ? 'optional — defaults to the input file’s folder' : ''}
                       value={m.values[i.name] ?? ''}
                       onChange={(v) => setMode({ ...m, values: { ...m.values, [i.name]: v } })}
                     />

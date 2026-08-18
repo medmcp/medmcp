@@ -428,3 +428,98 @@ async def test_mcp_caller_respawns_after_transport_crash(monkeypatch: pytest.Mon
 
     assert spawns[0] == 2  # the dead server was re-spawned, not reused
     assert outcome == (True, {"brain_path": "/b"}, None)
+
+
+# ── derived {{dir(...)}} references ──────────────────────────────────────────
+
+
+def test_resolves_a_derived_directory() -> None:
+    """`{{dir(ref)}}` is the folder holding whatever `ref` resolves to."""
+    bindings = {"in_1": "/data/subj_09/t1.nii.gz"}
+    args = {"input_path": "{{in_1}}", "output_dir": "{{dir(in_1)}}"}
+    assert replay.resolve_arguments(args, bindings) == {
+        "input_path": "/data/subj_09/t1.nii.gz",
+        "output_dir": "/data/subj_09",
+    }
+
+
+def test_derived_directory_follows_the_new_input() -> None:
+    """The point of deriving it: outputs land beside the file being replayed on."""
+    args = {"output_dir": "{{dir(in_1)}}"}
+    assert replay.resolve_arguments(args, {"in_1": "/other/subj_42/scan.nii.gz"}) == {
+        "output_dir": "/other/subj_42"
+    }
+
+
+def test_derived_directory_substitutes_inside_a_larger_string() -> None:
+    """A derived ref works embedded in text, not just as a whole value."""
+    args = {"note": "writing to {{dir(in_1)}}/derivatives"}
+    assert replay.resolve_arguments(args, {"in_1": "/data/s/t1.nii.gz"}) == {
+        "note": "writing to /data/s/derivatives"
+    }
+
+
+def test_unresolvable_derived_ref_is_left_verbatim() -> None:
+    """Left intact so unresolved_refs still reports it rather than silently emptying."""
+    args = {"output_dir": "{{dir(nope)}}"}
+    assert replay.resolve_arguments(args, {"in_1": "/data/x.nii.gz"}) == args
+    assert "dir(nope)" in replay.unresolved_refs(args)
+
+
+def test_default_fills_an_unbound_input() -> None:
+    """An input left blank takes its derived default."""
+    recipe = Recipe(
+        name="w",
+        description="",
+        inputs=[
+            WorkflowInput(name="in_1", example="/a/t1.nii.gz"),
+            WorkflowInput(name="in_2", example="/a", default="{{dir(in_1)}}"),
+        ],
+    )
+    assert replay.apply_input_defaults(recipe, {"in_1": "/b/scan.nii.gz"}) == {
+        "in_1": "/b/scan.nii.gz",
+        "in_2": "/b",
+    }
+
+
+def test_explicit_value_beats_the_default() -> None:
+    """The default saves typing; it must never override a stated destination."""
+    recipe = Recipe(
+        name="w",
+        description="",
+        inputs=[
+            WorkflowInput(name="in_1", example="/a/t1.nii.gz"),
+            WorkflowInput(name="in_2", example="/a", default="{{dir(in_1)}}"),
+        ],
+    )
+    bound = replay.apply_input_defaults(recipe, {"in_1": "/b/scan.nii.gz", "in_2": "/exports"})
+    assert bound["in_2"] == "/exports"
+
+
+def test_default_with_an_unbound_anchor_stays_missing() -> None:
+    """Half-resolved is worse than absent: validate must still report it."""
+    recipe = Recipe(
+        name="w",
+        description="",
+        inputs=[
+            WorkflowInput(name="in_1", example="/a/t1.nii.gz"),
+            WorkflowInput(name="in_2", example="/a", default="{{dir(in_1)}}"),
+        ],
+    )
+    assert replay.apply_input_defaults(recipe, {}) == {}
+    error = replay.validate(recipe, {}, [])
+    assert error is not None and "in_1" in error and "in_2" in error
+
+
+def test_validate_accepts_an_input_covered_by_its_default() -> None:
+    """A defaulted input must not be reported as missing."""
+    recipe = Recipe(
+        name="w",
+        description="",
+        inputs=[
+            WorkflowInput(name="in_1", example="/a/t1.nii.gz"),
+            WorkflowInput(name="in_2", example="/a", default="{{dir(in_1)}}"),
+        ],
+        steps=[RecipeStep(server="s", tool="t", arguments={"p": "{{in_2}}"})],
+    )
+    assert replay.validate(recipe, {"in_1": "/b/scan.nii.gz"}, [{"name": "s"}]) is None

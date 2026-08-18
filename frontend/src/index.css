@@ -2732,3 +2732,20 @@ textarea.wf-input {
   opacity: 0.6;
   text-decoration: line-through;
 }
+
+/* A quiet disclosure, not an action: the derived inputs behind it are optional,
+   so it must not compete with Preview steps for attention. */
+.wf-derived-toggle {
+  align-self: flex-start;
+  border: none;
+  background: none;
+  padding: 2px 0;
+  font-weight: 500;
+  color: var(--muted);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.wf-derived-toggle:hover {
+  color: var(--text);
+}

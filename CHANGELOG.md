@@ -8,6 +8,17 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Fixed
 
+- **Workflow runs only ask for the inputs you actually have to provide.**
+  A workflow distilled from a session used to ask for the scan *and* for the
+  directory that scan sits in — so a two-decision pipeline arrived with several
+  boxes to fill, and the folder was frozen to wherever the workflow happened to
+  be recorded. Where a step simply wrote next to its input, that folder is now
+  worked out from the file you give it and no longer appears in the form, so the
+  results land beside the file you are replaying on. It remains part of the
+  workflow, and *Change where results are written* opens it if you want the
+  output somewhere else. Where the folder can't be worked out unambiguously —
+  two inputs sitting in the same directory, say — nothing is guessed and it is
+  asked for as before.
 - **Tool stacks no longer go missing on the first run after installing them.**
   A stack that takes a moment to start the first time — the usual case, since its
   image has just been pulled and nothing is cached yet — could be given up on

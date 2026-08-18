@@ -194,12 +194,15 @@ function InputField({
   description,
   value,
   onChange,
+  defaultHint = '',
 }: {
   name: string
   example: string
   description: string
   value: string
   onChange: (v: string) => void
+  /** Set when the input fills itself if left blank; shown instead of an example. */
+  defaultHint?: string
 }) {
   const [dropReady, setDropReady] = useState(false)
   return (
@@ -207,11 +210,12 @@ function InputField({
       <span className="wf-input-label">
         <code>{name}</code>
         {description && <span className="wf-input-desc">{description}</span>}
+        {defaultHint && <span className="wf-input-desc">{defaultHint}</span>}
       </span>
       <input
         className={dropReady ? 'wf-input drop-ready' : 'wf-input'}
         value={value}
-        placeholder={example ? `e.g. ${example}` : 'value'}
+        placeholder={defaultHint ? 'leave blank to derive it' : example ? `e.g. ${example}` : 'value'}
         onChange={(e) => onChange(e.target.value)}
         onDragOver={(e) => {
           if (e.dataTransfer.types.includes(DRAG_PATH_MIME) || getDraggedFilePath() !== null) {
@@ -418,6 +422,8 @@ export const WorkflowPanel = memo(function WorkflowPanel({
   const [now, setNow] = useState(0)
   const [planCsv, setPlanCsv] = useState('')
   const [planSkipped, setPlanSkipped] = useState<BatchPlanSkip[] | null>(null)
+  // Derived inputs stay collapsed until the user wants to redirect the output.
+  const [showDerived, setShowDerived] = useState(false)
   const runWs = useRef<WebSocket | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -988,19 +994,27 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       {mode.kind === 'inputs' &&
         ((m: Extract<Mode, { kind: 'inputs' }>) => {
           const inputNames = d.inputs.map((i) => i.name)
+          // An input carrying a default fills itself server-side when left
+          // blank, so requiring it here would put the typing straight back.
+          const requiredInputs = d.inputs.filter((i) => !i.default)
+          const derivedInputs = d.inputs.filter((i) => i.default)
+          const requiredNames = requiredInputs.map((i) => i.name)
           const emptyRow = (): Record<string, string> =>
             Object.fromEntries(inputNames.map((n) => [n, '']))
           // Distribute the selected files across rows: every N files (N = number
-          // of inputs) fill one row's inputs in order. So a 2-input workflow turns
-          // 2 selected files into one run (in_1, in_2), 4 files into two runs, etc.
-          // A single-input workflow gets one row per file. Drops blank rows.
+          // of inputs the user fills) fill one row's inputs in order. So a 2-input
+          // workflow turns 2 selected files into one run (in_1, in_2), 4 files into
+          // two runs, etc. A single-input workflow gets one row per file. Derived
+          // inputs are excluded: they resolve per row from the files chosen here,
+          // and counting them would consume a selected file per row for a value
+          // nobody picked. Drops blank rows.
           const addFromSelection = () => {
-            const k = inputNames.length
+            const k = requiredNames.length
             if (k === 0 || selectedPaths.length === 0) return
             const added: Record<string, string>[] = []
             for (let i = 0; i < selectedPaths.length; i += k) {
               const row = emptyRow()
-              inputNames.forEach((n, j) => {
+              requiredNames.forEach((n, j) => {
                 const file = selectedPaths[i + j]
                 if (file) row[n] = file
               })
@@ -1009,15 +1023,17 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             const filled = m.rows.filter((r) => Object.values(r).some((v) => v.trim()))
             setMode({ ...m, rows: [...filled, ...added] })
           }
-          const singleIncomplete = inputNames.some((n) => !(m.values[n] ?? '').trim())
-          const completeRows = m.rows.filter((r) => inputNames.every((n) => (r[n] ?? '').trim()))
+          const singleIncomplete = requiredNames.some((n) => !(m.values[n] ?? '').trim())
+          const completeRows = m.rows.filter((r) =>
+            requiredNames.every((n) => (r[n] ?? '').trim()),
+          )
           const previewDisabled = m.batch ? completeRows.length === 0 : singleIncomplete
           return (
             <form
               className="wf-form"
               onSubmit={(e) => {
                 e.preventDefault()
-                void toPreview(d.name, { batch: m.batch, values: m.values, rows: m.rows }, inputNames)
+                void toPreview(d.name, { batch: m.batch, values: m.values, rows: m.rows }, requiredNames)
               }}
             >
               <div className="wf-mode-toggle">
@@ -1051,7 +1067,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                     Provide a value for each input — select a file in the explorer to fill it, or
                     type / drag a path.
                   </div>
-                  {d.inputs.map((i) => (
+                  {requiredInputs.map((i) => (
                     <InputField
                       key={i.name}
                       name={i.name}
@@ -1061,18 +1077,49 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                       onChange={(v) => setMode({ ...m, values: { ...m.values, [i.name]: v } })}
                     />
                   ))}
+                  {/* Derived inputs are worked out from the ones above, so they are
+                      not questions to put to the user. They stay reachable — the
+                      recipe still declares them and a caller may want the results
+                      somewhere else — but behind a disclosure rather than as empty
+                      boxes that look like something is missing. */}
+                  {derivedInputs.length > 0 && (
+                    <>
+                      <button
+                        type="button"
+                        className="btn-text wf-derived-toggle"
+                        onClick={() => setShowDerived((v) => !v)}
+                      >
+                        {showDerived ? 'Hide' : 'Change'} where results are written
+                      </button>
+                      {showDerived &&
+                        derivedInputs.map((i) => (
+                          <InputField
+                            key={i.name}
+                            name={i.name}
+                            example={i.example}
+                            description={i.description}
+                            defaultHint="leave blank to write beside the input file"
+                            value={m.values[i.name] ?? ''}
+                            onChange={(v) =>
+                              setMode({ ...m, values: { ...m.values, [i.name]: v } })
+                            }
+                          />
+                        ))}
+                    </>
+                  )}
                 </>
               ) : (
                 <>
                   <div className="wf-hint">
                     One row per run — each runs the whole workflow on its own inputs. Drag a file
                     into any cell, or select files in the explorer and “Add from selection” (every{' '}
-                    {d.inputs.length} selected file{d.inputs.length === 1 ? '' : 's'} fill one row).
+                    {requiredInputs.length} selected file{requiredInputs.length === 1 ? '' : 's'}{' '}
+                    fill one row).
                   </div>
                   <div className="wf-batch-table">
                     <div className="wf-batch-row wf-batch-head">
                       <span className="wf-batch-idx">#</span>
-                      {d.inputs.map((i) => (
+                      {requiredInputs.map((i) => (
                         <span key={i.name} className="wf-batch-col" title={inputOptionLabel(i)}>
                           {i.name}
                         </span>
@@ -1082,7 +1129,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                     {m.rows.map((row, ri) => (
                       <div key={ri} className="wf-batch-row">
                         <span className="wf-batch-idx">{ri + 1}</span>
-                        {d.inputs.map((i) => (
+                        {requiredInputs.map((i) => (
                           <BatchCell
                             key={i.name}
                             value={row[i.name] ?? ''}

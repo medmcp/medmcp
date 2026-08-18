@@ -148,7 +148,7 @@ export interface WorkflowDetail {
   name: string
   kind: 'active' | 'draft'
   description: string
-  inputs: { name: string; example: string; description: string }[]
+  inputs: { name: string; example: string; description: string; default?: string }[]
   steps: { server: string; tool: string; arguments: Record<string, unknown> }[]
   requires: StackRequirement[]
   manual_steps: string[]

@@ -29,7 +29,7 @@ import os
 import re
 import shutil
 from collections.abc import Collection
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 import httpx
@@ -250,6 +250,33 @@ def _manual_step_label(tool: str, arguments: JsonDict) -> str:
     return f"builtin:{tool}"
 
 
+_DIR_REF_RE = re.compile(r"dir\((.+)\)")
+
+
+def _derive_container_dir_defaults(inputs: dict[str, WorkflowInput]) -> None:
+    """Give an input that was another input's folder a derived default.
+
+    A tool's ``output_dir`` is usually the directory its input file already sits
+    in, so replay asks for the same thing twice. It stays a declared input —
+    the session had it, and a caller may legitimately want the results
+    somewhere else — but gains a default so it need not be retyped, and so the
+    outputs follow the file being replayed on rather than the folder the
+    workflow was recorded from.
+
+    Only an unambiguous parent-of relationship earns a default. With two inputs
+    in the same folder there is no principled anchor, and silently picking one
+    would make the destination follow whichever happened to be lifted first.
+    """
+    for path, inp in inputs.items():
+        anchors = [
+            other_inp.name
+            for other, other_inp in inputs.items()
+            if other != path and str(PurePosixPath(other).parent) == path.rstrip("/")
+        ]
+        if len(anchors) == 1:
+            inp.default = f"{{{{dir({anchors[0]})}}}}"
+
+
 def build_recipe(
     messages: list[JsonDict],
     *,
@@ -322,6 +349,7 @@ def build_recipe(
             RecipeStep(server=server, tool=tool, arguments=new_args, produces=produces)
         )
 
+    _derive_container_dir_defaults(inputs)
     recipe.inputs = list(inputs.values())
     recipe.manual_steps = manual_steps
     return recipe
@@ -623,6 +651,7 @@ def load_recipe(draft_dir: Path) -> Recipe:
             name=str(i.get("name", "")),
             example=str(i.get("example", "")),
             description=str(i.get("description", "")),
+            default=str(i.get("default", "")),
         )
         for i in cast("list[JsonDict]", data.get("inputs", []))
     ]

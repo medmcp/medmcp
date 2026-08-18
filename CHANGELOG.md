@@ -6,6 +6,25 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Added
+
+- **External MCP servers** (Settings → Advanced, off by default). Lets you connect
+  the agent to MCP tool services hosted outside your machine — a literature
+  search, a hospital system, a vendor API — alongside your local imaging stacks.
+  Because this ends the guarantee that nothing leaves your infrastructure, the
+  switch does not simply flip: it first explains what changes and asks you to
+  accept responsibility for what those services receive. Nothing is connected
+  until you do, and turning it off removes the servers from the agent again.
+  Servers are addressed by URL (`streamable-http` or `http`); if one needs a
+  token, you give the *name* of an environment variable rather than the token, so
+  no credential is ever written to disk. Tokens are sent as
+  `Authorization: Bearer …` by default, and services that expect something else
+  (an `X-API-Key` header, say) can set the header and value format themselves.
+  Individual servers can be switched off without deleting them, and every tool
+  call still asks for your approval. To supply a token, put `NAME=value` lines in
+  a `medmcp.env` file next to your compose file (or point `MEDMCP_ENV_FILE` at
+  one); it is optional and read only if present.
+
 ### Fixed
 
 - **Tool stacks no longer go missing on the first run after installing them.**

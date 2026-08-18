@@ -590,6 +590,127 @@ def _workflow_detail(name: str) -> JsonDict:
     }
 
 
+# ── External MCP servers (advanced) ──────────────────────────────────────────
+# Every mutation here changes what the agent can reach, so all of them are
+# audit-logged and all of them re-sync the vibe config and restart the agent —
+# the same treatment a stack change gets, for the same reason.
+
+
+class ExternalMcpEnabledPayload(BaseModel):
+    """Request body for turning external MCP support on or off."""
+
+    enabled: bool
+
+
+class ExternalServerPayload(BaseModel):
+    """Request body for registering an external MCP server."""
+
+    name: str
+    transport: str
+    url: str
+    api_key_env: str = ""
+    # Optional overrides for services that don't take a bearer token; empty means
+    # vibe's `Authorization: Bearer {token}` default.
+    api_key_header: str = ""
+    api_key_format: str = ""
+
+
+class ExternalServerActivePayload(BaseModel):
+    """Request body for activating/deactivating one external server."""
+
+    active: bool
+
+
+async def _apply_external_change() -> None:
+    """Re-discover servers, re-sync the vibe config, and restart the agent."""
+    await asyncio.to_thread(_apply_stack_change)
+    await _restart_vibe()
+
+
+@app.get("/api/external-mcp")
+async def get_external_mcp() -> JsonDict:
+    """Return the external-MCP state: the toggle, the acknowledgement, the servers."""
+
+    def _state() -> JsonDict:
+        state = settings.load_external_mcp()
+        return {
+            "enabled": bool(state["enabled"]),
+            "acknowledged": bool(state["acknowledged_at"]),
+            "acknowledged_at": state["acknowledged_at"],
+            "transports": list(settings.EXTERNAL_MCP_TRANSPORTS),
+            "servers": state["servers"],
+        }
+
+    return await asyncio.to_thread(_state)
+
+
+@app.post("/api/external-mcp/acknowledge")
+async def post_external_mcp_acknowledge() -> JsonDict:
+    """Record that the operator accepted responsibility for external services."""
+    state = await asyncio.to_thread(settings.acknowledge_external_mcp)
+    _audit.info("external MCP acknowledged at %s", state["acknowledged_at"])
+    return {"ok": True, "acknowledged_at": state["acknowledged_at"]}
+
+
+@app.put("/api/external-mcp")
+async def put_external_mcp(payload: ExternalMcpEnabledPayload) -> JsonDict:
+    """Enable or disable external MCP support (enabling requires the acknowledgement)."""
+    try:
+        await asyncio.to_thread(settings.set_external_mcp_enabled, payload.enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit.info("external MCP %s", "enabled" if payload.enabled else "disabled")
+    await _apply_external_change()
+    return {"ok": True, "enabled": payload.enabled, "restarted": True}
+
+
+@app.post("/api/external-mcp/servers")
+async def post_external_server(payload: ExternalServerPayload) -> JsonDict:
+    """Register an external MCP server."""
+    try:
+        entry = await asyncio.to_thread(
+            settings.add_external_server,
+            payload.name,
+            payload.transport,
+            payload.url,
+            payload.api_key_env,
+            True,
+            payload.api_key_header,
+            payload.api_key_format,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit.info("external MCP server added: %s -> %s", entry["name"], entry["url"])
+    await _apply_external_change()
+    return {"ok": True, "server": entry, "restarted": True}
+
+
+@app.patch("/api/external-mcp/servers/{name}")
+async def patch_external_server(name: str, payload: ExternalServerActivePayload) -> JsonDict:
+    """Activate or deactivate a single external server without deleting it."""
+    try:
+        await asyncio.to_thread(settings.set_external_server_active, name, payload.active)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _audit.info(
+        "external MCP server %s: %s", "activated" if payload.active else "deactivated", name
+    )
+    await _apply_external_change()
+    return {"ok": True, "restarted": True}
+
+
+@app.delete("/api/external-mcp/servers/{name}")
+async def delete_external_server(name: str) -> JsonDict:
+    """Remove an external MCP server."""
+    try:
+        await asyncio.to_thread(settings.remove_external_server, name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _audit.info("external MCP server removed: %s", name)
+    await _apply_external_change()
+    return {"ok": True, "restarted": True}
+
+
 @app.get("/api/workflows")
 async def get_workflows() -> JsonDict:
     """List the personal workflows available to the replay engine."""

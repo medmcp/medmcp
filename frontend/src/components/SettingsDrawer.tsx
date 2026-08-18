@@ -1,57 +1,13 @@
 import { useEffect, useState } from 'react'
 import { fetchGpus, fetchSettings, saveSettings } from '../api'
 import type { GpuInfo, SettingsState } from '../types'
+import { ExternalMcpSection } from './ExternalMcpSection'
+import { Row } from './SettingsControls'
 import { ChevronRightIcon, XIcon } from './icons'
 
 interface SettingsDrawerProps {
   open: boolean
   onClose: () => void
-}
-
-function Toggle({
-  checked,
-  onChange,
-  disabled,
-}: {
-  checked: boolean
-  onChange: (value: boolean) => void
-  disabled?: boolean
-}) {
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      className={`toggle${checked ? ' on' : ''}`}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-    >
-      <span className="toggle-knob" />
-    </button>
-  )
-}
-
-function Row({
-  label,
-  hint,
-  checked,
-  onChange,
-  disabled,
-}: {
-  label: string
-  hint?: string
-  checked: boolean
-  onChange: (value: boolean) => void
-  disabled?: boolean
-}) {
-  return (
-    <div className={`settings-row${disabled ? ' disabled' : ''}`}>
-      <div className="settings-row-text">
-        <div className="settings-row-label">{label}</div>
-        {hint && <div className="settings-row-hint">{hint}</div>}
-      </div>
-      <Toggle checked={checked} onChange={onChange} disabled={disabled} />
-    </div>
-  )
 }
 
 /**
@@ -171,12 +127,15 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                 Advanced
               </button>
               {advanced && (
-                <Row
-                  label="Record provenance"
-                  hint="Keeps a replayable record of what each chat did (manifest, tool log, permissions). Turning this off means a chat leaves no audit trail and cannot be distilled into a workflow."
-                  checked={state.record_provenance}
-                  onChange={(v) => apply({ ...state, record_provenance: v })}
-                />
+                <>
+                  <Row
+                    label="Record provenance"
+                    hint="Keeps a replayable record of what each chat did (manifest, tool log, permissions). Turning this off means a chat leaves no audit trail and cannot be distilled into a workflow."
+                    checked={state.record_provenance}
+                    onChange={(v) => apply({ ...state, record_provenance: v })}
+                  />
+                  <ExternalMcpSection />
+                </>
               )}
 
               <div className="drawer-footnote">

@@ -226,6 +226,11 @@ __marimo__/
 # copy the image ships lives at docker/hooks.toml).
 .vibe/hooks.toml
 .vibe/pathguard_retries.json
+.vibe/external_mcp.json
+# Tokens for external MCP servers, passed to the core container via env_file.
+medmcp.env
+# Derived from .vibe/prompts/medmcp.md at sync time when external MCP is in use.
+.vibe/prompts/medmcp-external.md
 .vibe/provenance/
 .vibe/workflows/
 data/

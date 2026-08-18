@@ -13,6 +13,22 @@ Notable, user-visible changes to MedMCP. Format follows
   the general CT model and 50 with the MR one, plus focused models for the spine,
   lungs, liver, head and neck, and teeth — and reports per-structure volumes. A
   GPU is strongly recommended; it also runs on CPU, considerably more slowly.
+- **External MCP servers** (Settings → Advanced, off by default). Lets you connect
+  the agent to MCP tool services hosted outside your machine — a literature
+  search, a hospital system, a vendor API — alongside your local imaging stacks.
+  Because this ends the guarantee that nothing leaves your infrastructure, the
+  switch does not simply flip: it first explains what changes and asks you to
+  accept responsibility for what those services receive. Nothing is connected
+  until you do, and turning it off removes the servers from the agent again.
+  Servers are addressed by URL (`streamable-http` or `http`); if one needs a
+  token, you give the *name* of an environment variable rather than the token, so
+  no credential is ever written to disk. Tokens are sent as
+  `Authorization: Bearer …` by default, and services that expect something else
+  (an `X-API-Key` header, say) can set the header and value format themselves.
+  Individual servers can be switched off without deleting them, and every tool
+  call still asks for your approval. To supply a token, put `NAME=value` lines in
+  a `medmcp.env` file next to your compose file (or point `MEDMCP_ENV_FILE` at
+  one); it is optional and read only if present.
 
 ## 0.1.0
 

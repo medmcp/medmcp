@@ -523,3 +523,48 @@ def test_validate_accepts_an_input_covered_by_its_default() -> None:
         steps=[RecipeStep(server="s", tool="t", arguments={"p": "{{in_2}}"})],
     )
     assert replay.validate(recipe, {"in_1": "/b/scan.nii.gz"}, [{"name": "s"}]) is None
+
+
+def test_blank_optional_input_still_takes_its_default() -> None:
+    """The regression that made replays write nowhere.
+
+    The run form posts every field it rendered, so an input deliberately left
+    empty arrives as "". Treating that as bound skipped the default and sent an
+    empty output_dir to the tool, which wrote relative to its own working
+    directory — outside the workspace. The run reported success and no files
+    appeared.
+    """
+    recipe = Recipe(
+        name="w",
+        description="",
+        inputs=[
+            WorkflowInput(name="in_1", example="/a/t1.nii.gz"),
+            WorkflowInput(name="in_2", example="/a", default="{{dir(in_1)}}"),
+        ],
+        steps=[
+            RecipeStep(
+                server="s",
+                tool="t",
+                arguments={"input_path": "{{in_1}}", "output_dir": "{{in_2}}"},
+            )
+        ],
+    )
+    posted = {"in_1": "/data/subj_42/scan.nii.gz", "in_2": ""}
+    bound = replay.apply_input_defaults(recipe, posted)
+
+    assert bound["in_2"] == "/data/subj_42"
+    assert replay.resolve_arguments(recipe.steps[0].arguments, bound)["output_dir"] == (
+        "/data/subj_42"
+    )
+
+
+def test_blank_required_input_is_reported_missing() -> None:
+    """A blank with no default must fail loudly, not run with an empty argument."""
+    recipe = Recipe(
+        name="w",
+        description="",
+        inputs=[WorkflowInput(name="in_1", example="/a/t1.nii.gz")],
+        steps=[RecipeStep(server="s", tool="t", arguments={"p": "{{in_1}}"})],
+    )
+    error = replay.validate(recipe, {"in_1": "   "}, [{"name": "s"}])
+    assert error is not None and "in_1" in error

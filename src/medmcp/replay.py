@@ -313,6 +313,11 @@ async def mcp_caller(
 # ── Validation & execution ────────────────────────────────────────────────────
 
 
+def _is_unset(value: object) -> bool:
+    """Whether *value* counts as not supplied: absent, or whitespace-only text."""
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
 def apply_input_defaults(recipe: Recipe, inputs: dict[str, Any]) -> dict[str, Any]:
     """Return *inputs* with any unbound input filled in from its declared default.
 
@@ -325,7 +330,14 @@ def apply_input_defaults(recipe: Recipe, inputs: dict[str, Any]) -> dict[str, An
     An explicitly supplied value always wins: the default exists to save typing,
     not to override a caller who pointed the workflow somewhere else.
     """
-    bound: dict[str, Any] = dict(inputs)
+    # A blank is not a value. The run form posts every field it rendered, so an
+    # input the caller deliberately left empty arrives as "" — and treating that
+    # as bound skipped the default and sent an empty output_dir to the tool,
+    # which then wrote relative to its own working directory, outside the
+    # workspace: the run reported success and no files appeared. Dropping blanks
+    # here also means a blank *required* input reaches validate() as missing,
+    # failing loudly rather than writing somewhere nobody will look.
+    bound: dict[str, Any] = {k: v for k, v in inputs.items() if not _is_unset(v)}
     for inp in recipe.inputs:
         if inp.name in bound or not inp.default:
             continue

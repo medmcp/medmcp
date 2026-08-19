@@ -5,7 +5,6 @@
 
 <p align="center">
   <a href="https://medmcp.ai"><b>medmcp.ai</b></a> ·
-  <a href="https://www.youtube.com/watch?v=wvc-MAnzHVA">Launch trailer</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#security">Security</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
@@ -40,6 +39,12 @@ Then open **http://localhost:8100**.
 **Update** by re-running the start command with `--pull always`.
 
 > Want to build from source or run host-native? See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
+
+---
+
+## See it in action
+
+A short **[launch trailer](https://www.youtube.com/watch?v=wvc-MAnzHVA)** demonstrating MedMCP's capabilities at launch.
 
 ---
 

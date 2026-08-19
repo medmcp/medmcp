@@ -15,7 +15,7 @@ You should receive an acknowledgement within a few business days. We will work w
 
 ## Scope
 
-medmcp and its ecosystem packages are **research software**. They are not medical devices and **must not be used for clinical decision-making**. Security reports should focus on:
+MedMCP and its ecosystem packages are **research software**. They are not medical devices and **must not be used for clinical decision-making**. Security reports should focus on:
 
 - Code-execution vulnerabilities in parsing/processing pipelines (DICOM, NIfTI, etc.)
 - Path traversal, SSRF, or injection in tool handlers
@@ -24,7 +24,7 @@ medmcp and its ecosystem packages are **research software**. They are not medica
 
 Out of scope:
 
-- Issues that only apply to clinical use (medmcp is not approved for it — see the warning in the README)
+- Issues that only apply to clinical use (MedMCP is not approved for it — see the warning in the README)
 - Denial of service on deliberately malformed inputs where the fix is "don't feed it malformed inputs"
 
 ## Patient data

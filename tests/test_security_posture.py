@@ -53,13 +53,6 @@ def test_web_search_off_and_web_fetch_on_but_gated(rel: str) -> None:
 
 
 @pytest.mark.parametrize("rel", CONFIGS)
-def test_no_allowlist_smuggles_an_approval(rel: str) -> None:
-    """An allowlist entry is an approval nobody clicks; the bash one was emptied once."""
-    for name, tool in _load(rel).get("tools", {}).items():
-        assert not tool.get("allowlist"), f"{rel}: [tools.{name}] carries an allowlist"
-
-
-@pytest.mark.parametrize("rel", CONFIGS)
 def test_config_names_only_real_tools(rel: str) -> None:
     """A key naming a tool vibe does not have expresses nothing.
 

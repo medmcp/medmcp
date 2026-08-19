@@ -62,7 +62,12 @@ A short **[launch trailer](https://www.youtube.com/watch?v=wvc-MAnzHVA)** demons
 
 MedMCP assumes the local model can be steered by prompt injection (e.g. text pasted from untrusted documents), so its safety model is built around explicit user control:
 
-- **No auto-approval**: every tool call (bash, file writes, web fetches) requires an explicit click.
+- **Nothing is changed or sent without your approval**: writing a file, editing
+  one, fetching a URL, or running a command with side effects each require an
+  explicit click. There is no "always allow" and no session-wide approval — each
+  call is approved on its own. Read-only shell commands (`ls`, `cat`, `grep`, …)
+  run without a prompt *inside your workspace*; pointed outside it, they ask
+  first, and `find -exec` is treated as execution, not reading.
 - **Localhost only**: the server binds to localhost. Do not expose port 8100 over a network without adding real authentication.
 - **No data egress**: `web_search` is disabled and `web_fetch` requires approval.
 - **Isolated tool stacks**: stack containers run with `--network none`, all capabilities dropped, and no privilege escalation. They bake their models at build time, so a tool call cannot reach the network even if the agent is steered into making one. A stack that genuinely needs egress must declare it in its image label.

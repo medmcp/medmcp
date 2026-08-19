@@ -75,10 +75,13 @@ your infrastructure.
 
 ### Security
 
-- **No auto-approval.** Every tool call — bash, file writes, web fetches —
-  requires an explicit click. There is no "always allow" and no session-wide
-  approval; each call is approved on its own. The approval dialog shows the
-  call's arguments alongside a generated plain-language risk summary.
+- **Nothing is changed or sent without your approval.** Writing a file, editing
+  one, fetching a URL, or running a command with side effects each require an
+  explicit click. There is no "always allow" and no session-wide approval; each
+  call is approved on its own, and the dialog shows the call's arguments
+  alongside a generated plain-language risk summary. Read-only shell commands
+  (`ls`, `cat`, `grep`, …) run without a prompt inside your workspace; the same
+  commands pointed outside it ask first, and `find -exec` counts as execution.
 - **Invented file paths are sent back to the agent, not to you.** Before a tool
   call reaches the approval dialog, MedMCP checks the paths it would use. If one
   cannot be right — an input that does not exist, a destination folder that is

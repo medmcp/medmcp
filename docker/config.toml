@@ -100,7 +100,7 @@ sensitive_patterns = [
     "sudo",
 ]
 
-[tools.read]
+[tools.read_file]
 permission = "always"
 allowlist = []
 denylist = []

@@ -141,6 +141,10 @@ def _recipe_from_envelope(env: JsonDict) -> Recipe:
             name=str(i.get("name", "")),
             example=str(i.get("example", "")),
             description=str(i.get("description", "")),
+            # Without this a shared workflow loses its derived defaults on
+            # import, handing the recipient back the very input the default
+            # exists to spare them — and silently, since export writes it.
+            default=str(i.get("default", "")),
         )
         for i in cast("list[JsonDict]", env.get("inputs", []))
     ]

@@ -6,15 +6,19 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
-### Fixed
+### Added
 
-- **Published images can no longer go backwards.** Two changes merged close
-  together could leave the `:main` image built from the *older* of them, because
-  both builds pushed the same tag and the one that started first sometimes
-  finished last. Nothing failed and nothing said the tag had moved backwards, so
-  a `docker compose pull` could quietly hand you an image missing the change you
-  had just merged. Image builds are now ordered, so the newest commit always wins
-  the tag.
+- **`medmcp-llm-shim`** — an optional local proxy that sits between the agent and
+  the model server and repairs the tool-call failures above: it works around the
+  name collision that triggers them, retries turns that are cut short, and
+  neutralises malformed tool arguments that would otherwise leave a chat
+  permanently unable to reply. **On by default** — the failure it prevents is
+  silent, so there is nothing for you to notice or search for when it happens.
+  Set `MEDMCP_LLM_SHIM=0` to disable it and talk to the model server directly.
+- **Reset view** button in the image viewer. After panning, zooming, rotating the
+  3D view, or scrolling far through the slices, one click returns the volume to
+  how it looked when it opened. Your viewer settings and any overlay stay as they
+  are — only the camera moves.
 
 ### Changed
 
@@ -26,6 +30,19 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Fixed
 
+- **Shared workflows keep their filled-in fields.** A workflow exported and sent
+  to a colleague arrived with its automatically-filled inputs turned back into
+  questions, so the recipient was asked for a folder the workflow already knew.
+- **The one-command install builds the model it is supposed to.** The deploy
+  compose still carried sampling settings from the previously bundled model, so
+  installs made that way ran a differently tuned model than the one tested.
+- **Published images can no longer go backwards.** Two changes merged close
+  together could leave the `:main` image built from the *older* of them, because
+  both builds pushed the same tag and the one that started first sometimes
+  finished last. Nothing failed and nothing said the tag had moved backwards, so
+  a `docker compose pull` could quietly hand you an image missing the change you
+  had just merged. Image builds are now ordered, so the newest commit always wins
+  the tag.
 - **Workflow runs only ask for the inputs you actually have to provide.**
   A workflow distilled from a session used to ask for the scan *and* for the
   directory that scan sits in — so a two-decision pipeline arrived with several
@@ -53,20 +70,6 @@ Notable, user-visible changes to MedMCP. Format follows
 - **Agent replies are no longer discarded.** Responses from the model were being
   dropped before they reached the chat because the reasoning output was read from
   the wrong field.
-
-### Added
-
-- **`medmcp-llm-shim`** — an optional local proxy that sits between the agent and
-  the model server and repairs the tool-call failures above: it works around the
-  name collision that triggers them, retries turns that are cut short, and
-  neutralises malformed tool arguments that would otherwise leave a chat
-  permanently unable to reply. **On by default** — the failure it prevents is
-  silent, so there is nothing for you to notice or search for when it happens.
-  Set `MEDMCP_LLM_SHIM=0` to disable it and talk to the model server directly.
-- **Reset view** button in the image viewer. After panning, zooming, rotating the
-  3D view, or scrolling far through the slices, one click returns the volume to
-  how it looked when it opened. Your viewer settings and any overlay stay as they
-  are — only the camera moves.
 
 ## 0.1.0
 

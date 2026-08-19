@@ -6,6 +6,16 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Fixed
+
+- **Published images can no longer go backwards.** Two changes merged close
+  together could leave the `:main` image built from the *older* of them, because
+  both builds pushed the same tag and the one that started first sometimes
+  finished last. Nothing failed and nothing said the tag had moved backwards, so
+  a `docker compose pull` could quietly hand you an image missing the change you
+  had just merged. Image builds are now ordered, so the newest commit always wins
+  the tag.
+
 ### Changed
 
 - **The agent now keeps a visible task list when you ask for more than one

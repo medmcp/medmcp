@@ -61,8 +61,8 @@ services:
           'PARAMETER temperature 0.3' \
           'PARAMETER top_p 0.95' \
           'PARAMETER top_k 64' \
-          'PARAMETER repeat_penalty 1.15' \
-          'PARAMETER repeat_last_n 256' \
+          'PARAMETER repeat_penalty 1.1' \
+          'PARAMETER repeat_last_n 64' \
           > /tmp/Modelfile.medmcp
         ollama create "$$MEDMCP_MODEL" -f /tmp/Modelfile.medmcp
     restart: "no"

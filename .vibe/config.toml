@@ -3,7 +3,7 @@ vim_keybindings = false
 disable_welcome_banner_animation = false
 autocopy_to_clipboard = true
 file_watcher_for_autocomplete = false
-auto_compact_threshold = 200000
+auto_compact_threshold = 115000
 context_warnings = false
 auto_approve = false
 system_prompt_id = "medmcp"
@@ -20,7 +20,6 @@ tool_paths = []
 enabled_tools = []
 disabled_tools = [
     "web_search",
-    "web_fetch",
 ]
 agent_paths = []
 enabled_agents = []
@@ -87,7 +86,7 @@ allowlist = []
 denylist = []
 max_todos = 100
 
-[tools.search_replace]
+[tools.edit]
 permission = "ask"
 allowlist = []
 denylist = []
@@ -137,6 +136,13 @@ codeignore_file = ".vibeignore"
 
 [tools.ask_user_question]
 permission = "always"
+allowlist = []
+denylist = []
+
+[tools.web_fetch]
+# The one tool that can reach the network. Never "always": every fetch is a
+# decision the person makes, and the README's security section says so.
+permission = "ask"
 allowlist = []
 denylist = []
 

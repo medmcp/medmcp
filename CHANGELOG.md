@@ -4,70 +4,6 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
-## Unreleased
-
-### Fixed
-
-- **Published images can no longer go backwards.** Two changes merged close
-  together could leave the `:main` image built from the *older* of them, because
-  both builds pushed the same tag and the one that started first sometimes
-  finished last. Nothing failed and nothing said the tag had moved backwards, so
-  a `docker compose pull` could quietly hand you an image missing the change you
-  had just merged. Image builds are now ordered, so the newest commit always wins
-  the tag.
-
-### Changed
-
-- **The agent now keeps a visible task list when you ask for more than one
-  thing.** Multi-part requests — strip this scan, register it, then report the
-  volumes — are written out as a checklist before the work starts and ticked off
-  as each part lands, so you can see what it understood you to be asking and how
-  far it has got. Single requests are unaffected.
-
-### Fixed
-
-- **Workflow runs only ask for the inputs you actually have to provide.**
-  A workflow distilled from a session used to ask for the scan *and* for the
-  directory that scan sits in — so a two-decision pipeline arrived with several
-  boxes to fill, and the folder was frozen to wherever the workflow happened to
-  be recorded. Where a step simply wrote next to its input, that folder is now
-  worked out from the file you give it and no longer appears in the form, so the
-  results land beside the file you are replaying on. It remains part of the
-  workflow, and *Change where results are written* opens it if you want the
-  output somewhere else. Where the folder can't be worked out unambiguously —
-  two inputs sitting in the same directory, say — nothing is guessed and it is
-  asked for as before.
-- **Tool stacks no longer go missing on the first run after installing them.**
-  A stack that takes a moment to start the first time — the usual case, since its
-  image has just been pulled and nothing is cached yet — could be given up on
-  before it answered, leaving that chat with none of its tools. Stacks are now
-  given a startup budget a cold start fits into, and existing installations are
-  repaired automatically — no reinstall needed. Starting a new chat also retries,
-  so a stack that was only slow comes back on its own.
-- **The agent no longer goes silent on multi-step requests.** Asking for a
-  multi-step imaging workflow could leave the chat with no reply at all — no text,
-  no error, nothing to retry. The local model server was failing to read the
-  model's tool calls and closing the connection without reporting it, so roughly
-  half of all tool-using turns were lost. Affected turns now complete, and a turn
-  that genuinely cannot be recovered says so instead of hanging.
-- **Agent replies are no longer discarded.** Responses from the model were being
-  dropped before they reached the chat because the reasoning output was read from
-  the wrong field.
-
-### Added
-
-- **`medmcp-llm-shim`** — an optional local proxy that sits between the agent and
-  the model server and repairs the tool-call failures above: it works around the
-  name collision that triggers them, retries turns that are cut short, and
-  neutralises malformed tool arguments that would otherwise leave a chat
-  permanently unable to reply. **On by default** — the failure it prevents is
-  silent, so there is nothing for you to notice or search for when it happens.
-  Set `MEDMCP_LLM_SHIM=0` to disable it and talk to the model server directly.
-- **Reset view** button in the image viewer. After panning, zooming, rotating the
-  3D view, or scrolling far through the slices, one click returns the volume to
-  how it looked when it opened. Your viewer settings and any overlay stay as they
-  are — only the camera moves.
-
 ## 0.1.0
 
 First public release. MedMCP is an on-premise agentic framework that exposes
@@ -87,12 +23,16 @@ your infrastructure.
 - **Image viewer** — volumes (`.nii.gz`, `.nrrd`, `.dcm`, …) rendered with
   Niivue as multiplanar slices plus a 3D view, with PDF, image, and text preview
   for everything else. Drag a segmentation from the explorer onto the image to
-  overlay it with a per-label colormap and adjustable opacity.
+  overlay it with a per-label colormap and adjustable opacity. A reset button
+  returns the volume to how it looked when it opened, leaving your viewer
+  settings and any overlay untouched.
 - **Chat** with a local model over Ollama (Meta's Muse Glimmer 30B by
   default — open-weight, Apache 2.0, and built for tool use), with
   streamed responses, tool-call cards, and a context meter. Chats persist and
   can be resumed, renamed, archived, deleted, branched into a parallel session,
   or rewound to before an earlier message (restoring the files it touched).
+  Ask for more than one thing and the agent writes out a task list before it
+  starts, ticking off each part as it lands.
 
 ### Imaging tool stacks
 
@@ -112,9 +52,13 @@ your infrastructure.
   recipe plus a readable description of what it does.
 - **Replay** a workflow deterministically on new data with no model in the loop
   — including in batch over a whole cohort — after previewing and confirming the
-  resolved steps.
+  resolved steps. A run asks only for the inputs that are genuinely yours to
+  choose: where a step simply wrote next to its input, the destination is worked
+  out from the file you give it, and the results land beside the data you are
+  replaying on.
 - **Share** a workflow as one self-contained `.workflow.yaml` file, and import
-  one you were sent as a reviewable draft.
+  one you were sent as a reviewable draft — including the fields it fills in for
+  itself, so a colleague is asked no more than you were.
 
 ### Deployment
 
@@ -123,13 +67,21 @@ your infrastructure.
 - Multi-architecture images (x86-64 and ARM) built on one shared CUDA base, with
   GPU access through the NVIDIA Container Toolkit's CDI interface, so rootless
   Docker is supported.
+- A local proxy between the agent and the model server repairs tool-call
+  failures in the bundled model's parser — it works around the name collision
+  that triggers them, retries turns that are cut short, and neutralises malformed
+  tool arguments. On by default, since the failure it prevents is silent; set
+  `MEDMCP_LLM_SHIM=0` to talk to the model server directly.
 
 ### Security
 
-- **No auto-approval.** Every tool call — bash, file writes, web fetches —
-  requires an explicit click. There is no "always allow" and no session-wide
-  approval; each call is approved on its own. The approval dialog shows the
-  call's arguments alongside a generated plain-language risk summary.
+- **Nothing is changed or sent without your approval.** Writing a file, editing
+  one, fetching a URL, or running a command with side effects each require an
+  explicit click. There is no "always allow" and no session-wide approval; each
+  call is approved on its own, and the dialog shows the call's arguments
+  alongside a generated plain-language risk summary. Read-only shell commands
+  (`ls`, `cat`, `grep`, …) run without a prompt inside your workspace; the same
+  commands pointed outside it ask first, and `find -exec` counts as execution.
 - **Invented file paths are sent back to the agent, not to you.** Before a tool
   call reaches the approval dialog, MedMCP checks the paths it would use. If one
   cannot be right — an input that does not exist, a destination folder that is

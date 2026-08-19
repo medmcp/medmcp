@@ -128,3 +128,33 @@ class TestImport:
         assert draft.name == "skull-strip-register-imported"
         again = share.import_workflow(text, workflows_root=tmp_path)
         assert again.name == "skull-strip-register-imported-2"
+
+
+def test_export_import_round_trips_a_derived_default(tmp_path: Path) -> None:
+    """A shared workflow must keep its derived defaults.
+
+    Export writes `default` (it is part of the input's dict form), so dropping it
+    on import is silent: the recipient gets back the very input the default
+    exists to spare them, and only notices when the run form asks for it.
+    """
+    recipe = Recipe(
+        name="wf",
+        description="d",
+        inputs=[
+            WorkflowInput(name="in_1", example="/a/t1.nii.gz"),
+            WorkflowInput(name="in_2", example="/a", default="{{dir(in_1)}}"),
+        ],
+        steps=[RecipeStep(server="s", tool="t", arguments={"p": "{{in_1}}", "o": "{{in_2}}"})],
+    )
+    root = tmp_path / "workflows"
+    src = root / "draft" / "wf"
+    src.mkdir(parents=True)
+    (src / "recipe.yaml").write_text(yaml.safe_dump(recipe.to_dict()), encoding="utf-8")
+
+    envelope = share.export_workflow("wf", workflows_root=root)
+    assert "{{dir(in_1)}}" in envelope
+
+    dest_root = tmp_path / "dest"
+    draft = share.import_workflow(envelope, workflows_root=dest_root)
+    loaded = distill.load_recipe(draft)
+    assert [i.default for i in loaded.inputs] == ["", "{{dir(in_1)}}"]

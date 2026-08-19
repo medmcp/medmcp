@@ -5,6 +5,7 @@
 
 <p align="center">
   <a href="https://medmcp.ai"><b>medmcp.ai</b></a> ·
+  <a href="https://www.youtube.com/watch?v=wvc-MAnzHVA">Launch trailer</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#security">Security</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>

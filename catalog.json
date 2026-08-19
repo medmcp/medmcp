@@ -18,30 +18,6 @@
       "image": "medmcp-neuro-ms:dev",
       "description": "MS white-matter lesion segmentation and lesion load (LST-AI).",
       "gpu": true
-    },
-    {
-      "name": "medmcp-neuro-cancer",
-      "image": "medmcp-neuro-cancer:dev",
-      "description": "Brain-tumor (glioma / BraTS) segmentation (MONAI SegResNet).",
-      "gpu": true
-    },
-    {
-      "name": "medmcp-monai",
-      "image": "medmcp-monai:dev",
-      "description": "Run pretrained MONAI Model-Zoo bundles (spleen / multi-organ / whole-body CT segmentation).",
-      "gpu": true
-    },
-    {
-      "name": "medmcp-qc",
-      "image": "medmcp-qc:dev",
-      "description": "Visual QC reports for segmentations (brain extraction, lesions, tumor, parcellations).",
-      "gpu": false
-    },
-    {
-      "name": "medmcp-cohort",
-      "image": "medmcp-cohort:dev",
-      "description": "Clinical cohort assembly, imaging-biomarker stratification, and association analysis (ehrapy).",
-      "gpu": false
     }
   ]
 }

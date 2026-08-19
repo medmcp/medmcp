@@ -92,6 +92,13 @@ permission = "always"
 allowlist = []
 denylist = []
 
+[tools.web_fetch]
+# The one tool that can reach the network. Never "always": every fetch is a
+# decision the person makes, and the README's security section says so.
+permission = "ask"
+allowlist = []
+denylist = []
+
 [tools.bash]
 permission = "ask"
 allowlist = []

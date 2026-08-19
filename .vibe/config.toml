@@ -20,21 +20,15 @@ tool_paths = []
 enabled_tools = []
 disabled_tools = [
     "web_search",
-    "web_fetch",
 ]
 agent_paths = []
 enabled_agents = []
 disabled_agents = []
-skill_paths = [
-    "/home/paul.friedrich/.local/share/uv/tools/medmcp-neuro/lib/python3.12/site-packages/medmcp_neuro/skills",
-]
+skill_paths = []
 enabled_skills = []
 disabled_skills = [
     "skill-creator",
     "vibe",
-]
-applied_migrations = [
-    "bash_read_only_defaults_v1",
 ]
 
 [[providers]]
@@ -43,6 +37,10 @@ api_base = "http://localhost:11434/v1"
 api_key_env_var = ""
 api_style = "openai"
 backend = "generic"
+# Ollama names the reasoning channel differently per mode: "reasoning_content" when
+# non-streaming, "reasoning" in stream deltas. vibe streams, so this must be
+# "reasoning" — otherwise the key never matches and the model's entire answer is
+# dropped (LLMMessage ignores extras), leaving turns visibly empty.
 reasoning_field_name = "reasoning"
 project_id = ""
 region = ""
@@ -51,6 +49,10 @@ region = ""
 name = "muse-medmcp"
 provider = "ollama"
 alias = "local"
+# Must match Modelfile.muse. This value is sent on every request, and a request
+# option overrides the Modelfile's PARAMETER — so while this said 1.0 the
+# Modelfile's 0.3 never applied. Low temperature is deliberate: the model is
+# choosing tool arguments and file paths, where creativity is a defect.
 temperature = 0.3
 input_price = 0.0
 output_price = 0.0
@@ -83,6 +85,14 @@ permission = "always"
 allowlist = []
 denylist = []
 max_todos = 100
+
+[tools.edit]
+permission = "ask"
+allowlist = []
+denylist = []
+max_content_size = 100000
+create_backup = false
+fuzzy_threshold = 0.9
 
 [tools.read_file]
 permission = "always"
@@ -129,64 +139,17 @@ permission = "always"
 allowlist = []
 denylist = []
 
+[tools.web_fetch]
+# The one tool that can reach the network. Never "always": every fetch is a
+# decision the person makes, and the README's security section says so.
+permission = "ask"
+allowlist = []
+denylist = []
+
 [tools.bash]
 permission = "ask"
-allowlist = [
-    "basename",
-    "cat",
-    "comm",
-    "cut",
-    "date",
-    "diff",
-    "dirname",
-    "du",
-    "file",
-    "find",
-    "fmt",
-    "fold",
-    "grep",
-    "head",
-    "join",
-    "less",
-    "ls",
-    "md5sum",
-    "more",
-    "nl",
-    "od",
-    "paste",
-    "pwd",
-    "readlink",
-    "sha1sum",
-    "sha256sum",
-    "shasum",
-    "sort",
-    "stat",
-    "sum",
-    "tac",
-    "tail",
-    "tr",
-    "uname",
-    "uniq",
-    "wc",
-    "which",
-]
+allowlist = []
 denylist_standalone = []
 sensitive_patterns = [
     "sudo",
 ]
-
-[tools.edit]
-permission = "ask"
-allowlist = []
-denylist = []
-fuzzy_threshold = 0.9
-
-[[mcp_servers]]
-transport = "stdio"
-tool_timeout_sec = 7200.0
-skills_path = "/home/paul.friedrich/.local/share/uv/tools/medmcp-neuro/lib/python3.12/site-packages/medmcp_neuro/skills"
-name = "medmcp-neuro"
-command = "/home/paul.friedrich/.local/share/uv/tools/medmcp-neuro/bin/medmcp-neuro"
-startup_timeout_sec = 60.0
-
-[mcp_servers.env]

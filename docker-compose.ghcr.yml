@@ -58,7 +58,7 @@ services:
         printf '%s\n' \
           "FROM $$MEDMCP_BASE_MODEL" \
           'PARAMETER num_ctx 131072' \
-          'PARAMETER temperature 1.0' \
+          'PARAMETER temperature 0.3' \
           'PARAMETER top_p 0.95' \
           'PARAMETER top_k 64' \
           'PARAMETER repeat_penalty 1.1' \

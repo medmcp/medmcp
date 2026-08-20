@@ -18,6 +18,12 @@
       "image": "ghcr.io/medmcp/neuro-ms:main",
       "description": "MS white-matter lesion segmentation and lesion load (LST-AI).",
       "gpu": true
+    },
+    {
+      "name": "medmcp-totalsegmentator",
+      "image": "ghcr.io/medmcp/totalsegmentator:main",
+      "description": "Whole-body anatomy segmentation on CT and MR (TotalSegmentator): 31 tasks, 117 structures.",
+      "gpu": true
     }
   ]
 }

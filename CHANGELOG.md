@@ -4,6 +4,15 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Added
+
+- **TotalSegmentator stack** in Settings → Stacks. Segments anatomical structures
+  on whole-body CT and MR — 117 structures in one pass with the general model,
+  plus focused models for the spine, lungs, liver, head and neck, and teeth — and
+  reports per-structure volumes. Requires a GPU.
+
 ## 0.1.0
 
 First public release. MedMCP is an on-premise agentic framework that exposes

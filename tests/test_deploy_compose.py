@@ -52,26 +52,37 @@ def test_inlined_base_model_matches_the_modelfile_from_line() -> None:
     assert f"MEDMCP_BASE_MODEL:-{from_line}" in compose
 
 
-def _vibe_mounts(filename: str) -> set[str]:
-    """Return every ``name:/app/.vibe/<dir>`` volume entry in a compose file."""
+def _persisted_paths(filename: str) -> set[str]:
+    """Return the in-container paths under ``/app`` that survive a recreate.
+
+    The *target* path, not the whole mount: the local compose bind-mounts the
+    repo's ``stacks.d`` so a developer can see what the UI wrote, while the
+    published one uses a named volume for the same directory. Both persist it,
+    which is what matters — comparing mount syntax would forbid that difference
+    while catching nothing extra.
+    """
     doc = cast("dict[str, Any]", yaml.safe_load((ROOT / filename).read_text()))
     services = cast("dict[str, Any]", doc["services"])
     found: set[str] = set()
     for service in services.values():
         for entry in cast("list[Any]", cast("dict[str, Any]", service).get("volumes") or []):
-            if isinstance(entry, str) and ":/app/.vibe/" in entry:
-                found.add(entry)
+            if not isinstance(entry, str):
+                continue
+            _, _, target = entry.partition(":")
+            target = target.split(":")[0]
+            if target.startswith("/app/"):
+                found.add(target)
     return found
 
 
-def test_both_compose_files_persist_the_same_vibe_state() -> None:
+def test_both_compose_files_persist_the_same_paths() -> None:
     """Whatever the local compose keeps across an image update, the published one keeps too.
 
-    ``.vibe`` otherwise lives in the container's writable layer, so a directory
-    mounted in one file and not the other means the documented install silently
-    loses state a developer keeps — settings, chat history, or a configured
-    external server and the consent that armed it.
+    Everything under ``/app`` otherwise lives in the container's writable layer,
+    so a directory persisted in one file and not the other means one install
+    silently loses what the other keeps — installed stacks, chat history, or a
+    configured external server and the consent that armed it.
     """
-    local = _vibe_mounts("docker-compose.yml")
-    assert local, "no .vibe volumes found — did the mount format change?"
-    assert local == _vibe_mounts("docker-compose.ghcr.yml")
+    local = _persisted_paths("docker-compose.yml")
+    assert local, "no /app mounts found — did the mount format change?"
+    assert local == _persisted_paths("docker-compose.ghcr.yml")

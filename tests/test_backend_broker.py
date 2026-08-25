@@ -71,6 +71,20 @@ async def _roundtrip(socket_path: Path, request: JsonDict) -> JsonDict:
 
 
 @pytest.mark.asyncio
+async def test_socket_is_only_reachable_by_its_owner(tmp_path: Path) -> None:
+    """The broker socket's mode is set, not inherited from the process umask.
+
+    Connecting to it means invoking any installed stack's tools on the workspace,
+    below the permission flow entirely. Connect(2) needs write permission, which
+    a 022 umask already withholds from others — but the umask belongs to whoever
+    launched the process (a unit file with UMask=0000 would produce 0777), so the
+    mode is asserted here rather than assumed.
+    """
+    async with _broker(tmp_path) as sock:
+        assert sock.stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.asyncio
 async def test_list_tools_over_socket(tmp_path: Path) -> None:
     """list_tools returns the stack's tools through the broker."""
     async with _broker(tmp_path) as sock:

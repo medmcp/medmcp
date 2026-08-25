@@ -34,6 +34,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, cast
 
@@ -76,6 +77,13 @@ class BackendBroker:
         self._server = await asyncio.start_unix_server(
             self._handle, path=str(self._socket_path), limit=STREAM_LIMIT
         )
+        # Whoever can connect here can invoke any installed stack's tools on the
+        # workspace, below the permission flow entirely — so the mode is set
+        # rather than inherited. Connecting needs write permission, which the
+        # usual 022 umask already withholds from others, but the umask is a
+        # property of how the process was launched (a unit file with UMask=0000
+        # yields 0777) and not something this code should depend on.
+        os.chmod(self._socket_path, 0o600)
         log.info("backend broker listening at %s", self._socket_path)
 
     async def aclose(self) -> None:

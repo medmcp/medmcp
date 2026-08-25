@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   acknowledgeExternalMcp,
@@ -13,7 +13,7 @@ import type { ExternalMcpState, ExternalServer } from '../types'
 import { Row, Toggle } from './SettingsControls'
 
 /**
- * Advanced-settings section for wiring third-party MCP services into the
+ * The body of the external-MCP window: wiring third-party MCP services into the
  * workspace.
  *
  * The whole product guarantees that data stays on-premise, and this is the one
@@ -31,7 +31,13 @@ interface ExternalMcpSectionProps {
 export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
   const [state, setState] = useState<ExternalMcpState | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
+  // How many changes are in flight or queued. Every one of them stops the agent
+  // and waits for it to exit, which takes about a second and a half, so this is
+  // long enough to be felt.
+  const [inFlight, setInFlight] = useState(0)
+  // Changes are chained rather than run concurrently: two overlapping restarts
+  // would race, and dropping the second click is worse than making it wait.
+  const queue = useRef<Promise<unknown>>(Promise.resolve())
   const [consenting, setConsenting] = useState(false)
   const [understood, setUnderstood] = useState(false)
   const [adding, setAdding] = useState(false)
@@ -48,19 +54,34 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
       .catch((e: unknown) => setError(String(e)))
   }, [])
 
-  /** Run a mutation, then refetch — every one of them restarts the agent. */
+  /**
+   * Apply a change: queue it, refetch, tell the caller.
+   *
+   * *optimistic* moves the control now rather than a second and a half later,
+   * when the refetch lands. Without it a click looks ignored for the whole
+   * restart, which is exactly as long as it takes to doubt the click. The
+   * refetch is the authority either way, including after a failure, so a
+   * rejected change snaps back rather than lingering as a lie.
+   */
   const run = useCallback(
-    (action: () => Promise<void>) => {
-      setBusy(true)
+    (action: () => Promise<void>, optimistic?: (s: ExternalMcpState) => ExternalMcpState) => {
       setError(null)
-      action()
+      if (optimistic) setState((s) => (s ? optimistic(s) : s))
+      setInFlight((n) => n + 1)
+      queue.current = queue.current
+        .then(action)
         .then(reload)
         .then(() => onChanged?.())
-        .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-        .finally(() => setBusy(false))
+        .catch((e: unknown) => {
+          setError(e instanceof Error ? e.message : String(e))
+          return reload().catch(() => undefined)
+        })
+        .finally(() => setInFlight((n) => n - 1))
     },
     [reload, onChanged],
   )
+
+  const busy = inFlight > 0
 
   if (!state) return null
 
@@ -73,7 +94,10 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
       setConsenting(true)
       return
     }
-    run(() => setExternalMcpEnabled(next))
+    run(
+      () => setExternalMcpEnabled(next),
+      (s) => ({ ...s, enabled: next, acknowledged: next && s.acknowledged }),
+    )
   }
 
   const accept = () =>
@@ -86,26 +110,38 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
   return (
     <>
       <Row
-        label="External MCP servers"
-        hint="Lets the agent use tools hosted outside this machine. Off by default — anything sent to such a server leaves your infrastructure."
+        label="Allow external servers"
+        hint="Lets the agent use tools hosted outside this machine. Off by default, because anything sent to such a server leaves your infrastructure."
         checked={state.enabled}
         onChange={onToggle}
-        disabled={busy}
       />
 
       {error && <div className="panel-error">{error}</div>}
 
-      {/* Someone who turns this off to be sure nothing is leaving gets told so.
-          An empty space is not an answer to that question. */}
-      {!state.enabled && state.servers.length > 0 && (
-        <div className="settings-row-hint ext-mcp-disconnected">
-          {state.servers.length} server{state.servers.length === 1 ? '' : 's'} configured, none
-          enabled. Nothing is sent outside this machine while this is off.
+      {/* Says why a change takes a moment. The agent is stopped and restarted
+          for every one of these, so the panel is briefly out of date rather
+          than broken. */}
+      {busy && (
+        <div className="settings-row-hint ext-mcp-applying">
+          Applying. The agent restarts, so open chats reconnect.
         </div>
       )}
 
-      {state.enabled && (
-        <div className="ext-mcp">
+      {/* Someone who turns this off to be sure nothing is leaving gets told so.
+          An empty space is not an answer to that question. */}
+      {!state.enabled && (
+        <div className="settings-row-hint ext-mcp-disconnected">
+          Off. Nothing is sent outside this machine.
+          {state.servers.length > 0 && ' The servers below stay configured until you remove them.'}
+        </div>
+      )}
+
+      {/* The list is shown whether or not the feature is on: the switch governs
+          whether the agent may use these servers, not whether their owner may
+          manage them. Turning it off to stop the traffic and then being unable
+          to remove the server that caused it is the wrong way round. */}
+      {(state.enabled || state.servers.length > 0) && (
+        <div className={`ext-mcp${state.enabled ? '' : ' is-off'}`}>
           {state.servers.length === 0 && (
             <div className="settings-row-hint ext-mcp-empty">No external servers yet.</div>
           )}
@@ -124,9 +160,9 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
                     unauthenticated rather than failing where the cause is. */}
                 {s.api_key_env && s.token_present === false && (
                   <div className="settings-row-hint ext-mcp-missing-token">
-                    ${s.api_key_env} is not set where the agent runs — requests go out with no
-                    credential. Add it to medmcp.env and restart, or replace it with a stored
-                    token.
+                    ${s.api_key_env} is not set where the agent runs, so requests go out with
+                    no credential. Add it to medmcp.env and restart, or store a token here
+                    instead.
                   </div>
                 )}
                 {replacing === s.name ? (
@@ -152,13 +188,30 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
               <div className="ext-mcp-server-actions">
                 <Toggle
                   checked={s.active}
-                  disabled={busy}
-                  onChange={(v) => run(() => setExternalServerActive(s.name, v))}
+                  onChange={(v) =>
+                    run(
+                      () => setExternalServerActive(s.name, v),
+                      (prev) => ({
+                        ...prev,
+                        servers: prev.servers.map((x) =>
+                          x.name === s.name ? { ...x, active: v } : x,
+                        ),
+                      }),
+                    )
+                  }
                 />
                 <button
                   className="btn-text"
                   disabled={busy}
-                  onClick={() => run(() => removeExternalServer(s.name))}
+                  onClick={() =>
+                    run(
+                      () => removeExternalServer(s.name),
+                      (prev) => ({
+                        ...prev,
+                        servers: prev.servers.filter((x) => x.name !== s.name),
+                      }),
+                    )
+                  }
                 >
                   Remove
                 </button>
@@ -186,13 +239,17 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
         </div>
       )}
 
-      {/* Portalled to the body: this section renders inside .drawer, which is a
-          stacking context (position: fixed + z-index), so a backdrop rendered in
-          place cannot paint above the drawer no matter how high its z-index —
-          the settings behind the dialog would stay visible and clickable. */}
+      {/* Portalled to the body: this section renders inside the external-MCP
+          window, which is a stacking context (position: fixed with a z-index),
+          so a backdrop rendered in place could not paint above that window at
+          any z-index and the list behind the dialog would stay clickable.
+          `over-window` lifts the pair above the window that opened it. */}
       {consenting &&
         createPortal(
-          <div className="modal-backdrop" onClick={() => setConsenting(false)}>
+          <div
+            className="modal-backdrop over-window"
+            onClick={() => setConsenting(false)}
+          >
             <div
               className="modal ext-mcp-consent"
               role="dialog"
@@ -208,8 +265,8 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
               </p>
               <ul>
                 <li>
-                  Anything the agent passes to an external tool — file contents, paths, patient
-                  identifiers, results — is sent to whoever operates that server.
+                  Anything the agent passes to an external tool is sent to whoever operates
+                  that server: file contents, paths, patient identifiers, results.
                 </li>
                 <li>
                   You are responsible for what those services receive, for their terms and security,
@@ -384,7 +441,7 @@ function AddServerForm({
             onChange={(e) => setEnvVar(e.target.value)}
           />
           <span className="settings-row-hint">
-            The name of a variable already set where the agent runs — for a deployment that
+            The name of a variable already set where the agent runs, for a deployment that
             manages its own secrets. In the container install that means an entry in{' '}
             <code>medmcp.env</code> and a restart.
           </span>

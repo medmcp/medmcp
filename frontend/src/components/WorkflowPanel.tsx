@@ -118,7 +118,7 @@ function inputOptionLabel(i: Input): string {
   const bits: string[] = []
   if (i.description) bits.push(i.description)
   if (i.example) bits.push(`e.g. ${basename(i.example)}`)
-  return bits.length > 0 ? `${i.name} — ${bits.join(' · ')}` : i.name
+  return bits.length > 0 ? `${i.name}: ${bits.join(' · ')}` : i.name
 }
 
 /** The file basenames of a run's input values, joined (e.g. "subjA.nii + atlas.nii"). */
@@ -277,7 +277,7 @@ function Requirements({ requires }: { requires: StackRequirement[] }) {
       {mismatched.length > 0 && (
         <div className="wf-req-warn">
           A different version of {mismatched.map((r) => r.stack).join(', ')} is installed than this
-          workflow was built with — results may not reproduce exactly.
+          workflow was built with. Results may not reproduce exactly.
         </div>
       )}
     </div>
@@ -605,7 +605,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       }
       setPlanSkipped(res.skipped)
       if (res.runs.length === 0) {
-        setError('no ready (ok) items in the plan — resolve the flagged rows first')
+        setError('No ready items in the plan. Resolve the flagged rows first.')
         return
       }
       setMode((m) =>
@@ -753,7 +753,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         {m.items.length < m.total ? (
           m.total > 1 ? (
             <span>
-              Processing <strong>{itemLabel(m.runs, m.items.length)}</strong> — item{' '}
+              Processing <strong>{itemLabel(m.runs, m.items.length)}</strong>, item{' '}
               {m.items.length + 1} of {m.total} · step {currentStep(m)} of {m.stepsPerItem}
             </span>
           ) : (
@@ -818,8 +818,8 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         {m.ok ? (
           <div className="wf-result ok">
             {m.total > 1
-              ? `Batch complete — all ${m.items.length} item(s) succeeded in ${formatDuration(duration)}.`
-              : `Replay complete in ${formatDuration(duration)} — ${m.log.length} step(s) ran.`}
+              ? `Batch complete. All ${m.items.length} item(s) succeeded in ${formatDuration(duration)}.`
+              : `Replay complete in ${formatDuration(duration)}. ${m.log.length} step(s) ran.`}
             {m.total === 1 && m.items.some((it) => it.outputs.length > 0) && (
               <div className="wf-outputs">
                 Outputs:
@@ -830,7 +830,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         ) : (
           <div className="wf-result fail">
             {m.total > 1 && succeeded > 0
-              ? `${succeeded} of ${m.total} item(s) succeeded — ${retryRuns.length} need a retry.`
+              ? `${succeeded} of ${m.total} item(s) succeeded. ${retryRuns.length} need a retry.`
               : `Replay failed. ${m.error ?? ''}`}
           </div>
         )}
@@ -861,7 +861,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             <StepList steps={d.steps} />
           ) : (
             <div className="wf-notice">
-              This chat produced no replayable tool steps — the workflow is empty.
+              This chat produced no replayable tool steps, so the workflow is empty.
             </div>
           )}
           {!d.replayable && d.replay_error && d.steps.length > 0 && (
@@ -870,7 +870,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
           <Requirements requires={d.requires} />
           {d.manual_steps.length > 0 && (
             <div className="wf-notice">
-              Includes manual step(s) replay can't run — do these by hand:
+              Includes manual step(s) replay can't run. Do these by hand:
               <ul className="wf-manual-list">
                 {d.manual_steps.map((m, i) => (
                   <li key={i}>
@@ -886,7 +886,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
               disabled={!d.replayable}
               title={
                 d.replayable
-                  ? 'Replay these exact steps on new inputs — no LLM involved'
+                  ? 'Replay these exact steps on new inputs. No LLM involved.'
                   : (d.replay_error ?? '')
               }
               onClick={() => beginRun(d)}
@@ -1064,7 +1064,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
               {!m.batch ? (
                 <>
                   <div className="wf-hint">
-                    Provide a value for each input — select a file in the explorer to fill it, or
+                    Provide a value for each input. Select a file in the explorer to fill it, or
                     type / drag a path.
                   </div>
                   {requiredInputs.map((i) => (
@@ -1111,7 +1111,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
               ) : (
                 <>
                   <div className="wf-hint">
-                    One row per run — each runs the whole workflow on its own inputs. Drag a file
+                    One row per run. Each runs the whole workflow on its own inputs. Drag a file
                     into any cell, or select files in the explorer and “Add from selection” (every{' '}
                     {requiredInputs.length} selected file{requiredInputs.length === 1 ? '' : 's'}{' '}
                     fill one row).
@@ -1214,7 +1214,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                   </div>
                   {planSkipped && planSkipped.length > 0 && (
                     <div className="wf-hint wf-plan-skipped">
-                      {planSkipped.length} item(s) flagged and left out — resolve them in the plan,
+                      {planSkipped.length} item(s) flagged and left out. Resolve them in the plan,
                       then re-fill:
                       <ul className="wf-manual-list">
                         {planSkipped.map((s, i) => (
@@ -1223,7 +1223,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                               {s.subject}
                               {s.session ? `/${s.session}` : ''}
                             </code>{' '}
-                            — {s.status}: {s.reason}
+                            · {s.status}: {s.reason}
                           </li>
                         ))}
                       </ul>
@@ -1260,12 +1260,12 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       {mode.kind === 'preview' && (
         <div className="wf-form">
           <div className="wf-hint">
-            Replay will run these exact steps — no LLM, no permission prompts. Review before
+            Replay will run these exact steps. No LLM, no permission prompts. Review before
             running.
           </div>
           {mode.runs.length > 1 && (
             <div className="wf-hint">
-              Batch: {mode.runs.length} runs — the steps below show the first. All runs:
+              Batch: {mode.runs.length} runs. The steps below show the first. All runs:
               <span className="wf-batch-chips">
                 {mode.runs.map((_run, i) => (
                   <code key={i}>{itemLabel(mode.runs, i)}</code>

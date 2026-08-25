@@ -317,6 +317,13 @@ export const FileExplorer = memo(function FileExplorer({
       </div>
       {error && <div className="panel-error">{error}</div>}
       <div className="panel-body" ref={containerRef}>
+        {/* Every other panel says what to do when it is empty; this one showed
+            a blank rectangle, which reads as a failure to load. */}
+        {data.length === 0 && !error && (
+          <div className="viewer-message">
+            This workspace is empty. Upload a file, or drop one here.
+          </div>
+        )}
         <Tree<TreeNode>
           data={data}
           width={size.width}

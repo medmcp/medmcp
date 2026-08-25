@@ -6,6 +6,15 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Changed
+
+- **Settings is easier to read.** General and Advanced are now the same kind of
+  heading rather than a heading and a button, and everything inside Advanced is
+  visibly inside it. External MCP servers moved out of the drawer into a window
+  of their own, reached from Advanced or from the warning strip, so settings is a
+  short list of switches and the servers get room for their list, their tokens
+  and the consent text. Wording across the interface was cleaned up as well.
+
 ### Fixed
 
 - **Uninstalling a tool stack now removes it properly.** A stack could disappear

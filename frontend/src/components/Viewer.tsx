@@ -590,7 +590,10 @@ export const Viewer = memo(function Viewer({
         <div className="panel-header">
           <span>Viewer</span>
         </div>
-        <div className="panel-body viewer-body">
+        {/* Black is the right ground for an image and the wrong one for an
+            empty panel, where it reads as a hole in the app. The layout stays,
+            only the colour changes. */}
+        <div className="panel-body viewer-body is-empty">
           <div className="viewer-message">Select a file in the explorer to view it here.</div>
         </div>
       </div>

@@ -224,7 +224,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
       if (m.type === 'done') {
         after?.()
         reload()
-          .then(() => setNotice(`Installed ${m.name} — the agent restarted.`))
+          .then(() => setNotice(`Installed ${m.name}. The agent restarted.`))
           .catch((e: unknown) => setError(String(e)))
       } else {
         setError(m.message ?? 'install failed')
@@ -245,7 +245,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
     uninstallStack(name)
       .then(async () => {
         await reload()
-        setNotice(`Uninstalled ${name} — the agent restarted.`)
+        setNotice(`Uninstalled ${name}. The agent restarted.`)
       })
       .catch((e: unknown) => setError(String(e)))
       .finally(() => setBusy(false))
@@ -261,7 +261,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
     saveSettings(next)
       .then((restarted) => {
         setError(null)
-        if (restarted) setNotice('Agent restarted — the chat starts a fresh session.')
+        if (restarted) setNotice('Agent restarted. The chat starts a fresh session.')
       })
       .catch((e: unknown) => setError(String(e)))
   }
@@ -425,7 +425,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
               <p>
                 Most stacks run with networking switched off: they see the files you point them at
                 and nothing else. This one asks for network access, and your workspace is available
-                to it — so it is able to send what it reads to whoever runs the service it talks to.
+                to it, so it can send what it reads to whoever runs the service it talks to.
               </p>
               <p>
                 Install it only if you know why it needs that. You can remove it at any time, and

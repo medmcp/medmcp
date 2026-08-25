@@ -15,8 +15,8 @@
   --card2: #1e2333;
   --border: rgba(255, 255, 255, 0.07);
   --border2: rgba(255, 255, 255, 0.12);
-  --muted: #8a92a6;
-  --muted2: #bcc3d4;
+  --muted: #99a1b4;
+  --muted2: #c6ccdb;
   --text: #e4e8f0;
   --ok: #4ade80;
   --warn: #fbbf24;
@@ -239,7 +239,13 @@ button:hover {
   gap: 10px;
 }
 
-.chat-new-btn {
+/* Icon and label aligned as boxes, not on the text baseline: an inline icon
+   next to 11px text sits a pixel or two off however the glyph is drawn. */
+.chat-new-btn,
+.chats-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   text-transform: none;
   letter-spacing: 0;
   font-size: 11px;
@@ -380,6 +386,10 @@ button:hover {
   align-items: stretch;
   justify-content: stretch;
   background: #000;
+}
+
+.viewer-body.is-empty {
+  background: var(--dark);
 }
 
 .viewer-title {
@@ -1476,28 +1486,73 @@ button:hover {
 
 /* Disclosure for settings that should be reachable but not browsed past. Mirrors
    the viewer settings popover's own Advanced row (.vs-advanced-toggle). */
+/* Same family as .settings-section so the two read as peers, but not the same
+   thing: General is a label, this one opens. Closed, it is muted with the
+   chevron beside the word and a whisper of what is inside; open, it takes the
+   section colour, because by then it is acting as a section heading. */
 .settings-advanced-toggle {
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
-  margin-top: 20px;
-  padding: 10px 0 4px;
+  margin-top: 22px;
+  padding: 12px 0 4px;
   background: none;
   border: none;
   border-top: 1px solid var(--border);
   color: var(--muted);
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
   cursor: pointer;
+  transition: color 0.15s;
+}
+
+.settings-advanced-toggle.open {
+  color: var(--blue-l);
 }
 
 .settings-advanced-toggle:hover {
-  /* Neutralize the global button:hover fade, as .vs-advanced-toggle does: on a
-     full-width, border-top-only row it reads as a shimmer. */
+  /* Neutralize the global button:hover fade: on a full-width, border-top-only
+     row it reads as a shimmer rather than a hover. */
   background: none;
   border-color: var(--border);
   color: var(--text);
+}
+
+/* Beside the label rather than at the far edge: at the edge it is too far from
+   the word to read as its affordance, which is what made the row look like a
+   static header. */
+.settings-advanced-toggle .settings-chevron {
+  flex-shrink: 0;
+}
+
+/* The chats menu used a text arrow while every other disclosure in the app uses
+   the chevron icon; rotated down, since the menu opens downward. */
+.chats-caret {
+  transform: rotate(90deg);
+  transform-origin: center;
+}
+
+/* Says what is behind the disclosure, so it is not a door with no sign on it.
+   Body face, lowercase: a description, not part of the heading. */
+.settings-advanced-peek {
+  margin-left: 2px;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--muted);
+}
+
+.settings-advanced-toggle:hover .settings-advanced-peek {
+  color: var(--muted2);
+}
+
+.settings-advanced-body {
+  margin-top: 2px;
+  padding-left: 12px;
 }
 
 .settings-chevron {
@@ -1508,28 +1563,38 @@ button:hover {
   transform: rotate(90deg);
 }
 
+/* No rule between rows. Two or three rows to a section is few enough that space
+   separates them, and once Advanced indents its own rows the lines no longer
+   share a left edge, which reads as clutter rather than structure. The only
+   rules left in the drawer are the section boundaries. */
 .settings-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 9px 0;
-  border-bottom: 1px solid var(--border);
+  padding: 10px 0;
 }
 
 .settings-row.disabled {
   opacity: 0.45;
 }
 
+/* Whole-pixel line boxes. With `normal` (≈1.2 → 15.6px) and 11.5px × 1.5
+   (17.25px), rows land on fractional offsets, and a switch that starts at
+   y.75 rasterises its track edges and its round knob unevenly: the geometry is
+   centred, the pixels are not. */
 .settings-row-label {
   font-size: 13px;
   font-weight: 500;
+  line-height: 16px;
 }
 
 .settings-row-hint {
   font-size: 11.5px;
-  color: var(--muted);
-  line-height: 1.5;
+  /* Hints carry real instructions, not decoration, so they sit a step above the
+     general muted grey. */
+  color: var(--muted2);
+  line-height: 17px;
   margin-top: 2px;
 }
 
@@ -1627,13 +1692,7 @@ button:hover {
   display: inline-flex;
 }
 
-.chats-menu-trigger {
-  text-transform: none;
-  letter-spacing: 0;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 8px;
-}
+
 
 .chats-menu-backdrop {
   position: fixed;
@@ -1793,7 +1852,10 @@ button:hover {
 .toggle {
   position: relative;
   width: 34px;
-  height: 19px;
+  /* Even, deliberately: an odd-height track centred in an even-height row lands
+     on a half pixel, and the knob's bottom edge then antialiases away, leaving
+     it visibly one row low. Even track, even knob, whole-pixel gaps. */
+  height: 20px;
   border-radius: 999px;
   border: 1px solid var(--border2);
   background: rgba(255, 255, 255, 0.04);
@@ -1810,12 +1872,16 @@ button:hover {
   background: rgba(255, 255, 255, 0.06);
 }
 
+/* Centred against the track rather than offset from its top edge: with a 1px
+   border and a 3px gap, fractional display scaling (1.25x, 1.5x) rounds the two
+   gaps differently and the knob visibly sinks. */
 .toggle-knob {
   position: absolute;
-  top: 2px;
+  top: 50%;
   left: 2px;
-  width: 13px;
-  height: 13px;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
   background: var(--muted);
   transition:
@@ -1830,7 +1896,8 @@ button:hover {
 }
 
 .toggle.on .toggle-knob {
-  transform: translateX(15px);
+  /* inner width 32 - knob 14 - the 2px gap at each end */
+  transform: translate(14px, -50%);
   background: #fff;
 }
 
@@ -2464,6 +2531,47 @@ textarea.wf-input {
   z-index: 40;
 }
 
+/* A dialog opened *from* a window (.market, .extwin, both z-index 41) needs to
+   clear it, or the window it came from stays visible and clickable behind the
+   thing asking for a decision. */
+.modal-backdrop.over-window {
+  z-index: 50;
+}
+
+.modal-backdrop.over-window > .modal {
+  z-index: 51;
+}
+
+/* The external-MCP window. Narrower than the stacks browser: a list of a few
+   servers and a form, not a grid to scan. */
+.extwin {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 620px;
+  max-width: 92vw;
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--dark2);
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  z-index: 41;
+  overflow: hidden;
+}
+
+.extwin-body {
+  padding: 14px 18px 18px;
+  overflow-y: auto;
+}
+
+/* The summary row in Advanced, when something is actually reachable. */
+.ext-summary-on {
+  color: var(--red-tint);
+}
+
 .market {
   position: fixed;
   top: 50%;
@@ -2946,22 +3054,49 @@ textarea.wf-input {
   cursor: pointer;
 }
 
+/* The list with the feature off: still legible, still operable, visibly not in
+   use. Opacity would take the text below the contrast the rest of the panel
+   holds, so only the accent recedes. */
+.ext-mcp.is-off .settings-row-label {
+  color: var(--muted2);
+}
+
+/* A per-server switch still shows its own state while the feature is off, but
+   in grey: brand blue on a switch that nothing is currently going through reads
+   as a live connection. */
+.ext-mcp.is-off .toggle.on {
+  background: var(--border2);
+}
+
+/* The one line that says a change is in progress. Amber rather than red: this
+   is a wait, not a problem. */
+.ext-mcp-applying {
+  color: var(--warn);
+  margin: 6px 0 0;
+}
+
+/* No indent rule: this list used to be nested under a switch in the settings
+   drawer, where a left border showed what it belonged to. In its own window it
+   is the content, so it sits at the window's own margin like everything else. */
 .ext-mcp {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 4px 0 10px 12px;
-  border-left: 1px solid var(--border);
-  margin-left: 4px;
+  padding: 12px 0 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
 }
 
 .ext-mcp-empty {
   font-style: italic;
 }
 
+/* The switch and Remove sit against the middle of the entry, not its first
+   line: a server is four lines (name, url, transport, token), and pinning the
+   controls to the top left them floating above everything they act on. */
 .ext-mcp-server {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
 }

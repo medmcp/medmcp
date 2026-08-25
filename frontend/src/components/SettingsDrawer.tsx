@@ -8,6 +8,13 @@ import { ChevronRightIcon, XIcon } from './icons'
 interface SettingsDrawerProps {
   open: boolean
   onClose: () => void
+  /** Whether the Advanced disclosure is expanded (owned by the caller, so the
+   *  warning banner can open the drawer straight onto the control it names). */
+  advancedOpen: boolean
+  /** Expand or collapse Advanced. */
+  onAdvancedToggle: (open: boolean) => void
+  /** Called when external-MCP state changed, so the banner can catch up. */
+  onExternalChanged?: () => void
 }
 
 /**
@@ -15,13 +22,18 @@ interface SettingsDrawerProps {
  * switches, and the stack GPU. Every change is saved immediately; stack and GPU
  * changes restart the agent (the chat reconnects into a fresh session).
  */
-export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
+export function SettingsDrawer({
+  open,
+  onClose,
+  advancedOpen,
+  onAdvancedToggle,
+  onExternalChanged,
+}: SettingsDrawerProps) {
   const [state, setState] = useState<SettingsState | null>(null)
   const [gpus, setGpus] = useState<GpuInfo[]>([])
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
-  const [advanced, setAdvanced] = useState(false)
 
   // Clear the toast on its own: it confirms something that already happened, so
   // leaving it up implies a state that still needs attention.
@@ -118,15 +130,15 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
               <button
                 type="button"
                 className="settings-advanced-toggle"
-                onClick={() => setAdvanced((v) => !v)}
+                onClick={() => onAdvancedToggle(!advancedOpen)}
               >
                 <ChevronRightIcon
                   size={12}
-                  className={advanced ? 'settings-chevron open' : 'settings-chevron'}
+                  className={advancedOpen ? 'settings-chevron open' : 'settings-chevron'}
                 />
                 Advanced
               </button>
-              {advanced && (
+              {advancedOpen && (
                 <>
                   <Row
                     label="Record provenance"
@@ -134,7 +146,7 @@ export function SettingsDrawer({ open, onClose }: SettingsDrawerProps) {
                     checked={state.record_provenance}
                     onChange={(v) => apply({ ...state, record_provenance: v })}
                   />
-                  <ExternalMcpSection />
+                  <ExternalMcpSection onChanged={onExternalChanged} />
                 </>
               )}
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Group, Panel, Separator } from 'react-resizable-panels'
 import { Chat } from './components/Chat'
+import { ExternalMcpBanner } from './components/ExternalMcpBanner'
 import { FileExplorer } from './components/FileExplorer'
 import { StackMarketplace } from './components/StackMarketplace'
 import { SettingsDrawer } from './components/SettingsDrawer'
@@ -20,6 +21,13 @@ export default function App() {
   // Files multi-selected in the explorer — feeds the workflow batch editor.
   const [selectedPaths, setSelectedPaths] = useState<string[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Set when the settings drawer is opened from the external-MCP warning, so it
+  // lands on the control the banner is talking about.
+  const [settingsAdvanced, setSettingsAdvanced] = useState(false)
+  // Bumped whenever external-MCP state may have changed, so the standing
+  // warning re-reads it instead of waiting for a reload.
+  const [externalVersion, setExternalVersion] = useState(0)
+  const notifyExternalChanged = useCallback(() => setExternalVersion((v) => v + 1), [])
   const [marketOpen, setMarketOpen] = useState(false)
   // The vibe session that received the last prompt — what "Save chat as
   // workflow" distills. Survives a reconnect (which starts an empty session).
@@ -100,7 +108,23 @@ export default function App() {
           <GearIcon />
         </button>
       </header>
-      <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <ExternalMcpBanner
+        refreshSignal={externalVersion}
+        onReview={() => {
+          setSettingsAdvanced(true)
+          setSettingsOpen(true)
+        }}
+      />
+      <SettingsDrawer
+        open={settingsOpen}
+        onClose={() => {
+          setSettingsOpen(false)
+          setSettingsAdvanced(false)
+        }}
+        advancedOpen={settingsAdvanced}
+        onAdvancedToggle={setSettingsAdvanced}
+        onExternalChanged={notifyExternalChanged}
+      />
       <StackMarketplace open={marketOpen} onClose={() => setMarketOpen(false)} />
       <Group
         orientation="vertical"

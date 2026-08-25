@@ -2749,6 +2749,61 @@ textarea.wf-input {
 .wf-derived-toggle:hover {
   color: var(--text);
 }
+/* ── External MCP: the standing connection warning ───────────────────────── */
+
+/* A strip under the header, up for exactly as long as external servers are
+   connected. Red rather than amber: while it shows, the on-premise guarantee the
+   rest of the product makes is not in force. It is not dismissible, so it stays
+   quiet — one line, no icon chrome — and carries its own way out. */
+.ext-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 7px 18px;
+  font-size: 12px;
+  color: var(--red-tint);
+  background: rgba(210, 34, 41, 0.12);
+  border-bottom: 1px solid rgba(210, 34, 41, 0.4);
+}
+
+.ext-banner-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 0 0 3px rgba(210, 34, 41, 0.2);
+}
+
+.ext-banner-text strong {
+  font-weight: 600;
+}
+
+/* The names identify what is connected without widening the strip; they yield
+   first when the window is narrow, since the warning itself must survive. */
+.ext-banner-names {
+  min-width: 0;
+  margin-right: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.ext-banner-action {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  color: var(--red-tint);
+}
+
+.ext-banner-action:hover:not(:disabled) {
+  color: var(--text);
+  border-color: rgba(210, 34, 41, 0.5);
+}
+
 /* ── External MCP (advanced settings) ────────────────────────────────────── */
 
 /* Sits above .drawer (z-index 21) on the shared .modal-backdrop (40), so the

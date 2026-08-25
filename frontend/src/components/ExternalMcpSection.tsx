@@ -22,7 +22,12 @@ import { Row, Toggle } from './SettingsControls'
  * there too — the dialog is the explanation, not the enforcement — and turning
  * the feature off clears it again, so re-arming it can never happen in silence.
  */
-export function ExternalMcpSection() {
+interface ExternalMcpSectionProps {
+  /** Called after any change that may have altered what is connected. */
+  onChanged?: () => void
+}
+
+export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
   const [state, setState] = useState<ExternalMcpState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -47,10 +52,11 @@ export function ExternalMcpSection() {
       setError(null)
       action()
         .then(reload)
+        .then(() => onChanged?.())
         .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
         .finally(() => setBusy(false))
     },
-    [reload],
+    [reload, onChanged],
   )
 
   if (!state) return null

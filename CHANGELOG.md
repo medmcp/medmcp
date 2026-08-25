@@ -27,7 +27,9 @@ Notable, user-visible changes to MedMCP. Format follows
   `Authorization: Bearer …` by default, and services that expect something else
   (an `X-API-Key` header, say) can set the header and value format themselves.
   Individual servers can be switched off without deleting them, and every tool
-  call still asks for your approval. To supply a token, put `NAME=value` lines in
+  call still asks for your approval. While anything external is connected, a red
+  strip under the header says so from every panel, names the servers, and offers
+  a one-click disconnect — the settings switch is easy to forget, this is not. To supply a token, put `NAME=value` lines in
   a `medmcp.env` file next to your compose file (or point `MEDMCP_ENV_FILE` at
   one); it is optional and read only if present.
 

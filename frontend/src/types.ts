@@ -282,6 +282,9 @@ export interface ExternalServer {
   /** Whether `api_key_env` actually holds a token where the agent runs. Presence
    *  only — the value never leaves the server. */
   token_present?: boolean
+  /** Whether the token is stored by MedMCP rather than named as a deployment
+   *  variable. Managed tokens are present by construction. */
+  token_managed?: boolean
 }
 
 /** State of the external-MCP feature (advanced settings). */

@@ -34,6 +34,7 @@ def _isolate(  # pyright: ignore[reportUnusedFunction]  # autouse fixture, invok
     )
     monkeypatch.setattr(settings, "VIBE_HOME", tmp_path)
     monkeypatch.setattr(settings, "EXTERNAL_MCP_PATH", tmp_path / "external_mcp.json")
+    monkeypatch.setattr(settings, "EXTERNAL_SECRETS_PATH", tmp_path / "external_secrets.json")
     monkeypatch.setattr(settings, "ACTIVE_STACKS_PATH", tmp_path / "active_stacks.json")
     monkeypatch.setattr(settings, "STACKS_D_PATH", tmp_path / "absent-stacks.d")
     # Source #1 too, or the machine's real uv-tool stacks turn up in discovery.
@@ -64,6 +65,12 @@ def _add(
         True,
         api_key_header,
         api_key_format,
+    )
+
+
+def _add_with_token(name: str, token: str) -> JsonDict:
+    return settings.add_external_server(
+        name, "streamable-http", "https://example.org/mcp", token=token
     )
 
 
@@ -436,6 +443,114 @@ def test_empty_token_variable_counts_as_missing(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("PUBMED_TOKEN", "")
     assert settings.external_token_present("PUBMED_TOKEN") is False
     assert settings.external_token_present("") is False
+
+
+# ── tokens entered in the UI ─────────────────────────────────────────────────
+
+
+def test_stored_token_never_reaches_the_config(tmp_path: Path) -> None:
+    """A token typed into the UI is not written to the file vibe reads."""
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    _add_with_token("pubmed", "s3cret-value")
+    settings.load_mcp_servers.cache_clear()
+    settings.sync_servers_to_vibe_config(settings.active_servers())
+
+    raw = (tmp_path / "config.toml").read_text()
+    assert "s3cret-value" not in raw
+    assert "MEDMCP_EXT_PUBMED" in raw
+    entry = _entries(tmp_path)["pubmed"]
+    assert cast("JsonDict", entry["auth"])["api_key_env"] == "MEDMCP_EXT_PUBMED"
+
+
+def test_stored_token_never_appears_in_a_response() -> None:
+    """Neither the add response nor the state listing carries the value."""
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    client = TestClient(server.app)
+
+    added = client.post(
+        "/api/external-mcp/servers",
+        json={
+            "name": "pubmed",
+            "transport": "streamable-http",
+            "url": "https://example.org/mcp",
+            "token": "s3cret-value",
+        },
+    )
+    assert added.status_code == 200
+    assert "s3cret-value" not in added.text
+
+    listed = client.get("/api/external-mcp")
+    assert "s3cret-value" not in listed.text
+    entry = cast("list[JsonDict]", listed.json()["servers"])[0]
+    assert entry["token_managed"] is True
+    assert entry["token_present"] is True
+
+
+def test_stored_token_reaches_the_agent_environment() -> None:
+    """The token is handed to the agent subprocess under the managed name."""
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    _add_with_token("pubmed", "s3cret-value")
+    assert settings.external_secret_env() == {"MEDMCP_EXT_PUBMED": "s3cret-value"}
+
+
+def test_no_token_is_handed_over_while_the_feature_is_off() -> None:
+    """Off means the agent process does not even hold the credential."""
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    _add_with_token("pubmed", "s3cret-value")
+    settings.set_external_mcp_enabled(False)
+    assert settings.external_secret_env() == {}
+
+
+def test_no_token_is_handed_over_for_a_deactivated_server() -> None:
+    """A server switched off individually does not put its token in the agent."""
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    _add_with_token("pubmed", "s3cret-value")
+    settings.set_external_server_active("pubmed", False)
+    assert settings.external_secret_env() == {}
+
+
+def test_token_and_env_var_together_are_refused() -> None:
+    """Two sources would mean one silently loses; say so instead."""
+    with pytest.raises(ValueError, match="either a token or an environment variable"):
+        settings.add_external_server(
+            "pubmed",
+            "streamable-http",
+            "https://example.org/mcp",
+            api_key_env="PUBMED_TOKEN",
+            token="s3cret-value",
+        )
+
+
+def test_removing_a_server_forgets_its_token() -> None:
+    """Nothing is left behind that a later server of the same name would inherit."""
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    _add_with_token("pubmed", "s3cret-value")
+    settings.remove_external_server("pubmed")
+    assert settings.load_external_secrets() == {}
+
+
+def test_replacing_a_token_adopts_the_managed_variable() -> None:
+    """A hand-plumbed server can move to a stored token, with one source in play."""
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    _add("pubmed", api_key_env="PUBMED_TOKEN")
+    settings.replace_external_token("pubmed", "s3cret-value")
+
+    stored = cast("list[JsonDict]", settings.load_external_mcp()["servers"])[0]
+    assert stored["api_key_env"] == "MEDMCP_EXT_PUBMED"
+    assert settings.external_secret_env() == {"MEDMCP_EXT_PUBMED": "s3cret-value"}
+
+
+def test_secret_file_is_not_world_readable() -> None:
+    """The store holds real credentials; it must not be readable by anything else."""
+    settings.set_external_secret("pubmed", "s3cret-value")
+    assert settings.EXTERNAL_SECRETS_PATH.stat().st_mode & 0o077 == 0
 
 
 def test_synced_entry_is_not_readopted_as_a_stdio_stack(tmp_path: Path) -> None:

@@ -672,6 +672,69 @@ def _save_external_mcp(state: JsonDict) -> None:
     _atomic_write_json(EXTERNAL_MCP_PATH, state)
 
 
+EXTERNAL_SECRETS_PATH: Path = VIBE_STATE_DIR / "external_secrets.json"
+# Prefix for the variables this process hands the agent. Namespaced so a stored
+# token can never take the name of an unrelated variable in the environment.
+EXTERNAL_SECRET_PREFIX: str = "MEDMCP_EXT_"
+
+
+def external_secret_env_var(server_name: str) -> str:
+    """Name of the variable that carries *server_name*'s stored token to the agent."""
+    return EXTERNAL_SECRET_PREFIX + server_name.upper().replace("-", "_")
+
+
+def load_external_secrets() -> dict[str, str]:
+    """Return ``{server_name: token}`` for tokens entered through the UI.
+
+    Kept out of ``external_mcp.json`` (which the API returns wholesale) and out of
+    ``config.toml`` (rewritten on every sync), so a token cannot reach a response
+    body or the agent's config by accident. Written 0600 by the atomic writer.
+    """
+    if not EXTERNAL_SECRETS_PATH.exists():
+        return {}
+    try:
+        data = cast("JsonDict", json.loads(EXTERNAL_SECRETS_PATH.read_text()))
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("could not read %s; treating as empty: %s", EXTERNAL_SECRETS_PATH, exc)
+        return {}
+    return {str(k): str(v) for k, v in data.items() if isinstance(v, str) and v}
+
+
+def set_external_secret(server_name: str, token: str) -> None:
+    """Store *token* for *server_name*, replacing any previous one."""
+    secrets = load_external_secrets()
+    secrets[server_name] = token
+    _atomic_write_json(EXTERNAL_SECRETS_PATH, cast("JsonDict", secrets))
+
+
+def delete_external_secret(server_name: str) -> None:
+    """Forget *server_name*'s token; a no-op when there is none."""
+    secrets = load_external_secrets()
+    if secrets.pop(server_name, None) is None:
+        return
+    _atomic_write_json(EXTERNAL_SECRETS_PATH, cast("JsonDict", secrets))
+
+
+def external_secret_env() -> dict[str, str]:
+    """Token variables to put in the agent subprocess's environment.
+
+    Empty while the feature is gated off, and empty for a deactivated server: a
+    switch that is off must mean the agent process does not even hold the
+    credential, not merely that no server is configured to use it. Read afresh on
+    every spawn, which is why the client takes a callable rather than a dict —
+    every mutation here restarts the agent.
+    """
+    if not external_mcp_enabled():
+        return {}
+    secrets = load_external_secrets()
+    out: dict[str, str] = {}
+    for srv in cast("list[JsonDict]", load_external_mcp()["servers"]):
+        name = str(srv.get("name", ""))
+        if srv.get("active") and secrets.get(name):
+            out[external_secret_env_var(name)] = secrets[name]
+    return out
+
+
 def external_token_present(api_key_env: str) -> bool:
     """Whether the env var *api_key_env* holds a usable token in this process.
 
@@ -787,6 +850,7 @@ def add_external_server(
     active: bool = True,
     api_key_header: str = "",
     api_key_format: str = "",
+    token: str = "",
 ) -> JsonDict:
     """Register an external MCP server and return the stored entry.
 
@@ -796,9 +860,20 @@ def add_external_server(
     ``api_key_header``/``api_key_format`` are optional overrides for services that
     do not take a bearer token (``X-API-Key: <token>``, say); left empty, vibe's
     ``Authorization: Bearer {token}`` default applies.
+
+    A *token* is stored here and handed to the agent through a variable this
+    process owns, so the operator never has to plumb one into the deployment by
+    hand. Naming an existing variable in ``api_key_env`` instead still works, for
+    a deployment that already manages its own secrets — but not both at once,
+    since only one of them could win and the other would look effective while
+    doing nothing.
     """
     name, transport, url = name.strip(), transport.strip(), url.strip()
-    api_key_env = api_key_env.strip()
+    api_key_env, token = api_key_env.strip(), token.strip()
+    if token and api_key_env:
+        raise ValueError("give either a token or an environment variable name, not both")
+    if token:
+        api_key_env = external_secret_env_var(name)
     api_key_header, api_key_format = api_key_header.strip(), api_key_format.strip()
     _validate_external_server(name, transport, url, api_key_env, api_key_header, api_key_format)
 
@@ -818,6 +893,10 @@ def add_external_server(
         "api_key_format": api_key_format,
         "active": bool(active),
     }
+    # Secret first: a failure here must not leave a registered server pointing at
+    # a variable that was never written.
+    if token:
+        set_external_secret(name, token)
     cast("list[JsonDict]", state["servers"]).append(entry)
     _save_external_mcp(state)
 
@@ -839,6 +918,7 @@ def remove_external_server(name: str) -> None:
         raise FileNotFoundError(f"no external server named {name!r}")
     state["servers"] = remaining
     _save_external_mcp(state)
+    delete_external_secret(name)
 
 
 def set_external_server_active(name: str, active: bool) -> None:
@@ -847,6 +927,26 @@ def set_external_server_active(name: str, active: bool) -> None:
     for srv in cast("list[JsonDict]", state["servers"]):
         if str(srv.get("name")) == name:
             srv["active"] = bool(active)
+            _save_external_mcp(state)
+            return
+    raise FileNotFoundError(f"no external server named {name!r}")
+
+
+def replace_external_token(name: str, token: str) -> None:
+    """Store a new token for an existing server, adopting the managed variable.
+
+    A server first configured with a hand-plumbed variable can be switched to a
+    stored token this way; the entry's ``api_key_env`` moves to the managed name
+    so exactly one source is in play.
+    """
+    token = token.strip()
+    if not token:
+        raise ValueError("token must not be empty")
+    state = load_external_mcp()
+    for srv in cast("list[JsonDict]", state["servers"]):
+        if str(srv.get("name")) == name:
+            set_external_secret(name, token)
+            srv["api_key_env"] = external_secret_env_var(name)
             _save_external_mcp(state)
             return
     raise FileNotFoundError(f"no external server named {name!r}")

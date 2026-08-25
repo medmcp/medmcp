@@ -153,7 +153,10 @@ app = FastAPI(title="MedMCP Workspace", lifespan=_lifespan)
 # One vibe-acp subprocess shared by every websocket connection. The subprocess
 # cwd must stay PROJECT_ROOT — `uv run` resolves the project from it; the
 # agent's working directory is set per session via session/new's cwd instead.
-_client: VibeAcpClient = VibeAcpClient()
+# The agent process is where an external server's credential is needed; this
+# process holds it so the operator does not have to plumb one into the
+# deployment by hand. Passed as a provider, re-read on every (re)start.
+_client: VibeAcpClient = VibeAcpClient(extra_env=settings.external_secret_env)
 
 # Live websocket connections, so a settings-triggered vibe restart can close
 # them (each client auto-reconnects into a fresh session on the new process).
@@ -608,6 +611,9 @@ class ExternalServerPayload(BaseModel):
     name: str
     transport: str
     url: str
+    # The token itself, stored by this process and handed to the agent. Mutually
+    # exclusive with api_key_env, which names a variable the deployment sets.
+    token: str = ""
     api_key_env: str = ""
     # Optional overrides for services that don't take a bearer token; empty means
     # vibe's `Authorization: Bearer {token}` default.
@@ -615,10 +621,11 @@ class ExternalServerPayload(BaseModel):
     api_key_format: str = ""
 
 
-class ExternalServerActivePayload(BaseModel):
-    """Request body for activating/deactivating one external server."""
+class ExternalServerPatchPayload(BaseModel):
+    """Request body for changing one external server: its state, its token, or both."""
 
-    active: bool
+    active: bool | None = None
+    token: str | None = None
 
 
 async def _apply_external_change() -> None:
@@ -633,16 +640,23 @@ async def get_external_mcp() -> JsonDict:
 
     def _state() -> JsonDict:
         state = settings.load_external_mcp()
-        # Presence of the named token variable, never its value. Without this the
-        # only symptom of a missing variable is the remote service's 401: vibe
-        # sends the request with no auth header rather than failing locally.
-        servers = [
-            {
-                **srv,
-                "token_present": settings.external_token_present(str(srv.get("api_key_env", ""))),
-            }
-            for srv in cast("list[JsonDict]", state["servers"])
-        ]
+        # Where each credential comes from, and whether it is actually there —
+        # never what it is. A stored token is held by this process and injected
+        # into the agent, so it is present by definition; a named variable has to
+        # exist in this environment, and when it does not the request goes out
+        # unauthenticated with the remote service's 401 as the only symptom.
+        secrets = settings.load_external_secrets()
+        servers: list[JsonDict] = []
+        for srv in cast("list[JsonDict]", state["servers"]):
+            managed = bool(secrets.get(str(srv.get("name", ""))))
+            servers.append(
+                {
+                    **srv,
+                    "token_managed": managed,
+                    "token_present": managed
+                    or settings.external_token_present(str(srv.get("api_key_env", ""))),
+                }
+            )
         return {
             "enabled": bool(state["enabled"]),
             "acknowledged": bool(state["acknowledged_at"]),
@@ -687,6 +701,7 @@ async def post_external_server(payload: ExternalServerPayload) -> JsonDict:
             True,
             payload.api_key_header,
             payload.api_key_format,
+            payload.token,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -696,15 +711,27 @@ async def post_external_server(payload: ExternalServerPayload) -> JsonDict:
 
 
 @app.patch("/api/external-mcp/servers/{name}")
-async def patch_external_server(name: str, payload: ExternalServerActivePayload) -> JsonDict:
-    """Activate or deactivate a single external server without deleting it."""
+async def patch_external_server(name: str, payload: ExternalServerPatchPayload) -> JsonDict:
+    """Activate/deactivate one external server, replace its token, or both."""
+    if payload.active is None and payload.token is None:
+        raise HTTPException(status_code=400, detail="nothing to change")
     try:
-        await asyncio.to_thread(settings.set_external_server_active, name, payload.active)
+        if payload.token is not None:
+            await asyncio.to_thread(settings.replace_external_token, name, payload.token)
+            # The value is deliberately absent from this line: the audit trail
+            # records that a credential changed, never what it changed to.
+            _audit.info("external MCP server token replaced: %s", name)
+        if payload.active is not None:
+            await asyncio.to_thread(settings.set_external_server_active, name, payload.active)
+            _audit.info(
+                "external MCP server %s: %s",
+                "activated" if payload.active else "deactivated",
+                name,
+            )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    _audit.info(
-        "external MCP server %s: %s", "activated" if payload.active else "deactivated", name
-    )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _apply_external_change()
     return {"ok": True, "restarted": True}
 

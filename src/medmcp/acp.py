@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -95,10 +96,25 @@ class VibeAcpClient:
     callers cannot interleave bytes mid-frame.
     """
 
-    def __init__(self, cwd: str = PROJECT_ROOT, vibe_home: Path = VIBE_HOME) -> None:
-        """Build an unstarted client. Call :meth:`ensure_started` before use."""
+    def __init__(
+        self,
+        cwd: str = PROJECT_ROOT,
+        vibe_home: Path = VIBE_HOME,
+        extra_env: Callable[[], Mapping[str, str]] | None = None,
+    ) -> None:
+        """Build an unstarted client. Call :meth:`ensure_started` before use.
+
+        *extra_env* supplies variables for the agent subprocess — credentials for
+        external MCP servers, which the agent reads at request time and this
+        process must therefore hold. It is a callable, not a dict, because the
+        client outlives many spawns: whatever it returns is read afresh each time
+        the process starts, so a changed credential takes effect on the restart
+        that every such change already triggers. (A callable also keeps this
+        module free of a settings import, which would be circular.)
+        """
         self._cwd: str = cwd
         self._vibe_home: Path = vibe_home
+        self._extra_env: Callable[[], Mapping[str, str]] | None = extra_env
         self.proc: asyncio.subprocess.Process | None = None
         self._next_id: int = 0
         self._pending: dict[int, asyncio.Future[JsonDict]] = {}
@@ -159,7 +175,11 @@ class VibeAcpClient:
                     stderr=None,  # inherit parent stderr so logs appear in terminal
                     limit=16 * 1024 * 1024,  # 16 MB; default 64 KB overflows with LLM responses
                     cwd=self._cwd,
-                    env={**os.environ, "VIBE_HOME": str(self._vibe_home)},
+                    env={
+                        **os.environ,
+                        "VIBE_HOME": str(self._vibe_home),
+                        **(self._extra_env() if self._extra_env else {}),
+                    },
                 )
                 self._reader_task = asyncio.create_task(self._read_loop())
                 resp = await self.request(

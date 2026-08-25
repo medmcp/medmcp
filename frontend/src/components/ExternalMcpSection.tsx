@@ -5,10 +5,11 @@ import {
   addExternalServer,
   fetchExternalMcp,
   removeExternalServer,
+  replaceExternalToken,
   setExternalMcpEnabled,
   setExternalServerActive,
 } from '../api'
-import type { ExternalMcpState } from '../types'
+import type { ExternalMcpState, ExternalServer } from '../types'
 import { Row, Toggle } from './SettingsControls'
 
 /**
@@ -34,6 +35,8 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
   const [consenting, setConsenting] = useState(false)
   const [understood, setUnderstood] = useState(false)
   const [adding, setAdding] = useState(false)
+  // Name of the server whose token is being replaced, if any.
+  const [replacing, setReplacing] = useState<string | null>(null)
 
   const reload = useCallback(async () => {
     setState(await fetchExternalMcp())
@@ -113,16 +116,37 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
                 <div className="settings-row-hint ext-mcp-url">{s.url}</div>
                 <div className="settings-row-hint">
                   {s.transport}
-                  {s.api_key_env ? ` · token from $${s.api_key_env}` : ' · no auth'}
+                  {tokenSource(s)}
                   {s.api_key_env && s.api_key_header ? ` · ${s.api_key_header}` : ''}
                 </div>
-                {/* Without this the only symptom is the remote service's 401:
-                    vibe sends the request unauthenticated rather than failing. */}
+                {/* Only reachable on the env-var path. Without it the sole symptom
+                    is the remote service's 401: vibe sends the request
+                    unauthenticated rather than failing where the cause is. */}
                 {s.api_key_env && s.token_present === false && (
                   <div className="settings-row-hint ext-mcp-missing-token">
                     ${s.api_key_env} is not set where the agent runs — requests go out with no
-                    credential. Add it to medmcp.env and recreate the container.
+                    credential. Add it to medmcp.env and restart, or replace it with a stored
+                    token.
                   </div>
+                )}
+                {replacing === s.name ? (
+                  <ReplaceTokenForm
+                    busy={busy}
+                    onCancel={() => setReplacing(null)}
+                    onSubmit={(value) => {
+                      run(() => replaceExternalToken(s.name, value))
+                      setReplacing(null)
+                    }}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className="btn-plain ext-mcp-replace"
+                    disabled={busy}
+                    onClick={() => setReplacing(s.name)}
+                  >
+                    {s.token_managed ? 'Replace token' : 'Store a token here instead'}
+                  </button>
                 )}
               </div>
               <div className="ext-mcp-server-actions">
@@ -225,6 +249,50 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
   )
 }
 
+/** Where a server's credential comes from, for the one-line summary. */
+function tokenSource(s: ExternalServer): string {
+  if (s.token_managed) return ' · token stored here'
+  if (s.api_key_env) return ` · token from $${s.api_key_env}`
+  return ' · no auth'
+}
+
+/** Write-only token entry: the current value is never available to prefill. */
+function ReplaceTokenForm({
+  busy,
+  onSubmit,
+  onCancel,
+}: {
+  busy: boolean
+  onSubmit: (token: string) => void
+  onCancel: () => void
+}) {
+  const [value, setValue] = useState('')
+  return (
+    <form
+      className="ext-mcp-replace-form"
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (value.trim()) onSubmit(value)
+      }}
+    >
+      <input
+        className="wf-input"
+        type="password"
+        value={value}
+        autoComplete="off"
+        placeholder="new token"
+        onChange={(e) => setValue(e.target.value)}
+      />
+      <button className="btn-plain" type="submit" disabled={busy || !value.trim()}>
+        Save
+      </button>
+      <button className="btn-plain" type="button" onClick={onCancel}>
+        Cancel
+      </button>
+    </form>
+  )
+}
+
 function AddServerForm({
   transports,
   busy,
@@ -237,6 +305,7 @@ function AddServerForm({
     name: string
     transport: string
     url: string
+    token: string
     api_key_env: string
     api_key_header: string
     api_key_format: string
@@ -246,7 +315,11 @@ function AddServerForm({
   const [name, setName] = useState('')
   const [transport, setTransport] = useState(transports[0] ?? 'streamable-http')
   const [url, setUrl] = useState('')
+  const [token, setToken] = useState('')
   const [envVar, setEnvVar] = useState('')
+  // The token goes in directly; naming a variable the deployment already sets is
+  // the path for a site that manages its own secrets, so it folds away.
+  const [useEnvVar, setUseEnvVar] = useState(false)
   const [header, setHeader] = useState('')
   const [format, setFormat] = useState('')
   // Most services take a bearer token, so the scheme fields stay folded away
@@ -262,7 +335,8 @@ function AddServerForm({
           name,
           transport,
           url,
-          api_key_env: envVar,
+          token: useEnvVar ? '' : token,
+          api_key_env: useEnvVar ? envVar : '',
           api_key_header: header,
           api_key_format: format,
         })
@@ -300,27 +374,51 @@ function AddServerForm({
           onChange={(e) => setUrl(e.target.value)}
         />
       </label>
-      <label>
-        Token env var (optional)
-        <input
-          className="wf-input"
-          value={envVar}
-          placeholder="PUBMED_TOKEN"
-          onChange={(e) => setEnvVar(e.target.value)}
-        />
-        {/* The token itself is never stored: only this name is written, and vibe
-            reads the value from the environment the workspace was started in. */}
-        <span className="settings-row-hint">
-          The name of an environment variable set where the workspace runs — not the token, which
-          is never saved. In the container install, put <code>NAME=value</code> in{' '}
-          <code>medmcp.env</code> next to your compose file and recreate the container; running on
-          the host, export it in the shell that starts the workspace.
-        </span>
-      </label>
+      {useEnvVar ? (
+        <label>
+          Token env var (optional)
+          <input
+            className="wf-input"
+            value={envVar}
+            placeholder="PUBMED_TOKEN"
+            onChange={(e) => setEnvVar(e.target.value)}
+          />
+          <span className="settings-row-hint">
+            The name of a variable already set where the agent runs — for a deployment that
+            manages its own secrets. In the container install that means an entry in{' '}
+            <code>medmcp.env</code> and a restart.
+          </span>
+        </label>
+      ) : (
+        <label>
+          Token (optional)
+          <input
+            className="wf-input"
+            type="password"
+            value={token}
+            autoComplete="off"
+            placeholder="paste the service's token"
+            onChange={(e) => setToken(e.target.value)}
+          />
+          {/* Kept out of config.toml and out of every response body; handed to the
+              agent process at startup. See settings.load_external_secrets. */}
+          <span className="settings-row-hint">
+            Stored on this machine and given to the agent when it starts. It is never written to
+            the agent's config and never sent back to this page.
+          </span>
+        </label>
+      )}
+      <button
+        type="button"
+        className="btn-plain ext-mcp-token-mode"
+        onClick={() => setUseEnvVar((v) => !v)}
+      >
+        {useEnvVar ? 'Enter a token instead' : 'Use an environment variable instead'}
+      </button>
 
       {/* Server-side these are refused without a token, since they would have
           nothing to send — so only offer them once one is named. */}
-      {envVar &&
+      {(useEnvVar ? envVar : token) &&
         (customScheme ? (
           <>
             <label>

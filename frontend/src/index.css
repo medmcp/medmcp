@@ -2768,6 +2768,38 @@ textarea.wf-input {
   background: var(--ok);
 }
 
+/* Switching between "type the token" and "name a variable the deployment sets".
+   A quiet link, not a control that competes with the fields around it. */
+.ext-mcp-token-mode {
+  align-self: flex-start;
+  padding: 0;
+  border-color: transparent;
+  font-size: 11px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.ext-mcp-replace {
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 0;
+  border-color: transparent;
+  font-size: 11px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.ext-mcp-replace-form {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.ext-mcp-replace-form .wf-input {
+  flex: 1;
+  min-width: 0;
+}
+
 /* A named token variable that does not exist where the agent runs. Not an error
    state — the server is configured correctly, the environment is not. */
 .ext-mcp-missing-token {

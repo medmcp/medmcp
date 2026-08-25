@@ -279,11 +279,18 @@ export async function addExternalServer(server: {
   name: string
   transport: string
   url: string
+  /** The token itself — stored server-side, never returned by any endpoint. */
+  token: string
   api_key_env: string
   api_key_header: string
   api_key_format: string
 }): Promise<void> {
   await postJson('/api/external-mcp/servers', server)
+}
+
+/** Replace one server's stored token. The value is write-only across this API. */
+export async function replaceExternalToken(name: string, token: string): Promise<void> {
+  await sendJson('PATCH', `/api/external-mcp/servers/${encodeURIComponent(name)}`, { token })
 }
 
 export async function setExternalServerActive(name: string, active: boolean): Promise<void> {

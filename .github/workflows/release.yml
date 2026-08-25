@@ -1,0 +1,257 @@
+name: Release
+
+# Cut a release by pushing a tag: `git tag v0.2.0 && git push origin v0.2.0`.
+# Publishes immutable `:v0.2.0` images and compose artifact, moves `:latest` to
+# them, and opens the GitHub Release with that version's CHANGELOG section as
+# the notes. `main` keeps meaning "rolling dev" and is published by images.yml.
+#
+# Tags published here: `vX.Y.Z` (immutable — pin here for a reproducible fleet)
+# and `latest` (newest release). images.yml owns `:main` and `:<sha>`.
+#
+# The version lives in pyproject.toml and nowhere else — medmcp.__version__
+# reads it back from the installed distribution. While on 0.x: patch for
+# Fixed/Security only; minor for anything under Added, or a break in the compose
+# env contract, the .vibe volume layout, or the org.medmcp.stack label schema.
+#
+# To release: move CHANGELOG's Unreleased under `## X.Y.Z — <date>`, bump
+# pyproject AND uv.lock (which records the project's own version — the image
+# build runs `uv sync --frozen` and fails on a mismatch), commit to main,
+# push the tag. A pre-release tag (`v0.3.0-rc1`)
+# publishes under its own tag and does not move `:latest`; it is checked against
+# its base version, so pyproject stays at the plain `X.Y.Z`.
+#
+# Rollback — release tags are never overwritten, so latest can always go back:
+#   docker buildx imagetools create -t ghcr.io/medmcp/core:latest \
+#     ghcr.io/medmcp/core:vX.Y.Z
+#
+# Two things this deliberately does not do. The README still installs
+# `compose:main`: switch it to `:latest` once the first release has published,
+# not before, or it points at a tag that is not there yet. And
+# catalog.ghcr.json points at `:main` stack images, so a release installs
+# rolling stacks — stacks version independently, so pin them in the release
+# commit once their repos are tagged. `verify` warns rather than failing.
+#
+# The build/merge steps deliberately mirror images.yml (native per-arch builds,
+# then manifest lists — do NOT collapse into one buildx --platform build, QEMU
+# is far too slow for the CUDA/torch compiles). Keep the two in sync when either
+# changes; they are separate files because their triggers and tags differ.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the GitHub Release
+  packages: write
+
+# Never let two releases interleave: they both move :latest, and the loser would
+# silently win the tag.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CUDA_TAG: "12.8.1"
+
+jobs:
+  # Everything that can reject a release before an image exists. A tag is
+  # effectively permanent once images carry it, so the checks are up front.
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: check
+        name: Tag, version and changelog must agree
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          # A pre-release tag (v0.3.0-rc1) releases the same code as v0.3.0 will,
+          # so it is checked against the base version — pyproject is not churned
+          # for release candidates, and the notes come from the 0.3.0 section.
+          base="${version%%-*}"
+
+          declared=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          if [ "$base" != "$declared" ]; then
+            echo "::error::tag $tag does not match pyproject.toml version $declared"
+            exit 1
+          fi
+
+          # Release notes come from the changelog; an empty or missing section
+          # must stop the release, not produce a release with no notes.
+          python3 scripts/changelog_section.py "$base" > /dev/null
+
+          # A tag off a branch that never landed would publish code no CI run on
+          # main ever saw.
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$tag is not an ancestor of origin/main"
+            exit 1
+          fi
+
+          # A pre-release (v0.3.0-rc1) publishes under its own tag but must not
+          # move :latest, which is what the README tells people to install.
+          prerelease=false
+          case "$version" in *-*) prerelease=true ;; esac
+
+          echo "version=$base" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "releasing $tag (prerelease=$prerelease)"
+      - name: Check the stack catalog is pinned
+        run: |
+          # A released core shipping a catalog of :main stack images means the
+          # stacks it installs keep changing under the release. Not fatal — the
+          # stack repos are versioned independently and may not be tagged yet.
+          if grep -q 'ghcr.io/medmcp/[^"]*:main' catalog.ghcr.json; then
+            echo "::warning::catalog.ghcr.json points at :main stack images; this release installs rolling stacks (see this file's header)"
+          fi
+
+  build:
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build base + core
+        run: |
+          docker build -f Dockerfile.base --build-arg CUDA_TAG="${CUDA_TAG}" -t medmcp-base:ci .
+          docker build --build-arg BASE_IMAGE=medmcp-base:ci \
+            --build-arg MEDMCP_BUILD="${GITHUB_REF_NAME}" -t medmcp-core:ci .
+      - name: Smoke test (entrypoint sanitizer + server boots + reports version)
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          printf '{"auths":{"ghcr.io":{"auth":"dGVzdA=="}},"currentContext":"rootless","credsStore":"pass"}' \
+            > /tmp/host-docker-config.json
+          docker run -d --name medmcp-smoke \
+            -v /tmp/host-docker-config.json:/run/host-docker-config.json:ro \
+            -e MEDMCP_GPU=all \
+            medmcp-core:ci
+          ok=
+          for _ in $(seq 1 30); do
+            if docker exec medmcp-smoke python3 -c \
+              "import urllib.request; urllib.request.urlopen('http://localhost:8100/healthz')" 2>/dev/null; then
+              ok=1; break
+            fi
+            sleep 2
+          done
+          [ "$ok" = 1 ] || { echo "::error::server never became healthy"; docker logs medmcp-smoke; exit 1; }
+          keys=$(docker exec medmcp-smoke python3 -c \
+            "import json; print(sorted(json.load(open('/root/.docker/config.json')).keys()))")
+          [ "$keys" = "['auths']" ] || { echo "::error::config not sanitized: $keys"; exit 1; }
+          # The image must know what it is — this is the whole point of tagging.
+          reported=$(docker exec medmcp-smoke python3 -c \
+            "import json,urllib.request; print(json.load(urllib.request.urlopen('http://localhost:8100/healthz'))['version'])")
+          [ "$reported" = "$VERSION" ] \
+            || { echo "::error::image reports version $reported, releasing $VERSION"; exit 1; }
+          echo "smoke test passed (version $reported)"
+      - name: Smoke test cleanup
+        if: always()
+        run: docker rm -f medmcp-smoke 2>/dev/null || true
+      - name: Push arch-suffixed tags to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          tags="${GITHUB_REF_NAME}"
+          [ "$PRERELEASE" = "true" ] || tags="$tags latest"
+          # Suffixed tags are an internal handoff to the merge job; nothing
+          # outside this workflow should consume one.
+          for img in base core; do
+            for tag in $tags; do
+              docker tag "medmcp-$img:ci" "ghcr.io/medmcp/$img:$tag-${{ matrix.arch }}"
+              docker push "ghcr.io/medmcp/$img:$tag-${{ matrix.arch }}"
+            done
+          done
+
+  publish:
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Merge arch tags into multi-arch manifest lists
+        env:
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          tags="${GITHUB_REF_NAME}"
+          [ "$PRERELEASE" = "true" ] || tags="$tags latest"
+          for img in base core; do
+            for tag in $tags; do
+              docker buildx imagetools create -t "ghcr.io/medmcp/$img:$tag" \
+                "ghcr.io/medmcp/$img:$tag-amd64" \
+                "ghcr.io/medmcp/$img:$tag-arm64"
+            done
+          done
+      - name: Verify both platforms resolve
+        run: |
+          for img in base core; do
+            insp=$(docker buildx imagetools inspect "ghcr.io/medmcp/$img:${GITHUB_REF_NAME}")
+            for plat in linux/amd64 linux/arm64; do
+              echo "$insp" | grep -q "$plat" \
+                || { echo "::error::ghcr.io/medmcp/$img:${GITHUB_REF_NAME} is missing $plat"; exit 1; }
+            done
+          done
+          echo "both platforms present on base + core"
+      - name: Pin the compose artifact to this release
+        run: |
+          # docker-compose.ghcr.yml defaults MEDMCP_TAG to `main`. Published
+          # unchanged under a release tag, `compose:v0.2.0` would still pull
+          # `core:main` — a "pinned" install that keeps moving.
+          python3 - <<'PY'
+          import os
+          import pathlib
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          path = pathlib.Path("docker-compose.ghcr.yml")
+          text = path.read_text()
+          old = "${MEDMCP_TAG:-main}"
+          if old not in text:
+              raise SystemExit(f"error: {old} not found in {path}; release would not be pinned")
+          path.write_text(text.replace(old, "${MEDMCP_TAG:-%s}" % tag))
+          print(f"pinned compose to {tag}")
+          PY
+          grep -n 'MEDMCP_TAG' docker-compose.ghcr.yml
+      - name: Publish the deploy compose as an OCI artifact
+        env:
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          # `yes |` answers the bind-mount confirmation that -y does not cover;
+          # without it the TTY-less runner reads EOF, defaults to No, and skips
+          # the publish while exiting 0. MEDMCP_WORKSPACE only satisfies
+          # publish-time interpolation — it is not baked in (no --with-env).
+          tags="${GITHUB_REF_NAME}"
+          [ "$PRERELEASE" = "true" ] || tags="$tags latest"
+          for tag in $tags; do
+            yes | MEDMCP_WORKSPACE=/run/medmcp \
+              docker compose -f docker-compose.ghcr.yml publish \
+              "ghcr.io/medmcp/compose:$tag" -y
+          done
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          python3 scripts/changelog_section.py "$VERSION" > /tmp/notes.md
+          flags=""
+          [ "$PRERELEASE" = "true" ] && flags="--prerelease"
+          # shellcheck disable=SC2086
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file /tmp/notes.md \
+            $flags

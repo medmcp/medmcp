@@ -51,6 +51,7 @@ from pydantic import BaseModel, Field
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from medmcp import (
+    __version__,
     batchplan,
     distill,
     explain,
@@ -81,6 +82,12 @@ WORKSPACE_ROOT: Path = Path(
 ).resolve()
 FRONTEND_DIST: Path = Path(PROJECT_ROOT) / "frontend" / "dist"
 DEFAULT_PORT: int = 8100
+
+# What this instance was built from, baked in by the image build: a release
+# tag (v1.2.3) for a released image, a commit sha for a rolling :main one,
+# empty when running from a source checkout. The version alone cannot say
+# which, since main carries the released version until the next bump.
+BUILD: str = os.environ.get("MEDMCP_BUILD", "")
 
 # Tool/VCS internals hidden from the explorer tree.
 _SKIP_DIRS: frozenset[str] = frozenset(
@@ -462,8 +469,12 @@ def _apply_stack_change() -> None:
 
 @app.get("/healthz")
 async def healthz() -> JsonDict:
-    """Liveness probe for container healthchecks (touches no dependencies)."""
-    return {"status": "ok"}
+    """Liveness probe for container healthchecks (touches no dependencies).
+
+    Carries the version and build identifier so an installed instance can say
+    what it is — the first question any bug report has to answer.
+    """
+    return {"status": "ok", "version": __version__, "build": BUILD}
 
 
 @app.get("/api/gpus")

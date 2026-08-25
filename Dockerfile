@@ -41,8 +41,13 @@ COPY catalog.ghcr.json ./catalog.ghcr.json
 COPY docker/entrypoint.sh /usr/local/bin/medmcp-entrypoint
 RUN chmod +x /usr/local/bin/medmcp-entrypoint
 
+# What this image was built from — a release tag for a released image, a commit
+# sha for a rolling :main one. Reported by /healthz; empty for a local build.
+ARG MEDMCP_BUILD=""
+
 ENV PATH=/app/.venv/bin:$PATH \
     UV_NO_SYNC=1 \
+    MEDMCP_BUILD=$MEDMCP_BUILD \
     MEDMCP_WORKSPACE_HOST=0.0.0.0 \
     OLLAMA_BASE_URL=http://llm:11434
 

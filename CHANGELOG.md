@@ -6,82 +6,32 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
-### Changed
-
-- **Settings is easier to read.** General and Advanced are now the same kind of
-  heading rather than a heading and a button, and everything inside Advanced is
-  visibly inside it. External MCP servers moved out of the drawer into a window
-  of their own, reached from Advanced or from the warning strip, so settings is a
-  short list of switches and the servers get room for their list, their tokens
-  and the consent text. Wording across the interface was cleaned up as well.
-
-### Fixed
-
-- **Uninstalling a tool stack now removes it properly.** A stack could disappear
-  from the stacks window while still showing in settings, and on an installation
-  that had never changed which stacks are switched on, it could come back
-  entirely — the agent kept being told to launch something you had removed.
-
-### Security
-
-- **A tool stack can no longer get internet access without you agreeing to it.**
-  Stacks normally run with networking switched off — they see the files you point
-  them at and nothing else — but an image can ask for network access, and your
-  workspace is available to it, so it could send what it reads elsewhere. That
-  request now stops the install and asks you first, and any stack that has it is
-  marked **internet** in the stacks window for as long as it is installed.
-- **Saved workflows can only touch your workspace.** A workflow runs its recorded
-  tool calls without asking for approval each time, so a file it names is now
-  required to be inside the workspace — including by way of a shortcut that
-  points out of it. Anything else is refused before the first step runs.
-
-- **A website you visit can no longer reach the workspace.** The workspace
-  listens on your machine only, but a browser will still let any page send
-  requests to it — and a chat connection is not covered by the browser's usual
-  same-site protection at all, so a page could open one, ask the agent to read
-  your files and receive the contents, without any approval prompt appearing.
-  Requests and connections that do not come from the workspace's own page are
-  now refused, as are requests aimed at it under another name (a technique that
-  otherwise gets around the first check). If you reach MedMCP through a
-  hostname of your own — a reverse proxy, say — list it in
-  `MEDMCP_ALLOWED_HOSTS` / `MEDMCP_ALLOWED_ORIGINS`; anything unlisted is
-  refused.
+## 0.2.0 — 2026-08-25
 
 ### Added
 
-- **TotalSegmentator stack**, installable from the Tool stacks window. Segments
-  anatomical structures on whole-body CT and MR — 117 structures in one pass with
-  the general CT model and 50 with the MR one, plus focused models for the spine,
-  lungs, liver, head and neck, and teeth — and reports per-structure volumes. A
-  GPU is strongly recommended; it also runs on CPU, considerably more slowly.
-- **External MCP servers** (Settings → Advanced, off by default). Lets you connect
-  the agent to MCP tool services hosted outside your machine — a literature
-  search, a hospital system, a vendor API — alongside your local imaging stacks.
-  Because this ends the guarantee that nothing leaves your infrastructure, the
-  switch does not simply flip: it first explains what changes and asks you to
-  accept responsibility for what those services receive. Nothing is connected
-  until you do, and turning it off both removes the servers from the agent and
-  withdraws your acceptance, so switching it back on asks again.
-  Servers are addressed by URL (`streamable-http` or `http`); if one needs a
-  token, you paste it into the form. It is kept on this machine, handed to the
-  agent when it starts, and never written into the agent's configuration or sent
-  back to the browser — you can replace it later, but nothing can read it out.
-  Tokens are sent as `Authorization: Bearer …` by default, and services that
-  expect something else (an `X-API-Key` header, say) can set the header and value
-  format themselves.
-  Individual servers can be switched off without deleting them, and every tool
-  call still asks for your approval. While anything external is enabled, a red
-  strip under the header says so from every panel, names the servers, and turns
-  them all off in one click — the settings switch is easy to forget, this is not.
-  Turning it off applies to every server at once, whatever their individual
-  switches say, and the setting states plainly that nothing is enabled any more;
-  the agent is restarted so nothing already running keeps a connection. Servers
-  and your acceptance are kept across restarts and updates. A deployment that
-  manages its own secrets can name an environment variable instead of a token: put
-  `NAME=value` lines in a `medmcp.env` file next to your compose file (or point
-  `MEDMCP_ENV_FILE` at one), which is optional and read only if present. If a
-  named variable turns out not to be set where the agent runs, the setting says
-  so — rather than leaving you with an unexplained rejection from the service.
+- **External MCP servers** — connect the agent to remote MCP services (Settings →
+  Advanced). Off by default, behind a consent dialog; tokens stay on this machine.
+- **TotalSegmentator stack** — whole-body CT/MR anatomy segmentation, installable
+  from the Tool stacks window.
+- `/healthz` reports the running version and the build it came from.
+
+### Changed
+
+- Settings drawer reorganised; external MCP servers moved into a window of their own.
+- Wording tidied across the interface.
+
+### Fixed
+
+- Uninstalling a tool stack now removes it for good — it could previously come back.
+
+### Security
+
+- Stacks that ask for network access need your consent at install, and are marked
+  **internet** while installed.
+- Saved workflows can only touch files inside your workspace.
+- Requests to the workspace from other websites are refused (`MEDMCP_ALLOWED_HOSTS`
+  / `MEDMCP_ALLOWED_ORIGINS` allow a reverse proxy).
 
 ## 0.1.0
 

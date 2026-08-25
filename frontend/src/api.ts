@@ -1,6 +1,7 @@
 import type {
   BatchFromPlanResult,
   CatalogEntry,
+  ExternalMcpState,
   GpuInfo,
   InstalledStack,
   ReplayPreviewStep,
@@ -28,7 +29,11 @@ async function check(res: Response): Promise<Response> {
   return res
 }
 
-async function sendJson(method: 'POST' | 'PUT', url: string, body: object): Promise<Response> {
+async function sendJson(
+  method: 'POST' | 'PUT' | 'PATCH',
+  url: string,
+  body: object,
+): Promise<Response> {
   return check(
     await fetch(url, {
       method,
@@ -250,4 +255,50 @@ export async function batchFromPlan(name: string, planCsv: string): Promise<Batc
     plan_csv: planCsv,
   })
   return (await res.json()) as BatchFromPlanResult
+}
+
+// ── External MCP (advanced) ──────────────────────────────────
+// Every mutation restarts the agent server-side, so callers should refetch
+// rather than assume their optimistic view survived.
+
+export async function fetchExternalMcp(): Promise<ExternalMcpState> {
+  const res = await check(await fetch('/api/external-mcp'))
+  return (await res.json()) as ExternalMcpState
+}
+
+/** Record that the operator accepted the risks. Required before enabling. */
+export async function acknowledgeExternalMcp(): Promise<void> {
+  await postJson('/api/external-mcp/acknowledge', {})
+}
+
+export async function setExternalMcpEnabled(enabled: boolean): Promise<void> {
+  await sendJson('PUT', '/api/external-mcp', { enabled })
+}
+
+export async function addExternalServer(server: {
+  name: string
+  transport: string
+  url: string
+  /** The token itself — stored server-side, never returned by any endpoint. */
+  token: string
+  api_key_env: string
+  api_key_header: string
+  api_key_format: string
+}): Promise<void> {
+  await postJson('/api/external-mcp/servers', server)
+}
+
+/** Replace one server's stored token. The value is write-only across this API. */
+export async function replaceExternalToken(name: string, token: string): Promise<void> {
+  await sendJson('PATCH', `/api/external-mcp/servers/${encodeURIComponent(name)}`, { token })
+}
+
+export async function setExternalServerActive(name: string, active: boolean): Promise<void> {
+  await sendJson('PATCH', `/api/external-mcp/servers/${encodeURIComponent(name)}`, { active })
+}
+
+export async function removeExternalServer(name: string): Promise<void> {
+  await check(
+    await fetch(`/api/external-mcp/servers/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  )
 }

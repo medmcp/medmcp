@@ -214,8 +214,6 @@ __marimo__/
 .vibe/vibehistory
 .vibe/trusted_folders.toml
 .vibe/active_stacks.json
-.vibe/active_workflows.json
-.vibe/workflows_enabled.json
 .vibe/provenance_enabled.json
 .vibe/explain_enabled.json
 .vibe/ui_sessions.json
@@ -226,12 +224,16 @@ __marimo__/
 # copy the image ships lives at docker/hooks.toml).
 .vibe/hooks.toml
 .vibe/pathguard_retries.json
+.vibe/state/
+# Tokens for external MCP servers, passed to the core container via env_file.
+medmcp.env
+# Derived from .vibe/prompts/medmcp.md at sync time when external MCP is in use.
+.vibe/prompts/medmcp-external.md
 .vibe/provenance/
 .vibe/workflows/
 data/
 node_modules/
 frontend/dist/
-.vibe/explain_enabled.json
 
 # Container-stack manifests + extracted skills are runtime state written by the
 # UI install flow; keep only the directory (README) in git.

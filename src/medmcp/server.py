@@ -153,7 +153,10 @@ app = FastAPI(title="MedMCP Workspace", lifespan=_lifespan)
 # One vibe-acp subprocess shared by every websocket connection. The subprocess
 # cwd must stay PROJECT_ROOT — `uv run` resolves the project from it; the
 # agent's working directory is set per session via session/new's cwd instead.
-_client: VibeAcpClient = VibeAcpClient()
+# The agent process is where an external server's credential is needed; this
+# process holds it so the operator does not have to plumb one into the
+# deployment by hand. Passed as a provider, re-read on every (re)start.
+_client: VibeAcpClient = VibeAcpClient(extra_env=settings.external_secret_env)
 
 # Live websocket connections, so a settings-triggered vibe restart can close
 # them (each client auto-reconnects into a fresh session on the new process).
@@ -588,6 +591,161 @@ def _workflow_detail(name: str) -> JsonDict:
         "replayable": replay_error is None,
         "replay_error": replay_error,
     }
+
+
+# ── External MCP servers (advanced) ──────────────────────────────────────────
+# Every mutation here changes what the agent can reach, so all of them are
+# audit-logged and all of them re-sync the vibe config and restart the agent —
+# the same treatment a stack change gets, for the same reason.
+
+
+class ExternalMcpEnabledPayload(BaseModel):
+    """Request body for turning external MCP support on or off."""
+
+    enabled: bool
+
+
+class ExternalServerPayload(BaseModel):
+    """Request body for registering an external MCP server."""
+
+    name: str
+    transport: str
+    url: str
+    # The token itself, stored by this process and handed to the agent. Mutually
+    # exclusive with api_key_env, which names a variable the deployment sets.
+    token: str = ""
+    api_key_env: str = ""
+    # Optional overrides for services that don't take a bearer token; empty means
+    # vibe's `Authorization: Bearer {token}` default.
+    api_key_header: str = ""
+    api_key_format: str = ""
+
+
+class ExternalServerPatchPayload(BaseModel):
+    """Request body for changing one external server: its state, its token, or both."""
+
+    active: bool | None = None
+    token: str | None = None
+
+
+async def _apply_external_change() -> None:
+    """Re-discover servers, re-sync the vibe config, and restart the agent."""
+    await asyncio.to_thread(_apply_stack_change)
+    await _restart_vibe()
+
+
+@app.get("/api/external-mcp")
+async def get_external_mcp() -> JsonDict:
+    """Return the external-MCP state: the toggle, the acknowledgement, the servers."""
+
+    def _state() -> JsonDict:
+        state = settings.load_external_mcp()
+        # Where each credential comes from, and whether it is actually there —
+        # never what it is. A stored token is held by this process and injected
+        # into the agent, so it is present by definition; a named variable has to
+        # exist in this environment, and when it does not the request goes out
+        # unauthenticated with the remote service's 401 as the only symptom.
+        secrets = settings.load_external_secrets()
+        servers: list[JsonDict] = []
+        for srv in cast("list[JsonDict]", state["servers"]):
+            managed = bool(secrets.get(str(srv.get("name", ""))))
+            servers.append(
+                {
+                    **srv,
+                    "token_managed": managed,
+                    "token_present": managed
+                    or settings.external_token_present(str(srv.get("api_key_env", ""))),
+                }
+            )
+        return {
+            "enabled": bool(state["enabled"]),
+            "acknowledged": bool(state["acknowledged_at"]),
+            "acknowledged_at": state["acknowledged_at"],
+            "transports": list(settings.EXTERNAL_MCP_TRANSPORTS),
+            "servers": servers,
+        }
+
+    return await asyncio.to_thread(_state)
+
+
+@app.post("/api/external-mcp/acknowledge")
+async def post_external_mcp_acknowledge() -> JsonDict:
+    """Record that the operator accepted responsibility for external services."""
+    state = await asyncio.to_thread(settings.acknowledge_external_mcp)
+    _audit.info("external MCP acknowledged at %s", state["acknowledged_at"])
+    return {"ok": True, "acknowledged_at": state["acknowledged_at"]}
+
+
+@app.put("/api/external-mcp")
+async def put_external_mcp(payload: ExternalMcpEnabledPayload) -> JsonDict:
+    """Enable or disable external MCP support (enabling requires the acknowledgement)."""
+    try:
+        await asyncio.to_thread(settings.set_external_mcp_enabled, payload.enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit.info("external MCP %s", "enabled" if payload.enabled else "disabled")
+    await _apply_external_change()
+    return {"ok": True, "enabled": payload.enabled, "restarted": True}
+
+
+@app.post("/api/external-mcp/servers")
+async def post_external_server(payload: ExternalServerPayload) -> JsonDict:
+    """Register an external MCP server."""
+    try:
+        entry = await asyncio.to_thread(
+            settings.add_external_server,
+            payload.name,
+            payload.transport,
+            payload.url,
+            payload.api_key_env,
+            True,
+            payload.api_key_header,
+            payload.api_key_format,
+            payload.token,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit.info("external MCP server added: %s -> %s", entry["name"], entry["url"])
+    await _apply_external_change()
+    return {"ok": True, "server": entry, "restarted": True}
+
+
+@app.patch("/api/external-mcp/servers/{name}")
+async def patch_external_server(name: str, payload: ExternalServerPatchPayload) -> JsonDict:
+    """Activate/deactivate one external server, replace its token, or both."""
+    if payload.active is None and payload.token is None:
+        raise HTTPException(status_code=400, detail="nothing to change")
+    try:
+        if payload.token is not None:
+            await asyncio.to_thread(settings.replace_external_token, name, payload.token)
+            # The value is deliberately absent from this line: the audit trail
+            # records that a credential changed, never what it changed to.
+            _audit.info("external MCP server token replaced: %s", name)
+        if payload.active is not None:
+            await asyncio.to_thread(settings.set_external_server_active, name, payload.active)
+            _audit.info(
+                "external MCP server %s: %s",
+                "activated" if payload.active else "deactivated",
+                name,
+            )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _apply_external_change()
+    return {"ok": True, "restarted": True}
+
+
+@app.delete("/api/external-mcp/servers/{name}")
+async def delete_external_server(name: str) -> JsonDict:
+    """Remove an external MCP server."""
+    try:
+        await asyncio.to_thread(settings.remove_external_server, name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _audit.info("external MCP server removed: %s", name)
+    await _apply_external_change()
+    return {"ok": True, "restarted": True}
 
 
 @app.get("/api/workflows")

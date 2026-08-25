@@ -1,5 +1,5 @@
 {
-  "_comment": "Curated catalog of installable MedMCP tool stacks shown in the UI (Settings -> Stacks -> Available). Override the source with MEDMCP_CATALOG_URL (an http(s) URL or a file path) to point at a published/air-gapped-mirror catalog; image refs there are typically ghcr.io/medmcp/<stack>:<tag>. The bundled defaults below use the locally built :dev images.",
+  "_comment": "Curated catalog of installable MedMCP tool stacks shown in the UI (the Tool stacks window). Override the source with MEDMCP_CATALOG_URL (an http(s) URL or a file path) to point at a published/air-gapped-mirror catalog; image refs there are typically ghcr.io/medmcp/<stack>:<tag>. The bundled defaults below use the locally built :dev images.",
   "stacks": [
     {
       "name": "medmcp-dicom",
@@ -22,7 +22,7 @@
     {
       "name": "medmcp-totalsegmentator",
       "image": "medmcp-totalsegmentator:dev",
-      "description": "Whole-body anatomy segmentation on CT and MR (TotalSegmentator): 31 tasks, 117 structures.",
+      "description": "Whole-body anatomy segmentation on CT and MR, plus focused models for the spine, lungs, liver, head and neck, and teeth (TotalSegmentator).",
       "gpu": true
     }
   ]

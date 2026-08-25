@@ -266,3 +266,34 @@ export type ServerFrame =
     }
   | { type: 'done' }
   | { type: 'error'; message: string }
+
+/** One external MCP server (GET /api/external-mcp). */
+export interface ExternalServer {
+  name: string
+  transport: string
+  url: string
+  /** Name of the env var holding the token — never the token itself. */
+  api_key_env: string
+  /** Header to carry the token; empty means Authorization. */
+  api_key_header: string
+  /** Value format, e.g. "Bearer {token}"; empty means Bearer. */
+  api_key_format: string
+  active: boolean
+  /** Whether `api_key_env` actually holds a token where the agent runs. Presence
+   *  only — the value never leaves the server. */
+  token_present?: boolean
+  /** Whether the token is stored by MedMCP rather than named as a deployment
+   *  variable. Managed tokens are present by construction. */
+  token_managed?: boolean
+}
+
+/** State of the external-MCP feature (advanced settings). */
+export interface ExternalMcpState {
+  enabled: boolean
+  /** Whether the operator has accepted responsibility; required before enabling. */
+  acknowledged: boolean
+  acknowledged_at: string | null
+  /** Transports the server will accept, in preference order. */
+  transports: string[]
+  servers: ExternalServer[]
+}

@@ -31,9 +31,12 @@ import tempfile
 import threading
 import tomllib
 from collections.abc import Callable
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
+from string import Formatter
 from typing import Any, cast
+from urllib.parse import urlparse
 
 import httpx
 import tomli_w
@@ -545,12 +548,26 @@ def load_mcp_servers() -> list[JsonDict]:
             if command and Path(command).name == "docker":
                 log.debug("Skipping orphaned container-stack config.toml entry %r", name)
                 continue
+            # An HTTP entry here is one this sync wrote for an external server —
+            # source #4 owns those. Re-adopting it would strip it back to a stdio
+            # entry with an empty command, which is the feedback loop above in a
+            # different costume, and would survive the feature being switched off.
+            if str(srv.get("transport", "")) in EXTERNAL_MCP_TRANSPORTS or srv.get("url"):
+                log.debug("Skipping external-server config.toml entry %r", name)
+                continue
             servers[name] = {
                 "name": name,
                 "command": command,
                 "args": cast("list[Any]", srv.get("args", [])),
                 "env": {},
             }
+
+    # ── 4. External MCP servers (advanced; gated on an explicit acknowledgement)
+    # Last, and non-shadowing: a local stack of the same name always wins, so a
+    # remote entry can never displace an audited on-premise tool set.
+    for entry in external_servers():
+        if entry["name"] not in servers:
+            servers[entry["name"]] = entry
 
     return list(servers.values())
 
@@ -601,6 +618,433 @@ def active_servers() -> list[JsonDict]:
     """Return only the active subset of all discovered servers."""
     active_names = load_active_server_names()
     return [s for s in load_mcp_servers() if s["name"] in active_names]
+
+
+# ── External MCP servers (advanced, off by default) ──────────────────────────
+# Wiring the workspace to a third-party MCP service crosses the on-premise
+# boundary the rest of the product guarantees, so this is gated twice: the
+# operator must enable the feature *and* have acknowledged what it means. Nothing
+# is discovered until both hold, which is why `external_mcp_enabled()` — not the
+# stored `enabled` flag — is what discovery consults.
+#
+# Remote HTTP transports only. A stdio entry here would mean launching an
+# arbitrary binary on the host, which is a categorically larger hole than a
+# network call the permission flow already gates, so it is not offered.
+#
+# Credentials are stored as the *name* of an environment variable, never a token:
+# `.vibe/config.toml` is rewritten on every sync and readable by anything in the
+# container, so it is the wrong place for a secret.
+# A directory rather than a bare file, because in a container this state has to
+# survive an image update: a named volume can cover a subdirectory of .vibe,
+# but not a single file, and covering .vibe itself would shadow the baked
+# prompts and the config.toml the entrypoint writes.
+VIBE_STATE_DIR: Path = VIBE_HOME / "state"
+EXTERNAL_MCP_PATH: Path = VIBE_STATE_DIR / "external_mcp.json"
+EXTERNAL_MCP_TRANSPORTS: tuple[str, ...] = ("streamable-http", "http")
+_ENV_VAR_RE: re.Pattern[str] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# RFC 7230 token characters — the same set vibe validates header names against.
+_HEADER_NAME_RE: re.Pattern[str] = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]+")
+
+
+def _default_external_state() -> JsonDict:
+    return {"enabled": False, "acknowledged_at": None, "servers": []}
+
+
+def load_external_mcp() -> JsonDict:
+    """Return the external-MCP state (``enabled``/``acknowledged_at``/``servers``)."""
+    if not EXTERNAL_MCP_PATH.exists():
+        return _default_external_state()
+    try:
+        data = cast("JsonDict", json.loads(EXTERNAL_MCP_PATH.read_text()))
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("could not read %s; treating as disabled: %s", EXTERNAL_MCP_PATH, exc)
+        return _default_external_state()
+    state = _default_external_state()
+    state["enabled"] = bool(data.get("enabled"))
+    ack = data.get("acknowledged_at")
+    state["acknowledged_at"] = str(ack) if ack else None
+    servers = data.get("servers")
+    state["servers"] = list(cast("list[JsonDict]", servers)) if isinstance(servers, list) else []
+    return state
+
+
+def _save_external_mcp(state: JsonDict) -> None:
+    _atomic_write_json(EXTERNAL_MCP_PATH, state)
+
+
+EXTERNAL_SECRETS_PATH: Path = VIBE_STATE_DIR / "external_secrets.json"
+# Prefix for the variables this process hands the agent. Namespaced so a stored
+# token can never take the name of an unrelated variable in the environment.
+EXTERNAL_SECRET_PREFIX: str = "MEDMCP_EXT_"
+
+
+def external_secret_env_var(server_name: str) -> str:
+    """Name of the variable that carries *server_name*'s stored token to the agent."""
+    return EXTERNAL_SECRET_PREFIX + server_name.upper().replace("-", "_")
+
+
+def load_external_secrets() -> dict[str, str]:
+    """Return ``{server_name: token}`` for tokens entered through the UI.
+
+    Kept out of ``external_mcp.json`` (which the API returns wholesale) and out of
+    ``config.toml`` (rewritten on every sync), so a token cannot reach a response
+    body or the agent's config by accident. Written 0600 by the atomic writer.
+    """
+    if not EXTERNAL_SECRETS_PATH.exists():
+        return {}
+    try:
+        data = cast("JsonDict", json.loads(EXTERNAL_SECRETS_PATH.read_text()))
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("could not read %s; treating as empty: %s", EXTERNAL_SECRETS_PATH, exc)
+        return {}
+    return {str(k): str(v) for k, v in data.items() if isinstance(v, str) and v}
+
+
+def set_external_secret(server_name: str, token: str) -> None:
+    """Store *token* for *server_name*, replacing any previous one."""
+    secrets = load_external_secrets()
+    secrets[server_name] = token
+    _atomic_write_json(EXTERNAL_SECRETS_PATH, cast("JsonDict", secrets))
+
+
+def delete_external_secret(server_name: str) -> None:
+    """Forget *server_name*'s token; a no-op when there is none."""
+    secrets = load_external_secrets()
+    if secrets.pop(server_name, None) is None:
+        return
+    _atomic_write_json(EXTERNAL_SECRETS_PATH, cast("JsonDict", secrets))
+
+
+def external_secret_env() -> dict[str, str]:
+    """Token variables to put in the agent subprocess's environment.
+
+    Empty while the feature is gated off, and empty for a deactivated server: a
+    switch that is off must mean the agent process does not even hold the
+    credential, not merely that no server is configured to use it. Read afresh on
+    every spawn, which is why the client takes a callable rather than a dict —
+    every mutation here restarts the agent.
+    """
+    if not external_mcp_enabled():
+        return {}
+    secrets = load_external_secrets()
+    out: dict[str, str] = {}
+    for srv in cast("list[JsonDict]", load_external_mcp()["servers"]):
+        name = str(srv.get("name", ""))
+        if srv.get("active") and secrets.get(name):
+            out[external_secret_env_var(name)] = secrets[name]
+    return out
+
+
+def external_token_present(api_key_env: str) -> bool:
+    """Whether the env var *api_key_env* holds a usable token in this process.
+
+    Only ever returns presence — never the value, which must not leave the
+    process. vibe attaches the auth header only when ``os.getenv`` is truthy, so
+    an empty variable counts as absent here for the same reason: with one, the
+    request goes out unauthenticated and the operator sees the remote service's
+    401 with nothing pointing at the real cause. vibe-acp inherits this process's
+    environment, so what is visible here is what it will see.
+    """
+    return bool(api_key_env) and bool(os.environ.get(api_key_env))
+
+
+def external_mcp_acknowledged() -> bool:
+    """Whether the operator has accepted responsibility for external services."""
+    return bool(load_external_mcp()["acknowledged_at"])
+
+
+def external_mcp_enabled() -> bool:
+    """Whether external MCP servers may be discovered at all.
+
+    Both the toggle and the acknowledgement are required — a state file that
+    somehow carries ``enabled`` without one is treated as off rather than trusted.
+    """
+    state = load_external_mcp()
+    return bool(state["enabled"]) and bool(state["acknowledged_at"])
+
+
+def acknowledge_external_mcp() -> JsonDict:
+    """Record that the operator accepted the risks.
+
+    Idempotent within one activation (re-acknowledging keeps the original
+    timestamp). :func:`set_external_mcp_enabled` clears it again on disable, so
+    an acknowledgement covers the period it was given for and no longer.
+    """
+    state = load_external_mcp()
+    if not state["acknowledged_at"]:
+        state["acknowledged_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+        _save_external_mcp(state)
+    return state
+
+
+def set_external_mcp_enabled(enabled: bool) -> JsonDict:
+    """Turn the feature on or off; enabling requires a *current* acknowledgement.
+
+    Disabling clears the acknowledgement, so switching the feature back on has to
+    pass through the consent dialog again. A once-per-machine consent would mean
+    the one control that ends the on-premise guarantee could be re-armed in
+    silence — months later, or by someone who never saw what it says — and the
+    person turning it on would get no warning at the moment it matters.
+    """
+    state = load_external_mcp()
+    if enabled and not state["acknowledged_at"]:
+        raise ValueError("external MCP must be acknowledged before it can be enabled")
+    state["enabled"] = bool(enabled)
+    if not enabled:
+        state["acknowledged_at"] = None
+    _save_external_mcp(state)
+    return state
+
+
+def _validate_api_key_format(fmt: str) -> None:
+    """Raise ``ValueError`` unless *fmt* is a format string using only ``{token}``.
+
+    Mirrors vibe's own check. Enumerating the replacement fields beats searching
+    for the ``{token}`` substring: ``{{token}}`` contains it but escapes to a
+    literal, and ``{token:>5}`` is valid without containing it.
+    """
+    try:
+        fields = [name for _, name, _, _ in Formatter().parse(fmt) if name is not None]
+    except ValueError as exc:
+        raise ValueError(f"invalid token format: {fmt!r} (not a valid format string)") from exc
+    if any(name != "token" for name in fields):
+        raise ValueError(f"invalid token format: {fmt!r} (may only reference {{token}})")
+    if "token" not in fields:
+        raise ValueError(f"invalid token format: {fmt!r} (must contain {{token}})")
+
+
+def _validate_external_server(
+    name: str,
+    transport: str,
+    url: str,
+    api_key_env: str,
+    api_key_header: str = "",
+    api_key_format: str = "",
+) -> None:
+    """Raise ``ValueError`` if any field of a proposed external server is unusable."""
+    if not _STACK_NAME_RE.fullmatch(name):
+        raise ValueError(f"invalid server name: {name!r} (lowercase letters, digits and '-')")
+    if transport not in EXTERNAL_MCP_TRANSPORTS:
+        allowed = ", ".join(EXTERNAL_MCP_TRANSPORTS)
+        raise ValueError(f"invalid transport: {transport!r} (allowed: {allowed})")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(f"invalid url: {url!r} (must be an http(s) URL)")
+    if api_key_env and not _ENV_VAR_RE.fullmatch(api_key_env):
+        raise ValueError(f"invalid environment variable name: {api_key_env!r}")
+    if api_key_header and not _HEADER_NAME_RE.fullmatch(api_key_header):
+        raise ValueError(f"invalid header name: {api_key_header!r}")
+    if api_key_format:
+        _validate_api_key_format(api_key_format)
+    # vibe ignores the header/format fields when no token is configured and warns
+    # about it; refuse up front rather than storing settings that do nothing.
+    if (api_key_header or api_key_format) and not api_key_env:
+        raise ValueError("a header or token format needs an environment variable to send")
+
+
+def add_external_server(
+    name: str,
+    transport: str,
+    url: str,
+    api_key_env: str = "",
+    active: bool = True,
+    api_key_header: str = "",
+    api_key_format: str = "",
+    token: str = "",
+) -> JsonDict:
+    """Register an external MCP server and return the stored entry.
+
+    The name must not collide with a discovered stack: a duplicate would shadow a
+    local, audited tool set with a remote one of the operator's choosing.
+
+    ``api_key_header``/``api_key_format`` are optional overrides for services that
+    do not take a bearer token (``X-API-Key: <token>``, say); left empty, vibe's
+    ``Authorization: Bearer {token}`` default applies.
+
+    A *token* is stored here and handed to the agent through a variable this
+    process owns, so the operator never has to plumb one into the deployment by
+    hand. Naming an existing variable in ``api_key_env`` instead still works, for
+    a deployment that already manages its own secrets — but not both at once,
+    since only one of them could win and the other would look effective while
+    doing nothing.
+    """
+    name, transport, url = name.strip(), transport.strip(), url.strip()
+    api_key_env, token = api_key_env.strip(), token.strip()
+    if token and api_key_env:
+        raise ValueError("give either a token or an environment variable name, not both")
+    if token:
+        api_key_env = external_secret_env_var(name)
+    api_key_header, api_key_format = api_key_header.strip(), api_key_format.strip()
+    _validate_external_server(name, transport, url, api_key_env, api_key_header, api_key_format)
+
+    state = load_external_mcp()
+    if any(str(s.get("name")) == name for s in cast("list[JsonDict]", state["servers"])):
+        raise ValueError(f"an external server named {name!r} already exists")
+    local = {s["name"] for s in load_mcp_servers() if not s.get("external")}
+    if name in local:
+        raise ValueError(f"{name!r} is already the name of an installed stack")
+
+    entry: JsonDict = {
+        "name": name,
+        "transport": transport,
+        "url": url,
+        "api_key_env": api_key_env,
+        "api_key_header": api_key_header,
+        "api_key_format": api_key_format,
+        "active": bool(active),
+    }
+    # Secret first: a failure here must not leave a registered server pointing at
+    # a variable that was never written.
+    if token:
+        set_external_secret(name, token)
+    cast("list[JsonDict]", state["servers"]).append(entry)
+    _save_external_mcp(state)
+
+    # A server the operator just added is meant to be on. Once written, the active
+    # set is an explicit list rather than "everything discovered", so without this
+    # the new entry would be discovered and then silently left out of the sync.
+    if active:
+        load_mcp_servers.cache_clear()
+        save_active_server_names(load_active_server_names() | {name})
+    return entry
+
+
+def remove_external_server(name: str) -> None:
+    """Delete an external server by name."""
+    state = load_external_mcp()
+    servers = cast("list[JsonDict]", state["servers"])
+    remaining = [s for s in servers if str(s.get("name")) != name]
+    if len(remaining) == len(servers):
+        raise FileNotFoundError(f"no external server named {name!r}")
+    state["servers"] = remaining
+    _save_external_mcp(state)
+    delete_external_secret(name)
+
+
+def set_external_server_active(name: str, active: bool) -> None:
+    """Enable or disable a single external server without deleting it."""
+    state = load_external_mcp()
+    for srv in cast("list[JsonDict]", state["servers"]):
+        if str(srv.get("name")) == name:
+            srv["active"] = bool(active)
+            _save_external_mcp(state)
+            return
+    raise FileNotFoundError(f"no external server named {name!r}")
+
+
+def replace_external_token(name: str, token: str) -> None:
+    """Store a new token for an existing server, adopting the managed variable.
+
+    A server first configured with a hand-plumbed variable can be switched to a
+    stored token this way; the entry's ``api_key_env`` moves to the managed name
+    so exactly one source is in play.
+    """
+    token = token.strip()
+    if not token:
+        raise ValueError("token must not be empty")
+    state = load_external_mcp()
+    for srv in cast("list[JsonDict]", state["servers"]):
+        if str(srv.get("name")) == name:
+            set_external_secret(name, token)
+            srv["api_key_env"] = external_secret_env_var(name)
+            _save_external_mcp(state)
+            return
+    raise FileNotFoundError(f"no external server named {name!r}")
+
+
+def external_servers() -> list[JsonDict]:
+    """Return active external servers as server-config dicts, or [] when gated off."""
+    if not external_mcp_enabled():
+        return []
+    out: list[JsonDict] = []
+    for srv in cast("list[JsonDict]", load_external_mcp()["servers"]):
+        if not srv.get("active"):
+            continue
+        name, url = str(srv.get("name", "")), str(srv.get("url", ""))
+        transport = str(srv.get("transport", ""))
+        env_var = str(srv.get("api_key_env") or "")
+        header = str(srv.get("api_key_header") or "")
+        fmt = str(srv.get("api_key_format") or "")
+        try:
+            _validate_external_server(name, transport, url, env_var, header, fmt)
+        except ValueError as exc:
+            log.warning("skipping malformed external server %r: %s", name, exc)
+            continue
+        entry: JsonDict = {
+            "name": name,
+            "transport": transport,
+            "url": url,
+            "external": True,
+        }
+        if env_var:
+            # Shape fixed by vibe's MCPAuth: a discriminated union on ``type``
+            # whose members forbid extra keys, so a missing discriminator or a
+            # misspelled field is a hard validation error, not a silent no-op —
+            # the server would simply fail to load. ``test_generated_entry_*``
+            # validates what we write here against vibe's own model.
+            #
+            # vibe reads the token from the environment itself (defaulting to an
+            # ``Authorization: Bearer {token}`` header); the variable's name is
+            # all that is ever written to disk.
+            auth: JsonDict = {"type": "static", "api_key_env": env_var}
+            # Written only when overridden, so a server on the default scheme
+            # produces the same config it did before these fields existed.
+            if header:
+                auth["api_key_header"] = header
+            if fmt:
+                auth["api_key_format"] = fmt
+            entry["auth"] = auth
+        out.append(entry)
+    return out
+
+
+# The base prompt tells the agent it runs entirely on-premise and must never
+# suggest sending data to external services. With an external server wired up
+# that is no longer true, and an agent holding tools it has been told never to
+# use behaves erratically — it refuses them, or narrates the contradiction.
+#
+# vibe resolves `system_prompt_id` to exactly one file with no append hook, so
+# the enabled state needs its own prompt. It is *derived* from the base rather
+# than checked in beside it: two hand-maintained copies of a 70-line prompt drift,
+# and the drift is silent. The anchor below is asserted by a test, so editing it
+# out of the base prompt fails CI instead of quietly producing an identical file.
+BASE_SYSTEM_PROMPT_ID: str = "medmcp"
+EXTERNAL_SYSTEM_PROMPT_ID: str = "medmcp-external"
+ONPREM_RULE: str = "- You run entirely on-premise. Never suggest sending data to external services."
+EXTERNAL_RULE: str = (
+    "- Your tool stacks run on-premise. This workspace also has external MCP servers "
+    "configured; the operator enabled them and accepted responsibility for what they "
+    "receive, so use their tools when they fit the task."
+)
+
+
+def write_external_prompt_variant() -> bool:
+    """Derive the external-enabled system prompt next to the base one.
+
+    Returns ``False`` — leaving the base prompt in force — when the source is
+    missing or no longer carries the on-premise rule, so a prompt edit can never
+    silently hand the agent a variant identical to the one it was meant to relax.
+    """
+    prompts = VIBE_HOME / "prompts"
+    base = prompts / f"{BASE_SYSTEM_PROMPT_ID}.md"
+    try:
+        text = base.read_text()
+    except OSError as exc:
+        log.warning("cannot read %s; keeping the base system prompt: %s", base, exc)
+        return False
+    if ONPREM_RULE not in text:
+        log.warning(
+            "%s no longer contains the on-premise rule; keeping the base system prompt", base
+        )
+        return False
+    try:
+        (prompts / f"{EXTERNAL_SYSTEM_PROMPT_ID}.md").write_text(
+            text.replace(ONPREM_RULE, EXTERNAL_RULE)
+        )
+    except OSError as exc:
+        log.warning("could not write the external system prompt: %s", exc)
+        return False
+    return True
 
 
 # ── Container-stack install / uninstall (UI-driven) ──────────────────────────
@@ -1240,7 +1684,20 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
     new_entries: list[JsonDict] = []
     for srv in servers:
         name = srv["name"]
-        if name in existing_by_name:
+        if srv.get("external"):
+            # An HTTP server has no command/args to preserve or overwrite, and
+            # nothing about it is owned by config.toml — the state file is the
+            # single source of truth, so it is rebuilt from scratch each sync.
+            # That also means disabling the feature removes these entries.
+            entry = {
+                "transport": srv["transport"],
+                "name": name,
+                "url": srv["url"],
+            }
+            if srv.get("auth"):
+                entry["auth"] = srv["auth"]
+            new_entries.append(entry)
+        elif name in existing_by_name:
             # Preserve vibe-acp-specific fields (timeouts, transport, etc.)
             # and overwrite discovery-owned fields (command, args).
             entry = dict(existing_by_name[name])
@@ -1292,14 +1749,29 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
     # then spawns the cheap `medmcp-mcp-proxy <stack>` shim, which forwards to the
     # persistent BackendPool; the real launch specs go to backends.json. Disabled
     # is byte-for-byte the legacy behaviour, minus any stale proxy env keys.
+    # External servers are exempt: the pool exists to amortise process spawn and
+    # CUDA init for local stacks, and there is no such cost to amortise for an
+    # HTTP endpoint — routing one through a spawn-shim would only break it.
     if stack_pool_enabled():
-        _write_backend_registry(servers)
+        _write_backend_registry([s for s in servers if not s.get("external")])
         ws_root = os.environ.get("MEDMCP_WORKSPACE") or None
-        new_entries = [_proxied_entry(entry, ws_root) for entry in new_entries]
+        new_entries = [
+            entry if entry.get("url") else _proxied_entry(entry, ws_root) for entry in new_entries
+        ]
     else:
         _strip_pool_env(new_entries)
 
     cfg["mcp_servers"] = new_entries
+
+    # Point vibe at the prompt that matches the posture actually in force. Only a
+    # value this function owns is overwritten, so a hand-set custom prompt id is
+    # left alone rather than being reset on the next sync.
+    use_external = any(s.get("external") for s in servers) and write_external_prompt_variant()
+    owned_prompt_ids = ("", BASE_SYSTEM_PROMPT_ID, EXTERNAL_SYSTEM_PROMPT_ID)
+    if str(cfg.get("system_prompt_id", "")) in owned_prompt_ids:
+        cfg["system_prompt_id"] = (
+            EXTERNAL_SYSTEM_PROMPT_ID if use_external else BASE_SYSTEM_PROMPT_ID
+        )
 
     # Collect skills_path values from discovered servers and write them to
     # skill_paths so vibe-acp loads the bundled skill docs automatically.

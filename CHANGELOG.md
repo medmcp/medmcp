@@ -8,10 +8,39 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Added
 
-- **TotalSegmentator stack** in Settings → Stacks. Segments anatomical structures
-  on whole-body CT and MR — 117 structures in one pass with the general model,
-  plus focused models for the spine, lungs, liver, head and neck, and teeth — and
-  reports per-structure volumes. Requires a GPU.
+- **TotalSegmentator stack**, installable from the Tool stacks window. Segments
+  anatomical structures on whole-body CT and MR — 117 structures in one pass with
+  the general CT model and 50 with the MR one, plus focused models for the spine,
+  lungs, liver, head and neck, and teeth — and reports per-structure volumes. A
+  GPU is strongly recommended; it also runs on CPU, considerably more slowly.
+- **External MCP servers** (Settings → Advanced, off by default). Lets you connect
+  the agent to MCP tool services hosted outside your machine — a literature
+  search, a hospital system, a vendor API — alongside your local imaging stacks.
+  Because this ends the guarantee that nothing leaves your infrastructure, the
+  switch does not simply flip: it first explains what changes and asks you to
+  accept responsibility for what those services receive. Nothing is connected
+  until you do, and turning it off both removes the servers from the agent and
+  withdraws your acceptance, so switching it back on asks again.
+  Servers are addressed by URL (`streamable-http` or `http`); if one needs a
+  token, you paste it into the form. It is kept on this machine, handed to the
+  agent when it starts, and never written into the agent's configuration or sent
+  back to the browser — you can replace it later, but nothing can read it out.
+  Tokens are sent as `Authorization: Bearer …` by default, and services that
+  expect something else (an `X-API-Key` header, say) can set the header and value
+  format themselves.
+  Individual servers can be switched off without deleting them, and every tool
+  call still asks for your approval. While anything external is enabled, a red
+  strip under the header says so from every panel, names the servers, and turns
+  them all off in one click — the settings switch is easy to forget, this is not.
+  Turning it off applies to every server at once, whatever their individual
+  switches say, and the setting states plainly that nothing is enabled any more;
+  the agent is restarted so nothing already running keeps a connection. Servers
+  and your acceptance are kept across restarts and updates. A deployment that
+  manages its own secrets can name an environment variable instead of a token: put
+  `NAME=value` lines in a `medmcp.env` file next to your compose file (or point
+  `MEDMCP_ENV_FILE` at one), which is optional and read only if present. If a
+  named variable turns out not to be set where the agent runs, the setting says
+  so — rather than leaving you with an unexplained rejection from the service.
 
 ## 0.1.0
 

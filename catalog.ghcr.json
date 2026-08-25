@@ -22,7 +22,7 @@
     {
       "name": "medmcp-totalsegmentator",
       "image": "ghcr.io/medmcp/totalsegmentator:main",
-      "description": "Whole-body anatomy segmentation on CT and MR (TotalSegmentator): 31 tasks, 117 structures.",
+      "description": "Whole-body anatomy segmentation on CT and MR, plus focused models for the spine, lungs, liver, head and neck, and teeth (TotalSegmentator).",
       "gpu": true
     }
   ]

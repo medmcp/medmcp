@@ -48,11 +48,13 @@ from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisc
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from medmcp import (
     batchplan,
     distill,
     explain,
+    origincheck,
     pathcheck,
     pathguard,
     provenance,
@@ -148,7 +150,49 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         _pool = None
 
 
+class OriginGuard:
+    """Refuse browser requests that did not originate from the workspace's page.
+
+    A pure-ASGI middleware rather than ``@app.middleware("http")`` because the
+    exposure that matters most is the WebSocket one, which the HTTP decorator
+    never sees: ``/ws/chat`` hands out a live agent session and ``/ws/replay``
+    runs a workflow with no permission flow, and the same-origin policy does not
+    apply to either — a page on any site can open them, and the server is the
+    only thing that can say no. The upgrade is refused *before* ``accept``, so
+    the handshake fails and no session is created.
+
+    See :mod:`medmcp.origincheck` for what counts as acceptable and why the
+    ``Host`` header is checked alongside ``Origin`` (DNS rebinding).
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        """Wrap *app*, vetting every HTTP request and WebSocket upgrade."""
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Pass the request through, or refuse it without reaching the route."""
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
+        reason = origincheck.reject_reason(headers.get("host", ""), headers.get("origin", ""))
+        if reason is None:
+            await self.app(scope, receive, send)
+            return
+        _audit.warning("refused %s %s: %s", scope["type"], scope.get("path", ""), reason)
+        if scope["type"] == "websocket":
+            # The connect message has to be consumed before the close is sent;
+            # closing before accept makes the handshake itself fail.
+            await receive()
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        response = JSONResponse({"detail": reason}, status_code=403)
+        await response(scope, receive, send)
+
+
 app = FastAPI(title="MedMCP Workspace", lifespan=_lifespan)
+# Outermost, so a refused request never reaches a route or a static file.
+app.add_middleware(OriginGuard)
 
 # One vibe-acp subprocess shared by every websocket connection. The subprocess
 # cwd must stay PROJECT_ROOT — `uv run` resolves the project from it; the

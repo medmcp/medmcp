@@ -257,7 +257,7 @@ class TestSettingsMerge:
 
     def test_preserves_entry_unknown_to_the_drawer(self, harness: dict[str, set[str]]) -> None:
         """A stack the drawer never listed stays active after a save."""
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         result = self._put(client, stacks=[{"name": "alpha", "active": True}])
         # "beta" was unknown to this drawer payload, so it is kept; nothing changed.
         assert harness["stacks"] == {"alpha", "beta"}
@@ -265,7 +265,7 @@ class TestSettingsMerge:
 
     def test_deactivates_a_known_entry(self, harness: dict[str, set[str]]) -> None:
         """Turning a listed stack off removes it and triggers a restart."""
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         result = self._put(
             client,
             stacks=[{"name": "alpha", "active": False}, {"name": "beta", "active": True}],
@@ -275,7 +275,7 @@ class TestSettingsMerge:
 
     def test_no_restart_when_nothing_changes(self, harness: dict[str, set[str]]) -> None:
         """Re-submitting the current state is a no-op restart-wise."""
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         result = self._put(
             client,
             stacks=[{"name": "alpha", "active": True}, {"name": "beta", "active": True}],
@@ -316,7 +316,7 @@ class TestWorkflowShareEndpoints:
 
     def test_import_then_export_round_trip(self, vibe_home: Path) -> None:
         """A valid envelope imports as a draft and exports back as a YAML download."""
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.post("/api/workflows/import", json={"content": self._envelope()})
         assert resp.status_code == 200
         assert resp.json()["name"] == "demo-flow"
@@ -328,13 +328,13 @@ class TestWorkflowShareEndpoints:
 
     def test_import_malformed_returns_400(self, vibe_home: Path) -> None:
         """A payload that isn't a workflow envelope maps to HTTP 400."""
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.post("/api/workflows/import", json={"content": "- not a mapping"})
         assert resp.status_code == 400
 
     def test_export_missing_returns_404(self, vibe_home: Path) -> None:
         """Exporting an unknown workflow maps to HTTP 404."""
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         assert client.get("/api/workflows/nope/export").status_code == 404
 
 
@@ -654,7 +654,7 @@ class TestSessionsApi:
                 }
             },
         )
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.get("/api/sessions")
         assert resp.status_code == 200
         sessions = resp.json()["sessions"]
@@ -667,7 +667,7 @@ class TestSessionsApi:
     def test_vibe_error_maps_to_502(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A vibe-acp error surfaces as a 502, not a 500."""
         self._stub_client(monkeypatch, {"error": {"message": "boom"}})
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.get("/api/sessions")
         assert resp.status_code == 502
 
@@ -698,7 +698,7 @@ class TestSessionsApi:
         monkeypatch.setattr(sessions, "load_registry", _registry)
         monkeypatch.setattr(provenance, "provenance_dir", _prov_dir)
 
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         rows = {s["id"]: s for s in client.get("/api/sessions").json()["sessions"]}
         assert rows["s1"]["title"] == "My name"  # override wins over vibe's title
         assert rows["s1"]["archived"] is False
@@ -726,7 +726,7 @@ class TestSessionsApi:
         monkeypatch.setattr(sessions, "load_registry", dict)
         monkeypatch.setattr(provenance, "vibe_session_parents", lambda: {"cont": "root"})
         monkeypatch.setattr(provenance, "provenance_dir", _prov_dir_in(tmp_path))
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         rows = client.get("/api/sessions").json()["sessions"]
         assert [s["id"] for s in rows] == ["root", "other"]
         assert rows[0]["updatedAt"] == "t9"
@@ -751,7 +751,7 @@ class TestSessionsApi:
         monkeypatch.setattr(sessions, "load_registry", dict)
         monkeypatch.setattr(provenance, "vibe_session_parents", lambda: {"c1": "root", "c2": "c1"})
         monkeypatch.setattr(provenance, "provenance_dir", _prov_dir_in(tmp_path))
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         rows = client.get("/api/sessions").json()["sessions"]
         assert [s["id"] for s in rows] == ["root"]
         assert rows[0]["updatedAt"] == "t9"
@@ -774,7 +774,7 @@ class TestSessionsApi:
         monkeypatch.setattr(sessions, "load_registry", lambda: {"fork": {"title": "My branch"}})
         monkeypatch.setattr(provenance, "vibe_session_parents", lambda: {"fork": "root"})
         monkeypatch.setattr(provenance, "provenance_dir", _prov_dir_in(tmp_path))
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         rows = client.get("/api/sessions").json()["sessions"]
         assert [s["id"] for s in rows] == ["root", "fork"]
         assert rows[0]["updatedAt"] == "t1"  # nothing folded into the root
@@ -791,7 +791,7 @@ class TestSessionsApi:
         monkeypatch.setattr(sessions, "load_registry", dict)
         monkeypatch.setattr(provenance, "vibe_session_parents", lambda: {"c1": "elsewhere"})
         monkeypatch.setattr(provenance, "provenance_dir", _prov_dir_in(tmp_path))
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         rows = client.get("/api/sessions").json()["sessions"]
         assert [s["id"] for s in rows] == ["c1"]
 
@@ -803,7 +803,7 @@ class TestSessionsApi:
             captured["rename"] = (session_id, title)
 
         monkeypatch.setattr(sessions, "set_title", _set_title)
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.post("/api/sessions/abc/rename", json={"title": "New name"})
         assert resp.status_code == 200
         assert captured["rename"] == ("abc", "New name")
@@ -816,7 +816,7 @@ class TestSessionsApi:
             captured["archive"] = (session_id, archived)
 
         monkeypatch.setattr(sessions, "set_archived", _set_archived)
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.post("/api/sessions/abc/archive", json={"archived": True})
         assert resp.status_code == 200
         assert captured["archive"] == ("abc", True)
@@ -834,7 +834,7 @@ class TestSessionsApi:
 
         monkeypatch.setattr(provenance, "purge_session", _purge)
         monkeypatch.setattr(sessions, "remove", _remove)
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.delete("/api/sessions/abc")
         assert resp.status_code == 200
         assert calls == [("purge", "abc"), ("remove", "abc")]

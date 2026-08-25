@@ -6,6 +6,20 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Security
+
+- **A website you visit can no longer reach the workspace.** The workspace
+  listens on your machine only, but a browser will still let any page send
+  requests to it — and a chat connection is not covered by the browser's usual
+  same-site protection at all, so a page could open one, ask the agent to read
+  your files and receive the contents, without any approval prompt appearing.
+  Requests and connections that do not come from the workspace's own page are
+  now refused, as are requests aimed at it under another name (a technique that
+  otherwise gets around the first check). If you reach MedMCP through a
+  hostname of your own — a reverse proxy, say — list it in
+  `MEDMCP_ALLOWED_HOSTS` / `MEDMCP_ALLOWED_ORIGINS`; anything unlisted is
+  refused.
+
 ### Added
 
 - **TotalSegmentator stack**, installable from the Tool stacks window. Segments

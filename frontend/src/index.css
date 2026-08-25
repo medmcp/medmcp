@@ -2749,6 +2749,25 @@ textarea.wf-input {
 .wf-derived-toggle:hover {
   color: var(--text);
 }
+/* The reassurance the banner's absence cannot give: with the feature off, the
+   section says in words that nothing is connected. */
+.ext-mcp-disconnected {
+  position: relative;
+  margin: 2px 0 6px;
+  padding-left: 14px;
+}
+
+.ext-mcp-disconnected::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
 /* ── External MCP: the standing connection warning ───────────────────────── */
 
 /* A strip under the header, up for exactly as long as external servers are

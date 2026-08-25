@@ -92,6 +92,15 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
 
       {error && <div className="panel-error">{error}</div>}
 
+      {/* Someone who turns this off to be sure nothing is leaving gets told so.
+          An empty space is not an answer to that question. */}
+      {!state.enabled && state.servers.length > 0 && (
+        <div className="settings-row-hint ext-mcp-disconnected">
+          {state.servers.length} server{state.servers.length === 1 ? '' : 's'} configured, none
+          connected. Nothing is sent outside this machine while this is off.
+        </div>
+      )}
+
       {state.enabled && (
         <div className="ext-mcp">
           {state.servers.length === 0 && (

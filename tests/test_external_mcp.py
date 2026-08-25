@@ -14,8 +14,10 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from fastapi.testclient import TestClient
 
-from medmcp import settings
+# pyright: reportPrivateUsage=false
+from medmcp import server, settings
 
 JsonDict = dict[str, Any]
 
@@ -329,6 +331,74 @@ def test_disabling_removes_the_entries(tmp_path: Path) -> None:
     settings.load_mcp_servers.cache_clear()
     settings.sync_servers_to_vibe_config(settings.active_servers())
     assert "pubmed" not in _entries(tmp_path)
+
+
+def test_nothing_remote_survives_in_the_config(tmp_path: Path) -> None:
+    """After disabling, the written config holds no remote entry of any kind.
+
+    Asserting a known name is gone would miss an entry that lingers under another
+    key, so this asks the stronger question: does anything in the file still point
+    off this machine? The raw text is checked too — a URL surviving in a comment
+    or a stale table is still a thing a reader would have to explain away.
+    """
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    _add("pubmed", url="https://example.org/mcp")
+    _add("vendor", url="https://vendor.example/mcp")
+    settings.load_mcp_servers.cache_clear()
+    settings.sync_servers_to_vibe_config(settings.active_servers())
+    assert len(_entries(tmp_path)) == 2
+
+    settings.set_external_mcp_enabled(False)
+    settings.load_mcp_servers.cache_clear()
+    settings.sync_servers_to_vibe_config(settings.active_servers())
+
+    for name, entry in _entries(tmp_path).items():
+        assert "url" not in entry, name
+        assert "auth" not in entry, name
+        assert str(entry.get("transport", "")) not in settings.EXTERNAL_MCP_TRANSPORTS, name
+    raw = (tmp_path / "config.toml").read_text()
+    assert "example.org" not in raw
+    assert "vendor.example" not in raw
+
+
+def test_both_active_and_inactive_servers_are_dropped(tmp_path: Path) -> None:
+    """The switch is a master switch: per-server state does not survive it."""
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    _add("pubmed")
+    _add("vendor", url="https://vendor.example/mcp")
+    settings.set_external_server_active("vendor", False)
+
+    settings.set_external_mcp_enabled(False)
+    settings.load_mcp_servers.cache_clear()
+    settings.sync_servers_to_vibe_config(settings.active_servers())
+    assert _entries(tmp_path) == {}
+    assert settings.external_servers() == []
+
+
+def test_the_off_switch_reaches_the_running_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disabling re-syncs the config *and* restarts vibe-acp.
+
+    Dropping the entries from config.toml is only half of it — the agent process
+    already running was started with them, so without the restart the live
+    session would keep talking to whatever it had connected.
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(server, "_apply_stack_change", lambda: calls.append("sync"))
+
+    async def _restart() -> None:
+        calls.append("restart")
+
+    monkeypatch.setattr(server, "_restart_vibe", _restart)
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+
+    resp = TestClient(server.app).put("/api/external-mcp", json={"enabled": False})
+
+    assert resp.status_code == 200
+    assert calls == ["sync", "restart"]
+    assert settings.external_mcp_enabled() is False
 
 
 def test_synced_entry_is_not_readopted_as_a_stdio_stack(tmp_path: Path) -> None:

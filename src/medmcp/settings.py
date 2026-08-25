@@ -324,6 +324,31 @@ def _stack_run_hardening() -> tuple[tuple[str, tuple[str, ...]], ...]:
     )
 
 
+class NetworkConsentRequiredError(Exception):
+    """A stack asked for network egress and the caller has not accepted it.
+
+    Egress is the one stack capability that cannot be undone by the sandbox
+    around it: the workspace is bind-mounted into every stack, so a stack that
+    can reach the internet can send the data there. It is declared by the image
+    itself, which is exactly why installing one has to be an explicit decision
+    rather than a label the operator never sees.
+    """
+
+    def __init__(self, name: str, image: str) -> None:
+        """Name the stack and image that need the decision."""
+        super().__init__(f"{name!r} requests network access")
+        self.name = name
+        self.image = image
+
+
+def stack_has_network(args: list[str]) -> bool:
+    """Whether a manifest's ``docker run`` args leave the stack with egress."""
+    if "--network" not in args:
+        return False
+    index = args.index("--network") + 1
+    return index < len(args) and args[index] != "none"
+
+
 def _harden_stack_run_args(args: list[str]) -> list[str]:
     """Insert container-isolation flags into a ``docker run`` argument list.
 
@@ -1260,14 +1285,19 @@ def _write_stack_manifest(name: str, entry: JsonDict) -> None:
         raise
 
 
-def install_stack_image(image: str, on_progress: ProgressFn | None = None) -> str:
+def install_stack_image(
+    image: str, on_progress: ProgressFn | None = None, *, accept_network: bool = False
+) -> str:
     """Install a container stack from *image* and return its name.
 
     Pulls the image if absent (streaming progress to *on_progress*), reads its
     ``org.medmcp.stack`` label, extracts its skills next to the manifest, writes
     ``stacks.d/<name>.toml`` (the launch recipe), and marks the stack active.
-    Idempotent — re-installing overwrites. Raises as :func:`read_stack_label`
-    plus ValueError for a bad name in the label.
+    Idempotent — re-installing overwrites. Raises as :func:`read_stack_label`,
+    ValueError for a bad name in the label, and
+    :class:`NetworkConsentRequiredError` when the image declares egress and
+    *accept_network* was not set — the caller has to have put that to the
+    operator first.
     """
 
     def report(msg: str) -> None:
@@ -1292,6 +1322,9 @@ def install_stack_image(image: str, on_progress: ProgressFn | None = None) -> st
     name = str(meta["name"]).strip()
     if not _STACK_NAME_RE.fullmatch(name):
         raise ValueError(f"invalid stack name in label: {name!r}")
+
+    if meta.get("network") and not accept_network:
+        raise NetworkConsentRequiredError(name, image)
 
     args: list[str] = ["run", "--rm", "-i"]
     if meta.get("gpu"):
@@ -1365,6 +1398,9 @@ def list_installed_stacks() -> list[JsonDict]:
                 "name": m["name"],
                 "image": args[-1] if args else "",
                 "gpu": "--device" in args,
+                # Reported so the UI can show which stacks can reach off-machine;
+                # a stack with egress must not look like one without.
+                "network": stack_has_network(args),
             }
         )
     return out
@@ -1417,6 +1453,7 @@ def load_catalog() -> list[JsonDict]:
                 "image": image,
                 "description": str(e.get("description", "")),
                 "gpu": bool(e.get("gpu", False)),
+                "network": bool(e.get("network", False)),
             }
         )
     return out

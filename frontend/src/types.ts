@@ -96,6 +96,10 @@ export interface InstalledStack {
   name: string
   image: string
   gpu: boolean
+  /** Whether this stack runs with network egress. The workspace is mounted into
+   *  every stack, so this is the difference between a stack that can read your
+   *  data and one that can also send it somewhere. */
+  network: boolean
 }
 
 /** One catalog entry (from GET /api/catalog): an installable stack. */
@@ -104,6 +108,8 @@ export interface CatalogEntry {
   image: string
   description: string
   gpu: boolean
+  /** Declared egress — known before the pull, so the warning precedes the install. */
+  network: boolean
   installed: boolean
 }
 

@@ -444,6 +444,8 @@ class StackInstallPayload(BaseModel):
     """Request body for installing a container stack from an image."""
 
     image: str
+    # Set once the operator has been told the stack can reach off this machine.
+    accept_network: bool = False
 
 
 class StackUninstallPayload(BaseModel):
@@ -496,7 +498,17 @@ async def post_stack_install(payload: StackInstallPayload) -> JsonDict:
     is available. The image is inspected, never executed, to read the label.
     """
     try:
-        name = await asyncio.to_thread(settings.install_stack_image, payload.image)
+        name = await asyncio.to_thread(
+            partial(settings.install_stack_image, accept_network=payload.accept_network),
+            payload.image,
+        )
+    except settings.NetworkConsentRequiredError as exc:
+        # 409, not 400: the request is well-formed and becomes valid once the
+        # operator has seen what they are agreeing to.
+        raise HTTPException(
+            status_code=409,
+            detail={"needs_network_consent": True, "name": exc.name, "image": exc.image},
+        ) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -528,10 +540,15 @@ async def post_stack_uninstall(payload: StackUninstallPayload) -> JsonDict:
 async def ws_stack_install(ws: WebSocket) -> None:
     """Install a stack with streamed progress.
 
-    First client message: ``{"image": "..."}``. Streams
+    First client message: ``{"image": "...", "accept_network": bool}``. Streams
     ``{"type":"progress","line":...}`` frames during the pull/extract, then a
     final ``{"type":"done","name":...}`` or ``{"type":"error","message":...}``.
     On success it reloads discovery and restarts vibe-acp (same as the POST path).
+
+    An image that declares network egress ends the run with
+    ``{"type":"needs_network_consent","name":...}`` instead of installing, so
+    the client can put that to the operator and re-issue with consent. The
+    image has been pulled and inspected by then, never executed.
     """
     await ws.accept()
     try:
@@ -539,6 +556,7 @@ async def ws_stack_install(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         return
     image = str(first.get("image", "")).strip()
+    accept_network = bool(first.get("accept_network"))
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[JsonDict] = asyncio.Queue()
 
@@ -548,11 +566,17 @@ async def ws_stack_install(ws: WebSocket) -> None:
 
     async def run() -> None:
         try:
-            name = await asyncio.to_thread(settings.install_stack_image, image, on_progress)
+            name = await asyncio.to_thread(
+                partial(settings.install_stack_image, accept_network=accept_network),
+                image,
+                on_progress,
+            )
             await asyncio.to_thread(_apply_stack_change)
             _audit.info("stack installed: %s (%s)", name, image)
             await _restart_vibe()
             await queue.put({"type": "done", "name": name})
+        except settings.NetworkConsentRequiredError as exc:
+            await queue.put({"type": "needs_network_consent", "name": exc.name, "image": exc.image})
         except Exception as exc:  # relayed to the client as an error frame
             await queue.put({"type": "error", "message": str(exc)})
 
@@ -561,7 +585,7 @@ async def ws_stack_install(ws: WebSocket) -> None:
         while True:
             frame = await queue.get()
             await ws.send_json(frame)
-            if frame["type"] in ("done", "error"):
+            if frame["type"] in ("done", "error", "needs_network_consent"):
                 break
     except WebSocketDisconnect:
         pass
@@ -951,9 +975,42 @@ def _resolve_input_path(value: str) -> str:
     return value
 
 
-def _resolve_input_paths(inputs: dict[str, str]) -> dict[str, str]:
-    """Apply :func:`_resolve_input_path` to every value of a replay input binding."""
-    return {key: _resolve_input_path(value) for key, value in inputs.items()}
+def _confined_input_path(value: str) -> str:
+    """Resolve a replay input, refusing anything that leaves the workspace.
+
+    Replay calls stack tools directly, with no permission prompt between the
+    binding and the call, so an input naming a path outside the workspace is
+    either a mistake or an attempt to have a tool read something it should not.
+    The container deployment already limits the damage — only the workspace is
+    mounted into a stack — but a host-native stack runs as the operator and can
+    read anything they can, so the confinement belongs here rather than in the
+    deployment.
+
+    Symlinks resolve before the check, so a link inside the workspace pointing
+    out of it is refused too. Values that are not paths at all (``"cuda"``,
+    ``"fast"``) pass through untouched, as does a path that does not exist yet —
+    an output directory, or a genuinely missing scan that should surface as the
+    tool's own error.
+
+    Raises:
+        ValueError: the value resolves outside :data:`WORKSPACE_ROOT`.
+    """
+    if not value:
+        return value
+    if Path(value).is_absolute():
+        resolved = Path(value).resolve()
+        if not resolved.is_relative_to(WORKSPACE_ROOT):
+            raise ValueError(f"input path is outside the workspace: {value!r}")
+        return str(resolved)
+    candidate = (WORKSPACE_ROOT / value).resolve()
+    if not candidate.is_relative_to(WORKSPACE_ROOT):
+        raise ValueError(f"input path escapes the workspace: {value!r}")
+    return str(candidate) if candidate.exists() else value
+
+
+def _confined_input_paths(inputs: dict[str, str]) -> dict[str, str]:
+    """Apply :func:`_confined_input_path` to every value of a replay binding."""
+    return {key: _confined_input_path(value) for key, value in inputs.items()}
 
 
 class ReplayPreviewPayload(BaseModel):
@@ -975,7 +1032,7 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
         if d is None:
             raise FileNotFoundError(f"no workflow named {name!r}")
         recipe = distill.load_recipe(d)
-        inputs = _resolve_input_paths(dict(payload.inputs))
+        inputs = _confined_input_paths(dict(payload.inputs))
         error = replay.validate(recipe, inputs, settings.active_servers())
         if error is not None:
             return {"ok": False, "error": error, "steps": []}
@@ -997,6 +1054,8 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
         return await asyncio.to_thread(_preview)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:  # an input pointing outside the workspace
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class BatchFromPlanPayload(BaseModel):
@@ -1022,7 +1081,7 @@ async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> Json
             raise FileNotFoundError(f"no workflow named {name!r}")
         recipe = distill.load_recipe(d)
         try:
-            rows = batchplan.read_manifest(_resolve_input_path(payload.plan_csv))
+            rows = batchplan.read_manifest(_confined_input_path(payload.plan_csv))
         except OSError as exc:
             return {"ok": False, "error": f"cannot read plan: {exc}", "runs": [], "skipped": []}
         try:
@@ -1032,7 +1091,7 @@ async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> Json
         return {
             "ok": True,
             "error": None,
-            "runs": [_resolve_input_paths(r) for r in binding.runs],
+            "runs": [_confined_input_paths(r) for r in binding.runs],
             "skipped": binding.skipped,
             "column_map": binding.column_map,
         }
@@ -1041,6 +1100,8 @@ async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> Json
         return await asyncio.to_thread(_build)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:  # a plan or binding pointing outside the workspace
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.websocket("/ws/replay")
@@ -1062,16 +1123,24 @@ async def ws_replay(ws: WebSocket) -> None:
     SECURITY: the replay engine calls MCP tools directly, bypassing the
     vibe-acp permission flow — the client must show the resolved-steps preview
     (``/replay-preview``) and get an explicit confirmation before connecting.
+    Inputs are confined to the workspace here regardless (see
+    :func:`_confined_input_path`), since a binding arriving on this socket has
+    had no permission prompt between it and the tool call.
     """
     await ws.accept()
     try:
         first = cast("JsonDict", await ws.receive_json())
         name = str(first.get("name") or "")
-        runs = [
-            _resolve_input_paths({str(k): str(v) for k, v in cast("JsonDict", r).items()})
-            for r in cast("list[object]", first.get("runs") or [])
-            if isinstance(r, dict)
-        ]
+        try:
+            runs = [
+                _confined_input_paths({str(k): str(v) for k, v in cast("JsonDict", r).items()})
+                for r in cast("list[object]", first.get("runs") or [])
+                if isinstance(r, dict)
+            ]
+        except ValueError as exc:
+            _audit.warning("replay refused: %s", exc)
+            await ws.send_json({"type": "result", "ok": False, "error": str(exc)})
+            return
         d = _workflow_dir(name)
         if d is None or not runs:
             error = f"no workflow named {name!r}" if d is None else "no inputs to run"

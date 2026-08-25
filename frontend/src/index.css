@@ -2807,6 +2807,14 @@ textarea.wf-input {
   color: var(--red-tint);
 }
 
+/* A capability badge that is a warning, not a feature: a stack with egress can
+   send what it reads off this machine. Red rather than the neutral badge grey. */
+.stack-badge.egress {
+  color: var(--red-tint);
+  border-color: rgba(210, 34, 41, 0.45);
+  background: rgba(210, 34, 41, 0.12);
+}
+
 /* ── External MCP: the standing connection warning ───────────────────────── */
 
 /* A strip under the header, up for exactly as long as external servers are

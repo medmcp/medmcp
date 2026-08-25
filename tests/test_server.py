@@ -145,15 +145,62 @@ class TestResolveInputPath:
         """An empty value is returned untouched (not joined to the root)."""
         assert server._resolve_input_path("") == ""
 
-    def test_resolve_input_paths_maps_every_value(self, root: Path) -> None:
+    def test_confined_input_paths_maps_every_value(self, root: Path) -> None:
         """The dict helper resolves each binding value independently."""
         scan = root / "patient_01" / "visit_02" / "t1n_3d.nii.gz"
         scan.parent.mkdir(parents=True)
         scan.touch()
-        resolved = server._resolve_input_paths(
+        resolved = server._confined_input_paths(
             {"in_1": "patient_01/visit_02/t1n_3d.nii.gz", "in_2": "cuda"}
         )
         assert resolved == {"in_1": str(scan), "in_2": "cuda"}
+
+
+class TestConfinedInputPath:
+    """Replay inputs may not name anything outside the workspace.
+
+    Replay calls stack tools directly, with no permission prompt between the
+    binding and the call, so a path leaving the workspace is either a mistake or
+    an attempt to have a tool read something it should not. In the containerized
+    deployment only the workspace is mounted into a stack, but a host-native
+    stack runs as the operator — so the confinement belongs in the server.
+    """
+
+    @pytest.fixture
+    def root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Point the server's workspace root at a temp dir (resolved, no symlinks)."""
+        resolved = tmp_path.resolve()
+        monkeypatch.setattr(server, "WORKSPACE_ROOT", resolved)
+        return resolved
+
+    def test_absolute_path_inside_is_kept(self, root: Path) -> None:
+        """Path parity means an absolute workspace path is the normal case."""
+        scan = root / "patient_01" / "scan.nii.gz"
+        scan.parent.mkdir(parents=True)
+        scan.touch()
+        assert server._confined_input_path(str(scan)) == str(scan)
+
+    def test_absolute_path_outside_is_refused(self, root: Path) -> None:
+        """The case that mattered: a tool pointed at the operator's own files."""
+        with pytest.raises(ValueError, match="outside the workspace"):
+            server._confined_input_path("/etc/passwd")
+
+    def test_relative_escape_is_refused(self, root: Path) -> None:
+        """`..` is not a way around the same rule."""
+        with pytest.raises(ValueError, match="escapes the workspace"):
+            server._confined_input_path("../../etc/passwd")
+
+    def test_symlink_out_of_the_workspace_is_refused(self, root: Path) -> None:
+        """Resolution happens before the check, so a link inside is not a loophole."""
+        link = root / "escape"
+        link.symlink_to("/etc")
+        with pytest.raises(ValueError, match="workspace"):
+            server._confined_input_path("escape/passwd")
+
+    def test_non_path_and_missing_values_pass_through(self, root: Path) -> None:
+        """Device strings and not-yet-created outputs are not paths to refuse."""
+        assert server._confined_input_path("cuda") == "cuda"
+        assert server._confined_input_path("out/derivatives") == "out/derivatives"
 
 
 # ── _workspace_note: the viewer-context note handed to the agent ─────────────

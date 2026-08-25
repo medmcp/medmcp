@@ -566,12 +566,21 @@ def load_mcp_servers() -> list[JsonDict]:
                     "Skipping stale config.toml entry %r (command not found: %s)", name, command
                 )
                 continue
-            # A container-stack entry (command "docker") reaching here is an orphan:
-            # a present stacks.d manifest would have claimed its name in source #2, so
-            # this is a leftover written into config.toml by a prior sync before the
-            # stack was uninstalled. Drop it so uninstalls actually take effect.
-            if command and Path(command).name == "docker":
-                log.debug("Skipping orphaned container-stack config.toml entry %r", name)
+            # A stack entry reaching here is an orphan: a present stacks.d manifest
+            # would have claimed its name in source #2, so this is a leftover written
+            # into config.toml by a prior sync before the stack was uninstalled. Drop
+            # it so uninstalls actually take effect.
+            #
+            # Both spellings of the command have to be recognised. "docker" is what a
+            # manifest launches directly; PROXY_COMMAND is what the sync writes in its
+            # place when the backend pool is in the picture, and it is an absolute path
+            # to a file that *does* exist — so neither the stale-path check above nor a
+            # docker-only test catches it, and the uninstalled stack came back as a
+            # manual entry (invisible on the stacks list, present in settings, and
+            # re-synced into the config on the next write when no explicit active set
+            # narrows it away).
+            if command and Path(command).name in ("docker", PROXY_COMMAND):
+                log.debug("Skipping orphaned stack config.toml entry %r", name)
                 continue
             # An HTTP entry here is one this sync wrote for an external server —
             # source #4 owns those. Re-adopting it would strip it back to a stdio

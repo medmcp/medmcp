@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from medmcp import settings
 from medmcp.settings import load_mcp_servers
 
 JsonDict = dict[str, Any]
@@ -257,6 +258,44 @@ class TestConfigTomlFallback:
             servers = load_mcp_servers()
 
         assert servers == []
+
+    def test_orphaned_proxy_entry_dropped(self, tmp_path: Path) -> None:
+        """The same leftover, spelled the way the sync actually writes it.
+
+        When the backend pool is in the picture the sync writes the stack's command
+        as an absolute path to the ``medmcp-mcp-proxy`` shim, not ``docker``. That
+        path exists, so neither the stale-path check nor a docker-only test drops
+        it, and an uninstalled stack came back as a manual entry: gone from the
+        stacks list, still present in settings, and re-synced into the config on the
+        next write when no explicit active set narrowed it away.
+        """
+        proxy = tmp_path / "bin" / settings.PROXY_COMMAND
+        proxy.parent.mkdir(parents=True)
+        proxy.touch()
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'[[mcp_servers]]\nname = "medmcp-neuro"\n'
+            f'command = "{proxy}"\nargs = ["medmcp-neuro"]\n'
+        )
+        with (
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+        ):
+            servers = load_mcp_servers()
+
+        assert servers == []
+
+    def test_a_genuine_manual_entry_still_loads(self, tmp_path: Path) -> None:
+        """The orphan rule must not swallow a hand-written server."""
+        cfg = tmp_path / "config.toml"
+        cfg.write_text('[[mcp_servers]]\nname = "my-own-tool"\ncommand = "my-server"\nargs = []\n')
+        with (
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+        ):
+            servers = load_mcp_servers()
+
+        assert [s["name"] for s in servers] == ["my-own-tool"]
 
     def test_no_tools_no_config_returns_empty(self, tmp_path: Path) -> None:
         """Nothing installed and no config → empty list."""

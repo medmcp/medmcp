@@ -6,6 +6,13 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Fixed
+
+- **Uninstalling a tool stack now removes it properly.** A stack could disappear
+  from the stacks window while still showing in settings, and on an installation
+  that had never changed which stacks are switched on, it could come back
+  entirely — the agent kept being told to launch something you had removed.
+
 ### Security
 
 - **A tool stack can no longer get internet access without you agreeing to it.**

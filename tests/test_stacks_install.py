@@ -22,6 +22,8 @@ LABEL = (
     '"skills_path": "/app/src/medmcp_foo/skills"}'
 )
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def _fake_docker(label: str | None) -> Callable[..., subprocess.CompletedProcess[str]]:
     """Return a `_run_docker` stub: `inspect --format` yields *label* (or <no value>)."""
@@ -222,6 +224,69 @@ class TestCatalog:
             patch("medmcp.settings.CATALOG_URL", ""),
         ):
             assert settings.load_catalog() == []
+
+
+class TestCatalogParity:
+    """The two shipped catalogs must describe the same stacks.
+
+    ``catalog.json`` (bundled, ``:dev`` refs) is what a developer browses; the
+    core image also ships ``catalog.ghcr.json``, which ``MEDMCP_CATALOG_URL``
+    points at on deployments that pull from GHCR. Only the image ref may
+    legitimately differ. Both are hand-maintained, so a stack added — or a
+    description edited — in one file alone ships a deployed stack list that
+    disagrees with the dev one, and nothing else compares them. Same guard as
+    ``test_deploy_compose.py`` (the inlined Modelfile) and
+    ``test_security_posture.py`` (the two shipped configs).
+    """
+
+    @staticmethod
+    def _shipped(filename: str) -> list[dict[str, Any]]:
+        """Load a shipped catalog through the real loader, as the UI receives it."""
+        with (
+            patch("medmcp.settings.CATALOG_PATH", ROOT / filename),
+            patch("medmcp.settings.CATALOG_URL", ""),
+        ):
+            return settings.load_catalog()
+
+    def test_same_stacks_in_both(self) -> None:
+        """Both files offer the same stacks, in the same order."""
+        dev = self._shipped("catalog.json")
+        published = self._shipped("catalog.ghcr.json")
+        assert dev, "catalog.json parsed to no entries"
+        assert [e["name"] for e in dev] == [e["name"] for e in published]
+
+    def test_descriptions_and_gpu_match(self) -> None:
+        """The text a user reads and the flag the installer acts on are identical."""
+        published = {e["name"]: e for e in self._shipped("catalog.ghcr.json")}
+        for entry in self._shipped("catalog.json"):
+            other = published.get(entry["name"])
+            assert other is not None, f"{entry['name']} is missing from catalog.ghcr.json"
+            assert entry["description"] == other["description"], entry["name"]
+            assert entry["gpu"] == other["gpu"], entry["name"]
+
+    def test_image_refs_differ_only_by_registry(self) -> None:
+        """The dev ref is ``<repo>:dev``; the published one is that repo on GHCR at ``:main``."""
+        published = {e["name"]: e for e in self._shipped("catalog.ghcr.json")}
+        for entry in self._shipped("catalog.json"):
+            other = published.get(entry["name"])
+            assert other is not None, f"{entry['name']} is missing from catalog.ghcr.json"
+            dev_repo, _, dev_tag = str(entry["image"]).rpartition(":")
+            pub_image = str(other["image"])
+            pub_repo, _, pub_tag = pub_image.rpartition(":")
+            assert dev_tag == "dev", entry["image"]
+            assert pub_tag == "main", pub_image
+            expected = f"ghcr.io/medmcp/{dev_repo.removeprefix('medmcp-')}"
+            assert pub_repo == expected, entry["name"]
+
+    def test_every_entry_has_a_description(self) -> None:
+        """A misspelled or missing ``description`` key is not an error.
+
+        ``load_catalog`` defaults it to ``""``, so the stack still installs but
+        shows up in the marketplace with no text at all.
+        """
+        for filename in ("catalog.json", "catalog.ghcr.json"):
+            for entry in self._shipped(filename):
+                assert str(entry["description"]).strip(), f"{filename}: {entry['name']}"
 
 
 class TestStackIsolation:

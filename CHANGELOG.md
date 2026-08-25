@@ -8,10 +8,11 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Added
 
-- **TotalSegmentator stack** in Settings → Stacks. Segments anatomical structures
-  on whole-body CT and MR — 117 structures in one pass with the general model,
-  plus focused models for the spine, lungs, liver, head and neck, and teeth — and
-  reports per-structure volumes. Requires a GPU.
+- **TotalSegmentator stack**, installable from the Tool stacks window. Segments
+  anatomical structures on whole-body CT and MR — 117 structures in one pass with
+  the general CT model and 50 with the MR one, plus focused models for the spine,
+  lungs, liver, head and neck, and teeth — and reports per-structure volumes. A
+  GPU is strongly recommended; it also runs on CPU, considerably more slowly.
 
 ## 0.1.0
 

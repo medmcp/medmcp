@@ -214,8 +214,6 @@ __marimo__/
 .vibe/vibehistory
 .vibe/trusted_folders.toml
 .vibe/active_stacks.json
-.vibe/active_workflows.json
-.vibe/workflows_enabled.json
 .vibe/provenance_enabled.json
 .vibe/explain_enabled.json
 .vibe/ui_sessions.json
@@ -231,7 +229,6 @@ __marimo__/
 data/
 node_modules/
 frontend/dist/
-.vibe/explain_enabled.json
 
 # Container-stack manifests + extracted skills are runtime state written by the
 # UI install flow; keep only the directory (README) in git.

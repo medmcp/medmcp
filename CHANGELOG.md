@@ -6,6 +6,8 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+## 0.2.0 — 2026-08-25
+
 ### Added
 
 - **External MCP servers** — connect the agent to remote MCP services (Settings →

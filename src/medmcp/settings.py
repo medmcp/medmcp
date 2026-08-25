@@ -683,7 +683,12 @@ def external_mcp_enabled() -> bool:
 
 
 def acknowledge_external_mcp() -> JsonDict:
-    """Record that the operator accepted the risks; idempotent (first time wins)."""
+    """Record that the operator accepted the risks.
+
+    Idempotent within one activation (re-acknowledging keeps the original
+    timestamp). :func:`set_external_mcp_enabled` clears it again on disable, so
+    an acknowledgement covers the period it was given for and no longer.
+    """
     state = load_external_mcp()
     if not state["acknowledged_at"]:
         state["acknowledged_at"] = datetime.now(UTC).isoformat(timespec="seconds")
@@ -692,11 +697,20 @@ def acknowledge_external_mcp() -> JsonDict:
 
 
 def set_external_mcp_enabled(enabled: bool) -> JsonDict:
-    """Turn the feature on or off. Enabling without an acknowledgement is refused."""
+    """Turn the feature on or off; enabling requires a *current* acknowledgement.
+
+    Disabling clears the acknowledgement, so switching the feature back on has to
+    pass through the consent dialog again. A once-per-machine consent would mean
+    the one control that ends the on-premise guarantee could be re-armed in
+    silence — months later, or by someone who never saw what it says — and the
+    person turning it on would get no warning at the moment it matters.
+    """
     state = load_external_mcp()
     if enabled and not state["acknowledged_at"]:
         raise ValueError("external MCP must be acknowledged before it can be enabled")
     state["enabled"] = bool(enabled)
+    if not enabled:
+        state["acknowledged_at"] = None
     _save_external_mcp(state)
     return state
 

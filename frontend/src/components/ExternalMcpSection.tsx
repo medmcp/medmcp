@@ -16,10 +16,11 @@ import { Row, Toggle } from './SettingsControls'
  * workspace.
  *
  * The whole product guarantees that data stays on-premise, and this is the one
- * control that breaks that guarantee, so the switch does not act on its own: the
- * first time it is turned on it opens a consent dialog that has to be read and
+ * control that breaks that guarantee, so the switch does not act on its own:
+ * every time it is turned on it opens a consent dialog that has to be read and
  * accepted. The acknowledgement is recorded server-side and is a precondition
- * there too — the dialog is the explanation, not the enforcement.
+ * there too — the dialog is the explanation, not the enforcement — and turning
+ * the feature off clears it again, so re-arming it can never happen in silence.
  */
 export function ExternalMcpSection() {
   const [state, setState] = useState<ExternalMcpState | null>(null)
@@ -55,7 +56,9 @@ export function ExternalMcpSection() {
   if (!state) return null
 
   const onToggle = (next: boolean) => {
-    // Turning it on for the first time explains itself before it acts.
+    // Turning it on explains itself before it acts, every time: the server
+    // clears the acknowledgement on disable, so `acknowledged` is only ever true
+    // for a feature that is already on.
     if (next && !state.acknowledged) {
       setUnderstood(false)
       setConsenting(true)
@@ -170,7 +173,10 @@ export function ExternalMcpSection() {
                   these tools on its own. Each call still needs your approval, and the approval
                   prompt is where you see what is being sent.
                 </li>
-                <li>Turning this off at any time removes those servers from the agent.</li>
+                <li>
+                  Turning this off at any time removes those servers from the agent, and you
+                  will be asked to accept this again before it can be switched back on.
+                </li>
               </ul>
               <label className="ext-mcp-understood">
                 <input

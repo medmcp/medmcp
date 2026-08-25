@@ -95,6 +95,29 @@ def test_acknowledgement_is_idempotent() -> None:
     assert settings.acknowledge_external_mcp()["acknowledged_at"] == first
 
 
+def test_disabling_clears_the_acknowledgement() -> None:
+    """Consent covers one activation, so turning it off withdraws it."""
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    settings.set_external_mcp_enabled(False)
+    assert settings.external_mcp_acknowledged() is False
+    assert settings.load_external_mcp()["acknowledged_at"] is None
+
+
+def test_re_enabling_needs_fresh_consent() -> None:
+    """Off and on again must go through the dialog, not inherit the old decision."""
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    settings.set_external_mcp_enabled(False)
+    with pytest.raises(ValueError, match="acknowledged"):
+        settings.set_external_mcp_enabled(True)
+    assert settings.external_mcp_enabled() is False
+    # …and it works again once the operator has re-read and accepted it.
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    assert settings.external_mcp_enabled() is True
+
+
 def test_enabled_flag_alone_does_not_open_the_gate() -> None:
     """A hand-edited state file claiming enabled without an ack is still off."""
     settings.EXTERNAL_MCP_PATH.write_text(

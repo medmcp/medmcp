@@ -19,7 +19,8 @@ Notable, user-visible changes to MedMCP. Format follows
   Because this ends the guarantee that nothing leaves your infrastructure, the
   switch does not simply flip: it first explains what changes and asks you to
   accept responsibility for what those services receive. Nothing is connected
-  until you do, and turning it off removes the servers from the agent again.
+  until you do, and turning it off both removes the servers from the agent and
+  withdraws your acceptance, so switching it back on asks again.
   Servers are addressed by URL (`streamable-http` or `http`); if one needs a
   token, you give the *name* of an environment variable rather than the token, so
   no credential is ever written to disk. Tokens are sent as

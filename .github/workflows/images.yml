@@ -6,6 +6,8 @@ name: Images
 # arch — so the README quickstart works unchanged on amd64 nodes and on aarch64
 # boxes, which previously pulled an unrunnable amd64 image.
 # On pull_request: build + smoke test only — no login, no push, no merge.
+# Releases are NOT built here: pushing a v* tag runs release.yml, which
+# publishes the immutable :vX.Y.Z tags and moves :latest.
 # Plain `docker build` on the runner's daemon so core can FROM the just-built base
 # without a registry round-trip. Each arch builds natively because QEMU is far too
 # slow for the CUDA/torch compiles — do NOT collapse this into a single buildx
@@ -60,7 +62,8 @@ jobs:
       - name: Build base + core
         run: |
           docker build -f Dockerfile.base --build-arg CUDA_TAG="${CUDA_TAG}" -t medmcp-base:ci .
-          docker build --build-arg BASE_IMAGE=medmcp-base:ci -t medmcp-core:ci .
+          docker build --build-arg BASE_IMAGE=medmcp-base:ci \
+            --build-arg MEDMCP_BUILD="${GITHUB_SHA}" -t medmcp-core:ci .
       - name: Smoke test (entrypoint sanitizer + server boots)
         run: |
           # A host-like docker config carrying the leaked context + a credential

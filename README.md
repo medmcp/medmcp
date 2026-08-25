@@ -28,15 +28,19 @@ The easiest way to run MedMCP is with the prebuilt Docker images.
 
 ```bash
 MEDMCP_WORKSPACE="$HOME/medmcp-data" \
-  docker compose -f oci://ghcr.io/medmcp/compose:main up -d
+  docker compose -f oci://ghcr.io/medmcp/compose:latest up -d
 ```
 Then open **http://localhost:8100**.
 
 **Requirements:** Linux OS with an NVIDIA GPU (≥ 24 GB VRAM recommended for the local Muse Glimmer 30B model), a recent driver (≥ R570 / CUDA 12.8), and Docker with GPU access via the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/) (CDI; rootless Docker works).
 
-**Stop** with `docker compose -f oci://ghcr.io/medmcp/compose:main down`.
+**Stop** with `docker compose -f oci://ghcr.io/medmcp/compose:latest down`.
 
 **Update** by re-running the start command with `--pull always`.
+
+**Versions:** `latest` is the newest release. Pin a specific one with
+`oci://ghcr.io/medmcp/compose:v0.2.0` — release tags are never moved, so a
+pinned fleet stays put. `main` is the rolling development build.
 
 > Want to build from source or run host-native? See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 

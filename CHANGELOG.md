@@ -6,6 +6,10 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Changed
+
+- Published images link back to this repository and carry version and commit labels.
+
 ## 0.2.0 — 2026-08-25
 
 ### Added

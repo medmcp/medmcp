@@ -44,6 +44,19 @@ RUN chmod +x /usr/local/bin/medmcp-entrypoint
 # What this image was built from — a release tag for a released image, a commit
 # sha for a rolling :main one. Reported by /healthz; empty for a local build.
 ARG MEDMCP_BUILD=""
+# The commit itself, which a release tag does not spell out.
+ARG MEDMCP_REVISION=""
+
+# OCI metadata. `image.source` is the one GitHub acts on: it links the published
+# package to this repository, so the images are reachable from the repo instead
+# of floating in the org with no visible relationship to the code. The rest is
+# what `docker inspect` and SBOM tooling read to identify an image.
+LABEL org.opencontainers.image.source="https://github.com/medmcp/medmcp" \
+      org.opencontainers.image.title="MedMCP" \
+      org.opencontainers.image.description="A local medical imaging agent" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="$MEDMCP_BUILD" \
+      org.opencontainers.image.revision="$MEDMCP_REVISION"
 
 ENV PATH=/app/.venv/bin:$PATH \
     UV_NO_SYNC=1 \

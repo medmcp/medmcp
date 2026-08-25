@@ -63,7 +63,8 @@ jobs:
         run: |
           docker build -f Dockerfile.base --build-arg CUDA_TAG="${CUDA_TAG}" -t medmcp-base:ci .
           docker build --build-arg BASE_IMAGE=medmcp-base:ci \
-            --build-arg MEDMCP_BUILD="${GITHUB_SHA}" -t medmcp-core:ci .
+            --build-arg MEDMCP_BUILD="${GITHUB_SHA}" \
+            --build-arg MEDMCP_REVISION="${GITHUB_SHA}" -t medmcp-core:ci .
       - name: Smoke test (entrypoint sanitizer + server boots)
         run: |
           # A host-like docker config carrying the leaked context + a credential

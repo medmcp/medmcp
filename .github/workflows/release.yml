@@ -126,7 +126,8 @@ jobs:
         run: |
           docker build -f Dockerfile.base --build-arg CUDA_TAG="${CUDA_TAG}" -t medmcp-base:ci .
           docker build --build-arg BASE_IMAGE=medmcp-base:ci \
-            --build-arg MEDMCP_BUILD="${GITHUB_REF_NAME}" -t medmcp-core:ci .
+            --build-arg MEDMCP_BUILD="${GITHUB_REF_NAME}" \
+            --build-arg MEDMCP_REVISION="${GITHUB_SHA}" -t medmcp-core:ci .
       - name: Smoke test (entrypoint sanitizer + server boots + reports version)
         env:
           VERSION: ${{ needs.verify.outputs.version }}

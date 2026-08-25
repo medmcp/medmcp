@@ -10,7 +10,12 @@ interface ExternalMcpBannerProps {
 }
 
 /**
- * A standing warning, shown for as long as external MCP servers are connected.
+ * A standing warning, shown for as long as external MCP servers are enabled.
+ *
+ * "Enabled", not "connected": nothing here observes a handshake. What is known
+ * is that the agent may reach these servers, which is the thing worth warning
+ * about — a server that is unreachable today answers tomorrow, and the warning
+ * should not have gone quiet in between.
  *
  * The consent dialog is a moment; this is the reminder that outlives it. Someone
  * who turned the feature on days ago — or who sat down at a workspace where
@@ -35,7 +40,7 @@ export function ExternalMcpBanner({ refreshSignal, onReview }: ExternalMcpBanner
 
   useEffect(load, [load, refreshSignal])
 
-  const disconnect = useCallback(() => {
+  const turnAllOff = useCallback(() => {
     setBusy(true)
     setExternalMcpEnabled(false)
       .catch(() => undefined)
@@ -56,18 +61,18 @@ export function ExternalMcpBanner({ refreshSignal, onReview }: ExternalMcpBanner
       <span className="ext-banner-dot" aria-hidden="true" />
       <span className="ext-banner-text">
         <strong>
-          {active.length} external MCP server{plural} connected.
+          {active.length} external MCP server{plural} enabled.
         </strong>{' '}
         What the agent sends {active.length === 1 ? 'it' : 'them'} leaves this machine.
       </span>
-      <span className="ext-banner-names" title="Connected external servers">
+      <span className="ext-banner-names" title="Enabled external servers">
         {active.map((s) => s.name).join(', ')}
       </span>
       <button className="btn-plain ext-banner-action" onClick={onReview} disabled={busy}>
         Review
       </button>
-      <button className="btn-plain ext-banner-action" onClick={disconnect} disabled={busy}>
-        {busy ? 'Disconnecting…' : 'Disconnect all'}
+      <button className="btn-plain ext-banner-action" onClick={turnAllOff} disabled={busy}>
+        {busy ? 'Turning off…' : 'Turn all off'}
       </button>
     </div>
   )

@@ -154,6 +154,9 @@ services:
       - "vibe-workflows:/app/.vibe/workflows"
       - "vibe-provenance:/app/.vibe/provenance"
       - "vibe-logs:/app/.vibe/logs"
+      # External MCP servers and the consent that armed them. Losing these on an
+      # image update would silently disconnect a configured setup.
+      - "vibe-state:/app/.vibe/state"
       # Host registry creds, read-only at a staging path — the entrypoint copies
       # only `auths` to /root/.docker/config.json, dropping the host's
       # `currentContext` (which would break every in-container stack pull/run).
@@ -166,3 +169,4 @@ volumes:
   vibe-workflows:
   vibe-provenance:
   vibe-logs:
+  vibe-state:

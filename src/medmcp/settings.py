@@ -634,7 +634,12 @@ def active_servers() -> list[JsonDict]:
 # Credentials are stored as the *name* of an environment variable, never a token:
 # `.vibe/config.toml` is rewritten on every sync and readable by anything in the
 # container, so it is the wrong place for a secret.
-EXTERNAL_MCP_PATH: Path = VIBE_HOME / "external_mcp.json"
+# A directory rather than a bare file, because in a container this state has to
+# survive an image update: a named volume can cover a subdirectory of .vibe,
+# but not a single file, and covering .vibe itself would shadow the baked
+# prompts and the config.toml the entrypoint writes.
+VIBE_STATE_DIR: Path = VIBE_HOME / "state"
+EXTERNAL_MCP_PATH: Path = VIBE_STATE_DIR / "external_mcp.json"
 EXTERNAL_MCP_TRANSPORTS: tuple[str, ...] = ("streamable-http", "http")
 _ENV_VAR_RE: re.Pattern[str] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # RFC 7230 token characters — the same set vibe validates header names against.

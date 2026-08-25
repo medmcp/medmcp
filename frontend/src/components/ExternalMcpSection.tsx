@@ -97,7 +97,7 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
       {!state.enabled && state.servers.length > 0 && (
         <div className="settings-row-hint ext-mcp-disconnected">
           {state.servers.length} server{state.servers.length === 1 ? '' : 's'} configured, none
-          connected. Nothing is sent outside this machine while this is off.
+          enabled. Nothing is sent outside this machine while this is off.
         </div>
       )}
 

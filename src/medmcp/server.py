@@ -633,12 +633,22 @@ async def get_external_mcp() -> JsonDict:
 
     def _state() -> JsonDict:
         state = settings.load_external_mcp()
+        # Presence of the named token variable, never its value. Without this the
+        # only symptom of a missing variable is the remote service's 401: vibe
+        # sends the request with no auth header rather than failing locally.
+        servers = [
+            {
+                **srv,
+                "token_present": settings.external_token_present(str(srv.get("api_key_env", ""))),
+            }
+            for srv in cast("list[JsonDict]", state["servers"])
+        ]
         return {
             "enabled": bool(state["enabled"]),
             "acknowledged": bool(state["acknowledged_at"]),
             "acknowledged_at": state["acknowledged_at"],
             "transports": list(settings.EXTERNAL_MCP_TRANSPORTS),
-            "servers": state["servers"],
+            "servers": servers,
         }
 
     return await asyncio.to_thread(_state)

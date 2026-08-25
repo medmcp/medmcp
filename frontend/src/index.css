@@ -2768,6 +2768,13 @@ textarea.wf-input {
   background: var(--ok);
 }
 
+/* A named token variable that does not exist where the agent runs. Not an error
+   state — the server is configured correctly, the environment is not. */
+.ext-mcp-missing-token {
+  margin-top: 2px;
+  color: var(--red-tint);
+}
+
 /* ── External MCP: the standing connection warning ───────────────────────── */
 
 /* A strip under the header, up for exactly as long as external servers are

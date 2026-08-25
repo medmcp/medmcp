@@ -401,6 +401,43 @@ def test_the_off_switch_reaches_the_running_agent(monkeypatch: pytest.MonkeyPatc
     assert settings.external_mcp_enabled() is False
 
 
+def test_token_presence_is_reported_without_the_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The API says whether the named variable holds a token — never what it holds."""
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    _add("pubmed", api_key_env="PUBMED_TOKEN")
+    monkeypatch.setenv("PUBMED_TOKEN", "s3cret-value")
+
+    body = TestClient(server.app).get("/api/external-mcp").json()
+
+    server_entry = cast("list[JsonDict]", body["servers"])[0]
+    assert server_entry["token_present"] is True
+    assert "s3cret-value" not in json.dumps(body)
+
+
+def test_missing_token_variable_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A named variable that does not exist is flagged, so the UI can say so.
+
+    Without this the only symptom is the remote service's 401 — vibe attaches the
+    header only when the variable is truthy, so the request goes out with no
+    credential rather than failing where the cause is visible.
+    """
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    _add("pubmed", api_key_env="PUBMED_TOKEN")
+    monkeypatch.delenv("PUBMED_TOKEN", raising=False)
+
+    body = TestClient(server.app).get("/api/external-mcp").json()
+    assert cast("list[JsonDict]", body["servers"])[0]["token_present"] is False
+
+
+def test_empty_token_variable_counts_as_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty variable is absent for our purposes, matching vibe's own check."""
+    monkeypatch.setenv("PUBMED_TOKEN", "")
+    assert settings.external_token_present("PUBMED_TOKEN") is False
+    assert settings.external_token_present("") is False
+
+
 def test_synced_entry_is_not_readopted_as_a_stdio_stack(tmp_path: Path) -> None:
     """Discovery must not pick its own HTTP output back up as a broken local stack."""
     settings.acknowledge_external_mcp()

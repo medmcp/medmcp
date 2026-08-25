@@ -279,6 +279,9 @@ export interface ExternalServer {
   /** Value format, e.g. "Bearer {token}"; empty means Bearer. */
   api_key_format: string
   active: boolean
+  /** Whether `api_key_env` actually holds a token where the agent runs. Presence
+   *  only — the value never leaves the server. */
+  token_present?: boolean
 }
 
 /** State of the external-MCP feature (advanced settings). */

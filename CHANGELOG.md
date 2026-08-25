@@ -35,7 +35,9 @@ Notable, user-visible changes to MedMCP. Format follows
   the agent is restarted so nothing already running keeps a connection. Servers
   and your acceptance are kept across restarts and updates. To supply a token, put `NAME=value` lines in
   a `medmcp.env` file next to your compose file (or point `MEDMCP_ENV_FILE` at
-  one); it is optional and read only if present.
+  one); it is optional and read only if present. If the variable turns out not to
+  be set where the agent runs, the setting says so — rather than leaving you with
+  an unexplained rejection from the service.
 
 ## 0.1.0
 

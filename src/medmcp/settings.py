@@ -672,6 +672,19 @@ def _save_external_mcp(state: JsonDict) -> None:
     _atomic_write_json(EXTERNAL_MCP_PATH, state)
 
 
+def external_token_present(api_key_env: str) -> bool:
+    """Whether the env var *api_key_env* holds a usable token in this process.
+
+    Only ever returns presence — never the value, which must not leave the
+    process. vibe attaches the auth header only when ``os.getenv`` is truthy, so
+    an empty variable counts as absent here for the same reason: with one, the
+    request goes out unauthenticated and the operator sees the remote service's
+    401 with nothing pointing at the real cause. vibe-acp inherits this process's
+    environment, so what is visible here is what it will see.
+    """
+    return bool(api_key_env) and bool(os.environ.get(api_key_env))
+
+
 def external_mcp_acknowledged() -> bool:
     """Whether the operator has accepted responsibility for external services."""
     return bool(load_external_mcp()["acknowledged_at"])

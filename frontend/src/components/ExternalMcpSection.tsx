@@ -116,6 +116,14 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
                   {s.api_key_env ? ` · token from $${s.api_key_env}` : ' · no auth'}
                   {s.api_key_env && s.api_key_header ? ` · ${s.api_key_header}` : ''}
                 </div>
+                {/* Without this the only symptom is the remote service's 401:
+                    vibe sends the request unauthenticated rather than failing. */}
+                {s.api_key_env && s.token_present === false && (
+                  <div className="settings-row-hint ext-mcp-missing-token">
+                    ${s.api_key_env} is not set where the agent runs — requests go out with no
+                    credential. Add it to medmcp.env and recreate the container.
+                  </div>
+                )}
               </div>
               <div className="ext-mcp-server-actions">
                 <Toggle
@@ -303,8 +311,10 @@ function AddServerForm({
         {/* The token itself is never stored: only this name is written, and vibe
             reads the value from the environment the workspace was started in. */}
         <span className="settings-row-hint">
-          The name of an environment variable set where the workspace runs. The token itself is
-          never saved.
+          The name of an environment variable set where the workspace runs — not the token, which
+          is never saved. In the container install, put <code>NAME=value</code> in{' '}
+          <code>medmcp.env</code> next to your compose file and recreate the container; running on
+          the host, export it in the shell that starts the workspace.
         </span>
       </label>
 

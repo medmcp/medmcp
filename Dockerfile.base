@@ -34,5 +34,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # uv (pinned) — a single static binary, copied from the official distroless image.
 COPY --from=ghcr.io/astral-sh/uv:0.11.6 /uv /uvx /usr/local/bin/
 
+# Links the published package to this repository (see Dockerfile for why).
+LABEL org.opencontainers.image.source="https://github.com/medmcp/medmcp" \
+      org.opencontainers.image.title="MedMCP base" \
+      org.opencontainers.image.description="Shared CUDA + Python base for MedMCP images" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 # Reasonable default workdir; downstream images override as needed.
 WORKDIR /app

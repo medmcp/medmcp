@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { archiveSession, deleteSession, fetchSessions, forkSession, renameSession } from '../api'
 import type { SessionInfo } from '../types'
-import { ArchiveIcon, BranchIcon, PencilIcon, TrashIcon } from './icons'
+import { ArchiveIcon, BranchIcon, ChevronRightIcon, PencilIcon, TrashIcon } from './icons'
 
 interface ChatsMenuProps {
   /** The session the chat is currently showing (highlighted in the list). */
@@ -202,7 +202,8 @@ export function ChatsMenu({ currentSessionId, onSelectSession, onCurrentDeleted 
         title="Open a previous chat"
         onClick={() => setOpen((v) => !v)}
       >
-        Chats ▾
+        Chats
+        <ChevronRightIcon size={11} className="chats-caret" />
       </button>
       {open && (
         <>

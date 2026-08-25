@@ -14,7 +14,7 @@ import type {
   ToolCallState,
 } from '../types'
 import { ChatsMenu } from './ChatsMenu'
-import { ShieldIcon } from './icons'
+import { PlusIcon, ShieldIcon } from './icons'
 
 // vibe-acp >= 2.14 sends a tool call's rawInput as a JSON-encoded *string*
 // (read/edit/write tools) rather than an object. Parse it back so the card
@@ -312,7 +312,7 @@ function PermissionCard({
                   // What sits where the file was expected. Usually the intended
                   // path is right here, so it reads as the answer, not a dump.
                   <span className="path-siblings">
-                    {' — '}
+                    {' · '}
                     <code>{p.nearest === '.' ? 'workspace' : p.nearest}</code> contains{' '}
                     {p.entries.join(', ')}
                     {p.entry_total > p.entries.length &&
@@ -703,7 +703,8 @@ export const Chat = memo(function Chat({
           <span>Chat</span>
           {onNewChat && (
             <button className="btn-plain chat-new-btn" onClick={onNewChat} title="Start a new chat">
-              ＋ New chat
+              <PlusIcon size={12} />
+              New chat
             </button>
           )}
           {onSelectSession && (

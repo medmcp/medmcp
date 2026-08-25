@@ -63,7 +63,7 @@ export function ExternalMcpBanner({ refreshSignal, onReview }: ExternalMcpBanner
         <strong>
           {active.length} external MCP server{plural} enabled.
         </strong>{' '}
-        What the agent sends {active.length === 1 ? 'it' : 'them'} leaves this machine.
+        Anything the agent sends to an external server leaves this machine.
       </span>
       <span className="ext-banner-names" title="Enabled external servers">
         {active.map((s) => s.name).join(', ')}

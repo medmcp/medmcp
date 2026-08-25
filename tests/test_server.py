@@ -145,15 +145,62 @@ class TestResolveInputPath:
         """An empty value is returned untouched (not joined to the root)."""
         assert server._resolve_input_path("") == ""
 
-    def test_resolve_input_paths_maps_every_value(self, root: Path) -> None:
+    def test_confined_input_paths_maps_every_value(self, root: Path) -> None:
         """The dict helper resolves each binding value independently."""
         scan = root / "patient_01" / "visit_02" / "t1n_3d.nii.gz"
         scan.parent.mkdir(parents=True)
         scan.touch()
-        resolved = server._resolve_input_paths(
+        resolved = server._confined_input_paths(
             {"in_1": "patient_01/visit_02/t1n_3d.nii.gz", "in_2": "cuda"}
         )
         assert resolved == {"in_1": str(scan), "in_2": "cuda"}
+
+
+class TestConfinedInputPath:
+    """Replay inputs may not name anything outside the workspace.
+
+    Replay calls stack tools directly, with no permission prompt between the
+    binding and the call, so a path leaving the workspace is either a mistake or
+    an attempt to have a tool read something it should not. In the containerized
+    deployment only the workspace is mounted into a stack, but a host-native
+    stack runs as the operator — so the confinement belongs in the server.
+    """
+
+    @pytest.fixture
+    def root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Point the server's workspace root at a temp dir (resolved, no symlinks)."""
+        resolved = tmp_path.resolve()
+        monkeypatch.setattr(server, "WORKSPACE_ROOT", resolved)
+        return resolved
+
+    def test_absolute_path_inside_is_kept(self, root: Path) -> None:
+        """Path parity means an absolute workspace path is the normal case."""
+        scan = root / "patient_01" / "scan.nii.gz"
+        scan.parent.mkdir(parents=True)
+        scan.touch()
+        assert server._confined_input_path(str(scan)) == str(scan)
+
+    def test_absolute_path_outside_is_refused(self, root: Path) -> None:
+        """The case that mattered: a tool pointed at the operator's own files."""
+        with pytest.raises(ValueError, match="outside the workspace"):
+            server._confined_input_path("/etc/passwd")
+
+    def test_relative_escape_is_refused(self, root: Path) -> None:
+        """`..` is not a way around the same rule."""
+        with pytest.raises(ValueError, match="escapes the workspace"):
+            server._confined_input_path("../../etc/passwd")
+
+    def test_symlink_out_of_the_workspace_is_refused(self, root: Path) -> None:
+        """Resolution happens before the check, so a link inside is not a loophole."""
+        link = root / "escape"
+        link.symlink_to("/etc")
+        with pytest.raises(ValueError, match="workspace"):
+            server._confined_input_path("escape/passwd")
+
+    def test_non_path_and_missing_values_pass_through(self, root: Path) -> None:
+        """Device strings and not-yet-created outputs are not paths to refuse."""
+        assert server._confined_input_path("cuda") == "cuda"
+        assert server._confined_input_path("out/derivatives") == "out/derivatives"
 
 
 # ── _workspace_note: the viewer-context note handed to the agent ─────────────
@@ -257,7 +304,7 @@ class TestSettingsMerge:
 
     def test_preserves_entry_unknown_to_the_drawer(self, harness: dict[str, set[str]]) -> None:
         """A stack the drawer never listed stays active after a save."""
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         result = self._put(client, stacks=[{"name": "alpha", "active": True}])
         # "beta" was unknown to this drawer payload, so it is kept; nothing changed.
         assert harness["stacks"] == {"alpha", "beta"}
@@ -265,7 +312,7 @@ class TestSettingsMerge:
 
     def test_deactivates_a_known_entry(self, harness: dict[str, set[str]]) -> None:
         """Turning a listed stack off removes it and triggers a restart."""
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         result = self._put(
             client,
             stacks=[{"name": "alpha", "active": False}, {"name": "beta", "active": True}],
@@ -275,7 +322,7 @@ class TestSettingsMerge:
 
     def test_no_restart_when_nothing_changes(self, harness: dict[str, set[str]]) -> None:
         """Re-submitting the current state is a no-op restart-wise."""
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         result = self._put(
             client,
             stacks=[{"name": "alpha", "active": True}, {"name": "beta", "active": True}],
@@ -316,7 +363,7 @@ class TestWorkflowShareEndpoints:
 
     def test_import_then_export_round_trip(self, vibe_home: Path) -> None:
         """A valid envelope imports as a draft and exports back as a YAML download."""
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.post("/api/workflows/import", json={"content": self._envelope()})
         assert resp.status_code == 200
         assert resp.json()["name"] == "demo-flow"
@@ -328,13 +375,13 @@ class TestWorkflowShareEndpoints:
 
     def test_import_malformed_returns_400(self, vibe_home: Path) -> None:
         """A payload that isn't a workflow envelope maps to HTTP 400."""
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.post("/api/workflows/import", json={"content": "- not a mapping"})
         assert resp.status_code == 400
 
     def test_export_missing_returns_404(self, vibe_home: Path) -> None:
         """Exporting an unknown workflow maps to HTTP 404."""
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         assert client.get("/api/workflows/nope/export").status_code == 404
 
 
@@ -654,7 +701,7 @@ class TestSessionsApi:
                 }
             },
         )
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.get("/api/sessions")
         assert resp.status_code == 200
         sessions = resp.json()["sessions"]
@@ -667,7 +714,7 @@ class TestSessionsApi:
     def test_vibe_error_maps_to_502(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A vibe-acp error surfaces as a 502, not a 500."""
         self._stub_client(monkeypatch, {"error": {"message": "boom"}})
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.get("/api/sessions")
         assert resp.status_code == 502
 
@@ -698,7 +745,7 @@ class TestSessionsApi:
         monkeypatch.setattr(sessions, "load_registry", _registry)
         monkeypatch.setattr(provenance, "provenance_dir", _prov_dir)
 
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         rows = {s["id"]: s for s in client.get("/api/sessions").json()["sessions"]}
         assert rows["s1"]["title"] == "My name"  # override wins over vibe's title
         assert rows["s1"]["archived"] is False
@@ -726,7 +773,7 @@ class TestSessionsApi:
         monkeypatch.setattr(sessions, "load_registry", dict)
         monkeypatch.setattr(provenance, "vibe_session_parents", lambda: {"cont": "root"})
         monkeypatch.setattr(provenance, "provenance_dir", _prov_dir_in(tmp_path))
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         rows = client.get("/api/sessions").json()["sessions"]
         assert [s["id"] for s in rows] == ["root", "other"]
         assert rows[0]["updatedAt"] == "t9"
@@ -751,7 +798,7 @@ class TestSessionsApi:
         monkeypatch.setattr(sessions, "load_registry", dict)
         monkeypatch.setattr(provenance, "vibe_session_parents", lambda: {"c1": "root", "c2": "c1"})
         monkeypatch.setattr(provenance, "provenance_dir", _prov_dir_in(tmp_path))
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         rows = client.get("/api/sessions").json()["sessions"]
         assert [s["id"] for s in rows] == ["root"]
         assert rows[0]["updatedAt"] == "t9"
@@ -774,7 +821,7 @@ class TestSessionsApi:
         monkeypatch.setattr(sessions, "load_registry", lambda: {"fork": {"title": "My branch"}})
         monkeypatch.setattr(provenance, "vibe_session_parents", lambda: {"fork": "root"})
         monkeypatch.setattr(provenance, "provenance_dir", _prov_dir_in(tmp_path))
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         rows = client.get("/api/sessions").json()["sessions"]
         assert [s["id"] for s in rows] == ["root", "fork"]
         assert rows[0]["updatedAt"] == "t1"  # nothing folded into the root
@@ -791,7 +838,7 @@ class TestSessionsApi:
         monkeypatch.setattr(sessions, "load_registry", dict)
         monkeypatch.setattr(provenance, "vibe_session_parents", lambda: {"c1": "elsewhere"})
         monkeypatch.setattr(provenance, "provenance_dir", _prov_dir_in(tmp_path))
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         rows = client.get("/api/sessions").json()["sessions"]
         assert [s["id"] for s in rows] == ["c1"]
 
@@ -803,7 +850,7 @@ class TestSessionsApi:
             captured["rename"] = (session_id, title)
 
         monkeypatch.setattr(sessions, "set_title", _set_title)
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.post("/api/sessions/abc/rename", json={"title": "New name"})
         assert resp.status_code == 200
         assert captured["rename"] == ("abc", "New name")
@@ -816,7 +863,7 @@ class TestSessionsApi:
             captured["archive"] = (session_id, archived)
 
         monkeypatch.setattr(sessions, "set_archived", _set_archived)
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.post("/api/sessions/abc/archive", json={"archived": True})
         assert resp.status_code == 200
         assert captured["archive"] == ("abc", True)
@@ -834,7 +881,7 @@ class TestSessionsApi:
 
         monkeypatch.setattr(provenance, "purge_session", _purge)
         monkeypatch.setattr(sessions, "remove", _remove)
-        client = TestClient(server.app)
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.delete("/api/sessions/abc")
         assert resp.status_code == 200
         assert calls == [("purge", "abc"), ("remove", "abc")]

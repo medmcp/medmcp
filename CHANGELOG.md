@@ -6,6 +6,38 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Fixed
+
+- **Uninstalling a tool stack now removes it properly.** A stack could disappear
+  from the stacks window while still showing in settings, and on an installation
+  that had never changed which stacks are switched on, it could come back
+  entirely — the agent kept being told to launch something you had removed.
+
+### Security
+
+- **A tool stack can no longer get internet access without you agreeing to it.**
+  Stacks normally run with networking switched off — they see the files you point
+  them at and nothing else — but an image can ask for network access, and your
+  workspace is available to it, so it could send what it reads elsewhere. That
+  request now stops the install and asks you first, and any stack that has it is
+  marked **internet** in the stacks window for as long as it is installed.
+- **Saved workflows can only touch your workspace.** A workflow runs its recorded
+  tool calls without asking for approval each time, so a file it names is now
+  required to be inside the workspace — including by way of a shortcut that
+  points out of it. Anything else is refused before the first step runs.
+
+- **A website you visit can no longer reach the workspace.** The workspace
+  listens on your machine only, but a browser will still let any page send
+  requests to it — and a chat connection is not covered by the browser's usual
+  same-site protection at all, so a page could open one, ask the agent to read
+  your files and receive the contents, without any approval prompt appearing.
+  Requests and connections that do not come from the workspace's own page are
+  now refused, as are requests aimed at it under another name (a technique that
+  otherwise gets around the first check). If you reach MedMCP through a
+  hostname of your own — a reverse proxy, say — list it in
+  `MEDMCP_ALLOWED_HOSTS` / `MEDMCP_ALLOWED_ORIGINS`; anything unlisted is
+  refused.
+
 ### Added
 
 - **TotalSegmentator stack**, installable from the Tool stacks window. Segments

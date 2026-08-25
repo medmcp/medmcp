@@ -22,6 +22,9 @@ interface StackItem {
   image: string
   description: string
   gpu: boolean
+  /** Runs with network egress. The workspace is mounted into every stack, so
+   *  this separates a stack that can read your data from one that can send it. */
+  network: boolean
   installed: boolean
   /** Enabled for the agent. Only meaningful once installed. */
   active: boolean
@@ -66,6 +69,9 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
   const [state, setState] = useState<SettingsState | null>(null)
   const [catalog, setCatalog] = useState<CatalogEntry[]>([])
   const [containerNames, setContainerNames] = useState<Set<string>>(new Set())
+  // Installed stacks that run with egress, so the badge is right for stacks
+  // installed before this was surfaced (and for off-catalogue ones).
+  const [networkNames, setNetworkNames] = useState<Set<string>>(new Set())
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const [busy, setBusy] = useState(false)
@@ -73,6 +79,12 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
   const [progress, setProgress] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  // Set when an install stopped to ask about network access.
+  const [consent, setConsent] = useState<{
+    image: string
+    name: string
+    after?: () => void
+  } | null>(null)
   const [manualImage, setManualImage] = useState('')
 
   const reload = async () => {
@@ -83,6 +95,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
     ])
     setState(s)
     setContainerNames(new Set(inst.map((i) => i.name)))
+    setNetworkNames(new Set(inst.filter((i) => i.network).map((i) => i.name)))
     setCatalog(cat)
   }
 
@@ -94,6 +107,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
         if (cancelled) return
         setState(s)
         setContainerNames(new Set(inst.map((i) => i.name)))
+        setNetworkNames(new Set(inst.filter((i) => i.network).map((i) => i.name)))
         setCatalog(cat)
         setError(null)
       })
@@ -132,6 +146,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
         image: c.image,
         description: c.description,
         gpu: c.gpu,
+        network: c.network || networkNames.has(c.name),
         installed: c.installed,
         active: false,
         offCatalog: false,
@@ -149,6 +164,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
           image: containerNames.has(s.name) ? 'container image' : '',
           description: '',
           gpu: false,
+          network: networkNames.has(s.name),
           installed: true,
           active: s.active,
           version: s.version,
@@ -157,7 +173,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
       }
     }
     return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name))
-  }, [catalog, state, containerNames])
+  }, [catalog, state, containerNames, networkNames])
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -174,7 +190,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
     })
   }, [items, query, filter])
 
-  const install = (image: string, after?: () => void) => {
+  const install = (image: string, after?: () => void, acceptNetwork = false) => {
     if (!image || busy) return
     setBusy(true)
     setInstallingImage(image)
@@ -182,12 +198,13 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
     setProgress('Starting…')
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     const ws = new WebSocket(`${proto}://${location.host}/ws/stacks/install`)
-    ws.onopen = () => ws.send(JSON.stringify({ image }))
+    ws.onopen = () => ws.send(JSON.stringify({ image, accept_network: acceptNetwork }))
     ws.onmessage = (ev: MessageEvent<string>) => {
       const m = JSON.parse(ev.data) as {
-        type: 'progress' | 'done' | 'error'
+        type: 'progress' | 'done' | 'error' | 'needs_network_consent'
         line?: string
         name?: string
+        image?: string
         message?: string
       }
       if (m.type === 'progress') {
@@ -198,6 +215,12 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
       setBusy(false)
       setInstallingImage(null)
       setProgress(null)
+      if (m.type === 'needs_network_consent') {
+        // The image asked for egress. Nothing is installed until the operator
+        // has seen what that means and said yes.
+        setConsent({ image, name: m.name ?? image, after })
+        return
+      }
       if (m.type === 'done') {
         after?.()
         reload()
@@ -303,6 +326,9 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
                   <div className="market-card-head">
                     <span className="market-name">{i.name}</span>
                     {i.gpu && <span className="stack-badge">GPU</span>}
+                    {/* Not a feature badge: this is the one stack capability
+                        the sandbox around it cannot take back. */}
+                    {i.network && <span className="stack-badge egress">internet</span>}
                     {i.installed && (
                       <span className={`market-state${i.active ? ' on' : ''}`}>
                         {i.active ? 'enabled' : 'disabled'}
@@ -382,6 +408,46 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
         {notice && (
           <div className="drawer-toast" role="status">
             {notice}
+          </div>
+        )}
+        {/* The image asked for network access. It has been pulled and inspected
+            by now, never run, and nothing is registered until this is accepted. */}
+        {consent && (
+          <div className="modal-backdrop" onClick={() => setConsent(null)}>
+            <div
+              className="modal ext-mcp-consent"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="stack-egress-title"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 id="stack-egress-title">Let {consent.name} reach the internet?</h3>
+              <p>
+                Most stacks run with networking switched off: they see the files you point them at
+                and nothing else. This one asks for network access, and your workspace is available
+                to it — so it is able to send what it reads to whoever runs the service it talks to.
+              </p>
+              <p>
+                Install it only if you know why it needs that. You can remove it at any time, and
+                it will be marked <strong>internet</strong> in this list for as long as it is
+                installed.
+              </p>
+              <div className="modal-actions">
+                <button className="btn-text" onClick={() => setConsent(null)}>
+                  Cancel
+                </button>
+                <button
+                  className="btn"
+                  onClick={() => {
+                    const pending = consent
+                    setConsent(null)
+                    install(pending.image, pending.after, true)
+                  }}
+                >
+                  Install with network access
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </div>

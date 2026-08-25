@@ -401,7 +401,9 @@ def test_the_off_switch_reaches_the_running_agent(monkeypatch: pytest.MonkeyPatc
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
 
-    resp = TestClient(server.app).put("/api/external-mcp", json={"enabled": False})
+    resp = TestClient(server.app, base_url="http://127.0.0.1:8100").put(
+        "/api/external-mcp", json={"enabled": False}
+    )
 
     assert resp.status_code == 200
     assert calls == ["sync", "restart"]
@@ -415,7 +417,7 @@ def test_token_presence_is_reported_without_the_value(monkeypatch: pytest.Monkey
     _add("pubmed", api_key_env="PUBMED_TOKEN")
     monkeypatch.setenv("PUBMED_TOKEN", "s3cret-value")
 
-    body = TestClient(server.app).get("/api/external-mcp").json()
+    body = TestClient(server.app, base_url="http://127.0.0.1:8100").get("/api/external-mcp").json()
 
     server_entry = cast("list[JsonDict]", body["servers"])[0]
     assert server_entry["token_present"] is True
@@ -434,7 +436,7 @@ def test_missing_token_variable_is_reported(monkeypatch: pytest.MonkeyPatch) -> 
     _add("pubmed", api_key_env="PUBMED_TOKEN")
     monkeypatch.delenv("PUBMED_TOKEN", raising=False)
 
-    body = TestClient(server.app).get("/api/external-mcp").json()
+    body = TestClient(server.app, base_url="http://127.0.0.1:8100").get("/api/external-mcp").json()
     assert cast("list[JsonDict]", body["servers"])[0]["token_present"] is False
 
 
@@ -467,7 +469,7 @@ def test_stored_token_never_appears_in_a_response() -> None:
     """Neither the add response nor the state listing carries the value."""
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
-    client = TestClient(server.app)
+    client = TestClient(server.app, base_url="http://127.0.0.1:8100")
 
     added = client.post(
         "/api/external-mcp/servers",

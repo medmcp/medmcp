@@ -194,7 +194,7 @@ class TestListInstalled:
         ):
             settings.install_stack_image("ghcr.io/x/foo:dev")
         assert settings.list_installed_stacks() == [
-            {"name": "medmcp-foo", "image": "ghcr.io/x/foo:dev", "gpu": False}
+            {"name": "medmcp-foo", "image": "ghcr.io/x/foo:dev", "gpu": False, "network": False}
         ]
 
 
@@ -214,7 +214,13 @@ class TestCatalog:
         ):
             entries = settings.load_catalog()
         assert entries == [
-            {"name": "medmcp-foo", "image": "img:dev", "description": "d", "gpu": True}
+            {
+                "name": "medmcp-foo",
+                "image": "img:dev",
+                "description": "d",
+                "gpu": True,
+                "network": False,
+            }
         ]
 
     def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
@@ -330,12 +336,50 @@ class TestStackIsolation:
             patch("medmcp.settings._image_present", _always_present),
             patch("medmcp.settings._extract_image_skills", _fake_extract),
         ):
-            settings.install_stack_image("img:tag")
+            settings.install_stack_image("img:tag", accept_network=True)
         args = _read_manifest(stacks_dir, "medmcp-net")["args"]
         assert args[args.index("--network") + 1] == "bridge"
         assert "none" not in args
         # Opting into egress must not opt out of the rest.
         assert "--cap-drop" in args and "no-new-privileges" in args
+
+    def test_egress_needs_consent(self, stacks_dir: Path) -> None:
+        """A stack cannot arrive with network access unless someone accepted it.
+
+        The workspace is mounted into every stack, so egress is the difference
+        between "can read your data" and "can send it somewhere". The image
+        declares it, which is why it must not install silently.
+        """
+        label = '{"name": "medmcp-net", "gpu": false, "network": true}'
+        with (
+            patch("medmcp.settings._run_docker", _fake_docker(label)),
+            patch("medmcp.settings._image_present", _always_present),
+            patch("medmcp.settings._extract_image_skills", _fake_extract),
+            pytest.raises(settings.NetworkConsentRequiredError),
+        ):
+            settings.install_stack_image("img:tag")
+        assert not (stacks_dir / "medmcp-net.toml").exists()
+
+    def test_egress_is_disclosed_on_the_installed_list(self, stacks_dir: Path) -> None:
+        """A stack with egress must not look like one without it."""
+        label = '{"name": "medmcp-net", "gpu": false, "network": true}'
+        with (
+            patch("medmcp.settings._run_docker", _fake_docker(label)),
+            patch("medmcp.settings._image_present", _always_present),
+            patch("medmcp.settings._extract_image_skills", _fake_extract),
+        ):
+            settings.install_stack_image("img:tag", accept_network=True)
+        assert settings.list_installed_stacks()[0]["network"] is True
+
+    def test_a_sandboxed_stack_reports_no_egress(self, stacks_dir: Path) -> None:
+        """The default install is `--network none`, and says so."""
+        with (
+            patch("medmcp.settings._run_docker", _fake_docker(LABEL)),
+            patch("medmcp.settings._image_present", _always_present),
+            patch("medmcp.settings._extract_image_skills", _fake_extract),
+        ):
+            settings.install_stack_image("img:tag")
+        assert settings.list_installed_stacks()[0]["network"] is False
 
     def test_legacy_manifest_is_hardened_on_load(self, stacks_dir: Path) -> None:
         """A manifest written before this existed is isolated without a reinstall.

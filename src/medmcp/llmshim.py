@@ -28,8 +28,17 @@ This shim sits between vibe and Ollama and applies three repairs:
    the history and every later request 400s — a permanently dead chat. Coercing to
    ``"{}"`` on the way out breaks that trap.
 
-Reasoning deltas are relayed live so the UI keeps its "thinking" feed; only
-``content`` and ``tool_calls`` are buffered until the turn is known to be healthy.
+**Relay mode** (``MEDMCP_SHIM_RELAY``). ``live`` (default): reasoning and
+``content`` deltas stream straight through, so the answer appears as it is
+written; only ``tool_calls`` deltas are withheld until the turn is known to be
+healthy — they are not user-visible while streaming, and the parser failure
+above strikes exactly there, so the transparent retry still covers it. A
+truncation *after* visible text has gone out cannot be retried without the
+person seeing the answer twice, so the shim ends the stream without a
+``finish_reason``: vibe ≥2.24 treats that as an incomplete stream, keeps the
+partial text as an interrupted answer, and offers ``/retry`` to continue.
+``buffered``: the original behaviour — ``content`` is withheld as well and every
+truncation is retried invisibly, at the cost of the answer arriving all at once.
 If every attempt fails the shim emits an explicit, clearly-labelled error message
 rather than an empty turn — a visible failure beats a silent one.
 
@@ -62,6 +71,10 @@ _SSE_DONE = "[DONE]"
 
 # Total upstream attempts per client request, including the first.
 DEFAULT_ATTEMPTS: int = 3
+# How much of a streamed turn is relayed before it is known healthy (see module doc).
+RELAY_MODES: tuple[str, ...] = ("live", "buffered")
+DEFAULT_RELAY: str = "live"
+_RELAY_ENV = "MEDMCP_SHIM_RELAY"
 
 _UPSTREAM_ENV = "MEDMCP_SHIM_UPSTREAM"
 _DEFAULT_UPSTREAM = "http://llm:11434"
@@ -188,16 +201,23 @@ def _restore_names(message: JsonDict, inverse: Mapping[str, str]) -> None:
 class StreamOutcome:
     """Accumulates one upstream SSE stream and judges whether it completed.
 
-    ``content`` and ``tool_calls`` chunks are withheld until the stream is known to
-    be healthy, so a truncated attempt can be retried without the caller having seen
-    a partial answer. Reasoning chunks are released immediately — they are display-only
-    and replaying them across attempts is harmless.
+    ``tool_calls`` chunks are withheld until the stream is known to be healthy, so
+    a truncated attempt can be retried without the caller having seen a partial
+    call. Reasoning chunks are released immediately — they are display-only and
+    replaying them across attempts is harmless. ``content`` chunks stream through
+    in ``live`` mode (``relayed_visible`` then records that a retry would show the
+    answer twice) and are withheld in ``buffered`` mode.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, relay: str = DEFAULT_RELAY) -> None:
         """Start an empty outcome for one upstream attempt."""
+        if relay not in RELAY_MODES:
+            raise ValueError(f"unknown relay mode {relay!r}; expected one of {RELAY_MODES}")
+        self.relay = relay
         self.saw_finish_reason: bool = False
         self.saw_usable: bool = False
+        # Whether answer text the person can see has already been relayed.
+        self.relayed_visible: bool = False
         self.buffered: list[JsonDict] = []
         self.tail: list[JsonDict] = []
 
@@ -227,12 +247,18 @@ class StreamOutcome:
                 self.saw_finish_reason = True
             raw_delta = choice.get("delta")
             delta = cast("JsonDict", raw_delta) if isinstance(raw_delta, dict) else {}
-            if delta.get("content") or delta.get("tool_calls"):
+            has_content = bool(delta.get("content"))
+            has_calls = bool(delta.get("tool_calls"))
+            if has_content or has_calls:
                 self.saw_usable = True
-            # Reasoning-only frames stream straight through.
+            # Reasoning-only frames stream straight through in every mode.
             reasoning = delta.get("reasoning") or delta.get("reasoning_content")
-            if reasoning and not delta.get("content") and not delta.get("tool_calls"):
+            if reasoning and not has_content and not has_calls:
                 passthrough = True
+            # Answer text streams through live; tool-call deltas never do.
+            if self.relay == "live" and has_content and not has_calls:
+                passthrough = True
+                self.relayed_visible = True
 
         if passthrough:
             return event
@@ -302,8 +328,11 @@ def create_app(
     *,
     renames: Mapping[str, str] | None = None,
     attempts: int = DEFAULT_ATTEMPTS,
+    relay: str = DEFAULT_RELAY,
 ) -> FastAPI:
     """Build the shim ASGI app forwarding to ``upstream``."""
+    if relay not in RELAY_MODES:
+        raise ValueError(f"unknown relay mode {relay!r}; expected one of {RELAY_MODES}")
     app = FastAPI(title="medmcp-llm-shim")
     mapping = dict(DEFAULT_RENAMES if renames is None else renames)
     inverse = _inverse(mapping)
@@ -324,7 +353,7 @@ def create_app(
 
         if payload.get("stream"):
             return StreamingResponse(
-                _stream_with_retry(url, payload, inverse, attempts, model),
+                _stream_with_retry(url, payload, inverse, attempts, model, relay=relay),
                 media_type="text/event-stream",
             )
         return await _complete_with_retry(url, payload, inverse, attempts)
@@ -416,12 +445,23 @@ async def _stream_with_retry(
     inverse: Mapping[str, str],
     attempts: int,
     model: str,
+    *,
+    relay: str = DEFAULT_RELAY,
+    client: httpx.AsyncClient | None = None,
 ) -> AsyncIterator[bytes]:
-    """Relay a streaming completion, retrying attempts that truncate silently."""
+    """Relay a streaming completion, retrying attempts that truncate silently.
+
+    In ``live`` relay a retry is only possible while no answer text has gone out;
+    a truncation after that ends the stream without ``finish_reason`` (and without
+    ``[DONE]``) so the caller sees an incomplete stream rather than a silent or a
+    duplicated answer. ``client`` lets tests inject a transport.
+    """
     detail = "unknown error"
-    async with httpx.AsyncClient(timeout=httpx.Timeout(900.0)) as client:
+    async with (
+        httpx.AsyncClient(timeout=httpx.Timeout(900.0)) if client is None else _KeepOpen(client)
+    ) as client:
         for attempt in range(1, attempts + 1):
-            outcome = StreamOutcome()
+            outcome = StreamOutcome(relay)
             try:
                 async with client.stream("POST", url, json=payload) as resp:
                     if resp.status_code != 200:
@@ -453,10 +493,32 @@ async def _stream_with_retry(
                 return
 
             detail = "stream truncated with no finish_reason"
+            if outcome.relayed_visible:
+                # The person has seen part of the answer: a retry would show it
+                # twice, so hand the truncation to the caller as what it is.
+                log.warning(
+                    "shim: truncation after visible text on attempt %d — "
+                    "ending the stream as incomplete",
+                    attempt,
+                )
+                return
             log.warning("shim: silent truncation on attempt %d/%d — retrying", attempt, attempts)
 
     yield _encode(failure_event(model, detail))
     yield f"{_SSE_PREFIX}{_SSE_DONE}\n\n".encode()
+
+
+class _KeepOpen:
+    """Async context manager that yields an injected client without closing it."""
+
+    def __init__(self, client: httpx.AsyncClient) -> None:
+        self._client = client
+
+    async def __aenter__(self) -> httpx.AsyncClient:
+        return self._client
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
 
 
 def _renames_from_env() -> dict[str, str]:
@@ -483,12 +545,20 @@ def main() -> None:
     host = os.environ.get("MEDMCP_SHIM_HOST", "127.0.0.1")
     port = int(os.environ.get("MEDMCP_SHIM_PORT", "11435"))
     attempts = int(os.environ.get("MEDMCP_SHIM_ATTEMPTS", str(DEFAULT_ATTEMPTS)))
+    relay = os.environ.get(_RELAY_ENV, DEFAULT_RELAY).strip().lower() or DEFAULT_RELAY
+    if relay not in RELAY_MODES:
+        log.warning("shim: unknown %s=%r, using %r", _RELAY_ENV, relay, DEFAULT_RELAY)
+        relay = DEFAULT_RELAY
     renames = _renames_from_env()
     log.info(
-        "medmcp-llm-shim -> %s (renames=%s, attempts=%d)", upstream, renames or "none", attempts
+        "medmcp-llm-shim -> %s (renames=%s, attempts=%d, relay=%s)",
+        upstream,
+        renames or "none",
+        attempts,
+        relay,
     )
     uvicorn.run(
-        create_app(upstream, renames=renames, attempts=attempts),
+        create_app(upstream, renames=renames, attempts=attempts, relay=relay),
         host=host,
         port=port,
         log_level="warning",

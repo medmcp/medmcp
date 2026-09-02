@@ -10,6 +10,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 - Chats get a generated title after the first reply, refined as the conversation develops; a name you type always wins.
 - The chat shows when the model backend is being retried, and says so when a turn stopped at the step limit.
+- Replies stream again as they are written: the model-server shim now holds back only tool calls while it checks a turn is healthy (`MEDMCP_SHIM_RELAY=buffered` restores the old behaviour).
 
 ### Changed
 

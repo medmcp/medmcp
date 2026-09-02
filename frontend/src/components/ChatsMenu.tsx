@@ -54,6 +54,8 @@ interface ChatsMenuProps {
   onSelectSession: (id: string) => void
   /** Called when the currently-open session is deleted, so a fresh chat opens. */
   onCurrentDeleted: () => void
+  /** Called after a rename was saved (empty title = cleared), so other views follow. */
+  onRenamed?: (id: string, title: string) => void
 }
 
 /** Coarse day bucket for the list headers, from an ISO timestamp. */
@@ -83,7 +85,12 @@ function timeLabel(iso: string | null): string {
  * archive, or delete from per-row actions; reveal archived ones to restore or
  * delete. Sessions load each time the menu opens.
  */
-export function ChatsMenu({ currentSessionId, onSelectSession, onCurrentDeleted }: ChatsMenuProps) {
+export function ChatsMenu({
+  currentSessionId,
+  onSelectSession,
+  onCurrentDeleted,
+  onRenamed,
+}: ChatsMenuProps) {
   const [open, setOpen] = useState(false)
   const [list, setList] = useState<SessionInfo[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -149,7 +156,7 @@ export function ChatsMenu({ currentSessionId, onSelectSession, onCurrentDeleted 
     // title: a user-set title pins the chat and stops title generation.
     const current = list?.find((s) => s.id === id)?.title ?? ''
     if (title === current) return
-    act(renameSession(id, title))
+    act(renameSession(id, title).then(() => onRenamed?.(id, title)))
   }
 
   const confirmDelete = (id: string) => {

@@ -730,6 +730,11 @@ export const Chat = memo(function Chat({
               currentSessionId={currentSessionId ?? null}
               onSelectSession={onSelectSession}
               onCurrentDeleted={onNewChat ?? (() => undefined)}
+              // A rename of the open chat shows in the header at once; a cleared
+              // name drops it until the next generated title lands.
+              onRenamed={(id, t) => {
+                if (id === currentSessionId) setTitle(t || null)
+              }}
             />
           )}
         </span>

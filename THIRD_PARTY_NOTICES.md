@@ -9,7 +9,7 @@ This file is generated — do not edit it by hand. Regenerate with `just notices
 after changing a runtime dependency. The model and base OS/CUDA layers are not
 package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 
-## Python (96 packages, runtime closure)
+## Python (98 packages, runtime closure)
 
 | Component | Version | License |
 | --- | --- | --- |
@@ -20,15 +20,15 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | attrs | 26.1.0 | MIT |
 | beautifulsoup4 | 4.14.3 | MIT |
 | cachetools | 7.0.6 | MIT |
-| certifi | 2026.6.17 | MPL-2.0 |
+| certifi | 2026.7.22 | MPL-2.0 |
 | cffi | 2.0.0 | MIT |
 | charset-normalizer | 3.4.7 | MIT |
 | click | 8.3.3 | BSD-3-Clause |
-| cryptography | 48.0.1 | Apache-2.0 OR BSD-3-Clause |
+| cryptography | 50.0.0 | Apache-2.0 OR BSD-3-Clause |
 | eval-type-backport | 0.3.1 | MIT |
 | fastapi | 0.141.1 | MIT |
 | gitdb | 4.0.12 | BSD-3-Clause |
-| gitpython | 3.1.53 | BSD-3-Clause |
+| gitpython | 3.1.58 | BSD-3-Clause |
 | giturlparse | 0.15.0 | Apache-2.0 |
 | google-auth | 2.49.2 | Apache-2.0 |
 | googleapis-common-protos | 1.74.0 | Apache-2.0 |
@@ -55,7 +55,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | mcp | 1.28.1 | MIT |
 | mdit-py-plugins | 0.5.0 | MIT |
 | mdurl | 0.1.2 | MIT |
-| mistral-vibe | 2.23.3 | Apache-2.0 |
+| mistral-vibe | 2.24.5 | Apache-2.0 |
 | mistralai | 2.6.0 | Apache-2.0 |
 | more-itertools | 11.0.2 | MIT |
 | opentelemetry-api | 1.39.1 | Apache-2.0 |
@@ -84,10 +84,12 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | pyyaml | 6.0.3 | MIT |
 | referencing | 0.37.0 | MIT |
 | requests | 2.34.2 | Apache-2.0 |
+| rfc8785 | 0.1.4 | Apache-2.0 |
 | rich | 15.0.0 | MIT |
 | rpds-py | 0.30.0 | MIT |
 | secretstorage | 3.5.0 | BSD-3-Clause |
 | sentry-sdk | 2.64.0 | MIT |
+| setproctitle | 1.3.7 | BSD-3-Clause |
 | six | 1.17.0 | MIT |
 | smmap | 5.0.3 | BSD-3-Clause |
 | sounddevice | 0.5.5 | MIT |

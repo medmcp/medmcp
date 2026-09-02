@@ -78,21 +78,18 @@ class TitlePolicy:
     """The tunable numbers behind generated titles, in one place.
 
     Cadence counts *completed turns* (the server sees turns, not model steps):
-    the first title lands when the opening turn finishes, then a refresh every
-    ``refresh_every_turns`` turns, ``max_generations`` calls per connection in
-    total. The title runs on the same single-GPU model as the conversation, in
-    the idle time after a reply, so the cadence is a trade between cost and how
-    quickly a title follows a change of subject: every three turns means a
-    shift is reflected within two further exchanges, and the cap covers a long
-    session rather than freezing the title a dozen turns in — measured live, a
-    title that had gone stale never recovered once a low cap was spent. A
-    generation that yields nothing hands its slot back so the next turn
-    retries; the attempt still counts, so a failing model cannot be retried
-    without bound.
+    the first title lands when the opening turn finishes, a second check runs
+    ``refresh_every_turns`` turns later, and ``max_generations`` caps the
+    total per connection. The purpose is a descriptive name the person can
+    find the chat by again, not a running summary: two checks at the start —
+    one off the opening exchange, one once the subject is clear — settle the
+    name, and after that it is left alone. A generation that yields nothing
+    hands its slot back so the next turn retries; the attempt still counts,
+    so a failing model cannot be retried without bound.
     """
 
     refresh_every_turns: int = 3
-    max_generations: int = 12
+    max_generations: int = 2
     # Transcript window: the opening intent plus the latest exchange, each
     # message clamped so one large tool result can't crowd the rest out.
     max_transcript_chars: int = 6000

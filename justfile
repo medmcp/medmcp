@@ -122,7 +122,9 @@ notices-check:
     git diff --exit-code THIRD_PARTY_NOTICES.md
 
 # Pull Muse Glimmer 30B and build the custom muse-medmcp model.
-# Needs Ollama >= 0.32.9; older builds reject the manifest with a 412.
+# Needs Ollama >= 0.32.15: 0.32.9 was the first build to accept the manifest
+# (older ones reject it with a 412), and 0.32.15 the first where a tool-call
+# parser error mid-stream no longer wedges the chat.
 pull-model:
     ollama pull muse-glimmer:30b
     ollama create muse-medmcp -f Modelfile.muse

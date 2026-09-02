@@ -10,6 +10,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+# pyright: reportPrivateUsage=false
+import httpx
+import pytest
+
+from medmcp import llmshim
 from medmcp.llmshim import (
     DEFAULT_RENAMES,
     StreamOutcome,
@@ -160,8 +165,8 @@ def test_stream_outcome_accepts_a_stream_that_finished() -> None:
 
 
 def test_stream_outcome_streams_reasoning_but_withholds_the_answer() -> None:
-    """Reasoning is display-only so it flows live; the answer waits until trusted."""
-    outcome = StreamOutcome()
+    """Buffered relay: reasoning is display-only so it flows live; the answer waits."""
+    outcome = StreamOutcome("buffered")
     assert outcome.feed(_delta(content="", reasoning="thinking")) is not None
     assert outcome.feed(_delta(content="hello")) is None
     assert outcome.feed(_delta(tool_calls=[{"function": {"name": "bash"}}])) is None
@@ -187,3 +192,123 @@ def test_failure_event_is_terminal_and_attributed_to_the_shim() -> None:
     assert choice["finish_reason"] == "stop"
     assert "medmcp" in choice["delta"]["content"]
     assert "stream truncated" in choice["delta"]["content"]
+
+
+# ── relay modes ────────────────────────────────────────────
+
+
+def test_stream_outcome_live_streams_answer_text_but_withholds_tool_calls() -> None:
+    """Live relay: content goes out at once (and is remembered), tool calls wait."""
+    outcome = StreamOutcome("live")
+    text = {"choices": [{"index": 0, "delta": {"content": "Hel"}}]}
+    call = {"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "c1"}]}}]}
+    assert outcome.feed(text) is text
+    assert outcome.relayed_visible is True
+    assert outcome.feed(call) is None
+    assert outcome.buffered == [call]
+
+
+def test_stream_outcome_buffered_withholds_answer_text() -> None:
+    """Buffered relay is the original behaviour: nothing visible until healthy."""
+    outcome = StreamOutcome("buffered")
+    text = {"choices": [{"index": 0, "delta": {"content": "Hel"}}]}
+    assert outcome.feed(text) is None
+    assert outcome.relayed_visible is False
+    assert outcome.buffered == [text]
+
+
+def test_stream_outcome_rejects_an_unknown_relay_mode() -> None:
+    """A typo in MEDMCP_SHIM_RELAY must not silently pick a mode."""
+    with pytest.raises(ValueError):
+        StreamOutcome("eager")
+
+
+def _sse(events: list[JsonDict], *, done: bool) -> bytes:
+    body = "".join(f"data: {json.dumps(e)}\n\n" for e in events)
+    if done:
+        body += "data: [DONE]\n\n"
+    return body.encode()
+
+
+def _text(chunk: str, finish: str | None = None) -> JsonDict:
+    return {"choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": finish}]}
+
+
+def _call(finish: str | None = None) -> JsonDict:
+    delta = {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "load_skill"}}]}
+    return {"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+
+
+def _client(responses: list[bytes]) -> httpx.AsyncClient:
+    """An upstream that answers each attempt with the next canned SSE body."""
+    calls = iter(responses)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=next(calls), headers={"content-type": "text/event-stream"}
+        )
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def _collect(relay: str, responses: list[bytes], attempts: int = 3) -> str:
+    async with _client(responses) as client:
+        chunks = [
+            chunk
+            async for chunk in llmshim._stream_with_retry(
+                "http://upstream/v1/chat/completions",
+                {"model": "m", "stream": True},
+                {"load_skill": "skill"},
+                attempts,
+                "m",
+                relay=relay,
+                client=client,
+            )
+        ]
+    return b"".join(chunks).decode()
+
+
+@pytest.mark.asyncio
+async def test_tool_call_truncation_is_retried_invisibly_in_live_relay() -> None:
+    """The common failure strikes at the tool call, which live relay still withholds."""
+    truncated = _sse([_call()], done=False)  # no finish_reason: Ollama's parser failure
+    final: JsonDict = {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}
+    healthy = _sse([_call(), final], done=True)
+    out = await _collect("live", [truncated, healthy])
+    assert out.count('"name": "skill"') == 1  # one call, restored name, no duplicate
+    assert '"finish_reason": "tool_calls"' in out
+    assert out.endswith("data: [DONE]\n\n")
+    assert "medmcp-shim-error" not in out
+
+
+@pytest.mark.asyncio
+async def test_truncation_after_visible_text_ends_the_stream_as_incomplete() -> None:
+    """Text already shown cannot be retried: no [DONE], no finish_reason, no shim message."""
+    truncated = _sse([_text("Hello, "), _text("wor")], done=False)
+    healthy = _sse([_text("Hello, world", "stop")], done=True)
+    out = await _collect("live", [truncated, healthy])
+    assert "Hello, " in out and "wor" in out
+    assert 'finish_reason": "stop"' not in out
+    assert "[DONE]" not in out
+    assert "medmcp-shim-error" not in out
+    assert out.count("Hello") == 1  # the healthy second attempt was never requested
+
+
+@pytest.mark.asyncio
+async def test_buffered_relay_retries_text_truncation_invisibly() -> None:
+    """The original mode: the person only ever sees the healthy attempt."""
+    truncated = _sse([_text("Hello, "), _text("wor")], done=False)
+    healthy = _sse([_text("Hello, world", "stop")], done=True)
+    out = await _collect("buffered", [truncated, healthy])
+    assert out.count("Hello") == 1
+    assert "Hello, world" in out
+    assert out.endswith("data: [DONE]\n\n")
+
+
+@pytest.mark.asyncio
+async def test_live_relay_reports_failure_after_every_attempt_truncates_invisibly() -> None:
+    """Tool-call turns that never complete still end in the labelled shim message."""
+    truncated = _sse([_call()], done=False)
+    out = await _collect("live", [truncated, truncated], attempts=2)
+    assert "medmcp-shim-error" in out
+    assert out.endswith("data: [DONE]\n\n")

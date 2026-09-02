@@ -75,3 +75,55 @@ def test_both_install_paths_agree() -> None:
     assert {n: t.get("permission") for n, t in image.get("tools", {}).items()} == {
         n: t.get("permission") for n, t in host.get("tools", {}).items()
     }
+
+
+@pytest.mark.parametrize("rel", CONFIGS)
+def test_agent_profile_keeps_edits_gated(rel: str) -> None:
+    """The agent profile is pinned to one that leaves tool permissions alone.
+
+    vibe ≥2.24 starts in ``accept-edits`` unless told otherwise, and a profile's
+    overrides are layered *above* the project config — so ``write_file`` and
+    ``edit`` would be auto-approved no matter what ``[tools.*]`` says. Checked
+    against vibe's own profile table rather than a hard-coded expectation, so a
+    future profile change that starts auto-approving something fails here too.
+    """
+    agent = _load(rel).get("default_agent")
+    assert agent == "ask", f"{rel}: default_agent must be pinned to 'ask'"
+    try:
+        from vibe.core.agents.models import (  # pyright: ignore[reportMissingTypeStubs]  # vibe ships no stubs
+            BUILTIN_AGENTS,
+        )
+    except ImportError:  # pragma: no cover - docs-only checkout
+        pytest.skip("vibe not installed")
+    profile = BUILTIN_AGENTS[agent]
+    assert not profile.overrides.get("bypass_tool_permissions")
+    tool_overrides: dict[str, Any] = profile.overrides.get("tools", {})
+    for name in MUST_ASK:
+        assert tool_overrides.get(name, {}).get("permission") in (None, "ask"), (
+            f"{rel}: the {agent!r} profile auto-approves {name}"
+        )
+
+
+@pytest.mark.parametrize("rel", CONFIGS)
+def test_bash_allowlist_survives_vibes_migration(rel: str) -> None:
+    """The one-shot allowlist migration in vibe must not re-arm the emptied allowlist.
+
+    ``[tools.bash] allowlist = []`` is deliberate: an allowlisted command runs
+    without a prompt. vibe ships a one-shot migration that unions its read-only
+    defaults into any existing allowlist unless the config records it as already
+    applied — so ``applied_migrations`` is what keeps the list empty in practice.
+    Run vibe's real migration over the shipped config to prove it.
+    """
+    cfg = _load(rel)
+    assert cfg.get("tools", {}).get("bash", {}).get("allowlist") == []
+    assert "bash_read_only_defaults_v1" in cfg.get("applied_migrations", [])
+    try:
+        from vibe.core.config._migration import (  # pyright: ignore[reportMissingTypeStubs, reportPrivateImportUsage]  # vibe ships no stubs
+            migrate_config,
+        )
+    except ImportError:  # pragma: no cover - docs-only checkout
+        pytest.skip("vibe not installed")
+    migrate_config(cfg)
+    # vibe adds `find` unconditionally (that one carries no one-shot id); the
+    # read-only defaults it would otherwise union in must stay out.
+    assert set(cfg["tools"]["bash"]["allowlist"]) <= {"find"}

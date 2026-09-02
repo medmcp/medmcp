@@ -428,6 +428,10 @@ export const Chat = memo(function Chat({
   const [status, setStatus] = useState<ChatSocketStatus>('connecting')
   const [busy, setBusy] = useState(false)
   const [model, setModel] = useState<string | null>(null)
+  // The chat's name: user-set or generated (server-owned; arrives on ready and as title frames).
+  const [title, setTitle] = useState<string | null>(null)
+  // A backend retry in flight (vibe ≥2.24 announces them); cleared by the next real frame.
+  const [retrying, setRetrying] = useState<{ category: string; detail: string } | null>(null)
   const [usage, setUsage] = useState<{ used: number; size: number | null } | null>(null)
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
   // Pending rewind confirmation: set after the preview call, cleared on
@@ -491,6 +495,7 @@ export const Chat = memo(function Chat({
       if (frame.type !== 'chunk') flushChunks()
       switch (frame.type) {
         case 'chunk':
+          setRetrying(null)
           chunkBuffer += frame.text
           if (flushTimer == null) {
             flushTimer = window.setTimeout(flushChunks, 50)
@@ -572,11 +577,22 @@ export const Chat = memo(function Chat({
           break
         case 'done':
           setBusy(false)
+          setRetrying(null)
           setPermission(null)
           onToolActivityRef.current?.()
           break
         case 'error':
+          setRetrying(null)
           setItems((prev) => [...prev, { kind: 'error', text: frame.message }])
+          break
+        case 'notice':
+          setItems((prev) => [...prev, { kind: 'notice', text: frame.text }])
+          break
+        case 'title':
+          setTitle(frame.title)
+          break
+        case 'retrying':
+          setRetrying({ category: frame.category, detail: frame.detail })
           break
         case 'user':
           // Two sources: history replay on resume, and vibe ≥2.23's echo of a
@@ -615,6 +631,8 @@ export const Chat = memo(function Chat({
           setPermission(null)
           setRewind(null)
           if (frame.model) setModel(frame.model)
+          setTitle(frame.title ?? null)
+          setRetrying(null)
           onSessionEstablishedRef.current?.(frame.sessionId)
           break
       }
@@ -712,13 +730,30 @@ export const Chat = memo(function Chat({
               currentSessionId={currentSessionId ?? null}
               onSelectSession={onSelectSession}
               onCurrentDeleted={onNewChat ?? (() => undefined)}
+              // A rename of the open chat shows in the header at once; a cleared
+              // name drops it until the next generated title lands.
+              onRenamed={(id, t) => {
+                if (id === currentSessionId) setTitle(t || null)
+              }}
             />
           )}
         </span>
+        {/* The chat's name takes the slack between the controls and the meta,
+            so it never shifts either group; it truncates instead of growing. */}
+        {title && (
+          <span className="chat-title" title={title}>
+            {title}
+          </span>
+        )}
         <span className="panel-actions chat-meta">
           {model != null && <span className="model-name">{model}</span>}
           {usage != null && <ContextMeter used={usage.used} size={usage.size} />}
-          <span className={`conn conn-${status}`}>{status === 'open' ? 'running' : status}</span>
+          <span
+            className={`conn conn-${retrying ? 'retrying' : status}`}
+            title={retrying ? `${retrying.category}: ${retrying.detail}` : undefined}
+          >
+            {retrying ? 'retrying…' : status === 'open' ? 'running' : status}
+          </span>
         </span>
       </div>
       <div className="panel-body chat-scroll">
@@ -787,6 +822,13 @@ export const Chat = memo(function Chat({
           if (item.kind === 'error') {
             return (
               <div key={i} className="msg-error">
+                {item.text}
+              </div>
+            )
+          }
+          if (item.kind === 'notice') {
+            return (
+              <div key={i} className="msg-notice">
                 {item.text}
               </div>
             )

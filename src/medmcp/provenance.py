@@ -344,11 +344,15 @@ def find_vibe_session_dir(session_id: str) -> Path | None:
 def find_vibe_session_dirs(session_id: str, *, stop_ids: Collection[str] = ()) -> list[Path]:
     """Locate *session_id*'s log dir plus its compaction continuations, in order.
 
-    On context compaction vibe rolls the conversation over to a fresh session id
-    and dir, recording the predecessor as ``parent_session_id`` in the new dir's
-    ``meta.json``. Following those backlinks (vibe ≥2.21 writes them) yields the
-    whole chain — original first, then each continuation in creation order — so
-    purge and distillation see one chat, not just its pre-compaction prefix.
+    On context compaction vibe 2.21 to 2.23 rolled the conversation over to a fresh
+    session id and dir, recording the predecessor as ``parent_session_id`` in
+    the new dir's ``meta.json``. Following those backlinks yields the whole
+    chain — original first, then each continuation in creation order — so purge
+    and distillation see one chat, not just its pre-compaction prefix. Since
+    vibe 2.24 compaction happens in place (a summary envelope is appended to the
+    same transcript), so new chats never grow a chain; the walk stays for the
+    transcripts that already have one, and the single-dir case is just a chain
+    of length one.
 
     ``stop_ids`` marks children that are chats in their own right and must not
     be walked into: a **fork** carries the same ``parent_session_id`` backlink
@@ -438,6 +442,25 @@ def vibe_session_title(session_id: str) -> str | None:
         return None
     data = _read_session_meta(d)
     title = data.get("title") if data is not None else None
+    return title if isinstance(title, str) and title.strip() else None
+
+
+def vibe_manual_session_title(session_id: str) -> str | None:
+    """Return the session's title if vibe records it as user-set, else ``None``.
+
+    vibe marks a title applied through ``_session/set_title`` as
+    ``title_source: "manual"`` in ``meta.json`` (its own background titling
+    never overwrites one). The workspace writes every rename through, so this
+    is a second record of "the user named this chat" that survives the UI
+    session registry — which lives in the container layer — being reset.
+    """
+    d = find_vibe_session_dir(session_id)
+    if d is None:
+        return None
+    data = _read_session_meta(d)
+    if data is None or data.get("title_source") != "manual":
+        return None
+    title = data.get("title")
     return title if isinstance(title, str) and title.strip() else None
 
 

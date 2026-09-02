@@ -75,3 +75,41 @@ def test_writes_are_valid_json(registry_path: Path) -> None:
     sessions.set_title("s1", "Title")
     data = json.loads(registry_path.read_text(encoding="utf-8"))
     assert data == {"s1": {"title": "Title"}}
+
+
+def test_auto_title_is_stored_and_marked() -> None:
+    """A generated title lands with its source, so it can be told from a user's."""
+    assert sessions.set_auto_title("s1", " Skull-strip subject 12 ") is True
+    assert sessions.get_entry("s1") == {"title": "Skull-strip subject 12", "title_source": "auto"}
+    assert sessions.has_manual_title(sessions.get_entry("s1")) is False
+
+
+def test_auto_title_never_overwrites_a_manual_one() -> None:
+    """The user's name for a chat wins over anything generated later."""
+    sessions.set_title("s1", "My pipeline")
+    assert sessions.set_auto_title("s1", "Generated") is False
+    assert sessions.get_entry("s1") == {"title": "My pipeline"}
+
+
+def test_manual_rename_replaces_auto_title_and_its_marker() -> None:
+    """Renaming a generated title makes it manual; clearing drops both."""
+    sessions.set_auto_title("s1", "Generated")
+    sessions.set_title("s1", "Chosen")
+    assert sessions.get_entry("s1") == {"title": "Chosen"}
+    assert sessions.has_manual_title(sessions.get_entry("s1")) is True
+    sessions.set_title("s1", "")
+    assert sessions.get_entry("s1") == {}
+    assert sessions.set_auto_title("s1", "Generated again") is True
+
+
+def test_repeated_auto_title_is_a_no_op() -> None:
+    """The same generated title twice reports no change (nothing to push)."""
+    assert sessions.set_auto_title("s1", "Same") is True
+    assert sessions.set_auto_title("s1", "Same") is False
+    assert sessions.set_auto_title("s1", "   ") is False
+
+
+def test_pre_feature_title_counts_as_manual() -> None:
+    """Entries written before generated titles existed carry no source: manual."""
+    assert sessions.has_manual_title({"title": "Old"}) is True
+    assert sessions.has_manual_title({}) is False

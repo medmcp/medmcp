@@ -77,7 +77,13 @@ def _update(session_id: str, mutate: Callable[[JsonDict], None]) -> None:
 
 
 def set_title(session_id: str, title: str) -> None:
-    """Set the user's title override, or clear it when *title* is blank."""
+    """Set the user's title override, or clear it when *title* is blank.
+
+    A user-set title carries no ``title_source`` — the same shape entries had
+    before generated titles existed — so :func:`has_manual_title` treats both
+    alike. Clearing drops any generated title too, so the next refresh may
+    name the chat again.
+    """
 
     def _mutate(entry: JsonDict) -> None:
         cleaned = title.strip()
@@ -85,8 +91,38 @@ def set_title(session_id: str, title: str) -> None:
             entry["title"] = cleaned
         else:
             entry.pop("title", None)
+        entry.pop("title_source", None)
 
     _update(session_id, _mutate)
+
+
+def has_manual_title(entry: JsonDict) -> bool:
+    """Whether *entry* carries a title the user chose (any title not marked auto)."""
+    return bool(entry.get("title")) and entry.get("title_source") != "auto"
+
+
+def set_auto_title(session_id: str, title: str) -> bool:
+    """Store a generated title unless the user named the chat themselves.
+
+    Returns ``True`` when the stored title changed. A manual title always wins
+    — generation never second-guesses a name the person typed — and a repeat
+    of the current generated title is a no-op so callers can skip the UI push.
+    """
+    cleaned = title.strip()
+    if not cleaned:
+        return False
+    changed = False
+
+    def _mutate(entry: JsonDict) -> None:
+        nonlocal changed
+        if has_manual_title(entry) or entry.get("title") == cleaned:
+            return
+        entry["title"] = cleaned
+        entry["title_source"] = "auto"
+        changed = True
+
+    _update(session_id, _mutate)
+    return changed
 
 
 def set_archived(session_id: str, archived: bool) -> None:

@@ -411,3 +411,21 @@ class TestReport:
             provenance.append_run_event(SESSION_ID, {"server": "builtin", "tool": "bash"})
             path = provenance.write_report(SESSION_ID)
         assert path is not None and path.name == "report.md" and path.exists()
+
+
+def test_vibe_manual_session_title_only_for_user_set_titles(tmp_path: Path) -> None:
+    """Only a title vibe marks ``manual`` counts as the user's; auto/absent → None."""
+    sid = "abcd1234-1111-2222-3333-444455556666"
+    sess = tmp_path / "logs" / "session" / f"session_20260902_{sid[:8]}"
+    sess.mkdir(parents=True)
+    meta = sess / "meta.json"
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        meta.write_text(json.dumps({"session_id": sid, "title": "Auto", "title_source": "auto"}))
+        assert provenance.vibe_manual_session_title(sid) is None
+        meta.write_text(
+            json.dumps({"session_id": sid, "title": " My chat ", "title_source": "manual"})
+        )
+        assert provenance.vibe_manual_session_title(sid) == " My chat "
+        meta.write_text(json.dumps({"session_id": sid, "title": "", "title_source": "manual"}))
+        assert provenance.vibe_manual_session_title(sid) is None
+        assert provenance.vibe_manual_session_title("missing-id") is None

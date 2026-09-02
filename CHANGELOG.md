@@ -6,6 +6,24 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+## 0.2.2 — 2026-09-02
+
+### Added
+
+- Chats are given a descriptive title after the first reply and refined once a few turns later. A name you set yourself is kept.
+- Replies stream as they are written again; the model-server proxy keeps repairing tool calls.
+- The chat says when the model server is being retried, and when a turn stopped at its step limit.
+
+### Changed
+
+- mistral-vibe 2.24.5 and Ollama 0.33.2 (`docker compose` installs now pin the tested Ollama release; 0.32.15 is the minimum for host installs).
+- The Chats menu is wider and stays fully on screen at any window size.
+
+### Security
+
+- File writes and edits keep asking for approval. The updated agent runtime would otherwise have approved them automatically.
+- Host installs: the read-only shell-command allowlist no longer re-fills itself on every start.
+
 ## 0.2.1 — 2026-08-25
 
 ### Changed

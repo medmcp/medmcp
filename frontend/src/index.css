@@ -1701,11 +1701,10 @@ button:hover {
 }
 
 .chats-menu-popover {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  width: 300px;
-  max-height: 340px;
+  /* Rendered at document level and placed from the trigger's rectangle
+     (ChatsMenu.placePopover): top/left/width/max-height are set inline, so
+     it neither inherits the chat panel's clipping nor runs off the viewport. */
+  position: fixed;
   overflow: auto;
   z-index: 31;
   padding: 8px 10px;
@@ -3136,4 +3135,41 @@ textarea.wf-input {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* Generated (or user-set) chat title in the chat header. It fills the slack
+   between the left controls and the right-hand meta and truncates, so neither
+   group moves when a title appears, changes, or disappears. */
+.chat-title {
+  flex: 1 1 0;
+  min-width: 0;
+  text-align: center;
+  color: var(--muted);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A backend retry in progress: same badge, warning colour, the reason as a tooltip. */
+.conn-retrying {
+  color: var(--warn);
+}
+
+.conn-retrying::before {
+  background: var(--warn);
+  animation: blink 1.4s ease-in-out infinite;
+}
+
+/* A non-error note from the server (e.g. the turn stopped at the step limit). */
+.msg-notice {
+  align-self: stretch;
+  max-width: none;
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12.5px;
 }

@@ -20,6 +20,10 @@ file_watcher_for_autocomplete = false
 auto_compact_threshold = 115000
 context_warnings = false
 auto_approve = false
+# vibe ≥2.24 starts in its accept-edits profile unless told otherwise, and a
+# profile's overrides sit above this file — write_file/edit would be "always"
+# no matter what [tools.*] says. ask keeps every edit behind the prompt.
+default_agent = "ask"
 system_prompt_id = "medmcp"
 include_commit_signature = true
 include_model_info = true
@@ -44,6 +48,8 @@ disabled_skills = [
     "skill-creator",
     "vibe",
 ]
+# vibe's one-shot allowlist migration otherwise unions its read-only defaults
+# into the deliberately empty [tools.bash] allowlist on every start.
 applied_migrations = [
     "bash_read_only_defaults_v1",
 ]

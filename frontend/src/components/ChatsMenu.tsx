@@ -1,7 +1,51 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { archiveSession, deleteSession, fetchSessions, forkSession, renameSession } from '../api'
 import type { SessionInfo } from '../types'
 import { ArchiveIcon, BranchIcon, ChevronRightIcon, PencilIcon, TrashIcon } from './icons'
+
+/** Where the popover goes, in viewport pixels (it is rendered at document level). */
+interface Placement {
+  top: number
+  left: number
+  width: number
+  maxHeight: number
+}
+
+const POPOVER_WIDTH = 640
+const POPOVER_MAX_HEIGHT = 480
+const POPOVER_GAP = 6
+const VIEWPORT_MARGIN = 12
+
+/**
+ * Place the popover relative to the trigger's on-screen rectangle.
+ *
+ * The chat panel clips its overflow and is a containment root, so anything
+ * positioned inside it — even `position: fixed` — is cut at the panel edge;
+ * with the browser at half a monitor that hid most of the list. The popover
+ * is therefore portalled to the document and placed here: as wide as fits,
+ * shifted left when the trigger sits near the right edge, and flipped above
+ * the trigger when there is more room there than below (the chat panel is
+ * the bottom one, so "below" can be a few rows).
+ */
+function placePopover(rect: DOMRect): Placement {
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  const width = Math.min(POPOVER_WIDTH, vw - 2 * VIEWPORT_MARGIN)
+  const left = Math.max(VIEWPORT_MARGIN, Math.min(rect.left, vw - width - VIEWPORT_MARGIN))
+  const below = vh - rect.bottom - POPOVER_GAP - VIEWPORT_MARGIN
+  const above = rect.top - POPOVER_GAP - VIEWPORT_MARGIN
+  if (below < 200 && above > below) {
+    const maxHeight = Math.min(POPOVER_MAX_HEIGHT, above)
+    return { top: rect.top - POPOVER_GAP - maxHeight, left, width, maxHeight }
+  }
+  return {
+    top: rect.bottom + POPOVER_GAP,
+    left,
+    width,
+    maxHeight: Math.max(120, Math.min(POPOVER_MAX_HEIGHT, below)),
+  }
+}
 
 interface ChatsMenuProps {
   /** The session the chat is currently showing (highlighted in the list). */
@@ -10,6 +54,8 @@ interface ChatsMenuProps {
   onSelectSession: (id: string) => void
   /** Called when the currently-open session is deleted, so a fresh chat opens. */
   onCurrentDeleted: () => void
+  /** Called after a rename was saved (empty title = cleared), so other views follow. */
+  onRenamed?: (id: string, title: string) => void
 }
 
 /** Coarse day bucket for the list headers, from an ISO timestamp. */
@@ -39,13 +85,30 @@ function timeLabel(iso: string | null): string {
  * archive, or delete from per-row actions; reveal archived ones to restore or
  * delete. Sessions load each time the menu opens.
  */
-export function ChatsMenu({ currentSessionId, onSelectSession, onCurrentDeleted }: ChatsMenuProps) {
+export function ChatsMenu({
+  currentSessionId,
+  onSelectSession,
+  onCurrentDeleted,
+  onRenamed,
+}: ChatsMenuProps) {
   const [open, setOpen] = useState(false)
   const [list, setList] = useState<SessionInfo[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [showArchived, setShowArchived] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const [placement, setPlacement] = useState<Placement | null>(null)
+
+  const toggle = () => {
+    if (open) {
+      setOpen(false)
+      return
+    }
+    const el = triggerRef.current
+    if (el) setPlacement(placePopover(el.getBoundingClientRect()))
+    setOpen(true)
+  }
 
   const load = () => {
     fetchSessions()
@@ -66,8 +129,17 @@ export function ChatsMenu({ currentSessionId, onSelectSession, onCurrentDeleted 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false)
     }
+    // Re-place on resize: the window may shrink or grow while the list is open.
+    const onResize = () => {
+      const el = triggerRef.current
+      if (el) setPlacement(placePopover(el.getBoundingClientRect()))
+    }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('resize', onResize)
+    }
   }, [open])
 
   const act = (op: Promise<void>) => {
@@ -77,7 +149,14 @@ export function ChatsMenu({ currentSessionId, onSelectSession, onCurrentDeleted 
   const commitRename = (id: string) => {
     const title = editValue.trim()
     setEditingId(null)
-    act(renameSession(id, title))
+    // The editor opens pre-filled with the row's current title, which may be
+    // the server's fallback (vibe's first-message preview) or a generated
+    // title rather than a name the user chose. Committing it unchanged — a
+    // blur, an Enter without edits — must not turn that into a user-set
+    // title: a user-set title pins the chat and stops title generation.
+    const current = list?.find((s) => s.id === id)?.title ?? ''
+    if (title === current) return
+    act(renameSession(id, title).then(() => onRenamed?.(id, title)))
   }
 
   const confirmDelete = (id: string) => {
@@ -198,17 +277,28 @@ export function ChatsMenu({ currentSessionId, onSelectSession, onCurrentDeleted 
   return (
     <div className="chats-menu">
       <button
+        ref={triggerRef}
         className="btn-plain chats-menu-trigger"
         title="Open a previous chat"
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggle}
       >
         Chats
         <ChevronRightIcon size={11} className="chats-caret" />
       </button>
-      {open && (
-        <>
-          <div className="chats-menu-backdrop" onClick={() => setOpen(false)} />
-          <div className="chats-menu-popover">
+      {open &&
+        placement &&
+        createPortal(
+          <>
+            <div className="chats-menu-backdrop" onClick={() => setOpen(false)} />
+            <div
+              className="chats-menu-popover"
+              style={{
+                top: placement.top,
+                left: placement.left,
+                width: placement.width,
+                maxHeight: placement.maxHeight,
+              }}
+            >
             {error && <div className="panel-error">{error}</div>}
             {list == null ? (
               <div className="chats-menu-empty">Loading…</div>
@@ -231,8 +321,9 @@ export function ChatsMenu({ currentSessionId, onSelectSession, onCurrentDeleted 
               </>
             )}
           </div>
-        </>
-      )}
+          </>,
+          document.body,
+        )}
     </div>
   )
 }

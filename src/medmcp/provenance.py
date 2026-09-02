@@ -344,11 +344,15 @@ def find_vibe_session_dir(session_id: str) -> Path | None:
 def find_vibe_session_dirs(session_id: str, *, stop_ids: Collection[str] = ()) -> list[Path]:
     """Locate *session_id*'s log dir plus its compaction continuations, in order.
 
-    On context compaction vibe rolls the conversation over to a fresh session id
-    and dir, recording the predecessor as ``parent_session_id`` in the new dir's
-    ``meta.json``. Following those backlinks (vibe ≥2.21 writes them) yields the
-    whole chain — original first, then each continuation in creation order — so
-    purge and distillation see one chat, not just its pre-compaction prefix.
+    On context compaction vibe 2.21 to 2.23 rolled the conversation over to a fresh
+    session id and dir, recording the predecessor as ``parent_session_id`` in
+    the new dir's ``meta.json``. Following those backlinks yields the whole
+    chain — original first, then each continuation in creation order — so purge
+    and distillation see one chat, not just its pre-compaction prefix. Since
+    vibe 2.24 compaction happens in place (a summary envelope is appended to the
+    same transcript), so new chats never grow a chain; the walk stays for the
+    transcripts that already have one, and the single-dir case is just a chain
+    of length one.
 
     ``stop_ids`` marks children that are chats in their own right and must not
     be walked into: a **fork** carries the same ``parent_session_id`` backlink

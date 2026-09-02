@@ -3137,3 +3137,34 @@ textarea.wf-input {
   justify-content: flex-end;
   gap: 8px;
 }
+
+/* Generated (or user-set) chat title in the chat header, next to the panel name. */
+.chat-title {
+  color: var(--muted);
+  font-weight: 400;
+  max-width: 34ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A backend retry in progress: same badge, warning colour, the reason as a tooltip. */
+.conn-retrying {
+  color: var(--warn);
+}
+
+.conn-retrying::before {
+  background: var(--warn);
+  animation: blink 1.4s ease-in-out infinite;
+}
+
+/* A non-error note from the server (e.g. the turn stopped at the step limit). */
+.msg-notice {
+  align-self: stretch;
+  max-width: none;
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+}

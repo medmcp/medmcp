@@ -6,6 +6,20 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Added
+
+- Chats get a generated title after the first reply, refined as the conversation develops; a name you type always wins.
+- The chat shows when the model backend is being retried, and says so when a turn stopped at the step limit.
+
+### Changed
+
+- mistral-vibe 2.24.5, plus routine dependency updates.
+
+### Fixed
+
+- vibe 2.24 would auto-approve file edits regardless of the tool permissions in the config; the agent profile is now pinned to one that asks.
+- Host install: vibe's one-shot bash-allowlist migration no longer re-populates the deliberately empty allowlist on every start (the container config already pinned it).
+
 ## 0.2.1 — 2026-08-25
 
 ### Changed

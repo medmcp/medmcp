@@ -63,6 +63,7 @@ from medmcp import (
     sessions,
     settings,
     share,
+    titles,
     workflow,
 )
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict, VibeAcpClient
@@ -1247,8 +1248,11 @@ async def ws_replay(ws: WebSocket) -> None:
 # Wire protocol (JSON messages):
 #
 #   server → client
-#     {"type": "ready", "sessionId": str, "model": str}
+#     {"type": "ready", "sessionId": str, "model": str, "title": str | None}
 #     {"type": "chunk", "text": str}
+#     {"type": "title", "title": str}            # a generated chat title landed
+#     {"type": "retrying", "category": str, "detail": str}  # vibe is retrying the model
+#     {"type": "notice", "text": str}            # non-error note, e.g. the turn limit
 #     {"type": "tool_call", "toolCallId": str, "title": str, "status": str,
 #      "kind": str | None, "rawInput": object}
 #     {"type": "tool_call_update", "toolCallId": str, "status": str | None,
@@ -1448,6 +1452,10 @@ class _ChatConnection:
         self._thoughts = ThoughtStripper()
         # In-flight explanation tasks, kept so they aren't GC'd mid-run.
         self._explain_tasks: set[asyncio.Task[None]] = set()
+        # Generated chat titles: when one is due (per completed turn) and the
+        # background refresh in flight, if any (see _schedule_title).
+        self._title_cadence = titles.TitleCadence()
+        self._title_tasks: set[asyncio.Task[None]] = set()
         self._prompted: bool = False
 
     async def run(self) -> None:
@@ -1491,7 +1499,7 @@ class _ChatConnection:
         """
         await self._stop_idle_pump()
         await self._cancel_prompt()
-        for task in list(self._explain_tasks):
+        for task in [*self._explain_tasks, *self._title_tasks]:
             task.cancel()
         _client.unregister_session(self.session_id)
         if not self._prompted and not self._resumed:
@@ -1640,6 +1648,7 @@ class _ChatConnection:
             }
         prompt_fut = asyncio.create_task(_client.request("session/prompt", params))
         self._thoughts.reset()  # start each turn with a clean reasoning-strip state
+        turn_ok = False
         try:
             while True:
                 get_task: asyncio.Task[JsonDict] = asyncio.create_task(self.queue.get())
@@ -1659,11 +1668,18 @@ class _ChatConnection:
                 if "error" in resp:
                     err = cast("JsonDict", resp["error"])
                     await self._send({"type": "error", "message": str(err.get("message", err))})
+                else:
+                    turn_ok = True
+                    notice = _turn_limit_notice(resp)
+                    if notice is not None:
+                        await self._send({"type": "notice", "text": notice})
                 break
             tail = self._thoughts.flush()  # emit any real text held back at a tag boundary
             if tail:
                 await self._send({"type": "chunk", "text": tail})
             await self._send({"type": "done"})
+            if turn_ok:
+                self._schedule_title()
         except asyncio.CancelledError:
             # Deliberately no `done` frame: when a new prompt superseded this
             # one, a stale done would reset the client's busy/permission state
@@ -1679,6 +1695,60 @@ class _ChatConnection:
                 await _client.notify("session/cancel", {"session_id": self.session_id})
             await self._send({"type": "error", "message": str(exc)})
             await self._send({"type": "done"})
+
+    def _schedule_title(self) -> None:
+        """Start a background title refresh when one is due; never blocks the turn.
+
+        Called after each turn that ended normally. The cadence decides (first
+        completed turn, then bounded periodic refreshes); everything that reads
+        or writes state happens inside the task, off the frame path.
+        """
+        if not titles.enabled():
+            return
+        ticket = self._title_cadence.begin_if_due()
+        if ticket is None:
+            return
+        task = asyncio.create_task(self._refresh_title(ticket))
+        self._title_tasks.add(task)
+        task.add_done_callback(self._title_tasks.discard)
+
+    async def _refresh_title(self, ticket: titles.TitleTicket) -> None:
+        """Generate a title from the transcript and push it if it changed.
+
+        A name the user typed always wins — the refresh backs off entirely once
+        one exists. A refresh that yields nothing (model outage, transcript not
+        flushed yet) hands its slot back so the next turn retries. The result
+        is written through to vibe's own session metadata as well (best-effort)
+        so its resume picker shows the same name.
+        """
+        cid = self.canonical_id
+        try:
+            entry = await asyncio.to_thread(sessions.get_entry, cid)
+            if sessions.has_manual_title(entry):
+                return
+            previous = entry.get("title")
+            messages = await asyncio.to_thread(
+                lambda: titles.load_session_messages(cid, stop_ids=_chain_stop_ids(cid))
+            )
+            title = await titles.generate_title(
+                messages, previous_title=previous if isinstance(previous, str) else None
+            )
+            if title is None:
+                self._title_cadence.restore(ticket)
+                return
+            changed = await asyncio.to_thread(sessions.set_auto_title, cid, title)
+            if not changed:
+                return
+            await self._send({"type": "title", "title": title})
+            with contextlib.suppress(Exception):
+                await _client.request(
+                    "_session/set_title", {"sessionId": self.session_id, "title": title}
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._title_cadence.restore(ticket)
+            _audit.warning("chat title refresh failed", exc_info=True)
 
     async def _forward_frame(self, msg: JsonDict, *, replay: bool = False) -> None:
         """Translate one inbound vibe-acp frame into a browser message.
@@ -1791,6 +1861,11 @@ class _ChatConnection:
                     await self._send({"type": "usage", "used": used, "size": _usage_window(update)})
         elif method == "session/request_permission":
             await self._handle_permission(msg)
+        elif method == "_session/retrying":
+            # vibe ≥2.24 announces a backend retry (rate limit, connection,
+            # timeout) instead of going quiet; without this the chat looks
+            # frozen for exactly as long as the retry backoff runs.
+            await self._send(_retrying_frame(msg))
 
     async def _handle_permission(self, msg: JsonDict) -> None:
         """Forward a permission request to the browser and relay the decision.
@@ -1951,6 +2026,39 @@ class _ChatConnection:
 
 
 # ── Sessions API ───────────────────────────────────────────
+
+
+def _retrying_frame(msg: JsonDict) -> JsonDict:
+    """Browser frame for vibe's ``_session/retrying`` notification.
+
+    vibe ≥2.24 sends ``{sessionId, category, detail}`` while it backs off and
+    retries the model backend; ``category`` is one of rate_limited,
+    server_error, timed_out, connection, unknown.
+    """
+    params = msg.get("params")
+    params = cast("JsonDict", params) if isinstance(params, dict) else {}
+    return {
+        "type": "retrying",
+        "category": str(params.get("category") or "unknown"),
+        "detail": str(params.get("detail") or ""),
+    }
+
+
+def _turn_limit_notice(resp: JsonDict) -> str | None:
+    """A user-facing note when a turn ended on vibe's step limit, else ``None``.
+
+    Since vibe 2.24 hitting the per-turn limit is a normal ``session/prompt``
+    response with ``stopReason: max_turn_requests`` rather than an error, so a
+    turn that simply stopped mid-task would otherwise look finished.
+    """
+    result = resp.get("result")
+    result = cast("JsonDict", result) if isinstance(result, dict) else {}
+    if result.get("stopReason") == "max_turn_requests":
+        return (
+            "The agent stopped at the per-turn step limit before finishing. "
+            "Send a follow-up (for example “continue”) to pick up where it left off."
+        )
+    return None
 
 
 def _chain_stop_ids(session_id: str) -> set[str]:
@@ -2288,8 +2396,18 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
             ws, session_id, queue, servers, resumed=replayed, canonical_id=canonical_id
         )
         _connections.add(conn)
+        # The chat's current title (user-set or generated), so a resumed chat
+        # shows its name before the next refresh lands.
+        current_title = await asyncio.to_thread(
+            lambda: sessions.get_entry(conn.canonical_id).get("title")
+        )
         await ws.send_json(
-            {"type": "ready", "sessionId": conn.canonical_id, "model": settings.OLLAMA_MODEL}
+            {
+                "type": "ready",
+                "sessionId": conn.canonical_id,
+                "model": settings.OLLAMA_MODEL,
+                "title": current_title if isinstance(current_title, str) else None,
+            }
         )
         if replayed:
             await conn.replay_history()

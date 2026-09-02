@@ -219,6 +219,8 @@ export type ChatItem =
   | { kind: 'assistant'; text: string }
   | { kind: 'tool'; toolCallId: string }
   | { kind: 'error'; text: string }
+  // A non-error note from the server (e.g. the turn stopped at the step limit).
+  | { kind: 'notice'; text: string }
 
 /** What a rewind would restore (preview) / did restore (perform). */
 export interface RewindResult {
@@ -230,8 +232,13 @@ export interface RewindResult {
 
 /** Frames the server sends over /ws/chat. */
 export type ServerFrame =
-  | { type: 'ready'; sessionId: string; model?: string }
+  | { type: 'ready'; sessionId: string; model?: string; title?: string | null }
   | { type: 'chunk'; text: string }
+  /** A generated chat title landed (a user-set name is never overwritten). */
+  | { type: 'title'; title: string }
+  /** vibe is backing off and retrying the model backend. */
+  | { type: 'retrying'; category: string; detail: string }
+  | { type: 'notice'; text: string }
   // A user turn: replayed from a resumed session (session/load), or vibe's
   // echo of a live prompt (merged into the locally-rendered bubble by id).
   | { type: 'user'; text: string; messageId?: string }

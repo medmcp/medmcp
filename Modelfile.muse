@@ -12,7 +12,9 @@
 # temperature of their own — the explain and distill passes.
 # repeat_penalty + repeat_last_n guard against open-ended generation loops.
 #
-# Needs Ollama >= 0.32.9; older builds reject the manifest with a 412.
+# Needs Ollama >= 0.32.15: 0.32.9 was the first build to accept the manifest
+# (older ones reject it with a 412), and 0.32.15 the first where a tool-call
+# parser error mid-stream no longer wedges the chat.
 #
 # Build with:
 #   ollama create muse-medmcp -f Modelfile.muse

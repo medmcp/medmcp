@@ -6,20 +6,23 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+## 0.2.2 — 2026-09-02
+
 ### Added
 
-- Chats get a generated title after the first reply, refined as the conversation develops; a name you type always wins.
-- The chat shows when the model backend is being retried, and says so when a turn stopped at the step limit.
-- Replies stream again as they are written: the model-server shim now holds back only tool calls while it checks a turn is healthy (`MEDMCP_SHIM_RELAY=buffered` restores the old behaviour).
+- Chats are given a descriptive title after the first reply and refined once a few turns later. A name you set yourself is kept.
+- Replies stream as they are written again; the model-server proxy keeps repairing tool calls.
+- The chat says when the model server is being retried, and when a turn stopped at its step limit.
 
 ### Changed
 
-- mistral-vibe 2.24.5, plus routine dependency updates.
+- mistral-vibe 2.24.5.
+- The Chats menu is wider and stays fully on screen at any window size.
 
-### Fixed
+### Security
 
-- vibe 2.24 would auto-approve file edits regardless of the tool permissions in the config; the agent profile is now pinned to one that asks.
-- Host install: vibe's one-shot bash-allowlist migration no longer re-populates the deliberately empty allowlist on every start (the container config already pinned it).
+- File writes and edits keep asking for approval. The updated agent runtime would otherwise have approved them automatically.
+- Host installs: the read-only shell-command allowlist no longer re-fills itself on every start.
 
 ## 0.2.1 — 2026-08-25
 

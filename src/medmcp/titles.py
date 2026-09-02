@@ -52,18 +52,20 @@ SYSTEM_PROMPT = (
     "session is about.\n\n"
     "Rules:\n"
     "- 3 to 8 words. No trailing period.\n"
-    "- Name the task or the data, not the request: describe what is being worked on, "
-    "not that the user asked for it.\n"
-    "- Prefer specific nouns from the transcript — modality, pipeline step, subject, "
-    'file — over generic phrases. "Skull-strip and register subject 12" beats '
-    '"Process an image".\n'
+    "- Name the task or topic, not the request: describe what is being worked on or "
+    "discussed, not that the user asked for it.\n"
+    "- Prefer specific nouns from the transcript (modality, pipeline step, subject, "
+    'file, capability) over generic phrases. "Skull-strip and register subject 12" '
+    'beats "Process an image".\n'
+    "- A conversation with no processing task still gets a topical title, e.g. "
+    '"MedMCP capabilities overview".\n'
     "- Plain text only, in sentence case. No quotes, backticks, markdown, code fences, "
     "or emoji.\n"
     "- Always answer in English; translate the intent of a transcript in another "
     "language rather than transliterating it.\n"
     "- If a `Current title:` is given, keep it unless the session's focus has clearly "
     "shifted, in which case refine it.\n"
-    "- If the transcript is empty or describes no task, answer `New chat`.\n\n"
+    "- Only if the transcript is empty, answer `New chat`.\n\n"
     "Respond with ONLY the title, on one line, with no quotes or explanation."
 )
 
@@ -89,9 +91,13 @@ class TitlePolicy:
     head_transcript_chars: int = 1500
     max_message_chars: int = 2000
     max_tool_result_chars: int = 400
-    # Request budget and response size for the background call.
+    # Request budget and generation cap for the background call. The cap
+    # covers the model's hidden reasoning too: with thinking off, Ollama drops
+    # the reasoning tokens Muse Glimmer emits before its answer, and a title
+    # measured live costs ~110-230 of them — a cap sized for the title alone
+    # returns empty content with done_reason "length".
     timeout_seconds: float = 20.0
-    max_tokens: int = 96
+    max_tokens: int = 384
     # Result shaping: hard length cap and answers treated as "nothing usable".
     max_title_chars: int = 72
     generic_titles: frozenset[str] = frozenset({"new chat", "new session", "untitled"})

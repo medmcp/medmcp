@@ -77,6 +77,13 @@ export function ChatsMenu({ currentSessionId, onSelectSession, onCurrentDeleted 
   const commitRename = (id: string) => {
     const title = editValue.trim()
     setEditingId(null)
+    // The editor opens pre-filled with the row's current title, which may be
+    // the server's fallback (vibe's first-message preview) or a generated
+    // title rather than a name the user chose. Committing it unchanged — a
+    // blur, an Enter without edits — must not turn that into a user-set
+    // title: a user-set title pins the chat and stops title generation.
+    const current = list?.find((s) => s.id === id)?.title ?? ''
+    if (title === current) return
     act(renameSession(id, title))
   }
 

@@ -1701,13 +1701,10 @@ button:hover {
 }
 
 .chats-menu-popover {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  /* Wide enough to read a generated title and its time on one row; the
-     viewport clamp keeps it on screen when the chat panel is narrow. */
-  width: min(640px, calc(100vw - 48px));
-  max-height: min(40vh, 480px);
+  /* Rendered at document level and placed from the trigger's rectangle
+     (ChatsMenu.placePopover): top/left/width/max-height are set inline, so
+     it neither inherits the chat panel's clipping nor runs off the viewport. */
+  position: fixed;
   overflow: auto;
   z-index: 31;
   padding: 8px 10px;
@@ -3140,11 +3137,17 @@ textarea.wf-input {
   gap: 8px;
 }
 
-/* Generated (or user-set) chat title in the chat header, next to the panel name. */
+/* Generated (or user-set) chat title in the chat header. It fills the slack
+   between the left controls and the right-hand meta and truncates, so neither
+   group moves when a title appears, changes, or disappears. */
 .chat-title {
+  flex: 1 1 0;
+  min-width: 0;
+  text-align: center;
   color: var(--muted);
   font-weight: 400;
-  max-width: 34ch;
+  text-transform: none;
+  letter-spacing: normal;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

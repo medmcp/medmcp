@@ -719,11 +719,6 @@ export const Chat = memo(function Chat({
       <div className="panel-header">
         <span className="chat-head-left">
           <span>Chat</span>
-          {title && (
-            <span className="chat-title" title={title}>
-              {title}
-            </span>
-          )}
           {onNewChat && (
             <button className="btn-plain chat-new-btn" onClick={onNewChat} title="Start a new chat">
               <PlusIcon size={12} />
@@ -738,6 +733,13 @@ export const Chat = memo(function Chat({
             />
           )}
         </span>
+        {/* The chat's name takes the slack between the controls and the meta,
+            so it never shifts either group; it truncates instead of growing. */}
+        {title && (
+          <span className="chat-title" title={title}>
+            {title}
+          </span>
+        )}
         <span className="panel-actions chat-meta">
           {model != null && <span className="model-name">{model}</span>}
           {usage != null && <ContextMeter used={usage.used} size={usage.size} />}

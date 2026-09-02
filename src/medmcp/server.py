@@ -1456,6 +1456,9 @@ class _ChatConnection:
         # background refresh in flight, if any (see _schedule_title).
         self._title_cadence = titles.TitleCadence()
         self._title_tasks: set[asyncio.Task[None]] = set()
+        # Set once a user-chosen title is seen: generation never runs again on
+        # this connection (a person's name for a chat is final).
+        self._title_locked = False
         self._prompted: bool = False
 
     async def run(self) -> None:
@@ -1703,7 +1706,7 @@ class _ChatConnection:
         completed turn, then bounded periodic refreshes); everything that reads
         or writes state happens inside the task, off the frame path.
         """
-        if not titles.enabled():
+        if not titles.enabled() or self._title_locked:
             return
         ticket = self._title_cadence.begin_if_due()
         if ticket is None:
@@ -1715,16 +1718,27 @@ class _ChatConnection:
     async def _refresh_title(self, ticket: titles.TitleTicket) -> None:
         """Generate a title from the transcript and push it if it changed.
 
-        A name the user typed always wins — the refresh backs off entirely once
-        one exists. A refresh that yields nothing (model outage, transcript not
-        flushed yet) hands its slot back so the next turn retries. The result
-        is written through to vibe's own session metadata as well (best-effort)
-        so its resume picker shows the same name.
+        A name the user typed always wins — the refresh backs off for good once
+        one exists. Two records are consulted: the UI session registry, and
+        vibe's own session metadata, which every rename is written through to
+        and which lives on a persisted volume in a container; if the registry
+        was reset (container recreate) the name is re-seeded from vibe rather
+        than overwritten. A refresh that yields nothing (model outage,
+        transcript not flushed yet) hands its slot back so the next turn
+        retries. The result is written through to vibe's session metadata as
+        well (best-effort) so its resume picker shows the same name.
         """
         cid = self.canonical_id
         try:
             entry = await asyncio.to_thread(sessions.get_entry, cid)
             if sessions.has_manual_title(entry):
+                self._title_locked = True
+                return
+            manual = await asyncio.to_thread(provenance.vibe_manual_session_title, self.session_id)
+            if manual is not None:
+                self._title_locked = True
+                await asyncio.to_thread(sessions.set_title, cid, manual)
+                await self._send({"type": "title", "title": manual})
                 return
             previous = entry.get("title")
             messages = await asyncio.to_thread(

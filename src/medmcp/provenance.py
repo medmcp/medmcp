@@ -445,6 +445,25 @@ def vibe_session_title(session_id: str) -> str | None:
     return title if isinstance(title, str) and title.strip() else None
 
 
+def vibe_manual_session_title(session_id: str) -> str | None:
+    """Return the session's title if vibe records it as user-set, else ``None``.
+
+    vibe marks a title applied through ``_session/set_title`` as
+    ``title_source: "manual"`` in ``meta.json`` (its own background titling
+    never overwrites one). The workspace writes every rename through, so this
+    is a second record of "the user named this chat" that survives the UI
+    session registry — which lives in the container layer — being reset.
+    """
+    d = find_vibe_session_dir(session_id)
+    if d is None:
+        return None
+    data = _read_session_meta(d)
+    if data is None or data.get("title_source") != "manual":
+        return None
+    title = data.get("title")
+    return title if isinstance(title, str) and title.strip() else None
+
+
 def list_provenance_sessions() -> list[str]:
     """Return the session ids that currently have a provenance directory."""
     root = VIBE_HOME / "provenance"

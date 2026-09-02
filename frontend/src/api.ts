@@ -196,31 +196,19 @@ export async function fetchWorkflowDetail(name: string): Promise<WorkflowDetail>
   return (await res.json()) as WorkflowDetail
 }
 
-/** Distill a chat session into a draft workflow; returns the new draft's detail. */
+/** Distill a chat session into a workflow named after the chat; returns its detail. */
 export async function distillSession(sessionId: string): Promise<WorkflowDetail> {
   const res = await postJson('/api/workflows/distill', { session_id: sessionId })
   return (await res.json()) as WorkflowDetail
 }
 
-export async function promoteWorkflow(name: string): Promise<void> {
-  await postJson(`/api/workflows/${encodeURIComponent(name)}/promote`, {})
-}
-
-export async function unpromoteWorkflow(name: string): Promise<void> {
-  await postJson(`/api/workflows/${encodeURIComponent(name)}/unpromote`, {})
-}
-
-/** Rename a draft; returns the new (slugified) name. */
+/** Rename a workflow; returns the new (slugified) name. */
 export async function renameWorkflow(name: string, newName: string): Promise<string> {
   const res = await postJson(`/api/workflows/${encodeURIComponent(name)}/rename`, {
     new_name: newName,
   })
   const body = (await res.json()) as { name: string }
   return body.name
-}
-
-export async function refineWorkflow(name: string, instruction: string): Promise<void> {
-  await postJson(`/api/workflows/${encodeURIComponent(name)}/refine`, { instruction })
 }
 
 export async function deleteWorkflow(name: string): Promise<void> {
@@ -241,7 +229,7 @@ export async function exportWorkflow(name: string): Promise<void> {
   URL.revokeObjectURL(url)
 }
 
-/** Import a shared workflow file (its YAML text); returns the new draft's detail. */
+/** Import a shared workflow file (its YAML text); returns the new workflow's detail. */
 export async function importWorkflow(content: string): Promise<WorkflowDetail> {
   const res = await postJson('/api/workflows/import', { content })
   return (await res.json()) as WorkflowDetail

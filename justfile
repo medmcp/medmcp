@@ -31,7 +31,7 @@ clean-chats:
     rm -rf .vibe/provenance
     rm -rf .vibe/workflows/draft
 
-# Remove ALL distilled workflows, including promoted ones under active/
+# Remove ALL distilled workflows
 clean-workflows:
     rm -rf .vibe/workflows
 
@@ -142,21 +142,16 @@ provenance-list:
 report SESSION:
     uv run medmcp report {{SESSION}}
 
-# Distill a reusable workflow (recipe.yaml + SKILL.md) from a session's raw log
-# Usage: just distill <session-id>   (add --no-llm to skip the narrative pass)
-distill SESSION *ARGS:
-    uv run medmcp distill {{SESSION}} {{ARGS}}
+# Distill a replayable workflow (recipe.yaml) from a session's raw log
+# Usage: just distill <session-id>
+distill SESSION:
+    uv run medmcp distill {{SESSION}}
 
-# Promote a reviewed draft workflow into active/ (marks it reviewed; replay-only)
-# Usage: just promote <workflow-name>
-promote NAME:
-    uv run medmcp promote {{NAME}}
-
-# List personal workflows (draft + promoted)
+# List personal workflows
 workflows:
     uv run medmcp workflows
 
-# Delete a personal workflow (draft or active) by name
+# Delete a personal workflow by name
 # Usage: just delete-workflow <workflow-name>
 delete-workflow NAME:
     uv run medmcp delete {{NAME}}
@@ -166,7 +161,7 @@ delete-workflow NAME:
 export-workflow NAME *ARGS:
     uv run medmcp export {{NAME}} {{ARGS}}
 
-# Import a shared workflow file as a reviewable draft
+# Import a shared workflow file as a new workflow
 # Usage: just import-workflow <file.workflow.yaml>
 import-workflow FILE:
     uv run medmcp import {{FILE}}

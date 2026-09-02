@@ -7,13 +7,13 @@ same state:
 - **Stack discovery** (:func:`load_mcp_servers`) — uv tool environments with a
   ``[medmcp.stacks]`` entry point, plus manual ``[[mcp_servers]]`` entries in
   ``.vibe/config.toml``.
-- **Active sets** — which stacks/workflows are enabled, persisted as JSON under
+- **Active sets** — which stacks are enabled, persisted as JSON under
   ``.vibe/`` (all active when the file is absent).
-- **Feature toggles** — provenance capture, personal workflows, tool-call
-  explanations; each defaults to on.
+- **Feature toggles** — provenance capture and tool-call explanations; each
+  defaults to on.
 - **Config sync** (:func:`sync_servers_to_vibe_config`) — writes the resolved
-  server list and workflow skill paths into ``.vibe/config.toml`` before each
-  session, because vibe-acp reads that file directly.
+  server list and the stacks' skill paths into ``.vibe/config.toml`` before
+  each session, because vibe-acp reads that file directly.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ import httpx
 import tomli_w
 
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict
+from medmcp.workflow import list_workflows
 
 log: logging.Logger = logging.getLogger(__name__)
 
@@ -1468,40 +1469,9 @@ def load_catalog() -> list[JsonDict]:
     return out
 
 
-def read_skill_description(skill_md: Path) -> str:
-    """Return the ``description:`` frontmatter value from a SKILL.md, or ``''``."""
-    try:
-        lines = skill_md.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return ""
-    for line in lines[:15]:
-        if line.startswith("description:"):
-            return line.split(":", 1)[1].strip()
-    return ""
-
-
 def discover_workflows() -> list[JsonDict]:
-    """Discover personal workflows from ``draft/`` and ``active/``.
-
-    Returns ``{name, description, kind}`` dicts, deduplicated by name (an active
-    workflow shadows a draft of the same name). ``kind`` is ``"active"`` for
-    promoted workflows and ``"draft"`` for unpromoted ones.
-    """
-    found: dict[str, JsonDict] = {}
-    for kind in ("active", "draft"):
-        base = VIBE_HOME / "workflows" / kind
-        if not base.is_dir():
-            continue
-        for d in sorted(base.iterdir()):
-            skill = d / "SKILL.md"
-            if not d.is_dir() or not skill.is_file() or d.name in found:
-                continue
-            found[d.name] = {
-                "name": d.name,
-                "description": read_skill_description(skill),
-                "kind": kind,
-            }
-    return list(found.values())
+    """The personal workflows under ``.vibe/workflows`` as ``{name, description}`` rows."""
+    return list_workflows(VIBE_HOME / "workflows")
 
 
 def _load_flag(path: Path) -> bool:

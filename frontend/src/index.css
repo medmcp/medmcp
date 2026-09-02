@@ -1940,28 +1940,6 @@ button:hover {
   white-space: nowrap;
 }
 
-.wf-chip {
-  margin-left: auto;
-  flex-shrink: 0;
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  padding: 1px 7px;
-  border-radius: 99px;
-  border: 1px solid;
-}
-
-.wf-chip-draft {
-  color: var(--warn);
-  border-color: rgba(251, 191, 36, 0.4);
-}
-
-.wf-chip-active {
-  color: var(--ok);
-  border-color: rgba(74, 222, 128, 0.4);
-}
-
 .wf-detail {
   padding: 2px 8px 12px 27px;
   display: flex;

@@ -620,17 +620,13 @@ async def ws_stack_install(ws: WebSocket) -> None:
 # ── Workflow API ───────────────────────────────────────────
 #
 # Drives the provenance→distill→replay pipeline (Tier 2/3) from the workspace
-# UI: save the current chat as a draft workflow, review/promote/refine it, and
-# replay its recipe deterministically (no LLM) on new inputs.
+# UI: save the current chat as a workflow, rename/share it, and replay its
+# recipe deterministically (no LLM) on new inputs.
 
 
 def _workflow_dir(name: str) -> Path | None:
-    """Return the on-disk dir for workflow *name* (active wins over draft)."""
-    for kind in ("active", "draft"):
-        d = VIBE_HOME / "workflows" / kind / name
-        if (d / "recipe.yaml").exists():
-            return d
-    return None
+    """Return the on-disk dir for workflow *name*, or ``None``."""
+    return workflow.workflow_dir(VIBE_HOME / "workflows", name)
 
 
 def _requirement_statuses(recipe: workflow.Recipe, servers: list[JsonDict]) -> list[JsonDict]:
@@ -670,7 +666,6 @@ def _workflow_detail(name: str) -> JsonDict:
     replay_error = replay.validate(recipe, examples, servers)
     return {
         "name": recipe.name,
-        "kind": d.parent.name,
         "description": recipe.description,
         "inputs": [i.to_dict() for i in recipe.inputs],
         "steps": [
@@ -852,21 +847,20 @@ class DistillPayload(BaseModel):
 
 @app.post("/api/workflows/distill")
 async def post_distill(payload: DistillPayload) -> JsonDict:
-    """Distill a chat session into a draft workflow and return its detail.
-
-    Runs the hybrid prose pass against the local model, so this can take a
-    while; distillation itself never hard-fails on a model outage.
-    """
+    """Distill a chat session into a workflow, named after the chat, and return its detail."""
+    sid = payload.session_id
     try:
-        draft_dir = await asyncio.to_thread(
+        target = await asyncio.to_thread(
             lambda: distill.distill_session(
-                payload.session_id, chain_stop_ids=_chain_stop_ids(payload.session_id)
+                sid,
+                name_hint=sessions.chat_title(sid) or "",
+                chain_stop_ids=_chain_stop_ids(sid),
             )
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    _audit.info("workflow distilled: %s", draft_dir.name)
-    return await asyncio.to_thread(_workflow_detail, draft_dir.name)
+    _audit.info("workflow distilled: %s", target.name)
+    return await asyncio.to_thread(_workflow_detail, target.name)
 
 
 @app.get("/api/workflows/{name}")
@@ -878,64 +872,27 @@ async def get_workflow(name: str) -> JsonDict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.post("/api/workflows/{name}/promote")
-async def post_promote_workflow(name: str) -> JsonDict:
-    """Promote a draft to active/, marking it reviewed and worth keeping."""
-    try:
-        await asyncio.to_thread(distill.promote_draft, name)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    _audit.info("workflow promoted: %s", name)
-    return {"ok": True}
-
-
-@app.post("/api/workflows/{name}/unpromote")
-async def post_unpromote_workflow(name: str) -> JsonDict:
-    """Move a promoted workflow back to draft/ for editing."""
-    try:
-        await asyncio.to_thread(distill.unpromote_workflow, name)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"ok": True}
-
-
 class WorkflowRenamePayload(BaseModel):
-    """Request body for renaming a draft workflow."""
+    """Request body for renaming a workflow."""
 
     new_name: str
 
 
 @app.post("/api/workflows/{name}/rename")
 async def post_rename_workflow(name: str, payload: WorkflowRenamePayload) -> JsonDict:
-    """Rename a draft workflow; returns the new (slugified) name."""
+    """Rename a workflow; returns the new (slugified) name. 409 if that name is taken."""
     try:
-        new_dir = await asyncio.to_thread(distill.rename_draft, name, payload.new_name)
+        new_dir = await asyncio.to_thread(distill.rename_workflow, name, payload.new_name)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"ok": True, "name": new_dir.name}
-
-
-class WorkflowRefinePayload(BaseModel):
-    """Request body for refining a draft's narrative."""
-
-    instruction: str
-
-
-@app.post("/api/workflows/{name}/refine")
-async def post_refine_workflow(name: str, payload: WorkflowRefinePayload) -> JsonDict:
-    """Regenerate a draft's narrative from a plain-language instruction (LLM)."""
-    try:
-        await asyncio.to_thread(distill.refine_draft, name, payload.instruction)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return {"ok": True}
 
 
 @app.delete("/api/workflows/{name}")
 async def delete_workflow(name: str) -> JsonDict:
-    """Delete a personal workflow (draft or active). The UI confirms first."""
+    """Delete a personal workflow. The UI confirms first."""
     try:
         await asyncio.to_thread(distill.delete_workflow, name)
     except FileNotFoundError as exc:
@@ -967,13 +924,13 @@ class WorkflowImportPayload(BaseModel):
 
 @app.post("/api/workflows/import")
 async def post_import_workflow(payload: WorkflowImportPayload) -> JsonDict:
-    """Import a shared workflow envelope as a reviewable draft; return its detail."""
+    """Import a shared workflow envelope as a new workflow; return its detail."""
     try:
-        draft_dir = await asyncio.to_thread(share.import_workflow, payload.content)
+        target = await asyncio.to_thread(share.import_workflow, payload.content)
     except share.WorkflowShareError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _audit.info("workflow imported: %s", draft_dir.name)
-    return await asyncio.to_thread(_workflow_detail, draft_dir.name)
+    _audit.info("workflow imported: %s", target.name)
+    return await asyncio.to_thread(_workflow_detail, target.name)
 
 
 def _resolve_input_path(value: str) -> str:

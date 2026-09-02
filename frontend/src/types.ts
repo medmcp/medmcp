@@ -134,7 +134,6 @@ export interface GpuInfo {
 export interface WorkflowListEntry {
   name: string
   description: string
-  kind: 'active' | 'draft'
 }
 
 /** A stack the workflow needs, pinned for reproducibility. */
@@ -152,7 +151,6 @@ export interface StackRequirement {
 /** Full recipe detail from GET /api/workflows/{name}. */
 export interface WorkflowDetail {
   name: string
-  kind: 'active' | 'draft'
   description: string
   inputs: { name: string; example: string; description: string; default?: string }[]
   steps: { server: string; tool: string; arguments: Record<string, unknown> }[]

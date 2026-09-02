@@ -113,3 +113,33 @@ def test_pre_feature_title_counts_as_manual() -> None:
     """Entries written before generated titles existed carry no source: manual."""
     assert sessions.has_manual_title({"title": "Old"}) is True
     assert sessions.has_manual_title({}) is False
+
+
+# ── chat_title ───────────────────────────────────────────────────────────────
+
+
+def _vibe_title(_session_id: str) -> str | None:
+    return "vibe"
+
+
+def _no_vibe_title(_session_id: str) -> str | None:
+    return None
+
+
+def test_chat_title_prefers_the_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A registry title, generated or not, is the chat's name."""
+    sessions.set_auto_title("s1", "Brain MRI pipeline")
+    monkeypatch.setattr(sessions.provenance, "vibe_manual_session_title", _vibe_title)
+    assert sessions.chat_title("s1") == "Brain MRI pipeline"
+
+
+def test_chat_title_falls_back_to_vibes_manual_title(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no registry entry, the user-set title vibe recorded is used."""
+    monkeypatch.setattr(sessions.provenance, "vibe_manual_session_title", _vibe_title)
+    assert sessions.chat_title("s1") == "vibe"
+
+
+def test_chat_title_none_when_unnamed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chat nobody has named yet has no title."""
+    monkeypatch.setattr(sessions.provenance, "vibe_manual_session_title", _no_vibe_title)
+    assert sessions.chat_title("s1") is None

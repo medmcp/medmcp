@@ -384,6 +384,22 @@ class TestWorkflowShareEndpoints:
         client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         assert client.get("/api/workflows/nope/export").status_code == 404
 
+    def test_rename_onto_a_taken_name_is_409(self, vibe_home: Path) -> None:
+        """A rename never replaces another workflow."""
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        first = client.post("/api/workflows/import", json={"content": self._envelope()})
+        assert first.status_code == 200
+        other = yaml.safe_load(self._envelope())
+        other["name"] = "other-flow"
+        second = client.post("/api/workflows/import", json={"content": yaml.safe_dump(other)})
+        assert second.status_code == 200
+
+        resp = client.post("/api/workflows/other-flow/rename", json={"new_name": "Demo Flow"})
+
+        assert resp.status_code == 409
+        assert client.get("/api/workflows/demo-flow").json()["description"] == "demo"
+        assert client.get("/api/workflows/other-flow").status_code == 200
+
 
 # ── Session resume helpers ───────────────────────────────────────────────────
 

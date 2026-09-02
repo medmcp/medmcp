@@ -10,11 +10,8 @@ import {
   fetchWorkflows,
   fetchWorkspaceRoot,
   importWorkflow,
-  promoteWorkflow,
-  refineWorkflow,
   renameWorkflow,
   replayPreview,
-  unpromoteWorkflow,
 } from '../api'
 import { getDraggedFilePath } from '../dragState'
 import type {
@@ -54,7 +51,6 @@ type Row = { values: Record<string, string> }
 type Mode =
   | { kind: 'view' }
   | { kind: 'rename'; value: string }
-  | { kind: 'refine'; value: string }
   | { kind: 'run'; source: RunSource; rows: Row[]; resultsDir: string }
 
 /** Where a run's inputs come from: files picked by hand (the default, prefilled
@@ -531,8 +527,8 @@ function placeFiles(
 
 /**
  * Personal-workflows panel: save the current chat as a reusable workflow,
- * review/promote/refine drafts, and run a recipe deterministically (no LLM)
- * on new inputs. A run is a server-side job: it keeps going if this page goes
+ * rename/share it, and run its recipe deterministically (no LLM) on new
+ * inputs. A run is a server-side job: it keeps going if this page goes
  * away, and the page reattaches to it on reload.
  */
 // Memoized: App bumps `fsVersion` on every completed tool call / turn end to
@@ -833,42 +829,28 @@ export const WorkflowPanel = memo(function WorkflowPanel({
     }
   }
 
-  const showDraft = (draft: WorkflowDetail) => {
-    detailForRef.current = draft.name
-    setExpanded(draft.name)
-    setDetail(draft)
+  const showWorkflow = (wf: WorkflowDetail) => {
+    detailForRef.current = wf.name
+    setExpanded(wf.name)
+    setDetail(wf)
     setMode({ kind: 'view' })
   }
 
   const saveChat = () =>
-    withBusy('Distilling the chat into a workflow (local model)…', async () => {
+    withBusy('Saving the chat as a workflow…', async () => {
       if (!distillSessionId) return
-      const draft = await distillSession(distillSessionId)
+      const wf = await distillSession(distillSessionId)
       await reload()
-      showDraft(draft)
-    })
-
-  const promote = (name: string) =>
-    withBusy('Promoting…', async () => {
-      await promoteWorkflow(name)
-      await reload()
-      setDetail(await fetchWorkflowDetail(name))
+      showWorkflow(wf)
     })
 
   const exportFile = (name: string) => withBusy('Exporting…', () => exportWorkflow(name))
 
   const importFile = (file: File) =>
     withBusy('Importing workflow…', async () => {
-      const draft = await importWorkflow(await file.text())
+      const wf = await importWorkflow(await file.text())
       await reload()
-      showDraft(draft)
-    })
-
-  const unpromote = (name: string) =>
-    withBusy('Moving back to draft…', async () => {
-      await unpromoteWorkflow(name)
-      await reload()
-      setDetail(await fetchWorkflowDetail(name))
+      showWorkflow(wf)
     })
 
   const remove = (name: string) => {
@@ -889,14 +871,6 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       detailForRef.current = slug
       setExpanded(slug)
       setDetail(await fetchWorkflowDetail(slug))
-      setMode({ kind: 'view' })
-    })
-
-  const refine = (name: string, instruction: string) =>
-    withBusy('Refining the description (local model)…', async () => {
-      await refineWorkflow(name, instruction)
-      await reload()
-      setDetail(await fetchWorkflowDetail(name))
       setMode({ kind: 'view' })
     })
 
@@ -1398,41 +1372,13 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             >
               <PlayIcon size={12} /> Run
             </button>
-            {d.kind === 'draft' && (
-              <button
-                className="btn-plain"
-                title="Mark as reviewed and keep permanently"
-                onClick={() => void promote(d.name)}
-              >
-                Promote
-              </button>
-            )}
             <span className="wf-actions-secondary">
-              {d.kind === 'draft' ? (
-                <>
-                  <button
-                    className="btn-text"
-                    onClick={() => setMode({ kind: 'rename', value: d.name })}
-                  >
-                    Rename
-                  </button>
-                  <button
-                    className="btn-text"
-                    title="Rewrite the description with a plain-language instruction"
-                    onClick={() => setMode({ kind: 'refine', value: '' })}
-                  >
-                    Refine
-                  </button>
-                </>
-              ) : (
-                <button
-                  className="btn-text"
-                  title="Move back to draft for renaming/refining"
-                  onClick={() => void unpromote(d.name)}
-                >
-                  Edit
-                </button>
-              )}
+              <button
+                className="btn-text"
+                onClick={() => setMode({ kind: 'rename', value: d.name })}
+              >
+                Rename
+              </button>
               <button
                 className="btn-text"
                 title="Export as a shareable .workflow.yaml file"
@@ -1465,33 +1411,6 @@ export const WorkflowPanel = memo(function WorkflowPanel({
           <div className="wf-actions">
             <button className="btn-primary" type="submit">
               Rename
-            </button>
-            <button className="btn-plain" type="button" onClick={() => setMode({ kind: 'view' })}>
-              Cancel
-            </button>
-          </div>
-        </form>
-      )}
-
-      {mode.kind === 'refine' && (
-        <form
-          className="wf-form"
-          onSubmit={(e) => {
-            e.preventDefault()
-            if (mode.value.trim()) void refine(d.name, mode.value.trim())
-          }}
-        >
-          <textarea
-            className="wf-input"
-            autoFocus
-            rows={3}
-            placeholder="e.g. Mention that the input must be a T1-weighted scan"
-            value={mode.value}
-            onChange={(e) => setMode({ kind: 'refine', value: e.target.value })}
-          />
-          <div className="wf-actions">
-            <button className="btn-primary" type="submit">
-              Refine
             </button>
             <button className="btn-plain" type="button" onClick={() => setMode({ kind: 'view' })}>
               Cancel
@@ -1577,7 +1496,6 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                 className={expanded === w.name ? 'wf-chevron open' : 'wf-chevron'}
               />
               <span className="wf-name">{w.name}</span>
-              <span className={`wf-chip wf-chip-${w.kind}`}>{w.kind}</span>
             </button>
             {expanded === w.name &&
               (detail ? (

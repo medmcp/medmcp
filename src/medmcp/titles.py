@@ -35,6 +35,8 @@ from medmcp.settings import OLLAMA_BASE_URL, OLLAMA_MODEL
 from medmcp.workspace_note import display_content_text, strip_workspace_note
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
+# Outcomes go to the server log, not the audit trail (titles are not decisions).
+_log: logging.Logger = logging.getLogger("medmcp.titles")
 
 # Kill switch for deployments that would rather not spend model time on names.
 DISABLE_ENV_VAR = "MEDMCP_AUTO_TITLES"
@@ -63,8 +65,9 @@ SYSTEM_PROMPT = (
     "or emoji.\n"
     "- Always answer in English; translate the intent of a transcript in another "
     "language rather than transliterating it.\n"
-    "- If a `Current title:` is given, keep it unless the session's focus has clearly "
-    "shifted, in which case refine it.\n"
+    "- If a `Current title:` is given and the recent turns still fit it, keep it "
+    "verbatim. If the conversation has moved on to a different subject, replace it "
+    "with a title for the recent subject — the title follows the conversation.\n"
     "- Only if the transcript is empty, answer `New chat`.\n\n"
     "Respond with ONLY the title, on one line, with no quotes or explanation."
 )
@@ -77,14 +80,19 @@ class TitlePolicy:
     Cadence counts *completed turns* (the server sees turns, not model steps):
     the first title lands when the opening turn finishes, then a refresh every
     ``refresh_every_turns`` turns, ``max_generations`` calls per connection in
-    total — the title runs on the same single-GPU model as the conversation, so
-    it stays bounded rather than periodic-forever. A generation that yields
-    nothing hands its slot back so the next turn retries; the attempt still
-    counts, so a failing model cannot be retried without bound.
+    total. The title runs on the same single-GPU model as the conversation, in
+    the idle time after a reply, so the cadence is a trade between cost and how
+    quickly a title follows a change of subject: every three turns means a
+    shift is reflected within two further exchanges, and the cap covers a long
+    session rather than freezing the title a dozen turns in — measured live, a
+    title that had gone stale never recovered once a low cap was spent. A
+    generation that yields nothing hands its slot back so the next turn
+    retries; the attempt still counts, so a failing model cannot be retried
+    without bound.
     """
 
-    refresh_every_turns: int = 5
-    max_generations: int = 3
+    refresh_every_turns: int = 3
+    max_generations: int = 12
     # Transcript window: the opening intent plus the latest exchange, each
     # message clamped so one large tool result can't crowd the rest out.
     max_transcript_chars: int = 6000
@@ -94,10 +102,11 @@ class TitlePolicy:
     # Request budget and generation cap for the background call. The cap
     # covers the model's hidden reasoning too: with thinking off, Ollama drops
     # the reasoning tokens Muse Glimmer emits before its answer, and a title
-    # measured live costs ~110-230 of them — a cap sized for the title alone
-    # returns empty content with done_reason "length".
-    timeout_seconds: float = 20.0
-    max_tokens: int = 384
+    # measured live costs 110-430 of them (most when weighing a previous title
+    # against a changed subject) — a cap sized for the title alone returns
+    # empty content with done_reason "length". Only what is used is paid for.
+    timeout_seconds: float = 30.0
+    max_tokens: int = 768
     # Result shaping: hard length cap and answers treated as "nothing usable".
     max_title_chars: int = 72
     generic_titles: frozenset[str] = frozenset({"new chat", "new session", "untitled"})
@@ -298,7 +307,11 @@ async def generate_title(
     except Exception:
         _audit.warning("failed to generate a chat title", exc_info=True)
         return None
-    return clean_title(raw, policy=policy)
+    title = clean_title(raw, policy=policy)
+    _log.info(
+        "chat title: %r (previous %r, transcript %d chars)", title, previous_title, len(transcript)
+    )
+    return title
 
 
 async def _post_chat(client: httpx.AsyncClient, payload: JsonDict) -> str:

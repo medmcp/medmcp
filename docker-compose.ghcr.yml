@@ -16,7 +16,9 @@ name: medmcp
 
 services:
   llm:
-    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    # The Ollama release this MedMCP release was tested with; bumped per release so
+    # a pinned install stays put. Override with OLLAMA_IMAGE to try another.
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.33.2}
     environment:
       # Keep the model resident in VRAM (-1) so it isn't evicted after the
       # 5-minute idle default and reloaded on the next prompt. Override with a
@@ -34,7 +36,7 @@ services:
     restart: unless-stopped
 
   llm-init:
-    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.33.2}
     depends_on:
       llm:
         condition: service_healthy
@@ -68,7 +70,7 @@ services:
     restart: "no"
 
   llm-warmup:
-    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.33.2}
     depends_on:
       llm:
         condition: service_healthy

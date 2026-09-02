@@ -16,7 +16,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Changed
 
-- mistral-vibe 2.24.5. Ollama 0.32.15 or newer is required; `docker compose` installs pull the current release.
+- mistral-vibe 2.24.5 and Ollama 0.33.2 (`docker compose` installs now pin the tested Ollama release; 0.32.15 is the minimum for host installs).
 - The Chats menu is wider and stays fully on screen at any window size.
 
 ### Security

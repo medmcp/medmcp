@@ -27,7 +27,7 @@ classifiers = [
 keywords = ["medical", "image processing", "ai-agent"]
 requires-python = ">=3.12"
 dependencies = [
-    "mistral-vibe>=2.23.3,<3",
+    "mistral-vibe>=2.24.5,<3",
     "tomli-w>=1.0",
     "pyyaml>=6.0",
     "fastapi>=0.141.1",
@@ -51,15 +51,15 @@ medmcp-pathguard = "medmcp.pathguard:main"
 
 [dependency-groups]
 test = [
-    "httpx2>=2.9.1",
+    "httpx2>=2.12.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
 ]
 quality = [
-    "ruff>=0.16.0",
+    "ruff>=0.16.5",
     "pyright>=1.1.411",
-    "pre-commit>=4.6.1",
-    "types-pyyaml>=6.0.12.20260724"
+    "pre-commit>=4.6.2",
+    "types-pyyaml>=6.0.12.20260815"
 ]
 dev = [
     { include-group = "test" },

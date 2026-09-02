@@ -60,6 +60,7 @@ from medmcp import (
     pathguard,
     provenance,
     replay,
+    runs,
     sessions,
     settings,
     share,
@@ -113,6 +114,10 @@ _TREE_MAX_ENTRIES_PER_DIR: int = 500
 _pool: BackendPool | None = None
 _broker: BackendBroker | None = None
 
+# Replay runs in flight (see ``runs.py``). A run is a task in this process with a
+# record on disk; sockets attach to it and detach from it without affecting it.
+_runs: runs.RunManager = runs.RunManager()
+
 
 def _resolve_backend_spec(name: str) -> BackendSpec | None:
     """Map an active stack name to its persistent-backend launch spec (pool callback)."""
@@ -135,6 +140,10 @@ def _resolve_backend_spec(name: str) -> BackendSpec | None:
 async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     """Start the stack pool + broker on boot (when enabled); tear them down on exit."""
     global _pool, _broker
+    # A run record still marked "running" was cut off by the previous process.
+    interrupted = await asyncio.to_thread(runs.reconcile_interrupted)
+    if interrupted:
+        _audit.warning("marked %d interrupted replay run(s) as failed", interrupted)
     if settings.stack_pool_enabled():
         # Proxy children read MEDMCP_WORKSPACE for their fallback cwd; export it.
         os.environ.setdefault("MEDMCP_WORKSPACE", str(WORKSPACE_ROOT))
@@ -150,6 +159,7 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     try:
         yield
     finally:
+        await _runs.shutdown()
         if _broker is not None:
             await _broker.aclose()
         if _pool is not None:
@@ -1026,9 +1036,61 @@ def _confined_input_paths(inputs: dict[str, str]) -> dict[str, str]:
 
 
 class ReplayPreviewPayload(BaseModel):
-    """Request body for previewing a replay's resolved steps."""
+    """Request body for previewing a replay's resolved steps.
 
-    inputs: dict[str, str]
+    ``runs`` carries every item's input binding (the batch); ``inputs`` is the
+    older single-item form and is treated as a one-item batch.
+    """
+
+    inputs: dict[str, str] | None = None
+    runs: list[dict[str, str]] | None = None
+
+
+def _input_argument_names(recipe: workflow.Recipe) -> dict[str, str]:
+    """Map each ``in_N`` to the argument name it is first used as.
+
+    The path checker classifies a path by its *parameter name* — ``input_path``
+    must exist, ``output_dir`` need not — and the input's own name (``in_1``)
+    says nothing. The first step argument that references the placeholder gives
+    the role the tool assigns it.
+    """
+    names: dict[str, str] = {}
+    for step in recipe.steps:
+        for key, value in step.arguments.items():
+            if not isinstance(value, str):
+                continue
+            for ref in replay.unresolved_refs(value):
+                inner = ref[4:-1].strip() if ref.startswith("dir(") and ref.endswith(")") else ref
+                names.setdefault(inner, key)
+    return names
+
+
+def _preflight_item(
+    recipe: workflow.Recipe,
+    inputs: dict[str, str],
+    servers: list[JsonDict],
+    arg_names: dict[str, str],
+) -> JsonDict:
+    """Everything the run screen wants to say about one item before it runs.
+
+    ``error`` is the engine's own validation (a missing input, an uninstalled
+    stack). ``findings`` are the path checks on the *bound inputs* — the files
+    the person just pointed at — reported with the role the tool gives them, so
+    a missing scan is an error and an output folder that already holds results
+    is a warning about overwriting, not a false alarm.
+    """
+    error = replay.validate(recipe, inputs, servers)
+    if error is not None:
+        return {"ok": False, "error": error, "findings": []}
+    bound = replay.apply_input_defaults(recipe, inputs)
+    checked = {arg_names.get(name, name): value for name, value in bound.items()}
+    findings = pathcheck.check_tool_call_paths(checked, WORKSPACE_ROOT, containerized=True)
+    blocking = any(f["severity"] == "error" for f in findings)
+    return {
+        "ok": not blocking,
+        "error": next((f["note"] for f in findings if f["severity"] == "error"), None),
+        "findings": findings,
+    }
 
 
 @app.post("/api/workflows/{name}/replay-preview")
@@ -1036,7 +1098,9 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
     """Validate a replay and return its resolved steps for user confirmation.
 
     Inputs are bound now; cross-step refs (``{{stepM.*}}``) resolve at runtime,
-    so they intentionally still show as placeholders in the preview.
+    so they intentionally still show as placeholders in the preview. Every item
+    is pre-flighted (see :func:`_preflight_item`) so a typo in one of forty rows
+    is caught here rather than by the tool, after the stacks were spawned.
     """
 
     def _preview() -> JsonDict:
@@ -1044,13 +1108,21 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
         if d is None:
             raise FileNotFoundError(f"no workflow named {name!r}")
         recipe = distill.load_recipe(d)
-        inputs = _confined_input_paths(dict(payload.inputs))
-        error = replay.validate(recipe, inputs, settings.active_servers())
-        if error is not None:
-            return {"ok": False, "error": error, "steps": []}
+        raw_runs = payload.runs if payload.runs is not None else [payload.inputs or {}]
+        bindings_list = [_confined_input_paths(dict(r)) for r in raw_runs]
+        servers = settings.active_servers()
+        arg_names = _input_argument_names(recipe)
+        items = [
+            {"index": i, **_preflight_item(recipe, b, servers, arg_names)}
+            for i, b in enumerate(bindings_list)
+        ]
+        first_ok = next((i for i, item in enumerate(items) if item["error"] is None), None)
+        if first_ok is None and items:
+            return {"ok": False, "error": items[0]["error"], "steps": [], "items": items}
         # Same defaults the run will use, so the preview shows what will actually
         # be sent rather than an unresolved placeholder the user never filled in.
-        bindings: dict[str, Any] = replay.apply_input_defaults(recipe, inputs)
+        first = bindings_list[first_ok] if first_ok is not None else {}
+        bindings: dict[str, Any] = replay.apply_input_defaults(recipe, first)
         steps = [
             {
                 "index": i,
@@ -1060,7 +1132,13 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
             }
             for i, s in enumerate(recipe.steps, start=1)
         ]
-        return {"ok": True, "error": None, "steps": steps}
+        ready = sum(1 for item in items if item["ok"])
+        return {
+            "ok": ready > 0,
+            "error": None if ready > 0 else "no item can run",
+            "steps": steps,
+            "items": items,
+        }
 
     try:
         return await asyncio.to_thread(_preview)
@@ -1116,131 +1194,178 @@ async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> Json
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+class ReplayStartRequest(BaseModel):
+    """The first client message on ``/ws/replay``: start a run, or attach to one."""
+
+    name: str = ""
+    runs: list[dict[str, str]] = Field(default_factory=list[dict[str, str]])
+    attach: str = ""
+
+
 @app.websocket("/ws/replay")
 async def ws_replay(ws: WebSocket) -> None:
-    """Run a deterministic replay — single or batch — streaming status frames.
+    """Start a replay run — or attach to one — and stream its progress.
 
-    First client message: ``{"name": str, "runs": [{in_N: value}, ...]}``;
-    each entry is one full input binding and the recipe runs once per entry,
-    sequentially. A failed item does not stop the remaining items. The server
-    streams ``{"type": "step", "item": int, ...}`` per executed step,
-    ``{"type": "item_result", "item": int, "ok": bool, "error": str|null,
-    "outputs": [...]}`` per finished item, and a final ``{"type": "result",
-    "ok": bool, "error": str|null, "outputs": [...]}`` over all items.
-    Closing the socket aborts the run immediately: a concurrent watcher task
-    observes the disconnect and cancels the batch, unwinding the engine's
-    exit stack — which shuts down the spawned MCP servers, killing the
-    in-flight tool step.
+    First client message, one of:
+
+    - ``{"name": str, "runs": [{in_N: value}, ...]}`` starts a new run;
+
+      each entry is one full input binding and the recipe runs once per
+      entry, sequentially. A failed item does not stop the remaining items.
+    - ``{"attach": run_id}`` replays everything the run has done so far and then
+      streams the rest (a finished run streams its record and closes).
+
+    Frames: ``started`` (carries the ``run_id``), ``step_started``, ``step``,
+    ``item_result`` and a final ``result``. **Closing the socket does not stop
+    the run** — a reload or a dropped connection merely detaches, and the page
+    reattaches by id. Stopping is an explicit ``{"type": "cancel"}`` message,
+    which kills the in-flight tool call together with its stack.
 
     SECURITY: the replay engine calls MCP tools directly, bypassing the
     vibe-acp permission flow — the client must show the resolved-steps preview
-    (``/replay-preview``) and get an explicit confirmation before connecting.
+    (``/replay-preview``) and get an explicit confirmation before starting.
     Inputs are confined to the workspace here regardless (see
     :func:`_confined_input_path`), since a binding arriving on this socket has
     had no permission prompt between it and the tool call.
     """
     await ws.accept()
+    run_id = ""
+    queue: asyncio.Queue[runs.Frame] | None = None
     try:
-        first = cast("JsonDict", await ws.receive_json())
-        name = str(first.get("name") or "")
         try:
-            runs = [
-                _confined_input_paths({str(k): str(v) for k, v in cast("JsonDict", r).items()})
-                for r in cast("list[object]", first.get("runs") or [])
-                if isinstance(r, dict)
-            ]
+            first = ReplayStartRequest.model_validate(await ws.receive_json())
         except ValueError as exc:
-            _audit.warning("replay refused: %s", exc)
-            await ws.send_json({"type": "result", "ok": False, "error": str(exc)})
+            await ws.send_json({"type": "result", "ok": False, "error": f"bad request: {exc}"})
             return
-        d = _workflow_dir(name)
-        if d is None or not runs:
-            error = f"no workflow named {name!r}" if d is None else "no inputs to run"
-            await ws.send_json({"type": "result", "ok": False, "error": error})
-            return
-        recipe = await asyncio.to_thread(distill.load_recipe, d)
-        servers = await asyncio.to_thread(settings.active_servers)
-        _audit.info(
-            "replay started: %s (%d item(s) x %d steps)", name, len(runs), len(recipe.steps)
-        )
 
-        async def _run_batch() -> None:
-            async def _on_step(item: int, sr: replay.StepResult) -> None:
+        if first.attach:
+            attached = _runs.attach(first.attach)
+            if attached is None:
                 await ws.send_json(
-                    {
-                        "type": "step",
-                        "item": item,
-                        "index": sr.index,
-                        "server": sr.server,
-                        "tool": sr.tool,
-                        "ok": sr.ok,
-                        "error": sr.error,
-                        "produced": sr.produced,
-                    }
+                    {"type": "result", "ok": False, "error": f"no run {first.attach!r}"}
                 )
-
-            async def _on_item(item: int, result: replay.ReplayResult) -> None:
-                await ws.send_json(
-                    {
-                        "type": "item_result",
-                        "item": item,
-                        "ok": result.ok,
-                        "error": result.error,
-                        "outputs": [v for sr in result.steps for v in sr.produced.values()],
-                    }
-                )
-
-            # One shared set of stacks across all items (spawned once, not per item).
-            results = await replay.run_batch(
-                recipe,
-                runs,
+                return
+            run_id = first.attach
+            past, queue = attached
+        else:
+            try:
+                bindings = [_confined_input_paths(dict(r)) for r in first.runs]
+            except ValueError as exc:
+                _audit.warning("replay refused: %s", exc)
+                await ws.send_json({"type": "result", "ok": False, "error": str(exc)})
+                return
+            d = _workflow_dir(first.name)
+            if d is None or not bindings:
+                error = f"no workflow named {first.name!r}" if d is None else "no inputs to run"
+                await ws.send_json({"type": "result", "ok": False, "error": error})
+                return
+            recipe = await asyncio.to_thread(distill.load_recipe, d)
+            servers = await asyncio.to_thread(settings.active_servers)
+            record = _runs.start(
+                recipe=recipe,
+                runs=bindings,
                 servers=servers,
                 cwd=str(WORKSPACE_ROOT),
-                on_step=_on_step,
-                on_item=_on_item,
+                on_finished=lambda r: _audit.info(
+                    "replay finished: %s run=%s status=%s", r.workflow, r.id, r.status
+                ),
             )
-            all_outputs = [v for r in results for sr in r.steps for v in sr.produced.values()]
-            failed = sum(1 for r in results if not r.ok)
-            ok = failed == 0
-            batch_error = None if ok else f"{failed} of {len(runs)} item(s) failed"
-            _audit.info("replay finished: %s ok=%s", name, ok)
-            await ws.send_json(
-                {"type": "result", "ok": ok, "error": batch_error, "outputs": all_outputs}
+            _audit.info(
+                "replay started: %s run=%s (%d item(s) x %d steps)",
+                recipe.name,
+                record.id,
+                len(bindings),
+                len(recipe.steps),
             )
+            run_id = record.id
+            attached = _runs.attach(run_id)
+            past, queue = attached if attached is not None else ([], None)
 
-        # Race the batch against a socket watcher. The client sends nothing
-        # after the first message, so anything receive returns — and above all
-        # a disconnect — means "abort". Cancelling the batch task unwinds
-        # run_batch's shared exit stack, killing the in-flight MCP server and its
-        # running tool; without the watcher, Stop would only take effect at
-        # the next frame send, after the current step finished.
-        batch_task = asyncio.create_task(_run_batch())
-        watch_task = asyncio.create_task(ws.receive_text())
+        for frame in past:
+            await ws.send_json(frame)
+        if queue is None:
+            return  # a finished run: its record was the whole story
+
+        # Two concurrent loops: frames out, control messages in. A disconnect
+        # ends both and leaves the run alone; only an explicit cancel stops it.
+        async def _pump() -> None:
+            assert queue is not None
+            while True:
+                frame = await queue.get()
+                if runs.is_end(frame):
+                    return
+                await ws.send_json(frame)
+
+        async def _control() -> None:
+            while True:
+                msg = cast("JsonDict", await ws.receive_json())
+                if msg.get("type") == "cancel":
+                    _audit.info("replay cancel requested: run=%s", run_id)
+                    await _runs.cancel(run_id)
+
+        pump_task = asyncio.create_task(_pump())
+        control_task = asyncio.create_task(_control())
         try:
             done, _pending = await asyncio.wait(
-                {batch_task, watch_task}, return_when=asyncio.FIRST_COMPLETED
+                {pump_task, control_task}, return_when=asyncio.FIRST_COMPLETED
             )
-            if batch_task in done:
-                watch_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect):
-                    await watch_task
-                batch_task.result()  # propagate batch errors (e.g. send on closed socket)
-            else:
-                batch_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await batch_task
-                _audit.info("replay aborted by client; in-flight step cancelled")
-                with contextlib.suppress(WebSocketDisconnect):
-                    await watch_task
+            for task in (pump_task, control_task):
+                if task not in done:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect):
+                        await task
+            for task in done:
+                task.result()  # surface a send failure / disconnect
         except asyncio.CancelledError:
-            batch_task.cancel()
-            watch_task.cancel()
+            pump_task.cancel()
+            control_task.cancel()
             raise
     except WebSocketDisconnect:
-        _audit.info("replay socket closed by client; run aborted")
+        _audit.info("replay socket closed by client; run=%s keeps running", run_id or "-")
     finally:
+        if queue is not None and run_id:
+            _runs.detach(run_id, queue)
         with contextlib.suppress(Exception):
             await ws.close()
+
+
+@app.get("/api/runs")
+async def get_runs(workflow: str | None = None, limit: int = 20) -> JsonDict:
+    """Recent replay runs (newest first), optionally for one workflow.
+
+    ``live`` lists the ids in flight in this process, so a page can reattach to
+    a run it started before a reload.
+    """
+    records = await asyncio.to_thread(runs.list_runs, workflow=workflow, limit=max(1, limit))
+    return {"runs": [r.summary() for r in records], "live": _runs.live_ids()}
+
+
+@app.get("/api/runs/{run_id}")
+async def get_run(run_id: str) -> JsonDict:
+    """One run's full record: every item, every step, what each produced."""
+    record = await asyncio.to_thread(runs.load_run, run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"no run {run_id!r}")
+    return {**record.to_dict(), "live": _runs.is_live(run_id)}
+
+
+@app.post("/api/runs/{run_id}/cancel")
+async def post_cancel_run(run_id: str) -> JsonDict:
+    """Stop a live run (the REST twin of the socket's ``cancel`` message)."""
+    if not await _runs.cancel(run_id):
+        raise HTTPException(status_code=404, detail=f"no live run {run_id!r}")
+    _audit.info("replay cancelled: run=%s", run_id)
+    return {"ok": True}
+
+
+@app.delete("/api/runs/{run_id}")
+async def delete_run(run_id: str) -> JsonDict:
+    """Forget a finished run's record. A live run must be stopped first."""
+    if _runs.is_live(run_id):
+        raise HTTPException(status_code=409, detail="run is still in progress")
+    if not await asyncio.to_thread(runs.delete_run, run_id):
+        raise HTTPException(status_code=404, detail=f"no run {run_id!r}")
+    return {"ok": True}
 
 
 # ── WebSocket chat ─────────────────────────────────────────

@@ -43,6 +43,9 @@ JsonDict = dict[str, Any]
 # A callable that runs one tool and returns (ok, structured_output, error_text).
 ToolCaller = Callable[[str, str, JsonDict], Awaitable[tuple[bool, JsonDict, "str | None"]]]
 
+# Notified just before a step's tool is called: ``(step_index, server, tool)``.
+StepStartHook = Callable[[int, str, str], Awaitable[None]]
+
 _PLACEHOLDER_RE = re.compile(r"\{\{([^{}]+)\}\}")
 # A derived reference: ``{{dir(<ref>)}}`` is the directory holding whatever
 # ``<ref>`` resolves to. Distillation emits these instead of declaring a second
@@ -389,11 +392,14 @@ async def replay_with_caller(
     *,
     caller: ToolCaller,
     on_step: Callable[[StepResult], Awaitable[None]] | None = None,
+    on_step_start: StepStartHook | None = None,
 ) -> ReplayResult:
     """Execute *recipe* step-by-step using *caller*; abort on the first failure.
 
     *inputs* maps placeholder names (``in_1`` …) to concrete values. Outputs a
     step produces are captured and bound as ``{{stepM.<key>}}`` for later steps.
+    ``on_step_start`` fires just before each tool call, so a caller can show
+    which step is in flight.
     """
     # Defaults are filled here, the one place every replay path funnels through
     # (single run and each batch item alike), so no caller can forget them.
@@ -419,6 +425,8 @@ async def replay_with_caller(
                 await on_step(step_result)
             break
 
+        if on_step_start is not None:
+            await on_step_start(index, step.server, step.tool)
         try:
             ok, structured, error = await caller(step.server, step.tool, args)
         except Exception as exc:
@@ -490,6 +498,7 @@ async def run_batch(
     tool_timeout_sec: float = DEFAULT_TOOL_TIMEOUT_SEC,
     on_step: Callable[[int, StepResult], Awaitable[None]] | None = None,
     on_item: Callable[[int, ReplayResult], Awaitable[None]] | None = None,
+    on_step_start: Callable[[int, int, str, str], Awaitable[None]] | None = None,
 ) -> list[ReplayResult]:
     """Replay *recipe* once per input binding in *runs*, sharing one set of stacks.
 
@@ -504,7 +513,9 @@ async def run_batch(
 
     The MCP servers are shared across items for speed, but one that crashes is
     re-spawned for the next item (see :func:`mcp_caller`), so a single failure does
-    not cascade to the rest of the batch.
+    not cascade to the rest of the batch. ``on_step_start`` fires as
+    ``(item, step_index, server, tool)`` just before a tool is called, so a caller
+    can show which step is in flight.
     """
     pre = [validate(recipe, inputs, servers) for inputs in runs]
     results: list[ReplayResult] = []
@@ -532,7 +543,17 @@ async def run_batch(
                     if on_step is not None:
                         await on_step(_item, sr)
 
-                res = await replay_with_caller(recipe, inputs, caller=caller, on_step=_step)
+                async def _start(index: int, server: str, tool: str, _item: int = item) -> None:
+                    if on_step_start is not None:
+                        await on_step_start(_item, index, server, tool)
+
+                res = await replay_with_caller(
+                    recipe,
+                    inputs,
+                    caller=caller,
+                    on_step=_step,
+                    on_step_start=_start,
+                )
                 await _emit(item, res)
     except ReplayError as exc:
         # Engine-level failure mid-batch (e.g. a stack teardown error): fail the

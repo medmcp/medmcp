@@ -188,8 +188,59 @@ export interface ReplayPreviewStep {
   arguments: Record<string, unknown>
 }
 
+/** Pre-flight verdict on one run item, before anything is executed. */
+export interface ReplayPreviewItem {
+  index: number
+  ok: boolean
+  error: string | null
+  findings: PathFinding[]
+}
+
+/** Result of POST /api/workflows/{name}/replay-preview. */
+export interface ReplayPreviewResult {
+  ok: boolean
+  error: string | null
+  /** The resolved steps of the first item that can run. */
+  steps: ReplayPreviewStep[]
+  items: ReplayPreviewItem[]
+}
+
+export type RunStatus = 'running' | 'done' | 'failed' | 'cancelled'
+
+/** One row from GET /api/runs. */
+export interface RunSummary {
+  id: string
+  workflow: string
+  status: RunStatus
+  started_at: string
+  finished_at: string
+  error: string | null
+  total: number
+  succeeded: number
+  failed: number
+  steps_per_item: number
+}
+
 /** Frames the server sends over /ws/replay. */
 export type ReplayFrame =
+  | {
+      type: 'started'
+      run_id: string
+      workflow: string
+      total: number
+      steps_per_item: number
+      started_at: string
+      runs: Record<string, string>[]
+    }
+  | {
+      type: 'step_started'
+      item: number
+      index: number
+      server: string
+      tool: string
+      /** When the tool was called, so a late attach shows the real elapsed time. */
+      started_at?: string
+    }
   | {
       type: 'step'
       /** Batch item index this step belongs to (0 for single runs). */
@@ -200,9 +251,18 @@ export type ReplayFrame =
       ok: boolean
       error?: string | null
       produced: Record<string, string>
+      started_at?: string
+      finished_at?: string
     }
   | { type: 'item_result'; item: number; ok: boolean; error?: string | null; outputs: string[] }
-  | { type: 'result'; ok: boolean; error?: string | null; outputs?: string[] }
+  | {
+      type: 'result'
+      ok: boolean
+      error?: string | null
+      outputs?: string[]
+      status?: RunStatus
+      finished_at?: string
+    }
 
 /** One task in the agent's plan, from the `todo` tool's arguments. */
 export interface TodoItem {

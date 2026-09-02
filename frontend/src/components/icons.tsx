@@ -249,3 +249,15 @@ export function RecenterIcon(props: IconProps) {
     </Icon>
   )
 }
+
+/** A small table/grid — a cohort plan, one row per subject. */
+export function TableIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <line x1="3" y1="10" x2="21" y2="10" />
+      <line x1="3" y1="15" x2="21" y2="15" />
+      <line x1="10" y1="10" x2="10" y2="20" />
+    </Icon>
+  )
+}

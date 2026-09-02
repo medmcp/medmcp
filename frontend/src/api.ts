@@ -4,7 +4,8 @@ import type {
   ExternalMcpState,
   GpuInfo,
   InstalledStack,
-  ReplayPreviewStep,
+  ReplayPreviewResult,
+  RunSummary,
   RewindResult,
   SessionInfo,
   SettingsState,
@@ -45,6 +46,13 @@ async function sendJson(
 
 async function postJson(url: string, body: object): Promise<Response> {
   return sendJson('POST', url, body)
+}
+
+/** The absolute on-disk workspace root, so absolute tool outputs can be shown
+ *  and opened as workspace paths. */
+export async function fetchWorkspaceRoot(): Promise<string> {
+  const res = await check(await fetch('/api/workspace'))
+  return ((await res.json()) as { root: string }).root
 }
 
 export async function fetchTree(): Promise<TreeNode[]> {
@@ -239,14 +247,30 @@ export async function importWorkflow(content: string): Promise<WorkflowDetail> {
   return (await res.json()) as WorkflowDetail
 }
 
+/** Pre-flight every run item and resolve the first runnable one's steps. */
 export async function replayPreview(
   name: string,
-  inputs: Record<string, string>,
-): Promise<{ ok: boolean; error: string | null; steps: ReplayPreviewStep[] }> {
+  runs: Record<string, string>[],
+): Promise<ReplayPreviewResult> {
   const res = await postJson(`/api/workflows/${encodeURIComponent(name)}/replay-preview`, {
-    inputs,
+    runs,
   })
-  return (await res.json()) as { ok: boolean; error: string | null; steps: ReplayPreviewStep[] }
+  return (await res.json()) as ReplayPreviewResult
+}
+
+/** Recent replay runs (newest first), plus the ids still in flight on the server. */
+export async function fetchRuns(
+  workflow?: string,
+  limit = 10,
+): Promise<{ runs: RunSummary[]; live: string[] }> {
+  const q = new URLSearchParams({ limit: String(limit) })
+  if (workflow) q.set('workflow', workflow)
+  const res = await check(await fetch(`/api/runs?${q.toString()}`))
+  return (await res.json()) as { runs: RunSummary[]; live: string[] }
+}
+
+export async function deleteRun(id: string): Promise<void> {
+  await check(await fetch(`/api/runs/${encodeURIComponent(id)}`, { method: 'DELETE' }))
 }
 
 /** Turn a plan_batch manifest CSV into per-subject batch rows for this workflow. */

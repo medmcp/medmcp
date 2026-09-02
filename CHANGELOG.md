@@ -6,6 +6,12 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Changed
+
+- Workflow runs keep going when the page is closed or reloaded; the page picks them up again.
+- The run editor checks every row's input files before anything starts and flags a missing file per row.
+- One run editor replaces the Single/Batch switch and the separate preview screen: rows, checks, and the resolved steps sit on one screen with one Run button. Stop is now an explicit action rather than closing the page.
+
 ## 0.2.2 — 2026-09-02
 
 ### Added

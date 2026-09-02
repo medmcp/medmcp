@@ -947,3 +947,116 @@ class TestPathGuardDenialTagging:
     def test_another_hook_is_not_tagged(self) -> None:
         """Only this guard's denials are softened; someone else's stay visible."""
         assert not server._is_pathguard_denial("Tool 'x' was denied by hook 'other': no")
+
+
+# ── Replay runs: pre-flight preview, detached runs over the socket ───────────
+
+
+_WS_HEADERS = {"host": "127.0.0.1:8100", "origin": "http://127.0.0.1:8100"}
+
+
+class TestReplayRuns:
+    """The run screen's preview pre-flights every item; runs outlive the socket."""
+
+    @pytest.fixture
+    def env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """A temp VIBE_HOME with one imported workflow, a temp workspace, temp runs."""
+        from medmcp import replay, runs
+
+        monkeypatch.setattr(server, "VIBE_HOME", tmp_path)
+        monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
+        monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+        workspace = (tmp_path / "ws").resolve()
+        workspace.mkdir()
+        monkeypatch.setattr(server, "WORKSPACE_ROOT", workspace)
+        neuro: list[dict[str, Any]] = [{"name": "medmcp-neuro", "command": "x", "args": []}]
+        monkeypatch.setattr(settings, "active_servers", lambda: neuro)
+        (workspace / "t1.nii.gz").write_bytes(b"x")
+        envelope = yaml.safe_dump(
+            {
+                "medmcp_workflow": 1,
+                "name": "strip",
+                "description": "demo",
+                "inputs": [{"name": "in_1", "example": "/d/a.nii.gz"}],
+                "steps": [
+                    {
+                        "server": "medmcp-neuro",
+                        "tool": "skull_strip",
+                        "arguments": {"input_path": "{{in_1}}"},
+                        "produces": {"brain_path": "step1.brain_path"},
+                    }
+                ],
+            }
+        )
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        assert client.post("/api/workflows/import", json={"content": envelope}).status_code == 200
+
+        # The engine never spawns a real stack here.
+        import contextlib
+        from collections.abc import AsyncGenerator
+
+        @contextlib.asynccontextmanager
+        async def fake_caller(*_a: object, **_k: object) -> AsyncGenerator[replay.ToolCaller]:
+            async def _call(
+                srv: str, tool: str, args: dict[str, Any]
+            ) -> tuple[bool, dict[str, Any], str | None]:
+                return True, {"brain_path": str(workspace / "brain.nii.gz")}, None
+
+            yield _call
+
+        monkeypatch.setattr(replay, "mcp_caller", fake_caller)
+        return workspace
+
+    def test_preview_flags_a_missing_input_per_item(self, env: Path) -> None:
+        """A row pointing at a file that is not there is reported before anything runs."""
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        resp = client.post(
+            "/api/workflows/strip/replay-preview",
+            json={"runs": [{"in_1": "t1.nii.gz"}, {"in_1": "typo.nii.gz"}]},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        items = body["items"]
+        assert [i["ok"] for i in items] == [True, False]
+        assert items[1]["findings"][0]["status"] == "missing"
+        assert items[1]["findings"][0]["role"] == "input"  # named after the tool's argument
+        assert body["steps"][0]["arguments"]["input_path"] == str(env / "t1.nii.gz")
+
+    def test_run_survives_disconnect_and_can_be_reattached(self, env: Path) -> None:
+        """Closing the socket detaches; the run finishes and a later attach replays it."""
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        with client.websocket_connect("/ws/replay", headers=_WS_HEADERS) as ws:
+            ws.send_json({"name": "strip", "runs": [{"in_1": "t1.nii.gz"}]})
+            started = ws.receive_json()
+            assert started["type"] == "started"
+            run_id = started["run_id"]
+        # Detached — the run keeps going. Attach again and read the whole story.
+        with client.websocket_connect("/ws/replay", headers=_WS_HEADERS) as ws:
+            ws.send_json({"attach": run_id})
+            frames: list[dict[str, Any]] = []
+            while True:
+                frame = ws.receive_json()
+                frames.append(frame)
+                if frame["type"] == "result":
+                    break
+        assert frames[0]["type"] == "started" and frames[0]["run_id"] == run_id
+        assert frames[-1]["ok"] is True
+        assert any(f["type"] == "step" and f["ok"] for f in frames)
+
+        listing = client.get("/api/runs", params={"workflow": "strip"}).json()
+        assert [r["id"] for r in listing["runs"]] == [run_id]
+        assert listing["runs"][0]["status"] == "done"
+        detail = client.get(f"/api/runs/{run_id}").json()
+        assert detail["items"][0]["steps"][0]["produced"]["step1.brain_path"].endswith(
+            "brain.nii.gz"
+        )
+        assert client.delete(f"/api/runs/{run_id}").status_code == 200
+        assert client.get(f"/api/runs/{run_id}").status_code == 404
+
+    def test_bad_first_message_is_refused(self, env: Path) -> None:
+        """Neither a start nor an attach: the socket answers with an error and closes."""
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        with client.websocket_connect("/ws/replay", headers=_WS_HEADERS) as ws:
+            ws.send_json({"attach": "nope"})
+            assert ws.receive_json()["ok"] is False

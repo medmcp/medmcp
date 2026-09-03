@@ -6,6 +6,21 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+## 0.2.3 — 2026-09-03
+
+### Changed
+
+- Workflow runs keep going when the page is closed or reloaded; the page picks them up again.
+- The run editor checks every row's input files before anything starts and flags a missing file per row.
+- One run editor replaces the Single/Batch switch and the separate preview screen: rows, checks, and the resolved steps sit on one screen with one Run button. Stop is now an explicit action rather than closing the page.
+- Saving a chat as a workflow is instant and names the workflow after the chat; no model pass runs and only `recipe.yaml` is written.
+- Workflows no longer have a draft/active state: every workflow can be run, renamed, exported and deleted. Existing `draft/` and `active/` folders are folded together on first use; an earlier release will not list them afterwards.
+
+### Removed
+
+- The Refine action and the generated `SKILL.md` narrative; a workflow is its recorded steps.
+- `medmcp promote` (and `just promote`) and the `--no-llm` flag of `medmcp distill`.
+
 ## 0.2.2 — 2026-09-02
 
 ### Added

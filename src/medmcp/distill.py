@@ -1,49 +1,33 @@
-"""Tier-2 distillation: turn a session's raw log into a reusable workflow.
+"""Tier-2 distillation: turn a session's raw log into a replayable workflow.
 
 Reads vibe-acp's ``messages.jsonl`` (the authoritative record of exact tool
 names, arguments, and structured results), filters out exploratory/failed
 calls, and lifts concrete file paths into named placeholders to produce a
-:class:`~medmcp.workflow.Recipe`. The recipe is emitted two ways from one
-distillation (Option C):
+:class:`~medmcp.workflow.Recipe`, written as ``recipe.yaml`` — the one file a
+workflow consists of. No model takes part: the recipe is a recording, and the
+replay engine (:mod:`medmcp.replay`) is the only thing that runs it. The
+workflow is named after the chat it came from (the caller passes the chat's
+title; the request that opened the chat is the fallback, and its description).
 
-- ``recipe.yaml`` — machine-readable + replayable; what the replay engine runs.
-- ``SKILL.md``    — frontmatter + ``## Steps`` / ``## Gotchas``: the human-facing
-  description of the workflow, shown in the UI and carried by an export.
-
-The prose (workflow name, description, narrative steps, gotchas) is written by a
-hybrid pass: the step sequence is extracted deterministically, then the local
-Ollama model is asked to write the human-facing narrative. If the model is
-unavailable the narrative falls back to a mechanical rendering so distillation
-never hard-fails.
-
-Output lands in ``.vibe/workflows/draft/<name>/`` for human review; promoting it
-to ``active/`` — marking it reviewed and worth keeping — is a separate,
-deliberate step. Neither directory is ever loaded as a skill: a workflow runs
-through :mod:`medmcp.replay`, never by the agent deciding to invoke it.
+Output lands in ``.vibe/workflows/<name>/``. Nothing there is ever loaded as a
+skill: a workflow runs through the replay engine, never by the agent deciding
+to invoke it.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 from collections.abc import Collection
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
-import httpx
-import yaml
-
-from medmcp import provenance
+from medmcp import provenance, workflow
 from medmcp.workflow import Recipe, RecipeStep, StackRequirement, WorkflowInput
 from medmcp.workspace_note import display_content_text, strip_workspace_note
 
 JsonDict = dict[str, Any]
-
-OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "muse-medmcp")
-PROSE_TIMEOUT: float = 60.0
 
 # Read-only / orchestration tools that carry no reusable workflow meaning; they
 # are dropped from the distilled recipe so it captures the actual pipeline.
@@ -401,287 +385,32 @@ def build_requirements(recipe: Recipe, manifest: JsonDict | None) -> list[StackR
     return requires
 
 
-# ── Hybrid prose pass ────────────────────────────────────────────────────────
+# ── Workflow directories ─────────────────────────────────────────────────────
 
 
-def _prose_prompt(recipe: Recipe, context: str) -> str:
-    """Build the prompt that asks the model to narrate the distilled steps."""
-    steps_desc = "\n".join(
-        f"{i}. {s.server}:{s.tool} arguments={json.dumps(s.arguments)}"
-        for i, s in enumerate(recipe.steps, start=1)
-    )
-    manual_note = ""
-    if recipe.manual_steps:
-        manual_note = (
-            "\n\nManual steps (built-in tools that were used but CANNOT be replayed "
-            "automatically) — call these out in gotchas_markdown so the reader performs "
-            "them by hand:\n" + "\n".join(f"- {m}" for m in recipe.manual_steps)
-        )
-    return (
-        "You are documenting a medical-imaging workflow so a colleague can reuse it "
-        "on their own data. Below is the original user request and the exact sequence "
-        "of tool calls that were executed. Write a concise, reusable workflow.\n\n"
-        "GENERALIZE — this is the most important rule. The workflow must be reusable "
-        "beyond the specific scan it was run on:\n"
-        "- Describe inputs at the imaging-modality / anatomy level, NOT the specific "
-        "contrast, sequence, or filename. For example, a workflow run on a T1 scan is a "
-        "brain MRI workflow; refer to 'a brain MRI scan', not 'a T1 scan' or "
-        "'t1n_3d.nii.gz'.\n"
-        "- Only mention a specific contrast/sequence (T1, FLAIR, T2, b0, …) when a step "
-        "genuinely depends on it; otherwise keep it generic.\n"
-        "- The name and description must be modality-level and not tied to one dataset, "
-        "subject, or path.\n\n"
-        "NAME THE TOOLS — every step in steps_markdown MUST explicitly name the exact "
-        "tool it uses, written in backticks as `server:tool` (e.g. `medmcp-neuro:skull_strip`, "
-        "or `builtin:bash` for a built-in tool). This tells the reader precisely which "
-        "tool/skill to call. Never omit, invent, or rephrase a tool name — use only the "
-        "tools listed under 'Executed steps' below, exactly as written. Keep the surrounding "
-        "description generic, but the tool name itself must be verbatim.\n\n"
-        "Respond with ONLY a JSON object — no markdown fences, no extra text:\n"
-        '{"name": "<short-kebab-case-name>", "description": "<one sentence>", '
-        '"steps_markdown": "<numbered markdown list; each step names its `server:tool`>", '
-        '"gotchas_markdown": "<markdown bullet list of caveats, or empty string>"}\n\n'
-        f"Original request:\n{context}\n\n"
-        f"Executed steps (tool names are authoritative — reuse them verbatim):\n{steps_desc}\n"
-        f"{manual_note}"
-    )
+def resolve_root(override: Path | None = None) -> Path:
+    """Return the workflows root (``.vibe/workflows`` unless *override*), migrated.
 
-
-def _parse_prose_response(raw_text: str) -> JsonDict | None:
-    """Extract the prose JSON object from the model reply (strips code fences)."""
-    text = raw_text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-        text = re.sub(r"\n?```$", "", text).strip()
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        # Greedy match so nested braces in the markdown body aren't truncated.
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if not match:
-            return None
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return None
-    return cast("JsonDict", parsed) if isinstance(parsed, dict) else None
-
-
-def generate_prose(recipe: Recipe, context: str) -> JsonDict | None:
-    """Ask the local model to narrate *recipe*; return prose dict or ``None``.
-
-    Failures are swallowed and reported as ``None`` so distillation can fall
-    back to a mechanical rendering rather than blocking.
+    Every function here that takes a ``workflows_root`` keyword goes through
+    this, so the old ``draft/``/``active/`` layout is folded in before any
+    lookup or write (see :func:`medmcp.workflow.migrate_layout`).
     """
-    prompt = _prose_prompt(recipe, context)
-    try:
-        with httpx.Client(timeout=PROSE_TIMEOUT) as client:
-            resp = client.post(
-                f"{OLLAMA_BASE_URL}/api/chat",
-                json={
-                    "model": OLLAMA_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False,
-                    "think": False,
-                    "options": {"temperature": 0.3, "num_predict": 2048},
-                },
-            )
-            resp.raise_for_status()
-            data = cast("JsonDict", resp.json())
-            message = cast("JsonDict", data.get("message") or {})
-            raw_text = str(message.get("content") or "").strip()
-    except Exception:
-        return None
-    return _parse_prose_response(raw_text)
+    root = override if override is not None else provenance.VIBE_HOME / "workflows"
+    workflow.migrate_layout(root)
+    return root
 
 
-# ── SKILL.md rendering ───────────────────────────────────────────────────────
+def load_recipe(directory: Path) -> Recipe:
+    """Reconstruct a :class:`Recipe` from a workflow directory's ``recipe.yaml``."""
+    return workflow.read_recipe(directory)
 
 
-def _mechanical_steps_markdown(recipe: Recipe) -> str:
-    """Render a plain numbered list of steps when no LLM narrative is available."""
-    lines: list[str] = []
-    for i, step in enumerate(recipe.steps, start=1):
-        args = json.dumps(step.arguments)
-        lines.append(f"{i}. **`{step.server}:{step.tool}`** — `{args}`")
-    return "\n".join(lines) or "_No reusable steps were extracted._"
-
-
-def _required_tools(recipe: Recipe) -> list[tuple[str, str]]:
-    """Return the distinct ``(server, tool)`` pairs the recipe uses, first-seen order."""
-    seen: list[tuple[str, str]] = []
-    for step in recipe.steps:
-        pair = (step.server, step.tool)
-        if pair not in seen:
-            seen.append(pair)
-    return seen
-
-
-def _manual_steps_markdown(recipe: Recipe) -> str:
-    """Render the note about manual (built-in) steps replay can't run, or ``""``."""
-    if not recipe.manual_steps:
-        return ""
-    lines = [
-        "This workflow originally included manual steps using built-in tools that "
-        "the replay engine cannot run automatically. Perform them by hand where the "
-        "pipeline needs them:",
-    ]
-    lines += [f"- `{m}`" for m in recipe.manual_steps]
-    return "\n".join(lines)
-
-
-def _requirements_markdown(recipe: Recipe) -> str:
-    """Render the stacks the workflow needs, pinned for reproducibility.
-
-    Derived from the recipe's ``requires`` (captured at distillation): container
-    stacks show their image (+ digest when resolved), uv-tool stacks their version.
-    """
-    lines: list[str] = []
-    for req in recipe.requires:
-        if req.image:
-            pin = f"image `{req.image}`" + (f" (`{req.digest}`)" if req.digest else "")
-        elif req.version:
-            pin = f"version `{req.version}`"
-        else:
-            pin = ""
-        lines.append(f"- `{req.stack}`" + (f" — {pin}" if pin else ""))
-    return "\n".join(lines)
-
-
-def _tools_markdown(recipe: Recipe) -> str:
-    """Render the explicit list of tools/skills the workflow requires.
-
-    Derived directly from the recipe (not the LLM) so it is always accurate: each
-    line names a ``server:tool`` and the stack it comes from.
-    """
-    lines: list[str] = []
-    for server, tool in _required_tools(recipe):
-        if server == "builtin":
-            lines.append(f"- `{tool}` — built-in tool")
-        else:
-            lines.append(f"- `{server}:{tool}` — from the `{server}` stack")
-    return "\n".join(lines)
-
-
-def render_skill_md(recipe: Recipe, prose: JsonDict | None) -> str:
-    """Render the ``SKILL.md`` document for *recipe* (using *prose* if present)."""
-    description = recipe.description
-    steps_md = _mechanical_steps_markdown(recipe)
-    gotchas_md = ""
-    if prose is not None:
-        description = str(prose.get("description") or description)
-        steps_md = str(prose.get("steps_markdown") or steps_md)
-        gotchas_md = str(prose.get("gotchas_markdown") or "")
-
-    # Always surface dropped manual steps (deterministic), ahead of any LLM gotchas.
-    manual_md = _manual_steps_markdown(recipe)
-    gotchas_md = "\n\n".join(part for part in (manual_md, gotchas_md.strip()) if part)
-
-    title = recipe.name.replace("-", " ").strip().capitalize()
-    parts: list[str] = [
-        "---",
-        f"name: {recipe.name}",
-        f"description: {description}",
-        "---",
-        "",
-        f"# {title} workflow",
-    ]
-    tools_md = _tools_markdown(recipe)
-    if tools_md:
-        parts += ["", "## Tools", "", tools_md]
-    reqs_md = _requirements_markdown(recipe)
-    if reqs_md:
-        parts += ["", "## Requirements", "", reqs_md]
-    parts += ["", "## Steps", "", steps_md]
-    if gotchas_md.strip():
-        parts += ["", "## Gotchas", "", gotchas_md.strip()]
-    if recipe.inputs:
-        parts += ["", "## Inputs", ""]
-        for i in recipe.inputs:
-            desc = f" — {i.description}" if i.description else ""
-            parts.append(f"- `{{{{{i.name}}}}}`{desc} (e.g. `{i.example}`)")
-    return "\n".join(parts).rstrip() + "\n"
-
-
-# ── Draft persistence & editing ──────────────────────────────────────────────
-
-
-def _workflows_root(workflows_root: Path | None) -> Path:
-    """Resolve the workflows root, defaulting to ``.vibe/workflows``."""
-    return workflows_root if workflows_root is not None else provenance.VIBE_HOME / "workflows"
-
-
-def _draft_dir(name: str, workflows_root: Path | None) -> Path:
-    """Return the draft directory for workflow *name*."""
-    return _workflows_root(workflows_root) / "draft" / name
-
-
-def _write_draft(draft_dir: Path, recipe: Recipe, prose: JsonDict | None) -> None:
-    """Write ``recipe.yaml``, ``SKILL.md`` and ``prose.json`` for a draft.
-
-    ``prose.json`` caches the LLM narrative so rename/refine can re-render the
-    ``SKILL.md`` without re-running distillation.
-    """
-    draft_dir.mkdir(parents=True, exist_ok=True)
-    recipe_yaml = yaml.safe_dump(recipe.to_dict(), sort_keys=False, allow_unicode=True)
-    (draft_dir / "recipe.yaml").write_text(recipe_yaml, encoding="utf-8")
-    (draft_dir / "SKILL.md").write_text(render_skill_md(recipe, prose), encoding="utf-8")
-    (draft_dir / "prose.json").write_text(
-        json.dumps(prose) if prose is not None else "null", encoding="utf-8"
-    )
-
-
-def _read_prose(draft_dir: Path) -> JsonDict | None:
-    """Read the cached prose for a draft, or ``None`` if absent/mechanical."""
-    path = draft_dir / "prose.json"
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    return cast("JsonDict", data) if isinstance(data, dict) else None
-
-
-def load_recipe(draft_dir: Path) -> Recipe:
-    """Reconstruct a :class:`Recipe` from a draft's ``recipe.yaml``."""
-    data = cast("JsonDict", yaml.safe_load((draft_dir / "recipe.yaml").read_text(encoding="utf-8")))
-    inputs = [
-        WorkflowInput(
-            name=str(i.get("name", "")),
-            example=str(i.get("example", "")),
-            description=str(i.get("description", "")),
-            default=str(i.get("default", "")),
-        )
-        for i in cast("list[JsonDict]", data.get("inputs", []))
-    ]
-    steps = [
-        RecipeStep(
-            server=str(s.get("server", "")),
-            tool=str(s.get("tool", "")),
-            arguments=cast("JsonDict", s.get("arguments", {})),
-            produces=cast("dict[str, str]", s.get("produces", {})),
-        )
-        for s in cast("list[JsonDict]", data.get("steps", []))
-    ]
-    requires = [
-        StackRequirement(
-            stack=str(r.get("stack", "")),
-            version=str(r.get("version", "")),
-            image=str(r.get("image", "")),
-            digest=str(r.get("digest", "")),
-        )
-        for r in cast("list[JsonDict]", data.get("requires", []))
-    ]
-    manual_steps = [str(m) for m in cast("list[Any]", data.get("manual_steps", []))]
-    return Recipe(
-        name=str(data.get("name", "")),
-        description=str(data.get("description", "")),
-        inputs=inputs,
-        steps=steps,
-        requires=requires,
-        manual_steps=manual_steps,
-    )
+def _require_dir(name: str, root: Path) -> Path:
+    """Return workflow *name*'s directory under *root* or raise ``FileNotFoundError``."""
+    d = workflow.workflow_dir(root, name)
+    if d is None:
+        raise FileNotFoundError(f"no workflow named {name!r} (looked in {root})")
+    return d
 
 
 # ── Top-level distillation ───────────────────────────────────────────────────
@@ -690,19 +419,23 @@ def load_recipe(draft_dir: Path) -> Recipe:
 def distill_session(
     session_id: str,
     *,
-    use_llm: bool = True,
+    name_hint: str = "",
     workflows_root: Path | None = None,
     chain_stop_ids: Collection[str] = (),
 ) -> Path:
-    """Distill *session_id* into a draft workflow directory and return its path.
+    """Distill *session_id* into a workflow directory and return its path.
 
     Reads the session's ``messages.jsonl`` — concatenated across the session's
     compaction chain (vibe rolls a compacted conversation over to a new dir;
     see :func:`provenance.find_vibe_session_dirs`), so tool calls made after a
     compaction distill too — ``chain_stop_ids`` keeps the walk out of forks
-    (pass the UI session registry's ids) — builds a parameterized recipe, adds a (hybrid)
-    prose narrative, and writes ``recipe.yaml`` + ``SKILL.md`` into
-    ``<workflows_root>/draft/<name>/`` for human review.
+    (pass the UI session registry's ids) — builds a parameterized recipe and
+    writes it as ``<workflows_root>/<name>/recipe.yaml``.
+
+    The workflow is named from *name_hint* — the chat's title, which the caller
+    looks up — falling back to the request that opened the chat; that request
+    is also the description. A name already in use gets a numeric suffix rather
+    than replacing another workflow.
 
     Raises ``FileNotFoundError`` if the session's raw log cannot be located.
     """
@@ -722,126 +455,53 @@ def distill_session(
     )
 
     context = _first_user_message(messages)
-    fallback_name = slugify(context) if context else f"workflow-{session_id[:8]}"
+    if name_hint.strip():
+        base = slugify(name_hint)
+    elif context:
+        base = slugify(context)
+    else:
+        base = f"workflow-{session_id[:8]}"
     recipe = build_recipe(
         messages,
         server_names=server_names,
-        name=fallback_name,
+        name=base,
         description=context[:120] if context else "Distilled MedMCP workflow",
     )
-
     recipe.requires = build_requirements(recipe, manifest)
 
-    prose = generate_prose(recipe, context) if use_llm else None
-    if prose is not None and isinstance(prose.get("name"), str):
-        recipe.name = slugify(str(prose["name"]))
-        recipe.description = str(prose.get("description") or recipe.description)
-
-    draft_dir = _draft_dir(recipe.name, workflows_root)
-    _write_draft(draft_dir, recipe, prose)
-    return draft_dir
-
-
-def promote_draft(name: str, *, workflows_root: Path | None = None) -> Path:
-    """Move draft workflow *name* into ``active/`` and return the new path.
-
-    Promotion marks the workflow as reviewed and worth keeping; both directories
-    are replayable, and neither is loaded as a skill. Raises ``FileNotFoundError``
-    if no such draft exists.
-    """
-    src = _draft_dir(name, workflows_root)
-    if not (src / "SKILL.md").exists():
-        raise FileNotFoundError(f"no draft workflow named {name!r} (looked in {src})")
-    dst = _workflows_root(workflows_root) / "active" / name
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists():
-        shutil.rmtree(dst)
-    shutil.move(str(src), str(dst))
-    return dst
-
-
-def unpromote_workflow(name: str, *, workflows_root: Path | None = None) -> Path:
-    """Move a promoted workflow from ``active/`` back to ``draft/`` for editing.
-
-    The inverse of :func:`promote_draft`: it returns the workflow to the draft
-    state so it can be renamed/refined/re-tested, then promoted again. Returns the
-    draft path. Raises ``FileNotFoundError`` if no promoted workflow has that name.
-    """
-    src = _workflows_root(workflows_root) / "active" / name
-    if not (src / "SKILL.md").exists():
-        raise FileNotFoundError(f"no promoted workflow named {name!r} (looked in {src})")
-    dst = _draft_dir(name, workflows_root)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists():
-        shutil.rmtree(dst)
-    shutil.move(str(src), str(dst))
-    return dst
-
-
-def discard_draft(name: str, *, workflows_root: Path | None = None) -> None:
-    """Delete a draft workflow. Raises ``FileNotFoundError`` if it doesn't exist."""
-    src = _draft_dir(name, workflows_root)
-    if not (src / "SKILL.md").exists():
-        raise FileNotFoundError(f"no draft workflow named {name!r} (looked in {src})")
-    shutil.rmtree(src)
+    root = resolve_root(workflows_root)
+    recipe.name = workflow.unique_name(root, base)
+    target = root / recipe.name
+    workflow.write_recipe(target, recipe)
+    return target
 
 
 def delete_workflow(name: str, *, workflows_root: Path | None = None) -> Path:
-    """Delete a personal workflow by *name* from ``active/`` or ``draft/``.
+    """Delete workflow *name*; return the directory that was removed.
 
-    Returns the directory that was removed. Raises ``FileNotFoundError`` if no
-    workflow with that name exists in either location.
+    Raises ``FileNotFoundError`` if no workflow with that name exists.
     """
-    root = _workflows_root(workflows_root)
-    for kind in ("active", "draft"):
-        target = root / kind / name
-        if (target / "SKILL.md").exists():
-            shutil.rmtree(target)
-            return target
-    raise FileNotFoundError(f"no workflow named {name!r} in {root}")
+    target = _require_dir(name, resolve_root(workflows_root))
+    shutil.rmtree(target)
+    return target
 
 
-def rename_draft(name: str, new_name: str, *, workflows_root: Path | None = None) -> Path:
-    """Rename a draft workflow (its name, files, and directory). Returns the new dir."""
-    src = _draft_dir(name, workflows_root)
-    if not (src / "SKILL.md").exists():
-        raise FileNotFoundError(f"no draft workflow named {name!r} (looked in {src})")
+def rename_workflow(name: str, new_name: str, *, workflows_root: Path | None = None) -> Path:
+    """Rename a workflow (its name in the recipe and its directory); return the new dir.
+
+    Raises ``FileNotFoundError`` if *name* does not exist and ``FileExistsError``
+    if the slug of *new_name* already belongs to another workflow — a rename
+    never replaces one.
+    """
+    root = resolve_root(workflows_root)
+    src = _require_dir(name, root)
     new_slug = slugify(new_name)
+    dst = root / new_slug
+    if dst != src and dst.exists():
+        raise FileExistsError(f"a workflow named {new_slug!r} already exists")
     recipe = load_recipe(src)
     recipe.name = new_slug
-    prose = _read_prose(src)
-    if prose is not None:
-        prose["name"] = new_slug
-    # Rewrite in place (so name fields update), then relocate if the slug changed.
-    _write_draft(src, recipe, prose)
-    dst = src.parent / new_slug
+    workflow.write_recipe(src, recipe)
     if dst != src:
-        if dst.exists():
-            shutil.rmtree(dst)
         shutil.move(str(src), str(dst))
     return dst
-
-
-def refine_draft(name: str, instruction: str, *, workflows_root: Path | None = None) -> Path:
-    """Regenerate a draft's narrative from a plain-language *instruction*.
-
-    Re-runs the prose model with the user's instruction, keeping the workflow's
-    identity (name) and step recipe unchanged. Raises ``FileNotFoundError`` if the
-    draft is missing, or ``RuntimeError`` if the model returns nothing.
-    """
-    src = _draft_dir(name, workflows_root)
-    if not (src / "SKILL.md").exists():
-        raise FileNotFoundError(f"no draft workflow named {name!r} (looked in {src})")
-    recipe = load_recipe(src)
-    context = (
-        f"Current workflow description: {recipe.description}\n"
-        f"Revise the workflow per this instruction: {instruction}"
-    )
-    prose = generate_prose(recipe, context)
-    if prose is None:
-        raise RuntimeError("the model did not return a refined workflow")
-    # Refine content only; keep the existing name/identity.
-    prose["name"] = recipe.name
-    recipe.description = str(prose.get("description") or recipe.description)
-    _write_draft(src, recipe, prose)
-    return src

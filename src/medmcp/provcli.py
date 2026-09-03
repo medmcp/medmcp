@@ -4,15 +4,13 @@ Exposed as the ``medmcp`` console script::
 
     medmcp list                 # list sessions with a provenance record
     medmcp report  <session>    # (re)render report.md and print its path
-    medmcp distill <session>    # distill a draft workflow from the raw log
-    medmcp distill <session> --no-llm   # skip the LLM narrative pass
-    medmcp promote <name>       # move a reviewed draft into active/ (reusable)
+    medmcp distill <session>    # save a replayable workflow from the raw log
     medmcp replay  <name> -i in_1=path ...       # replay a workflow on new inputs
     medmcp replay  <name> --batch batch_plan.csv # roll it out over a cohort manifest
-    medmcp workflows            # list personal workflows (draft + promoted)
-    medmcp delete   <name>      # delete a personal workflow (draft or active)
+    medmcp workflows            # list personal workflows
+    medmcp delete   <name>      # delete a personal workflow
     medmcp export   <name>      # write a shareable <name>.workflow.yaml
-    medmcp import   <file>      # import a shared workflow file as a draft
+    medmcp import   <file>      # import a shared workflow file
 """
 
 from __future__ import annotations
@@ -23,7 +21,7 @@ import os
 import sys
 from pathlib import Path
 
-from medmcp import batchplan, distill, provenance, share
+from medmcp import batchplan, distill, provenance, sessions, share, workflow
 
 
 def _list_sessions() -> int:
@@ -54,27 +52,17 @@ def _report(session_id: str, *, to_stdout: bool) -> int:
     return 0
 
 
-def _distill(session_id: str, *, use_llm: bool) -> int:
-    """Distill a draft workflow for *session_id*."""
+def _distill(session_id: str) -> int:
+    """Save a replayable workflow for *session_id*, named after the chat."""
     try:
-        draft_dir = distill.distill_session(session_id, use_llm=use_llm)
+        target = distill.distill_session(
+            session_id, name_hint=sessions.chat_title(session_id) or ""
+        )
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(f"Draft workflow written to: {draft_dir}")
-    print("Review and edit it, then promote it to keep it.")
-    return 0
-
-
-def _promote(name: str) -> int:
-    """Move a reviewed draft workflow into ``active/``."""
-    try:
-        dst = distill.promote_draft(name)
-    except FileNotFoundError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    print(f"Promoted workflow to: {dst}")
-    print("Run it from the workspace UI's workflow panel.")
+    print(f"Workflow written to: {target}")
+    print(f"Run it from the workspace UI's workflow panel or `medmcp replay {target.name}`.")
     return 0
 
 
@@ -90,13 +78,8 @@ def _parse_bindings(pairs: list[str]) -> dict[str, str]:
 
 
 def _workflow_dir(name: str) -> Path | None:
-    """Resolve a workflow name to its recipe directory (active first, then draft)."""
-    root = provenance.VIBE_HOME / "workflows"
-    for kind in ("active", "draft"):
-        candidate = root / kind / name
-        if (candidate / "recipe.yaml").exists():
-            return candidate
-    return None
+    """Resolve a workflow name to its recipe directory."""
+    return workflow.workflow_dir(distill.resolve_root(), name)
 
 
 def _replay(
@@ -166,23 +149,16 @@ def _replay(
 
 def _list_workflows() -> int:
     """Print personal workflows discovered under ``.vibe/workflows/``."""
-    root = provenance.VIBE_HOME / "workflows"
-    found = False
-    for kind in ("active", "draft"):
-        base = root / kind
-        if not base.is_dir():
-            continue
-        for d in sorted(base.iterdir()):
-            if (d / "SKILL.md").exists():
-                found = True
-                print(f"{d.name}\t{kind}")
-    if not found:
+    rows = workflow.list_workflows(distill.resolve_root())
+    for row in rows:
+        print(f"{row['name']}\t{row['description']}")
+    if not rows:
         print("No personal workflows found.", file=sys.stderr)
     return 0
 
 
 def _delete(name: str) -> int:
-    """Delete a personal workflow (from active/ or draft/) by name."""
+    """Delete a personal workflow by name."""
     try:
         removed = distill.delete_workflow(name)
     except FileNotFoundError as exc:
@@ -206,7 +182,7 @@ def _export(name: str, out: str | None) -> int:
 
 
 def _import(path: str) -> int:
-    """Import a shared workflow file as a reviewable draft."""
+    """Import a shared workflow file as a new workflow."""
     try:
         text = Path(path).read_text(encoding="utf-8")
     except OSError as exc:
@@ -217,8 +193,7 @@ def _import(path: str) -> int:
     except share.WorkflowShareError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(f"Imported workflow as draft: {draft}")
-    print("Review it, then promote it to reuse.")
+    print(f"Imported workflow: {draft}")
     return 0
 
 
@@ -235,14 +210,8 @@ def main(argv: list[str] | None = None) -> int:
         "--print", dest="to_stdout", action="store_true", help="print to stdout instead of writing"
     )
 
-    distill_p = sub.add_parser("distill", help="distill a reusable workflow from a session")
+    distill_p = sub.add_parser("distill", help="save a replayable workflow from a session")
     distill_p.add_argument("session_id")
-    distill_p.add_argument(
-        "--no-llm", dest="use_llm", action="store_false", help="skip the LLM narrative pass"
-    )
-
-    promote_p = sub.add_parser("promote", help="move a reviewed draft workflow into active/")
-    promote_p.add_argument("name")
 
     replay_p = sub.add_parser("replay", help="replay a workflow on new inputs (single or batch)")
     replay_p.add_argument("name")
@@ -267,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         help="explicit recipe-input -> manifest-column mapping (repeatable)",
     )
 
-    sub.add_parser("workflows", help="list personal workflows (draft + promoted)")
+    sub.add_parser("workflows", help="list personal workflows")
 
     delete_p = sub.add_parser("delete", help="delete a personal workflow by name")
     delete_p.add_argument("name")
@@ -276,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
     export_p.add_argument("name")
     export_p.add_argument("--out", help="output path (default <name>.workflow.yaml)")
 
-    import_p = sub.add_parser("import", help="import a shared workflow file as a draft")
+    import_p = sub.add_parser("import", help="import a shared workflow file")
     import_p.add_argument("file")
 
     args = parser.parse_args(argv)
@@ -285,9 +254,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "report":
         return _report(args.session_id, to_stdout=args.to_stdout)
     if args.command == "distill":
-        return _distill(args.session_id, use_llm=args.use_llm)
-    if args.command == "promote":
-        return _promote(args.name)
+        return _distill(args.session_id)
     if args.command == "replay":
         try:
             inputs = _parse_bindings(args.input)

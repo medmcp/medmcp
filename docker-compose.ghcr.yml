@@ -159,6 +159,7 @@ services:
       # stay image-fresh.
       - "vibe-workflows:/app/.vibe/workflows"
       - "vibe-provenance:/app/.vibe/provenance"
+      - "vibe-runs:/app/.vibe/runs"
       - "vibe-logs:/app/.vibe/logs"
       # External MCP servers and the consent that armed them. Losing these on an
       # image update would silently disconnect a configured setup.
@@ -174,5 +175,6 @@ volumes:
   stacks-d:
   vibe-workflows:
   vibe-provenance:
+  vibe-runs:
   vibe-logs:
   vibe-state:

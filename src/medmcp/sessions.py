@@ -20,6 +20,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
+from medmcp import provenance
 from medmcp.acp import VIBE_HOME
 
 JsonDict = dict[str, Any]
@@ -62,6 +63,20 @@ def _save_registry(registry: dict[str, JsonDict]) -> None:
 def get_entry(session_id: str) -> JsonDict:
     """Return the stored metadata for *session_id* (empty dict if none)."""
     return load_registry().get(session_id, {})
+
+
+def chat_title(session_id: str) -> str | None:
+    """The chat's current name, or ``None`` if it has none yet.
+
+    The registry title comes first, generated or user-set; failing that, the
+    user-set title vibe recorded in its own session metadata (the registry lives
+    in the container layer and may have been reset). Used to name what is
+    derived from a chat — a distilled workflow — after the chat itself.
+    """
+    title = get_entry(session_id).get("title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    return provenance.vibe_manual_session_title(session_id)
 
 
 def _update(session_id: str, mutate: Callable[[JsonDict], None]) -> None:

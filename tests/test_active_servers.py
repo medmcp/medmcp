@@ -152,9 +152,9 @@ class TestWorkflowsAreNotSkills:
     """Workflows belong to the replay engine; vibe-acp never sees them."""
 
     def test_workflow_dirs_are_never_added_to_skill_paths(self, tmp_path: Path) -> None:
-        """Neither draft/ nor active/ reaches skill_paths, promoted or not."""
-        _make_workflow(tmp_path, "active", "wf-promoted")
-        _make_workflow(tmp_path, "draft", "wf-draft")
+        """No workflow directory reaches skill_paths."""
+        _make_workflow(tmp_path, "wf-one")
+        _make_workflow(tmp_path, "wf-two")
         cfg_path = tmp_path / "config.toml"
         with patch("medmcp.settings.VIBE_HOME", tmp_path):
             sync_servers_to_vibe_config([])
@@ -163,7 +163,7 @@ class TestWorkflowsAreNotSkills:
 
     def test_stack_skill_paths_still_load(self, tmp_path: Path) -> None:
         """A stack's own bundled skills are unaffected — only workflows are excluded."""
-        _make_workflow(tmp_path, "active", "wf-promoted")
+        _make_workflow(tmp_path, "wf-one")
         cfg_path = tmp_path / "config.toml"
         with patch("medmcp.settings.VIBE_HOME", tmp_path):
             sync_servers_to_vibe_config(
@@ -174,7 +174,7 @@ class TestWorkflowsAreNotSkills:
 
     def test_stale_workflow_names_are_dropped_from_disabled_skills(self, tmp_path: Path) -> None:
         """Names left in disabled_skills by the old gating are cleaned up."""
-        _make_workflow(tmp_path, "draft", "wf-draft")
+        _make_workflow(tmp_path, "wf-draft")
         cfg_path = tmp_path / "config.toml"
         cfg_path.write_text('disabled_skills = ["wf-draft", "skill-creator"]\n')
         with patch("medmcp.settings.VIBE_HOME", tmp_path):
@@ -389,32 +389,34 @@ class TestSyncServersToVibeConfig:
 # ── Personal workflows: discovery & disabled_skills sync ──────────────────────
 
 
-def _make_workflow(root: Path, kind: str, name: str, description: str = "") -> None:
-    """Create a minimal <root>/workflows/<kind>/<name>/SKILL.md."""
-    d = root / "workflows" / kind / name
+def _make_workflow(root: Path, name: str, description: str = "") -> None:
+    """Create a minimal <root>/workflows/<name>/recipe.yaml."""
+    d = root / "workflows" / name
     d.mkdir(parents=True)
-    front = f"---\nname: {name}\ndescription: {description}\n---\n# {name}\n"
-    (d / "SKILL.md").write_text(front)
+    (d / "recipe.yaml").write_text(f"name: {name}\ndescription: {description}\n")
 
 
 class TestDiscoverWorkflows:
-    """discover_workflows scans draft/ and active/ for SKILL.md entries."""
+    """discover_workflows lists every recipe under .vibe/workflows."""
 
-    def test_finds_active_and_draft(self, tmp_path: Path) -> None:
-        """Both promoted and draft workflows are discovered with their kind."""
-        _make_workflow(tmp_path, "active", "brain-mri", "skull strip")
-        _make_workflow(tmp_path, "draft", "spine-seg", "segment spine")
+    def test_lists_workflows_with_descriptions(self, tmp_path: Path) -> None:
+        """Each workflow directory becomes one row carrying the recipe's description."""
+        _make_workflow(tmp_path, "brain-mri", "skull strip")
+        _make_workflow(tmp_path, "spine-seg", "segment spine")
         with patch("medmcp.settings.VIBE_HOME", tmp_path):
-            found = {w["name"]: w for w in discover_workflows()}
-        assert found["brain-mri"]["kind"] == "active"
-        assert found["brain-mri"]["description"] == "skull strip"
-        assert found["spine-seg"]["kind"] == "draft"
+            found = discover_workflows()
+        assert found == [
+            {"name": "brain-mri", "description": "skull strip"},
+            {"name": "spine-seg", "description": "segment spine"},
+        ]
 
-    def test_active_shadows_draft_of_same_name(self, tmp_path: Path) -> None:
-        """A name present in both dirs resolves to the active entry."""
-        _make_workflow(tmp_path, "active", "dup")
-        _make_workflow(tmp_path, "draft", "dup")
+    def test_legacy_draft_and_active_entries_are_folded_in(self, tmp_path: Path) -> None:
+        """Workflows from the draft/active era are listed after the one-time fold."""
+        for kind, name in (("active", "dup"), ("draft", "dup"), ("draft", "spine-seg")):
+            d = tmp_path / "workflows" / kind / name
+            d.mkdir(parents=True)
+            (d / "recipe.yaml").write_text(f"name: {name}\ndescription: {kind}\n")
         with patch("medmcp.settings.VIBE_HOME", tmp_path):
-            found = [w for w in discover_workflows() if w["name"] == "dup"]
-        assert len(found) == 1
-        assert found[0]["kind"] == "active"
+            found = {w["name"]: w["description"] for w in discover_workflows()}
+        # The promoted one keeps its name; the shadowed draft survives under a suffix.
+        assert found == {"dup": "active", "dup-draft": "draft", "spine-seg": "draft"}

@@ -230,6 +230,7 @@ medmcp.env
 # Derived from .vibe/prompts/medmcp.md at sync time when external MCP is in use.
 .vibe/prompts/medmcp-external.md
 .vibe/provenance/
+.vibe/runs/
 .vibe/workflows/
 data/
 node_modules/

@@ -7,20 +7,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from medmcp import distill, share
+from medmcp import distill, share, workflow
 from medmcp.workflow import Recipe, RecipeStep, StackRequirement, WorkflowInput
-
-
-def _make_draft(root: Path, recipe: Recipe) -> Path:
-    """Write a draft workflow dir (recipe.yaml + SKILL.md + prose.json) under *root*."""
-    draft = root / "draft" / recipe.name
-    draft.mkdir(parents=True)
-    (draft / "recipe.yaml").write_text(
-        yaml.safe_dump(recipe.to_dict(), sort_keys=False), encoding="utf-8"
-    )
-    (draft / "SKILL.md").write_text(distill.render_skill_md(recipe, None), encoding="utf-8")
-    (draft / "prose.json").write_text("null", encoding="utf-8")
-    return draft
 
 
 def _sample_recipe() -> Recipe:
@@ -54,21 +42,17 @@ class TestExport:
     """export_workflow serializes a workflow dir into the inline-YAML envelope."""
 
     def test_export_missing_raises(self, tmp_path: Path) -> None:
-        """Exporting a name with no draft/active dir raises FileNotFoundError."""
+        """Exporting a name with no workflow dir raises FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
             share.export_workflow("nope", workflows_root=tmp_path)
 
-    def test_export_contains_envelope_and_docs(self, tmp_path: Path) -> None:
-        """Export emits the versioned envelope with steps, requires, and docs."""
-        _make_draft(tmp_path, _sample_recipe())
+    def test_export_is_the_versioned_recipe(self, tmp_path: Path) -> None:
+        """The envelope is the recipe's dict form behind a format marker — nothing else."""
+        workflow.write_recipe(tmp_path / "skull-strip-register", _sample_recipe())
         text = share.export_workflow("skull-strip-register", workflows_root=tmp_path)
         env = yaml.safe_load(text)
-        assert env[share.FORMAT_KEY] == share.FORMAT_VERSION
-        assert env["name"] == "skull-strip-register"
-        assert [s["tool"] for s in env["steps"]] == ["skull_strip", "register_to_template"]
-        assert env["requires"][0]["digest"] == "sha256:abc"
-        assert env["manual_steps"] == ["builtin:bash `convert a b`"]
-        assert "## Requirements" in env["documentation"]
+        assert env.pop(share.FORMAT_KEY) == share.FORMAT_VERSION
+        assert env == _sample_recipe().to_dict()
 
     def test_export_fills_missing_digest(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -78,7 +62,7 @@ class TestExport:
         recipe.requires = [
             StackRequirement(stack="medmcp-neuro", image="ghcr.io/medmcp/neuro:main")
         ]
-        _make_draft(tmp_path, recipe)
+        workflow.write_recipe(tmp_path / "skull-strip-register", recipe)
 
         def _fake_digest(_image: str) -> str:
             return "sha256:resolved"
@@ -89,19 +73,26 @@ class TestExport:
 
 
 class TestImport:
-    """import_workflow validates the envelope and reconstructs a reviewable draft."""
+    """import_workflow validates the envelope and reconstructs the workflow."""
 
     def test_round_trip_preserves_recipe(self, tmp_path: Path) -> None:
-        """Export → import reconstructs an equivalent recipe as a fresh draft."""
+        """Export → import reconstructs an equivalent recipe as a fresh workflow."""
         original = _sample_recipe()
-        _make_draft(tmp_path / "src", original)
+        workflow.write_recipe(tmp_path / "src" / "skull-strip-register", original)
         text = share.export_workflow("skull-strip-register", workflows_root=tmp_path / "src")
 
-        draft = share.import_workflow(text, workflows_root=tmp_path / "dst")
-        assert draft == tmp_path / "dst" / "draft" / "skull-strip-register"
-        imported = distill.load_recipe(draft)
-        assert imported.to_dict() == original.to_dict()
-        assert (draft / "SKILL.md").exists()
+        target = share.import_workflow(text, workflows_root=tmp_path / "dst")
+        assert target == tmp_path / "dst" / "skull-strip-register"
+        assert distill.load_recipe(target).to_dict() == original.to_dict()
+        assert sorted(p.name for p in target.iterdir()) == ["recipe.yaml"]
+
+    def test_import_ignores_the_blocks_older_exports_carried(self, tmp_path: Path) -> None:
+        """A file from a release that wrote documentation and prose still imports."""
+        env = {share.FORMAT_KEY: 1, **_sample_recipe().to_dict()}
+        env["documentation"] = "# Skull strip register workflow\n\n## Steps\n…"
+        env["prose"] = {"name": "x", "steps_markdown": "1. …"}
+        target = share.import_workflow(yaml.safe_dump(env), workflows_root=tmp_path)
+        assert distill.load_recipe(target).to_dict() == _sample_recipe().to_dict()
 
     def test_import_rejects_non_mapping(self, tmp_path: Path) -> None:
         """A payload that isn't a YAML mapping is rejected."""
@@ -122,12 +113,20 @@ class TestImport:
 
     def test_import_collision_gets_suffix(self, tmp_path: Path) -> None:
         """Importing the same workflow twice never clobbers — the second is suffixed."""
-        _make_draft(tmp_path, _sample_recipe())
+        workflow.write_recipe(tmp_path / "skull-strip-register", _sample_recipe())
         text = share.export_workflow("skull-strip-register", workflows_root=tmp_path)
-        draft = share.import_workflow(text, workflows_root=tmp_path)
-        assert draft.name == "skull-strip-register-imported"
+        first = share.import_workflow(text, workflows_root=tmp_path)
+        assert first.name == "skull-strip-register-imported"
         again = share.import_workflow(text, workflows_root=tmp_path)
         assert again.name == "skull-strip-register-imported-2"
+
+    def test_import_into_a_legacy_root_sees_its_workflows(self, tmp_path: Path) -> None:
+        """A name taken by an old draft/ entry is still a collision after the fold."""
+        workflow.write_recipe(tmp_path / "draft" / "skull-strip-register", _sample_recipe())
+        env = {share.FORMAT_KEY: 1, **_sample_recipe().to_dict()}
+        target = share.import_workflow(yaml.safe_dump(env), workflows_root=tmp_path)
+        assert target.name == "skull-strip-register-imported"
+        assert not (tmp_path / "draft").exists()
 
 
 def test_export_import_round_trips_a_derived_default(tmp_path: Path) -> None:
@@ -147,14 +146,11 @@ def test_export_import_round_trips_a_derived_default(tmp_path: Path) -> None:
         steps=[RecipeStep(server="s", tool="t", arguments={"p": "{{in_1}}", "o": "{{in_2}}"})],
     )
     root = tmp_path / "workflows"
-    src = root / "draft" / "wf"
-    src.mkdir(parents=True)
-    (src / "recipe.yaml").write_text(yaml.safe_dump(recipe.to_dict()), encoding="utf-8")
+    workflow.write_recipe(root / "wf", recipe)
 
     envelope = share.export_workflow("wf", workflows_root=root)
     assert "{{dir(in_1)}}" in envelope
 
-    dest_root = tmp_path / "dest"
-    draft = share.import_workflow(envelope, workflows_root=dest_root)
-    loaded = distill.load_recipe(draft)
+    target = share.import_workflow(envelope, workflows_root=tmp_path / "dest")
+    loaded = distill.load_recipe(target)
     assert [i.default for i in loaded.inputs] == ["", "{{dir(in_1)}}"]

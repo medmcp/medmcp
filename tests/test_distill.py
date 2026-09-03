@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 # pyright: reportPrivateUsage=false
-from medmcp import distill, provcli, provenance
+from medmcp import distill, provenance
 from medmcp.workflow import Recipe, RecipeStep, StackRequirement
 
 JsonDict = dict[str, Any]
@@ -196,24 +196,6 @@ class TestBuildRecipe:
         assert [s.tool for s in recipe.steps] == ["skull_strip", "register_to_template"]
 
 
-class TestProseParsing:
-    """_parse_prose_response handles fenced and inline JSON."""
-
-    def test_plain_json(self) -> None:
-        """A bare JSON object parses."""
-        parsed = distill._parse_prose_response('{"name": "x", "description": "y"}')
-        assert parsed == {"name": "x", "description": "y"}
-
-    def test_fenced_json(self) -> None:
-        """A ```json fenced block is unwrapped."""
-        parsed = distill._parse_prose_response('```json\n{"name": "x"}\n```')
-        assert parsed == {"name": "x"}
-
-    def test_garbage_returns_none(self) -> None:
-        """Unparseable text returns None."""
-        assert distill._parse_prose_response("not json at all") is None
-
-
 def test_slugify() -> None:
     """Slugs are lowercased, hyphenated, and bounded."""
     assert distill.slugify("Skull Strip & Register!") == "skull-strip-register"
@@ -281,74 +263,19 @@ class TestFirstUserMessage:
         assert distill._first_user_message(messages) == "Register this scan"
 
 
-class TestRenderSkillMd:
-    """render_skill_md produces a valid SKILL.md with or without prose."""
-
-    def test_mechanical_fallback(self) -> None:
-        """Without prose, steps render mechanically and inputs are listed."""
-        recipe = distill.build_recipe(
-            _MESSAGES, server_names=["medmcp-neuro"], name="my-flow", description="desc"
-        )
-        md = distill.render_skill_md(recipe, None)
-        assert md.startswith("---\nname: my-flow\n")
-        assert "## Steps" in md
-        assert "`medmcp-neuro:skull_strip`" in md
-        assert "## Inputs" in md
-
-    def test_uses_prose_when_present(self) -> None:
-        """Prose name/description/steps override the mechanical defaults."""
-        recipe = distill.build_recipe(
-            _MESSAGES, server_names=["medmcp-neuro"], name="my-flow", description="desc"
-        )
-        prose: JsonDict = {
-            "description": "A nicer description.",
-            "steps_markdown": "1. Do the thing.",
-            "gotchas_markdown": "- Mind the gap.",
-        }
-        md = distill.render_skill_md(recipe, prose)
-        assert "A nicer description." in md
-        assert "Do the thing." in md
-        assert "## Gotchas" in md
-
-    def test_lists_required_tools(self) -> None:
-        """A ## Tools section names every server:tool the workflow needs."""
-        recipe = distill.build_recipe(
-            _MESSAGES, server_names=["medmcp-neuro"], name="my-flow", description="desc"
-        )
-        md = distill.render_skill_md(recipe, None)
-        assert "## Tools" in md
-        assert "`medmcp-neuro:skull_strip` — from the `medmcp-neuro` stack" in md
-        assert "`medmcp-neuro:register_to_template`" in md
-
-    def test_required_tools_dedup(self) -> None:
-        """Distinct MCP tools are listed once, in first-seen order."""
-        recipe = Recipe(name="f", description="d")
-        recipe.steps = [
-            RecipeStep(server="medmcp-neuro", tool="skull_strip", arguments={}),
-            RecipeStep(server="medmcp-neuro", tool="skull_strip", arguments={}),
-            RecipeStep(server="medmcp-neuro", tool="coregister", arguments={}),
-        ]
-        assert distill._required_tools(recipe) == [
-            ("medmcp-neuro", "skull_strip"),
-            ("medmcp-neuro", "coregister"),
-        ]
-
-    def test_builtin_calls_recorded_as_manual_steps(self) -> None:
-        """Built-in (non-MCP) calls are dropped but surfaced as manual steps in Gotchas."""
-        messages: list[JsonDict] = [
-            _assistant_call("b0", "bash", {"command": "convert a b"}),
-            _tool_result("b0", "ok: True"),
-        ]
-        recipe = distill.build_recipe(messages, server_names=[], name="f", description="d")
-        assert distill._required_tools(recipe) == []
-        assert recipe.manual_steps == ["builtin:bash `convert a b`"]
-        md = distill.render_skill_md(recipe, None)
-        assert "## Gotchas" in md
-        assert "builtin:bash `convert a b`" in md
+def test_builtin_calls_recorded_as_manual_steps() -> None:
+    """Built-in (non-MCP) calls are dropped from the steps but kept as manual steps."""
+    messages: list[JsonDict] = [
+        _assistant_call("b0", "bash", {"command": "convert a b"}),
+        _tool_result("b0", "ok: True"),
+    ]
+    recipe = distill.build_recipe(messages, server_names=[], name="f", description="d")
+    assert recipe.steps == []
+    assert recipe.manual_steps == ["builtin:bash `convert a b`"]
 
 
 class TestRequirements:
-    """build_requirements + the ## Requirements rendering."""
+    """build_requirements pins the stacks a recipe uses."""
 
     def test_filters_to_used_stacks_and_pins(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Only stacks the recipe uses are required; container→image+digest, uv→version."""
@@ -379,20 +306,6 @@ class TestRequirements:
         recipe.steps = [RecipeStep(server="medmcp-x", tool="t", arguments={})]
         assert distill.build_requirements(recipe, None) == [StackRequirement(stack="medmcp-x")]
 
-    def test_requirements_rendered_in_skill_md(self) -> None:
-        """## Requirements pins each stack by image(+digest) or version."""
-        recipe = Recipe(name="w", description="d")
-        recipe.requires = [
-            StackRequirement(
-                stack="medmcp-neuro", image="ghcr.io/medmcp/neuro:main", digest="sha256:abc"
-            ),
-            StackRequirement(stack="medmcp-dicom", version="0.1.0"),
-        ]
-        md = distill.render_skill_md(recipe, None)
-        assert "## Requirements" in md
-        assert "image `ghcr.io/medmcp/neuro:main` (`sha256:abc`)" in md
-        assert "version `0.1.0`" in md
-
 
 def _write_fake_session(root: Path) -> None:
     """Create a minimal vibe session log dir under *root* (a VIBE_HOME)."""
@@ -405,30 +318,50 @@ def _write_fake_session(root: Path) -> None:
 
 
 def test_distill_session_end_to_end(tmp_path: Path) -> None:
-    """distill_session writes recipe.yaml + SKILL.md from a session's raw log."""
+    """distill_session writes one recipe.yaml, named from the opening request."""
     _write_fake_session(tmp_path)
     workflows_root = tmp_path / "workflows"
     with patch.object(provenance, "VIBE_HOME", tmp_path):
-        draft_dir = distill.distill_session(
-            SESSION_ID, use_llm=False, workflows_root=workflows_root
-        )
+        target = distill.distill_session(SESSION_ID, workflows_root=workflows_root)
 
-    assert (draft_dir / "SKILL.md").exists()
-    recipe_yaml = (draft_dir / "recipe.yaml").read_text()
-    recipe = yaml.safe_load(recipe_yaml)
+    assert target == workflows_root / "skull-strip-and-register-the-t1"
+    assert sorted(p.name for p in target.iterdir()) == ["recipe.yaml"]
+    recipe = yaml.safe_load((target / "recipe.yaml").read_text())
+    assert recipe["name"] == "skull-strip-and-register-the-t1"
+    assert recipe["description"] == "Skull strip and register the T1"
     assert [s["tool"] for s in recipe["steps"]] == ["skull_strip", "register_to_template"]
     assert recipe["steps"][1]["arguments"]["input_path"] == "{{step1.brain_path}}"
+
+
+def test_distill_names_the_workflow_after_the_chat(tmp_path: Path) -> None:
+    """A chat title names the workflow; the opening request stays the description."""
+    _write_fake_session(tmp_path)
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        target = distill.distill_session(
+            SESSION_ID,
+            name_hint="Brain MRI: strip & register",
+            workflows_root=tmp_path / "workflows",
+        )
+    assert target.name == "brain-mri-strip-register"
+    assert distill.load_recipe(target).description == "Skull strip and register the T1"
+
+
+def test_distill_never_replaces_an_existing_workflow(tmp_path: Path) -> None:
+    """Two chats with the same title give two workflows, not one overwriting the other."""
+    _write_fake_session(tmp_path)
+    root = tmp_path / "workflows"
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        first = distill.distill_session(SESSION_ID, name_hint="Strip", workflows_root=root)
+        second = distill.distill_session(SESSION_ID, name_hint="Strip", workflows_root=root)
+    assert (first.name, second.name) == ("strip", "strip-2")
+    assert distill.load_recipe(second).name == "strip-2"
 
 
 def test_distill_session_missing_log_raises(tmp_path: Path) -> None:
     """A session with no raw log raises FileNotFoundError."""
     (tmp_path / "logs" / "session").mkdir(parents=True)
-    with patch.object(provenance, "VIBE_HOME", tmp_path):
-        try:
-            distill.distill_session(SESSION_ID, use_llm=False)
-        except FileNotFoundError:
-            return
-    raise AssertionError("expected FileNotFoundError")
+    with patch.object(provenance, "VIBE_HOME", tmp_path), pytest.raises(FileNotFoundError):
+        distill.distill_session(SESSION_ID)
 
 
 def test_distill_session_spans_compaction_chain(tmp_path: Path) -> None:
@@ -460,11 +393,9 @@ def test_distill_session_spans_compaction_chain(tmp_path: Path) -> None:
             f.write(json.dumps(msg) + "\n")
 
     with patch.object(provenance, "VIBE_HOME", tmp_path):
-        draft_dir = distill.distill_session(
-            SESSION_ID, use_llm=False, workflows_root=tmp_path / "workflows"
-        )
+        target = distill.distill_session(SESSION_ID, workflows_root=tmp_path / "workflows")
 
-    recipe = yaml.safe_load((draft_dir / "recipe.yaml").read_text())
+    recipe = yaml.safe_load((target / "recipe.yaml").read_text())
     assert [s["tool"] for s in recipe["steps"]] == [
         "skull_strip",
         "register_to_template",
@@ -472,172 +403,83 @@ def test_distill_session_spans_compaction_chain(tmp_path: Path) -> None:
     ]
 
 
-def test_promote_moves_draft_to_active(tmp_path: Path) -> None:
-    """Promote relocates a reviewed draft into active/ for skill discovery."""
-    draft = tmp_path / "workflows" / "draft" / "my-flow"
-    draft.mkdir(parents=True)
-    (draft / "SKILL.md").write_text("---\nname: my-flow\n---\n")
-    (draft / "recipe.yaml").write_text("name: my-flow\n")
-    with patch.object(provenance, "VIBE_HOME", tmp_path):
-        rc = provcli._promote("my-flow")
-
-    assert rc == 0
-    active = tmp_path / "workflows" / "active" / "my-flow"
-    assert (active / "SKILL.md").exists()
-    assert not draft.exists()
+# ── Rename / delete ──────────────────────────────────────────────────────────
 
 
-def test_promote_missing_draft_errors(tmp_path: Path) -> None:
-    """Promoting a non-existent draft returns a non-zero exit code."""
-    with patch.object(provenance, "VIBE_HOME", tmp_path):
-        assert provcli._promote("nope") == 1
-
-
-# ── Draft editing: rename / refine / discard ─────────────────────────────────
-
-
-def _make_draft(tmp_path: Path) -> tuple[Path, Path]:
-    """Distill a real (no-LLM) draft; return (workflows_root, draft_dir)."""
+def _make_workflow(tmp_path: Path) -> tuple[Path, Path]:
+    """Distill a real workflow; return (workflows_root, workflow_dir)."""
     _write_fake_session(tmp_path)
     workflows_root = tmp_path / "workflows"
     with patch.object(provenance, "VIBE_HOME", tmp_path):
-        draft_dir = distill.distill_session(
-            SESSION_ID, use_llm=False, workflows_root=workflows_root
-        )
-    return workflows_root, draft_dir
+        target = distill.distill_session(SESSION_ID, workflows_root=workflows_root)
+    return workflows_root, target
 
 
-def test_rename_draft_relocates_and_rewrites(tmp_path: Path) -> None:
-    """Rename moves the draft dir and updates the name in recipe.yaml + SKILL.md."""
-    workflows_root, draft_dir = _make_draft(tmp_path)
-    old_name = draft_dir.name
+def test_rename_workflow_relocates_and_rewrites(tmp_path: Path) -> None:
+    """Rename moves the directory and updates the name in recipe.yaml."""
+    workflows_root, wf_dir = _make_workflow(tmp_path)
 
-    new_dir = distill.rename_draft(old_name, "Fancy New Name!", workflows_root=workflows_root)
+    new_dir = distill.rename_workflow(wf_dir.name, "Fancy New Name!", workflows_root=workflows_root)
 
-    assert new_dir.name == "fancy-new-name"
-    assert not draft_dir.exists()  # old dir gone
+    assert new_dir == workflows_root / "fancy-new-name"
+    assert not wf_dir.exists()
     recipe = distill.load_recipe(new_dir)
     assert recipe.name == "fancy-new-name"
     assert recipe.steps  # the pipeline is preserved across the rename
-    assert (new_dir / "SKILL.md").read_text().startswith("---\nname: fancy-new-name\n")
 
 
-def test_rename_draft_missing_raises(tmp_path: Path) -> None:
-    """Renaming a draft that doesn't exist raises FileNotFoundError."""
-    workflows_root = tmp_path / "workflows"
-    try:
-        distill.rename_draft("nope", "x", workflows_root=workflows_root)
-    except FileNotFoundError:
-        return
-    raise AssertionError("expected FileNotFoundError")
+def test_rename_workflow_missing_raises(tmp_path: Path) -> None:
+    """Renaming a workflow that doesn't exist raises FileNotFoundError."""
+    with pytest.raises(FileNotFoundError):
+        distill.rename_workflow("nope", "x", workflows_root=tmp_path / "workflows")
 
 
-def test_discard_draft_removes_dir(tmp_path: Path) -> None:
-    """Discard deletes the draft directory."""
-    workflows_root, draft_dir = _make_draft(tmp_path)
-    distill.discard_draft(draft_dir.name, workflows_root=workflows_root)
-    assert not draft_dir.exists()
+def test_rename_workflow_never_replaces_another(tmp_path: Path) -> None:
+    """Renaming onto a taken name is refused instead of overwriting that workflow."""
+    workflows_root, wf_dir = _make_workflow(tmp_path)
+    other = workflows_root / "other"
+    other.mkdir()
+    (other / "recipe.yaml").write_text("name: other\ndescription: keep me\n")
+
+    with pytest.raises(FileExistsError):
+        distill.rename_workflow(wf_dir.name, "Other", workflows_root=workflows_root)
+
+    assert distill.load_recipe(other).description == "keep me"
+    assert wf_dir.exists()
 
 
-def test_discard_draft_missing_raises(tmp_path: Path) -> None:
-    """Discarding a non-existent draft raises FileNotFoundError."""
-    try:
-        distill.discard_draft("nope", workflows_root=tmp_path / "workflows")
-    except FileNotFoundError:
-        return
-    raise AssertionError("expected FileNotFoundError")
+def test_rename_workflow_to_its_own_name_keeps_it(tmp_path: Path) -> None:
+    """A rename that slugifies to the current name changes nothing and does not raise."""
+    workflows_root, wf_dir = _make_workflow(tmp_path)
+    renamed = distill.rename_workflow(wf_dir.name, wf_dir.name, workflows_root=workflows_root)
+    assert renamed == wf_dir
+    assert wf_dir.exists()
 
 
-def test_refine_draft_rewrites_prose_keeps_identity(tmp_path: Path) -> None:
-    """Refine regenerates prose (mocked) while keeping the draft's name and steps."""
-    workflows_root, draft_dir = _make_draft(tmp_path)
-    name = draft_dir.name
-    new_prose: JsonDict = {
-        "name": "model-tried-to-rename",  # must be ignored — identity is preserved
-        "description": "Refined description.",
-        "steps_markdown": "1. Refined step.",
-        "gotchas_markdown": "",
-    }
-    with patch.object(distill, "generate_prose", return_value=new_prose):
-        out = distill.refine_draft(name, "make it generic", workflows_root=workflows_root)
-
-    assert out == draft_dir  # same dir; refine never relocates
-    recipe = distill.load_recipe(out)
-    assert recipe.name == name  # identity preserved despite the model's suggestion
-    assert recipe.description == "Refined description."
-    assert "Refined step." in (out / "SKILL.md").read_text()
-
-
-def test_unpromote_moves_active_back_to_draft(tmp_path: Path) -> None:
-    """unpromote_workflow returns a promoted workflow to draft/ for editing."""
-    active = tmp_path / "workflows" / "active" / "flow"
-    active.mkdir(parents=True)
-    (active / "SKILL.md").write_text("---\nname: flow\n---\n")
-    (active / "recipe.yaml").write_text("name: flow\n")
-
-    draft = distill.unpromote_workflow("flow", workflows_root=tmp_path / "workflows")
-
-    assert draft == tmp_path / "workflows" / "draft" / "flow"
-    assert (draft / "SKILL.md").exists()
-    assert not active.exists()
-
-
-def test_unpromote_missing_raises(tmp_path: Path) -> None:
-    """Unpromoting a non-promoted workflow raises FileNotFoundError."""
-    try:
-        distill.unpromote_workflow("nope", workflows_root=tmp_path / "workflows")
-    except FileNotFoundError:
-        return
-    raise AssertionError("expected FileNotFoundError")
-
-
-def test_promote_then_unpromote_round_trips(tmp_path: Path) -> None:
-    """A draft promoted and then unpromoted lands back in draft/ intact."""
-    _, draft_dir = _make_draft(tmp_path)
-    name = draft_dir.name
-    distill.promote_draft(name, workflows_root=tmp_path / "workflows")
-    assert not draft_dir.exists()
-    back = distill.unpromote_workflow(name, workflows_root=tmp_path / "workflows")
-    assert back == draft_dir
-    assert (back / "SKILL.md").exists()
-
-
-def test_delete_workflow_removes_active(tmp_path: Path) -> None:
-    """delete_workflow removes a promoted workflow from active/."""
-    active = tmp_path / "workflows" / "active" / "flow"
-    active.mkdir(parents=True)
-    (active / "SKILL.md").write_text("---\nname: flow\n---\n")
-    removed = distill.delete_workflow("flow", workflows_root=tmp_path / "workflows")
-    assert removed == active
-    assert not active.exists()
-
-
-def test_delete_workflow_removes_draft(tmp_path: Path) -> None:
-    """delete_workflow also removes an unpromoted draft."""
-    _, draft_dir = _make_draft(tmp_path)
-    removed = distill.delete_workflow(draft_dir.name, workflows_root=tmp_path / "workflows")
-    assert removed == draft_dir
-    assert not draft_dir.exists()
+def test_delete_workflow_removes_dir(tmp_path: Path) -> None:
+    """delete_workflow removes the workflow's directory and returns it."""
+    workflows_root, wf_dir = _make_workflow(tmp_path)
+    removed = distill.delete_workflow(wf_dir.name, workflows_root=workflows_root)
+    assert removed == wf_dir
+    assert not wf_dir.exists()
 
 
 def test_delete_workflow_missing_raises(tmp_path: Path) -> None:
     """Deleting a non-existent workflow raises FileNotFoundError."""
-    try:
+    with pytest.raises(FileNotFoundError):
         distill.delete_workflow("nope", workflows_root=tmp_path / "workflows")
-    except FileNotFoundError:
-        return
-    raise AssertionError("expected FileNotFoundError")
 
 
-def test_refine_draft_model_failure_raises(tmp_path: Path) -> None:
-    """When the model returns nothing, refine raises rather than silently no-op."""
-    workflows_root, draft_dir = _make_draft(tmp_path)
-    with patch.object(distill, "generate_prose", return_value=None):
-        try:
-            distill.refine_draft(draft_dir.name, "x", workflows_root=workflows_root)
-        except RuntimeError:
-            return
-    raise AssertionError("expected RuntimeError")
+def test_legacy_layout_is_folded_in_before_any_lookup(tmp_path: Path) -> None:
+    """A workflow saved under the old draft/ dir is found by name after the fold."""
+    root = tmp_path / "workflows"
+    legacy = root / "draft" / "strip"
+    legacy.mkdir(parents=True)
+    (legacy / "recipe.yaml").write_text("name: strip\ndescription: d\n")
+    (legacy / "SKILL.md").write_text("---\nname: strip\n---\n")
+
+    assert distill.delete_workflow("strip", workflows_root=root) == root / "strip"
+    assert not (root / "draft").exists()
 
 
 # ── derived defaults for container directories ───────────────────────────────

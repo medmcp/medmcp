@@ -4,7 +4,8 @@ import type {
   ExternalMcpState,
   GpuInfo,
   InstalledStack,
-  ReplayPreviewStep,
+  ReplayPreviewResult,
+  RunSummary,
   RewindResult,
   SessionInfo,
   SettingsState,
@@ -45,6 +46,13 @@ async function sendJson(
 
 async function postJson(url: string, body: object): Promise<Response> {
   return sendJson('POST', url, body)
+}
+
+/** The absolute on-disk workspace root, so absolute tool outputs can be shown
+ *  and opened as workspace paths. */
+export async function fetchWorkspaceRoot(): Promise<string> {
+  const res = await check(await fetch('/api/workspace'))
+  return ((await res.json()) as { root: string }).root
 }
 
 export async function fetchTree(): Promise<TreeNode[]> {
@@ -188,31 +196,19 @@ export async function fetchWorkflowDetail(name: string): Promise<WorkflowDetail>
   return (await res.json()) as WorkflowDetail
 }
 
-/** Distill a chat session into a draft workflow; returns the new draft's detail. */
+/** Distill a chat session into a workflow named after the chat; returns its detail. */
 export async function distillSession(sessionId: string): Promise<WorkflowDetail> {
   const res = await postJson('/api/workflows/distill', { session_id: sessionId })
   return (await res.json()) as WorkflowDetail
 }
 
-export async function promoteWorkflow(name: string): Promise<void> {
-  await postJson(`/api/workflows/${encodeURIComponent(name)}/promote`, {})
-}
-
-export async function unpromoteWorkflow(name: string): Promise<void> {
-  await postJson(`/api/workflows/${encodeURIComponent(name)}/unpromote`, {})
-}
-
-/** Rename a draft; returns the new (slugified) name. */
+/** Rename a workflow; returns the new (slugified) name. */
 export async function renameWorkflow(name: string, newName: string): Promise<string> {
   const res = await postJson(`/api/workflows/${encodeURIComponent(name)}/rename`, {
     new_name: newName,
   })
   const body = (await res.json()) as { name: string }
   return body.name
-}
-
-export async function refineWorkflow(name: string, instruction: string): Promise<void> {
-  await postJson(`/api/workflows/${encodeURIComponent(name)}/refine`, { instruction })
 }
 
 export async function deleteWorkflow(name: string): Promise<void> {
@@ -233,20 +229,36 @@ export async function exportWorkflow(name: string): Promise<void> {
   URL.revokeObjectURL(url)
 }
 
-/** Import a shared workflow file (its YAML text); returns the new draft's detail. */
+/** Import a shared workflow file (its YAML text); returns the new workflow's detail. */
 export async function importWorkflow(content: string): Promise<WorkflowDetail> {
   const res = await postJson('/api/workflows/import', { content })
   return (await res.json()) as WorkflowDetail
 }
 
+/** Pre-flight every run item and resolve the first runnable one's steps. */
 export async function replayPreview(
   name: string,
-  inputs: Record<string, string>,
-): Promise<{ ok: boolean; error: string | null; steps: ReplayPreviewStep[] }> {
+  runs: Record<string, string>[],
+): Promise<ReplayPreviewResult> {
   const res = await postJson(`/api/workflows/${encodeURIComponent(name)}/replay-preview`, {
-    inputs,
+    runs,
   })
-  return (await res.json()) as { ok: boolean; error: string | null; steps: ReplayPreviewStep[] }
+  return (await res.json()) as ReplayPreviewResult
+}
+
+/** Recent replay runs (newest first), plus the ids still in flight on the server. */
+export async function fetchRuns(
+  workflow?: string,
+  limit = 10,
+): Promise<{ runs: RunSummary[]; live: string[] }> {
+  const q = new URLSearchParams({ limit: String(limit) })
+  if (workflow) q.set('workflow', workflow)
+  const res = await check(await fetch(`/api/runs?${q.toString()}`))
+  return (await res.json()) as { runs: RunSummary[]; live: string[] }
+}
+
+export async function deleteRun(id: string): Promise<void> {
+  await check(await fetch(`/api/runs/${encodeURIComponent(id)}`, { method: 'DELETE' }))
 }
 
 /** Turn a plan_batch manifest CSV into per-subject batch rows for this workflow. */

@@ -1480,7 +1480,7 @@ button:hover {
   position: absolute;
   left: 16px;
   right: 16px;
-  bottom: 16px;
+  bottom: 64px;
   font-size: 12px;
   color: var(--blue-xl);
   background: rgba(24, 28, 37, 0.96);
@@ -3639,15 +3639,42 @@ textarea.wf-input {
   border-color: rgba(210, 34, 41, 0.4);
 }
 
-/* The version row in Settings. */
-.settings-version {
-  margin-left: 8px;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  font-weight: 400;
-  color: var(--muted);
+/* The foot of the settings drawer: version on the left, the release check or
+   the update on the right. Pinned below the scrolling body, so it is in the
+   same place however long the settings above it get. */
+.drawer-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  padding: 10px 18px;
+  border-top: 1px solid var(--border);
 }
 
-.settings-hint-update {
+.drawer-footer-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.drawer-footer-version {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--muted2);
+}
+
+.drawer-footer-hint {
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawer-footer-hint.available {
   color: var(--blue-xl);
 }

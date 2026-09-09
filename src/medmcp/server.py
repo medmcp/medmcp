@@ -514,7 +514,7 @@ async def healthz() -> JsonDict:
     Carries the version and build identifier so an installed instance can say
     what it is — the first question any bug report has to answer.
     """
-    return {"status": "ok", "version": __version__, "build": BUILD}
+    return {"status": "ok", "version": update.effective_version(__version__), "build": BUILD}
 
 
 # ── Update API ──────────────────────────────────────────────
@@ -530,10 +530,15 @@ async def _update_status() -> JsonDict:
     """The update payload; the apply plan is only computed when there is something to apply."""
     state = await asyncio.to_thread(update.load_state)
     latest = cast("JsonDict | None", state.get("latest"))
+    current = update.effective_version(__version__)
     reason: update.PlanError | None = None
-    if latest and update.is_newer(str(latest.get("version", "")), __version__):
+    if (
+        latest
+        and update.is_newer(str(latest.get("version", "")), current)
+        and not update.rehearsal_target(state, current)
+    ):
         reason = await asyncio.to_thread(update.plan_error)
-    return update.status(current_version=__version__, build=BUILD, plan_error=reason, state=state)
+    return update.status(current_version=current, build=BUILD, plan_error=reason, state=state)
 
 
 @app.get("/api/update")
@@ -582,18 +587,18 @@ async def ws_update(ws: WebSocket) -> None:
         return
     version = str(first.get("version", "")).strip()
     state = await asyncio.to_thread(update.load_state)
-    latest = cast("JsonDict | None", state.get("latest"))
-    if not latest or latest.get("version") != version or not update.is_newer(version, __version__):
+    current = update.effective_version(__version__)
+    rehearsal = update.rehearsal_target(state, current)
+    latest = (
+        update.rehearsal_release(rehearsal)
+        if rehearsal
+        else cast("JsonDict | None", state.get("latest"))
+    )
+    if not latest or latest.get("version") != version or not update.is_newer(version, current):
         await ws.send_json({"type": "error", "message": "That release is not the one on record."})
         await ws.close()
         return
     tag = str(latest.get("tag", ""))
-    try:
-        plan = await asyncio.to_thread(update.current_plan)
-    except update.UpdateNotApplicableError as exc:
-        await ws.send_json({"type": "error", "message": str(exc)})
-        await ws.close()
-        return
 
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[JsonDict] = asyncio.Queue()
@@ -601,7 +606,30 @@ async def ws_update(ws: WebSocket) -> None:
     def on_progress(line: str) -> None:
         loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", "line": line})
 
+    plan: update.ApplyPlan | None = None
+    if not rehearsal:
+        try:
+            plan = await asyncio.to_thread(update.current_plan)
+        except update.UpdateNotApplicableError as exc:
+            await ws.send_json({"type": "error", "message": str(exc)})
+            await ws.close()
+            return
+
+    async def run_rehearsal() -> None:
+        # Never touches docker; see ``update.run_rehearsal``. Same frames as the
+        # real thing, so the client cannot tell them apart.
+        _audit.info("update rehearsal: %s -> %s (nothing installed)", current, tag)
+        await update.run_rehearsal(version, on_progress, previous=BUILD or f"v{current}")
+        await queue.put(
+            {
+                "type": "restarting",
+                "version": version,
+                "host_commands": update.host_commands(BUILD or "latest", tag),
+            }
+        )
+
     async def run() -> None:
+        assert plan is not None
         try:
             await asyncio.to_thread(settings.pull_image, plan.image(tag), on_progress)
             _audit.info(
@@ -620,7 +648,7 @@ async def ws_update(ws: WebSocket) -> None:
             _audit.warning("update to %s failed before restart: %s", tag, exc)
             await queue.put({"type": "error", "message": str(exc)})
 
-    task = asyncio.create_task(run())
+    task = asyncio.create_task(run_rehearsal() if rehearsal else run())
     try:
         while True:
             frame = await queue.get()

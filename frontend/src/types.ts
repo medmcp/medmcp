@@ -404,4 +404,6 @@ export interface UpdateState {
   apply_reason: string | null
   host_commands: { update: string; rollback: string } | null
   last_result: UpdateResult | null
+  /** A rehearsal is set up: the release is a stand-in and the update installs nothing. */
+  rehearsal: boolean
 }

@@ -24,6 +24,7 @@ instead, never half-applied.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -32,6 +33,7 @@ import re
 import shlex
 import socket
 import subprocess
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -208,6 +210,7 @@ def _default_state() -> JsonDict:
         "error": None,
         "dismissed": None,
         "last_result": None,
+        "simulate": None,
     }
 
 
@@ -321,6 +324,102 @@ def collect_updater_result() -> JsonDict | None:
         UPDATE_RESULT_PATH.unlink()
     remove_stale_updater()
     return result
+
+
+# ── Rehearsal ────────────────────────────────────────────────────────────────
+# Writing ``{"simulate": "<version>"}`` into the state file (alongside whatever
+# else is there) makes that version show up as a release and lets the whole
+# flow be walked through — notice, notes, confirmation, download, restart,
+# outcome — without docker: the download is scripted and the "restart" flips
+# the version this process reports. Nothing is pulled, started, or replaced.
+# The key clears itself when the rehearsal completes, and a real restart of the
+# server ends the pretence. For demos and for checking the UI on an install
+# that cannot be updated from here.
+
+_simulated_version: str | None = None
+
+
+def rehearsal_target(state: JsonDict, current_version: str) -> str | None:
+    """The version a rehearsal is set up for, if one is and it would count as an update."""
+    target = state.get("simulate")
+    if isinstance(target, str) and target and is_newer(target, current_version):
+        return target.removeprefix("v")
+    return None
+
+
+def rehearsal_release(version: str) -> JsonDict:
+    """The stand-in release record a rehearsal presents."""
+    return {
+        "version": version,
+        "tag": f"v{version}",
+        "notes": (
+            "### Rehearsal\n\n"
+            "This release does not exist. Walking through the update from here "
+            "downloads nothing and changes nothing; the restart is pretended and the "
+            "version shown afterwards is not real until the server restarts.\n\n"
+            "### Added\n\n- The workspace says when a new MedMCP release is out and "
+            "shows its notes.\n- Update from the UI, with a rollback if the new "
+            "release does not start."
+        ),
+        "url": "",
+        "published_at": _now_iso(),
+    }
+
+
+def effective_version(current_version: str) -> str:
+    """What this process reports as its version: the real one, or the rehearsed one."""
+    return _simulated_version or current_version
+
+
+_REHEARSAL_LINES: tuple[str, ...] = (
+    "{tag}: Pulling from medmcp/core",
+    "4f4fb700ef54: Pulling fs layer",
+    "9c1b6dd6c1e6: Pulling fs layer",
+    "4f4fb700ef54: Downloading [=========>          ]  112MB/512MB",
+    "4f4fb700ef54: Downloading [==================> ]  498MB/512MB",
+    "4f4fb700ef54: Pull complete",
+    "9c1b6dd6c1e6: Pull complete",
+    "Digest: sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "Status: Downloaded newer image for ghcr.io/medmcp/core:{tag}",
+)
+
+
+async def run_rehearsal(
+    version: str,
+    on_progress: Callable[[str], None],
+    *,
+    previous: str,
+    step_delay: float = 0.5,
+    restart_delay: float = 6.0,
+) -> None:
+    """Play the download, record the outcome, and pretend the restart.
+
+    The version flip is delayed so the "restarting" stage is visible before the
+    page finds the new version on ``/healthz`` and reloads.
+    """
+    tag = f"v{version}"
+    for line in _REHEARSAL_LINES:
+        on_progress(line.format(tag=tag))
+        await asyncio.sleep(step_delay)
+    state = load_state()
+    state["simulate"] = None
+    state["last_result"] = {
+        "from": previous,
+        "to": tag,
+        "status": "ok",
+        "detail": "rehearsal — nothing was installed",
+        "at": _now_iso(),
+    }
+    save_state(state)
+
+    def flip() -> None:
+        global _simulated_version
+        _simulated_version = version
+
+    if restart_delay > 0:
+        asyncio.get_running_loop().call_later(restart_delay, flip)
+    else:
+        flip()
 
 
 # ── The plan ─────────────────────────────────────────────────────────────────
@@ -639,7 +738,12 @@ def status(
 ) -> JsonDict:
     """The ``GET /api/update`` payload."""
     state = state if state is not None else load_state()
+    current_version = effective_version(current_version)
     latest = cast("JsonDict | None", state.get("latest"))
+    rehearsal = rehearsal_target(state, current_version)
+    if rehearsal:
+        latest = rehearsal_release(rehearsal)
+        plan_error = None
     available = bool(latest and is_newer(str(latest.get("version", "")), current_version))
     target_tag = str(latest.get("tag", "")) if latest else ""
     previous = build if parse_version(build) is not None else "latest"
@@ -658,6 +762,7 @@ def status(
         "apply_reason": plan_error.reason if plan_error else None,
         "host_commands": commands,
         "last_result": state.get("last_result"),
+        "rehearsal": bool(rehearsal),
     }
 
 
@@ -693,6 +798,7 @@ __all__ = [
     "compose_defaults",
     "current_plan",
     "dismiss",
+    "effective_version",
     "fetch_latest_release",
     "host_commands",
     "is_newer",
@@ -701,7 +807,10 @@ __all__ = [
     "parse_version",
     "plan_apply",
     "plan_error",
+    "rehearsal_release",
+    "rehearsal_target",
     "run_check",
+    "run_rehearsal",
     "save_state",
     "start_updater",
     "status",

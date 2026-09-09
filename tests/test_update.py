@@ -433,3 +433,66 @@ class TestStatus:
             ws.send_json({"version": "0.3.0"})
             frame = ws.receive_json()
         assert frame == {"type": "error", "message": "run it on the host"}
+
+
+# ── Rehearsal ─────────────────────────────────────────────────────────────────
+
+
+class TestRehearsal:
+    """A ``simulate`` key plays the flow through without docker."""
+
+    @pytest.fixture(autouse=True)
+    def _real_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(update, "_simulated_version", None)
+        monkeypatch.setattr(server, "__version__", "0.2.3")
+
+    def test_status_presents_the_stand_in_release(self) -> None:
+        """The rehearsed version is offered and can be applied, whatever the plan says."""
+        state = {**update.load_state(), "simulate": "0.9.0"}
+        out = update.status(
+            current_version="0.2.3", build="v0.2.3", plan_error=update.PlanError("no"), state=state
+        )
+        assert out["rehearsal"] is True
+        assert out["available"] is True
+        assert out["can_apply"] is True
+        assert cast("JsonDict", out["latest"])["tag"] == "v0.9.0"
+        assert "Rehearsal" in cast("JsonDict", out["latest"])["notes"]
+
+    def test_a_rehearsal_older_than_the_install_is_ignored(self) -> None:
+        """Nothing to walk through if the stand-in would not be an update."""
+        state = {**update.load_state(), "simulate": "0.1.0"}
+        out = update.status(current_version="0.2.3", build="v0.2.3", plan_error=None, state=state)
+        assert out["rehearsal"] is False
+        assert out["available"] is False
+
+    @pytest.mark.asyncio
+    async def test_run_rehearsal_records_and_flips(self) -> None:
+        """Progress is played, the outcome recorded, the key cleared, the version flipped."""
+        update.save_state({**update.load_state(), "simulate": "0.9.0"})
+        lines: list[str] = []
+        await update.run_rehearsal(
+            "0.9.0", lines.append, previous="v0.2.3", step_delay=0, restart_delay=0
+        )
+        assert lines[0].startswith("v0.9.0: Pulling")
+        assert lines[-1].endswith("core:v0.9.0")
+        state = update.load_state()
+        assert state["simulate"] is None
+        assert cast("JsonDict", state["last_result"])["status"] == "ok"
+        assert update.effective_version("0.2.3") == "0.9.0"
+        # Afterwards the install reads as up to date and no rehearsal is pending.
+        out = update.status(current_version="0.2.3", build="v0.2.3", plan_error=None)
+        assert out["current"]["version"] == "0.9.0"
+        assert out["available"] is False
+
+    def test_ws_update_plays_the_rehearsal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The socket streams the scripted download and ends with ``restarting``."""
+        monkeypatch.setattr(update, "_REHEARSAL_LINES", ("{tag}: one", "{tag}: two"))
+        update.save_state({**update.load_state(), "simulate": "0.9.0"})
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        with client.websocket_connect("/ws/update", headers=_WS_HEADERS) as ws:
+            ws.send_json({"version": "0.9.0"})
+            frames = [ws.receive_json() for _ in range(3)]
+        assert [f["type"] for f in frames] == ["progress", "progress", "restarting"]
+        assert frames[0]["line"] == "v0.9.0: one"
+        assert frames[2]["version"] == "0.9.0"
+        assert update.load_state()["simulate"] is None

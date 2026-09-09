@@ -182,36 +182,6 @@ export function SettingsDrawer({
                 </select>
               </div>
 
-              <div className="settings-row">
-                <div className="settings-row-text">
-                  <div className="settings-row-label">
-                    Version
-                    {update && <span className="settings-version">v{update.current.version}</span>}
-                  </div>
-                  <div className={`settings-row-hint${update?.available ? ' settings-hint-update' : ''}`}>
-                    {versionHint(update, checking)}
-                  </div>
-                </div>
-                {update?.available ? (
-                  <button className="btn-primary" onClick={onOpenUpdate}>
-                    Update…
-                  </button>
-                ) : (
-                  update?.enabled && (
-                    <button
-                      className="btn-plain"
-                      disabled={checking}
-                      onClick={() => {
-                        setChecking(true)
-                        onCheckUpdate().finally(() => setChecking(false))
-                      }}
-                    >
-                      Check now
-                    </button>
-                  )
-                )}
-              </div>
-
               {/* Provenance is on, and meant to stay on — it is the record of what
                   the agent did to the data. The switch survives for the rare case
                   that needs it, one disclosure away from being reached by accident. */}
@@ -259,6 +229,37 @@ export function SettingsDrawer({
             </>
           )}
         </div>
+        {/* The version lives at the foot of the drawer rather than among the
+            settings: it is not a choice, and a release check is something you
+            reach for occasionally, from the same spot every time. */}
+        {update && (
+          <div className="drawer-footer">
+            <div className="drawer-footer-text">
+              <span className="drawer-footer-version">MedMCP v{update.current.version}</span>
+              <span className={`drawer-footer-hint${update.available ? ' available' : ''}`}>
+                {versionHint(update, checking)}
+              </span>
+            </div>
+            {update.available ? (
+              <button className="btn-primary" onClick={onOpenUpdate}>
+                Update…
+              </button>
+            ) : (
+              update.enabled && (
+                <button
+                  className="btn-plain"
+                  disabled={checking}
+                  onClick={() => {
+                    setChecking(true)
+                    onCheckUpdate().finally(() => setChecking(false))
+                  }}
+                >
+                  Check for update
+                </button>
+              )
+            )}
+          </div>
+        )}
         {/* Pinned over the drawer rather than placed in the flow. As the first
             child of the body it pushed every control down the moment a setting
             was saved — so the row you had just clicked moved out from under the

@@ -6,8 +6,11 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+## 0.3.0 — 2026-09-09
+
 ### Security
 
+- This is the first signed release. Updating to it from the host is unverified once; every update from it onward is verified.
 - Published images and the compose artifact are signed in CI (Sigstore keyless, bound to this repository's release workflow); the workspace verifies the signature before applying an update or installing a stack, pins the update to the verified digest, and refuses an image that does not verify.
 
 ### Added

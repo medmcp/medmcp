@@ -21,8 +21,10 @@ Everything it needs arrives in the environment:
     Id of the core container being replaced (to recover its ``env_file``).
 ``MEDMCP_UPDATE_PROJECT`` / ``MEDMCP_UPDATE_PROJECT_DIR``
     The compose project and its recorded working directory.
-``MEDMCP_UPDATE_PREVIOUS_TAG``
-    The tag to roll back to.
+``MEDMCP_UPDATE_PREVIOUS_TAG`` / ``MEDMCP_UPDATE_PREVIOUS_DIGEST``
+    The tag to roll back to, and the digest it ran as (empty if unknown).
+``MEDMCP_UPDATE_DIGEST``
+    The verified digest of this image; compose pins the core to it.
 ``MEDMCP_UPDATE_ENV``
     JSON object of the compose variables the operator set at install time.
 """
@@ -205,7 +207,9 @@ def apply(env: dict[str, str] | None = None, *, dry_run: bool = False) -> int:
     project = env.get("MEDMCP_UPDATE_PROJECT", "")
     project_dir = env.get("MEDMCP_UPDATE_PROJECT_DIR", "")
     previous = env.get("MEDMCP_UPDATE_PREVIOUS_TAG", "")
+    previous_digest = env.get("MEDMCP_UPDATE_PREVIOUS_DIGEST", "")
     target = env.get("MEDMCP_BUILD", "")
+    target_digest = env.get("MEDMCP_UPDATE_DIGEST", "")
     try:
         plan_env = cast("dict[str, str]", json.loads(env.get("MEDMCP_UPDATE_ENV") or "{}"))
     except json.JSONDecodeError:
@@ -235,6 +239,9 @@ def apply(env: dict[str, str] | None = None, *, dry_run: bool = False) -> int:
     run_env = {k: v for k, v in env.items() if not k.startswith("MEDMCP_UPDATE_")}
     run_env.update(plan_env)
     run_env["MEDMCP_TAG"] = target
+    # The compose file appends "@<digest>" to the core image when this is set,
+    # so what comes up is exactly what was verified, whatever the tag says now.
+    run_env["MEDMCP_CORE_DIGEST"] = target_digest
 
     old = _inspect(replace) if replace else None
     if old is not None:
@@ -277,6 +284,7 @@ def apply(env: dict[str, str] | None = None, *, dry_run: bool = False) -> int:
         failure = _tail(proc.stderr) or f"docker compose exited {proc.returncode}"
         log.error("update to %s failed: %s", target, failure)
         run_env["MEDMCP_TAG"] = previous
+        run_env["MEDMCP_CORE_DIGEST"] = previous_digest
         back = compose_up(
             project=project, project_dir=project_dir, compose_file=COMPOSE_PATH, env=run_env
         )

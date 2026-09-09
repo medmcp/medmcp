@@ -6,6 +6,10 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Security
+
+- Published images and the compose artifact are signed in CI (Sigstore keyless, bound to this repository's release workflow); the workspace verifies the signature before applying an update or installing a stack, pins the update to the verified digest, and refuses an image that does not verify.
+
 ### Added
 
 - The workspace says when a new MedMCP release is out (header notice, Settings → Version) and shows its notes.

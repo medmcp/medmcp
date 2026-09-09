@@ -1,0 +1,10 @@
+{
+  "_comment": "Which published images must be signed, and by which GitHub Actions identity (Sigstore keyless). Verified by src/medmcp/signing.py before an update is applied and before a stack is installed. Add a stack repository here once its release workflow signs its images; until then that stack installs unverified with a warning.",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "policies": [
+    {
+      "images": ["ghcr.io/medmcp/core", "ghcr.io/medmcp/base", "ghcr.io/medmcp/compose"],
+      "identity_regexp": "^https://github\\.com/medmcp/medmcp/\\.github/workflows/(release|images)\\.yml@refs/(tags/v[0-9][A-Za-z0-9.-]*|heads/main)$"
+    }
+  ]
+}

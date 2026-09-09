@@ -64,6 +64,7 @@ from medmcp import (
     sessions,
     settings,
     share,
+    signing,
     titles,
     update,
     workflow,
@@ -678,10 +679,18 @@ async def ws_update(ws: WebSocket) -> None:
         try:
             await asyncio.to_thread(settings.pull_image, plan.image(tag), on_progress)
             await asyncio.to_thread(update.verify_pulled_image, plan.image(tag), tag)
+            # The signature is the guarantee; the label check above is only a
+            # sanity check. Verified by digest, and the digest is what runs.
+            verified = await asyncio.to_thread(signing.verify_image, plan.image(tag))
+            on_progress(signing.describe(verified))
             _audit.info(
-                "update started: %s -> %s (container %s)", plan.current_tag, tag, plan.container_id
+                "update started: %s -> %s (%s, container %s)",
+                plan.current_tag,
+                tag,
+                verified.ref,
+                plan.container_id,
             )
-            helper = await asyncio.to_thread(update.start_updater, plan, tag)
+            helper = await asyncio.to_thread(update.start_updater, plan, tag, verified.digest)
             _audit.info("update helper started: %s", helper[:12])
             await queue.put(
                 {

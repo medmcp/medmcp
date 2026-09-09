@@ -42,6 +42,7 @@ on:
 permissions:
   contents: write # create the GitHub Release
   packages: write
+  id-token: write # sign the images with this workflow's identity (Sigstore keyless)
 
 # Never let two releases interleave: they both move :latest, and the loser would
 # silently win the tag.
@@ -160,6 +161,13 @@ jobs:
             || { echo "::error::compose plugin missing from the image"; exit 1; }
           docker exec medmcp-smoke test -f /app/docker-compose.ghcr.yml \
             || { echo "::error::docker-compose.ghcr.yml not baked into the image"; exit 1; }
+          # ...and the verifier: cosign, the policy, and the baked trust root.
+          docker exec medmcp-smoke cosign version >/dev/null \
+            || { echo "::error::cosign missing from the image"; exit 1; }
+          docker exec medmcp-smoke test -s /app/sigstore/trusted_root.json \
+            || { echo "::error::Sigstore trust root not baked into the image"; exit 1; }
+          docker exec medmcp-smoke test -s /app/signing-policy.json \
+            || { echo "::error::signing-policy.json not baked into the image"; exit 1; }
           echo "smoke test passed (version $reported)"
       - name: Smoke test cleanup
         if: always()
@@ -247,6 +255,49 @@ jobs:
               docker compose -f docker-compose.ghcr.yml publish \
               "ghcr.io/medmcp/compose:$tag" -y
           done
+      - uses: sigstore/cosign-installer@v4.1.2
+      - name: Sign the images and the compose artifact
+        run: |
+          # Keyless: the signature is bound to this repository, this workflow
+          # file and this tag through the run's OIDC identity — no key exists.
+          # Signed by digest (a tag can be moved; the digest cannot), and the
+          # digest is shared by :vX.Y.Z and :latest, so one signature covers
+          # both. --recursive also signs each platform manifest in the index.
+          for img in base core; do
+            digest=$(docker buildx imagetools inspect "ghcr.io/medmcp/$img:${GITHUB_REF_NAME}" \
+              --format '{{.Manifest.Digest}}')
+            cosign sign --yes --recursive "ghcr.io/medmcp/$img@$digest"
+          done
+          digest=$(docker buildx imagetools inspect "ghcr.io/medmcp/compose:${GITHUB_REF_NAME}" \
+            --format '{{.Manifest.Digest}}')
+          cosign sign --yes "ghcr.io/medmcp/compose@$digest"
+      - name: Verify the signatures the way an install will
+        run: |
+          # The exact identity, not a pattern: this run's workflow file at this
+          # tag. If this fails, the policy shipped in the image would fail too.
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          for img in base core compose; do
+            digest=$(docker buildx imagetools inspect "ghcr.io/medmcp/$img:${GITHUB_REF_NAME}" \
+              --format '{{.Manifest.Digest}}')
+            cosign verify "ghcr.io/medmcp/$img@$digest" \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null \
+              || { echo "::error::ghcr.io/medmcp/$img@$digest does not verify as $identity"; exit 1; }
+          done
+          # ...and against the policy file the image carries, so the two agree.
+          python3 - "$identity" <<'PY'
+          import json, re, sys
+          identity = sys.argv[1]
+          doc = json.load(open("signing-policy.json"))
+          for entry in doc["policies"]:
+              if "ghcr.io/medmcp/core" in entry["images"]:
+                  assert re.fullmatch(entry["identity_regexp"], identity), (
+                      f"signing-policy.json does not accept {identity}")
+                  break
+          else:
+              raise SystemExit("signing-policy.json has no entry for ghcr.io/medmcp/core")
+          print("signing-policy.json accepts", identity)
+          PY
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

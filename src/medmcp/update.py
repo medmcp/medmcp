@@ -41,7 +41,6 @@ from typing import cast
 
 import httpx
 
-from medmcp import __version__
 from medmcp.acp import JsonDict
 from medmcp.settings import VIBE_STATE_DIR, atomic_write_json
 
@@ -85,6 +84,8 @@ _CORE_ENV_VARS: tuple[str, ...] = (
     "MEDMCP_UPDATE_URL",
 )
 _DEFAULT_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}")
+# What may follow ``X.Y.Z-`` in a tag: the tag is used as an image tag verbatim.
+_PRERELEASE_RE = re.compile(r"[A-Za-z0-9.]*")
 
 
 # ── Versions ─────────────────────────────────────────────────────────────────
@@ -102,6 +103,8 @@ def parse_version(text: str) -> tuple[tuple[int, ...], str] | None:
     core, _, pre = body.partition("-")
     parts = core.split(".")
     if not parts or not all(p.isdigit() for p in parts):
+        return None
+    if not _PRERELEASE_RE.fullmatch(pre):
         return None
     return tuple(int(p) for p in parts), pre
 
@@ -149,23 +152,48 @@ def parse_release(data: object) -> ReleaseInfo | None:
     tag = str(obj.get("tag_name") or "").strip()
     if parse_version(tag) is None:
         return None
+    url = str(obj.get("html_url") or "")
     return ReleaseInfo(
         version=tag.removeprefix("v"),
         tag=tag,
         notes=str(obj.get("body") or ""),
-        url=str(obj.get("html_url") or ""),
+        # The page link is the one thing from the document the browser is
+        # pointed at; anything but https is dropped rather than rendered.
+        url=url if url.startswith("https://") else "",
         published_at=str(obj.get("published_at") or ""),
     )
 
 
 def check_enabled() -> bool:
-    """``MEDMCP_UPDATE_CHECK=0`` (or false/no/off) disables the release check."""
+    """Whether release checks are permitted at all.
+
+    ``MEDMCP_UPDATE_CHECK=0`` (or false/no/off) is the deployment's say — set
+    in the compose environment, it forbids every check, manual ones included,
+    and the UI shows the switch as pinned. The operator's own choice is the
+    ``auto_check`` state key (see :func:`auto_check_enabled`).
+    """
     return os.environ.get("MEDMCP_UPDATE_CHECK", "1").strip().lower() not in {
         "0",
         "false",
         "no",
         "off",
     }
+
+
+def auto_check_enabled(state: JsonDict | None = None) -> bool:
+    """Whether the daily unattended check runs (permitted, and not switched off in Settings)."""
+    if not check_enabled():
+        return False
+    state = state if state is not None else load_state()
+    return bool(state.get("auto_check", True))
+
+
+def set_auto_check(enabled: bool) -> JsonDict:
+    """Switch the daily check on or off from the UI; manual checks stay available."""
+    state = load_state()
+    state["auto_check"] = bool(enabled)
+    save_state(state)
+    return state
 
 
 def update_url() -> str:
@@ -188,7 +216,9 @@ async def fetch_latest_release(
     else:
         headers = {
             "Accept": "application/vnd.github+json",
-            "User-Agent": f"medmcp/{__version__}",
+            # GitHub requires a User-Agent; it names the product, not the install.
+            # Nothing else about the machine, the workspace, or its use is sent.
+            "User-Agent": "medmcp",
         }
         if client is None:
             async with httpx.AsyncClient(timeout=FETCH_TIMEOUT_SEC) as own:
@@ -211,6 +241,7 @@ def _default_state() -> JsonDict:
         "dismissed": None,
         "last_result": None,
         "simulate": None,
+        "auto_check": True,
     }
 
 
@@ -272,6 +303,8 @@ async def run_check(*, force: bool = False) -> JsonDict:
         age = _age_seconds(state.get("checked_at"))
         if age is not None and age < MANUAL_CHECK_MIN_GAP_SEC:
             return state
+    elif not auto_check_enabled(state):
+        return state
     try:
         info = await fetch_latest_release()
     except Exception as exc:  # network, HTTP, JSON — all are "could not check"
@@ -420,6 +453,13 @@ async def run_rehearsal(
         asyncio.get_running_loop().call_later(restart_delay, flip)
     else:
         flip()
+
+
+def updater_pending() -> bool:
+    """Whether an update helper is (or was) at work whose outcome has not been read."""
+    if UPDATE_RESULT_PATH.exists():
+        return True
+    return inspect_ref(UPDATER_CONTAINER) is not None
 
 
 # ── The plan ─────────────────────────────────────────────────────────────────
@@ -697,6 +737,25 @@ def updater_command(plan: ApplyPlan, target_tag: str) -> list[str]:
     return args
 
 
+def verify_pulled_image(image: str, tag: str) -> None:
+    """Refuse to start the helper from an image that does not carry *tag*.
+
+    Every released core is labelled with its tag (``org.opencontainers.image.version``).
+    A registry answering ``:v0.3.0`` with something else — a mis-tagged mirror,
+    a moved tag — is caught here rather than run.
+    """
+    try:
+        out = _run(["image", "inspect", image], timeout=30)
+        items = cast("list[JsonDict]", json.loads(out))
+    except (RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"could not inspect the pulled image {image}: {exc}") from exc
+    labelled = _labels(items[0]).get("org.opencontainers.image.version", "") if items else ""
+    if labelled != tag:
+        raise RuntimeError(
+            f"the image pulled for {tag} is labelled {labelled or 'nothing'!r}; not starting it."
+        )
+
+
 def remove_stale_updater() -> None:
     """Remove a finished helper container so a new one can take its name."""
     info = inspect_ref(UPDATER_CONTAINER)
@@ -715,7 +774,11 @@ def start_updater(plan: ApplyPlan, target_tag: str) -> str:
     """Start the helper; returns its container id. The image must already be pulled."""
     remove_stale_updater()
     args = updater_command(plan, target_tag)
-    log.info("starting updater: docker %s", shlex.join(a for a in args if "GHCR_TOKEN" not in a))
+    shown = [
+        f"{a.partition('=')[0]}=<redacted>" if a.startswith("MEDMCP_UPDATE_ENV=") else a
+        for a in args
+    ]
+    log.info("starting updater: docker %s", shlex.join(shown))
     return _run(args, timeout=120).strip()
 
 
@@ -753,6 +816,7 @@ def status(
     return {
         "current": {"version": current_version, "build": build},
         "enabled": check_enabled(),
+        "auto_check": auto_check_enabled(state),
         "checked_at": state.get("checked_at"),
         "error": state.get("error"),
         "latest": latest,
@@ -792,6 +856,7 @@ __all__ = [
     "ReleaseInfo",
     "UpdateNotApplicableError",
     "ack_result",
+    "auto_check_enabled",
     "check_due",
     "check_enabled",
     "collect_updater_result",
@@ -812,7 +877,10 @@ __all__ = [
     "run_check",
     "run_rehearsal",
     "save_state",
+    "set_auto_check",
     "start_updater",
     "status",
     "updater_command",
+    "updater_pending",
+    "verify_pulled_image",
 ]

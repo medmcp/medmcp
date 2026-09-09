@@ -335,6 +335,12 @@ export async function dismissUpdate(version: string): Promise<UpdateState> {
   return (await res.json()) as UpdateState
 }
 
+/** Switch the daily release check on or off. */
+export async function setUpdateAutoCheck(enabled: boolean): Promise<UpdateState> {
+  const res = await postJson('/api/update/auto-check', { enabled })
+  return (await res.json()) as UpdateState
+}
+
 /** The outcome of the last update has been shown; stop reporting it. */
 export async function ackUpdateResult(): Promise<UpdateState> {
   const res = await postJson('/api/update/ack-result', {})

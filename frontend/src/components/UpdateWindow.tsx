@@ -18,6 +18,7 @@ type Mode = 'info' | 'confirm' | 'pulling' | 'restarting' | 'failed' | 'timeout'
 const RESTART_DEADLINE_MS = 6 * 60 * 1000
 const HEALTH_POLL_MS = 2000
 const REMARK_PLUGINS = [remarkGfm]
+const NO_LOADING_ELEMENTS = ['img']
 
 function formatDate(iso: string): string {
   if (!iso) return ''
@@ -160,7 +161,15 @@ export function UpdateWindow({ open, onClose, state, onDismiss }: UpdateWindowPr
             <>
               {latest.notes ? (
                 <div className="upwin-notes">
-                  <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{latest.notes}</ReactMarkdown>
+                  {/* No images: the notes must not make the browser fetch anything.
+                      Raw HTML is already off by default in react-markdown. */}
+                  <ReactMarkdown
+                    remarkPlugins={REMARK_PLUGINS}
+                    disallowedElements={NO_LOADING_ELEMENTS}
+                    unwrapDisallowed
+                  >
+                    {latest.notes}
+                  </ReactMarkdown>
                 </div>
               ) : (
                 <p className="upwin-muted">This release carries no notes.</p>

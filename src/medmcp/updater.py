@@ -30,6 +30,7 @@ Everything it needs arrives in the environment:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -250,46 +251,52 @@ def apply(env: dict[str, str] | None = None, *, dry_run: bool = False) -> int:
     else:
         log.warning("container %s not found; env_file variables are not carried", replace)
 
-    if dry_run:
+    try:
+        if dry_run:
+            proc = compose_up(
+                project=project,
+                project_dir=project_dir,
+                compose_file=COMPOSE_PATH,
+                env=run_env,
+                dry_run=True,
+            )
+            sys.stdout.write(proc.stdout)
+            sys.stderr.write(proc.stderr)
+            return proc.returncode
+
         proc = compose_up(
-            project=project,
-            project_dir=project_dir,
-            compose_file=COMPOSE_PATH,
-            env=run_env,
-            dry_run=True,
+            project=project, project_dir=project_dir, compose_file=COMPOSE_PATH, env=run_env
         )
-        sys.stdout.write(proc.stdout)
-        sys.stderr.write(proc.stderr)
-        return proc.returncode
+        if proc.returncode == 0:
+            result["status"] = "ok"
+            result["detail"] = _tail(proc.stderr)
+            write_result(RESULT_PATH, result)
+            log.info("updated %s → %s", previous, target)
+            return 0
 
-    proc = compose_up(
-        project=project, project_dir=project_dir, compose_file=COMPOSE_PATH, env=run_env
-    )
-    if proc.returncode == 0:
-        result["status"] = "ok"
-        result["detail"] = _tail(proc.stderr)
+        failure = _tail(proc.stderr) or f"docker compose exited {proc.returncode}"
+        log.error("update to %s failed: %s", target, failure)
+        run_env["MEDMCP_TAG"] = previous
+        back = compose_up(
+            project=project, project_dir=project_dir, compose_file=COMPOSE_PATH, env=run_env
+        )
+        if back.returncode == 0:
+            result["status"] = "rolled_back"
+            result["detail"] = failure
+            log.info("rolled back to %s", previous)
+            code = 1
+        else:
+            result["status"] = "failed"
+            result["detail"] = f"{failure}\n\nrollback also failed: {_tail(back.stderr)}"
+            log.error("rollback to %s failed: %s", previous, _tail(back.stderr))
+            code = 3
         write_result(RESULT_PATH, result)
-        log.info("updated %s → %s", previous, target)
-        return 0
-
-    failure = _tail(proc.stderr) or f"docker compose exited {proc.returncode}"
-    log.error("update to %s failed: %s", target, failure)
-    run_env["MEDMCP_TAG"] = previous
-    back = compose_up(
-        project=project, project_dir=project_dir, compose_file=COMPOSE_PATH, env=run_env
-    )
-    if back.returncode == 0:
-        result["status"] = "rolled_back"
-        result["detail"] = failure
-        log.info("rolled back to %s", previous)
-        code = 1
-    else:
-        result["status"] = "failed"
-        result["detail"] = f"{failure}\n\nrollback also failed: {_tail(back.stderr)}"
-        log.error("rollback to %s failed: %s", previous, _tail(back.stderr))
-        code = 3
-    write_result(RESULT_PATH, result)
-    return code
+        return code
+    finally:
+        # The recovered env_file secrets have served their purpose: compose has
+        # read them into the new container. Nothing of them stays in this one.
+        with contextlib.suppress(OSError):
+            ENV_FILE_PATH.unlink()
 
 
 def main(argv: list[str] | None = None) -> int:

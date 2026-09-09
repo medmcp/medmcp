@@ -147,6 +147,23 @@ class TestVersions:
         assert update.parse_release(["v0.3.0"]) is None
         assert update.parse_release(None) is None
 
+    def test_tag_is_kept_to_image_tag_characters(self) -> None:
+        """The tag becomes an image reference, so anything odd in it is refused."""
+        assert update.parse_version("v0.3.0-rc.1") == ((0, 3, 0), "rc.1")
+        assert update.parse_version("v0.3.0-$(rm)") is None
+        assert update.parse_version("v0.3.0-a b") is None
+        assert update.parse_release({"tag_name": "v0.3.0-x/y"}) is None
+
+    def test_release_link_is_https_or_nothing(self) -> None:
+        """The page link is the one thing the browser is pointed at from the document."""
+        assert update.parse_release({"tag_name": "v1.0.0", "html_url": "javascript:x"})
+        info = update.parse_release({"tag_name": "v1.0.0", "html_url": "javascript:x"})
+        assert info is not None and info.url == ""
+        info = update.parse_release({"tag_name": "v1.0.0", "html_url": "http://mirror/r"})
+        assert info is not None and info.url == ""
+        info = update.parse_release({"tag_name": "v1.0.0", "html_url": "https://mirror/r"})
+        assert info is not None and info.url == "https://mirror/r"
+
 
 # ── The check ─────────────────────────────────────────────────────────────────
 
@@ -167,7 +184,8 @@ class TestCheck:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             info = await update.fetch_latest_release(client=client)
         assert seen["url"] == update.DEFAULT_UPDATE_URL
-        assert seen["ua"].startswith("medmcp/")
+        # The request names the product and nothing else — not even the version.
+        assert seen["ua"] == "medmcp"
         assert info.version == "0.3.0"
 
     @pytest.mark.asyncio
@@ -227,6 +245,34 @@ class TestCheck:
         second = await update.run_check(force=True)
         assert second["checked_at"] == first["checked_at"]
         assert cast("JsonDict", second["latest"])["version"] == "0.3.0"
+
+    @pytest.mark.asyncio
+    async def test_auto_check_off_stops_the_daily_check_but_not_a_manual_one(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The operator's switch governs the unattended request only."""
+        doc = tmp_path / "latest.json"
+        doc.write_text(json.dumps({"tag_name": "v0.3.0"}))
+        monkeypatch.setenv("MEDMCP_UPDATE_URL", str(doc))
+        update.set_auto_check(False)
+        assert update.auto_check_enabled() is False
+        assert update.check_enabled() is True
+        state = await update.run_check()
+        assert state["checked_at"] is None
+        state = await update.run_check(force=True)
+        assert cast("JsonDict", state["latest"])["version"] == "0.3.0"
+        assert state["auto_check"] is False
+
+    @pytest.mark.asyncio
+    async def test_env_off_forbids_manual_checks_too(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """MEDMCP_UPDATE_CHECK=0 is the deployment's decision; the UI cannot override it."""
+        monkeypatch.setenv("MEDMCP_UPDATE_CHECK", "0")
+        monkeypatch.setenv("MEDMCP_UPDATE_URL", str(tmp_path / "latest.json"))
+        state = await update.run_check(force=True)
+        assert state["checked_at"] is None
+        assert update.auto_check_enabled() is False
 
     def test_dismiss_and_ack_round_trip(self) -> None:
         """Dismiss and ack round trip."""
@@ -350,6 +396,41 @@ class TestPlan:
         assert json.loads(env_arg.partition("=")[2]) == plan.env
         assert "medmcp-workspace" not in joined
 
+    def test_pulled_image_must_carry_the_tag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A registry answering the tag with a differently labelled image is not run."""
+        labelled = {"v": "v0.2.9"}
+
+        def _run(args: list[str], *, timeout: float = 60.0) -> str:
+            assert args[:2] == ["image", "inspect"]
+            return json.dumps(
+                [{"Config": {"Labels": {"org.opencontainers.image.version": labelled["v"]}}}]
+            )
+
+        monkeypatch.setattr(update, "_run", _run)
+        with pytest.raises(RuntimeError, match=r"labelled 'v0\.2\.9'"):
+            update.verify_pulled_image("ghcr.io/medmcp/core:v0.3.0", "v0.3.0")
+        labelled["v"] = "v0.3.0"
+        update.verify_pulled_image("ghcr.io/medmcp/core:v0.3.0", "v0.3.0")
+
+    def test_updater_log_line_redacts_the_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The token can be in the env the helper gets; it must not be in the log."""
+        plan = update.plan_apply(_core_info(), None)
+        plan.env["GHCR_TOKEN"] = "ghp_secret"
+        seen: list[str] = []
+
+        def _run(args: list[str], *, timeout: float = 60.0) -> str:
+            return "cid\n"
+
+        def _info(msg: str, *a: object) -> None:
+            seen.append(msg % a)
+
+        monkeypatch.setattr(update, "remove_stale_updater", lambda: None)
+        monkeypatch.setattr(update, "_run", _run)
+        monkeypatch.setattr(update.log, "info", _info)
+        assert update.start_updater(plan, "v0.3.0") == "cid"
+        assert "ghp_secret" not in seen[0]
+        assert "MEDMCP_UPDATE_ENV=<redacted>" in seen[0]
+
     def test_compose_defaults(self) -> None:
         """Compose defaults."""
         assert update.compose_defaults(COMPOSE_TEXT)["MEDMCP_GPU"] == "all"
@@ -406,6 +487,17 @@ class TestStatus:
         assert body["apply_reason"] == "not here"
         body = client.post("/api/update/dismiss", json={"version": "0.3.0"}).json()
         assert body["dismissed"] is True
+        body = client.post("/api/update/auto-check", json={"enabled": False}).json()
+        assert body["auto_check"] is False
+        assert body["enabled"] is True
+
+    def test_auto_check_endpoint_refuses_when_env_forbids(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With the deployment's switch off there is nothing for the UI to turn on."""
+        monkeypatch.setenv("MEDMCP_UPDATE_CHECK", "0")
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        assert client.post("/api/update/auto-check", json={"enabled": True}).status_code == 400
 
     def test_ws_update_refuses_a_version_not_on_record(
         self, monkeypatch: pytest.MonkeyPatch

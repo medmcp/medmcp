@@ -101,7 +101,13 @@ class TestApply:
         def _up(
             *, project: str, project_dir: str, compose_file: Path, env: dict[str, str]
         ) -> subprocess.CompletedProcess[str]:
-            calls.append({"project": project, "dir": project_dir, **env})
+            content = ""
+            path = env.get("MEDMCP_ENV_FILE")
+            if path and Path(path).exists():
+                content = Path(path).read_text()
+            calls.append(
+                {"project": project, "dir": project_dir, "env_file_content": content, **env}
+            )
             return outcomes.pop(0)
 
         monkeypatch.setattr(updater, "compose_up", _up)
@@ -134,9 +140,11 @@ class TestApply:
         assert call["MEDMCP_WORKSPACE"] == "/data"
         assert call["MEDMCP_GPU"] == "0"
         assert "MEDMCP_UPDATE_ENV" not in call
-        # The operator's env_file secret travelled with the update, off the host.
+        # The operator's env_file secret travelled with the update, off the host,
+        # and was removed again once compose had read it.
         assert call["MEDMCP_ENV_FILE"] == str(updater.ENV_FILE_PATH)
-        assert updater.ENV_FILE_PATH.read_text() == "PACS_TOKEN=s3cret\n"
+        assert call["env_file_content"] == "PACS_TOKEN=s3cret\n"
+        assert not updater.ENV_FILE_PATH.exists()
         result = self._result(harness)
         assert (result["status"], result["from"], result["to"]) == ("ok", "v0.2.3", "v0.3.0")
 

@@ -10,13 +10,17 @@ import { UpdateWindow } from './components/UpdateWindow'
 import { Viewer } from './components/Viewer'
 import { WorkflowPanel } from './components/WorkflowPanel'
 import { GearIcon, StoreIcon, XIcon } from './components/icons'
-import { ackUpdateResult, checkForUpdate, dismissUpdate, fetchUpdate } from './api'
+import { ackUpdateResult, checkForUpdate, dismissUpdate, fetchUpdate, setUpdateAutoCheck } from './api'
 import type { UpdateState } from './types'
 
 /** localStorage key holding the last active chat session id (for auto-resume). */
 const ACTIVE_SESSION_KEY = 'medmcp.activeSession'
 /** How often the page re-reads the release record the server keeps. */
 const UPDATE_POLL_MS = 30 * 60 * 1000
+/** Right after a load the outcome of an update may still be on its way (the
+ *  helper finishes after the new server is up), so the first minutes poll fast. */
+const UPDATE_POLL_EARLY_MS = 10 * 1000
+const UPDATE_POLL_EARLY_FOR_MS = 3 * 60 * 1000
 
 function describeUpdateResult(r: NonNullable<UpdateState['last_result']>): string {
   if (r.status === 'ok') return `Updated to ${r.to}.`
@@ -55,9 +59,23 @@ export default function App() {
   }, [])
   useEffect(() => {
     loadUpdate()
-    const t = window.setInterval(loadUpdate, UPDATE_POLL_MS)
-    return () => window.clearInterval(t)
+    const started = Date.now()
+    let timer = 0
+    const tick = () => {
+      loadUpdate()
+      const early = Date.now() - started < UPDATE_POLL_EARLY_FOR_MS
+      timer = window.setTimeout(tick, early ? UPDATE_POLL_EARLY_MS : UPDATE_POLL_MS)
+    }
+    timer = window.setTimeout(tick, UPDATE_POLL_EARLY_MS)
+    return () => window.clearTimeout(timer)
   }, [loadUpdate])
+  const setAutoCheck = useCallback(
+    (enabled: boolean) =>
+      setUpdateAutoCheck(enabled)
+        .then(setUpdateState)
+        .catch(() => {}),
+    [],
+  )
   const checkUpdate = useCallback(
     () =>
       checkForUpdate()
@@ -190,6 +208,7 @@ export default function App() {
         update={updateState}
         onCheckUpdate={checkUpdate}
         onOpenUpdate={() => setUpdateOpen(true)}
+        onSetAutoCheck={setAutoCheck}
       />
       <UpdateWindow
         open={updateOpen}

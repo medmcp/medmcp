@@ -390,8 +390,10 @@ export interface UpdateResult {
 
 export interface UpdateState {
   current: { version: string; build: string }
-  /** False when MEDMCP_UPDATE_CHECK=0: nothing is ever fetched. */
+  /** False when MEDMCP_UPDATE_CHECK=0: nothing is ever fetched, not even by hand. */
   enabled: boolean
+  /** The daily unattended check (the operator's switch in Settings › Advanced). */
+  auto_check: boolean
   checked_at: string | null
   error: string | null
   latest: UpdateRelease | null

@@ -150,7 +150,14 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     outcome = await asyncio.to_thread(update.collect_updater_result)
     if outcome:
         _audit.info("update outcome: %s", outcome)
-    check_task = asyncio.create_task(_update_check_loop()) if update.check_enabled() else None
+    # Only a built image is ever updated from here, so only a built image looks:
+    # a source checkout never contacts the release endpoint on its own.
+    check_task = asyncio.create_task(_update_check_loop()) if BUILD else None
+    outcome_task = (
+        asyncio.create_task(_await_update_outcome())
+        if outcome is None and await asyncio.to_thread(update.updater_pending)
+        else None
+    )
     if settings.stack_pool_enabled():
         # Proxy children read MEDMCP_WORKSPACE for their fallback cwd; export it.
         os.environ.setdefault("MEDMCP_WORKSPACE", str(WORKSPACE_ROOT))
@@ -166,10 +173,11 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     try:
         yield
     finally:
-        if check_task is not None:
-            check_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await check_task
+        for task in (check_task, outcome_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         await _runs.shutdown()
         if _broker is not None:
             await _broker.aclose()
@@ -190,11 +198,32 @@ async def _update_check_loop() -> None:
     await asyncio.sleep(update.FIRST_CHECK_DELAY_SEC)
     while True:
         try:
-            if update.check_due(update.load_state()):
+            state = update.load_state()
+            if update.auto_check_enabled(state) and update.check_due(state):
                 await update.run_check()
         except Exception:
             log.exception("release check failed")
         await asyncio.sleep(3600)
+
+
+async def _await_update_outcome() -> None:
+    """Pick up the helper's result once it lands after this core came up.
+
+    The helper's ``compose up`` returns — and its outcome is written — after
+    the new core has already started, so the boot-time read usually finds
+    nothing yet. Poll briefly; the page does the same on its side.
+    """
+    deadline = time.monotonic() + 15 * 60
+    while time.monotonic() < deadline:
+        await asyncio.sleep(5)
+        try:
+            outcome = await asyncio.to_thread(update.collect_updater_result)
+        except Exception:
+            log.exception("could not read the update outcome")
+            return
+        if outcome is not None:
+            _audit.info("update outcome: %s", outcome)
+            return
 
 
 class OriginGuard:
@@ -526,6 +555,12 @@ class UpdateDismissBody(BaseModel):
     version: str
 
 
+class UpdateAutoCheckBody(BaseModel):
+    """Body of ``POST /api/update/auto-check``."""
+
+    enabled: bool
+
+
 async def _update_status() -> JsonDict:
     """The update payload; the apply plan is only computed when there is something to apply."""
     state = await asyncio.to_thread(update.load_state)
@@ -558,6 +593,16 @@ async def post_update_check() -> JsonDict:
 async def post_update_dismiss(body: UpdateDismissBody) -> JsonDict:
     """Hide the header notice for one version; Settings keeps showing it."""
     await asyncio.to_thread(update.dismiss, body.version)
+    return await _update_status()
+
+
+@app.post("/api/update/auto-check")
+async def post_update_auto_check(body: UpdateAutoCheckBody) -> JsonDict:
+    """Switch the daily release check on or off (the one unattended request this server makes)."""
+    if not update.check_enabled():
+        raise HTTPException(400, "Release checks are disabled by MEDMCP_UPDATE_CHECK.")
+    await asyncio.to_thread(update.set_auto_check, body.enabled)
+    _audit.info("automatic release check %s", "enabled" if body.enabled else "disabled")
     return await _update_status()
 
 
@@ -632,6 +677,7 @@ async def ws_update(ws: WebSocket) -> None:
         assert plan is not None
         try:
             await asyncio.to_thread(settings.pull_image, plan.image(tag), on_progress)
+            await asyncio.to_thread(update.verify_pulled_image, plan.image(tag), tag)
             _audit.info(
                 "update started: %s -> %s (container %s)", plan.current_tag, tag, plan.container_id
             )

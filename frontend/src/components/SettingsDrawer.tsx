@@ -22,6 +22,8 @@ interface SettingsDrawerProps {
   onCheckUpdate: () => Promise<void>
   /** Open the update window. */
   onOpenUpdate: () => void
+  /** Switch the daily release check on or off. */
+  onSetAutoCheck: (enabled: boolean) => Promise<void>
 }
 
 /** "2 h ago" for the version row; empty when unknown. */
@@ -40,12 +42,13 @@ function ago(iso: string | null): string {
 function versionHint(u: UpdateState | null, checking: boolean): string {
   if (!u) return ''
   if (u.available) return `v${u.latest?.version} is available.`
-  if (!u.enabled) return 'Automatic release checks are off (MEDMCP_UPDATE_CHECK=0).'
+  if (!u.enabled) return 'Release checks are off (MEDMCP_UPDATE_CHECK=0).'
   if (checking) return 'Checking…'
   if (u.error && !u.latest) return `Could not check for releases: ${u.error}`
-  if (!u.checked_at) return 'Not checked yet.'
+  if (!u.checked_at) return u.auto_check ? 'Not checked yet.' : 'Automatic checks are off.'
   const when = ago(u.checked_at)
-  return `Up to date${when ? ` · checked ${when}` : ''}.`
+  const status = `Up to date${when ? ` · checked ${when}` : ''}.`
+  return u.auto_check ? status : `${status} Automatic checks are off.`
 }
 
 /**
@@ -63,6 +66,7 @@ export function SettingsDrawer({
   update,
   onCheckUpdate,
   onOpenUpdate,
+  onSetAutoCheck,
 }: SettingsDrawerProps) {
   const [checking, setChecking] = useState(false)
   const [state, setState] = useState<SettingsState | null>(null)
@@ -197,7 +201,7 @@ export function SettingsDrawer({
                   className={advancedOpen ? 'settings-chevron open' : 'settings-chevron'}
                 />
                 {!advancedOpen && (
-                  <span className="settings-advanced-peek">provenance, external servers</span>
+                  <span className="settings-advanced-peek">provenance, release checks, external servers</span>
                 )}
               </button>
               {advancedOpen && (
@@ -208,6 +212,21 @@ export function SettingsDrawer({
                     checked={state.record_provenance}
                     onChange={(v) => apply({ ...state, record_provenance: v })}
                   />
+                  {update && (
+                    <Row
+                      label="Check for updates automatically"
+                      hint={
+                        update.enabled
+                          ? 'Once a day the workspace asks github.com for the newest release. Nothing about this workspace, its data or its use is sent. Off, you can still check by hand from the bottom of this panel.'
+                          : 'Turned off for this deployment (MEDMCP_UPDATE_CHECK=0).'
+                      }
+                      checked={update.auto_check}
+                      disabled={!update.enabled}
+                      onChange={(v) => {
+                        onSetAutoCheck(v).catch(() => {})
+                      }}
+                    />
+                  )}
                   <div className="settings-row">
                     <div className="settings-row-text">
                       <div className="settings-row-label">External MCP servers</div>

@@ -36,7 +36,7 @@ Then open **http://localhost:8100**.
 
 **Stop** with `docker compose -f oci://ghcr.io/medmcp/compose:latest down`.
 
-**Update** by re-running the start command with `--pull always`.
+**Update** from the workspace: when a new release is out, a notice appears in the header — open it to read what changed and click *Update now*. MedMCP pulls the new images, restarts, and puts the previous release back if the new one does not start. The same can be done on the host by re-running the start command with `--pull always`. The release check is one anonymous request to GitHub a day; set `MEDMCP_UPDATE_CHECK=0` to turn it off, or `MEDMCP_UPDATE_URL` to read releases from a mirror.
 
 **Versions:** `latest` is the newest release. Pin a specific one with
 `oci://ghcr.io/medmcp/compose:v0.2.0` — release tags are never moved, so a

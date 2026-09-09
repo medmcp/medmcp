@@ -48,6 +48,7 @@ medmcp-workspace = "medmcp.server:main"
 medmcp-mcp-proxy = "medmcp.proxy:main"
 medmcp-llm-shim = "medmcp.llmshim:main"
 medmcp-pathguard = "medmcp.pathguard:main"
+medmcp-update = "medmcp.updater:main"
 
 [dependency-groups]
 test = [

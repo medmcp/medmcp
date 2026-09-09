@@ -6,6 +6,12 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Added
+
+- The workspace says when a new MedMCP release is out (header notice, Settings → Version) and shows its notes.
+- Update from the UI: *Update now* pulls the release, restarts on it, and rolls back if it does not start. `docker compose` installs only; others get the host command.
+- `MEDMCP_UPDATE_CHECK=0` turns the daily release check off; `MEDMCP_UPDATE_URL` points it at a mirror.
+
 ## 0.2.3 — 2026-09-03
 
 ### Changed

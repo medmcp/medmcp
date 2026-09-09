@@ -10,6 +10,7 @@ import type {
   SessionInfo,
   SettingsState,
   TreeNode,
+  UpdateState,
   WorkflowDetail,
   WorkflowListEntry,
 } from './types'
@@ -313,4 +314,29 @@ export async function removeExternalServer(name: string): Promise<void> {
   await check(
     await fetch(`/api/external-mcp/servers/${encodeURIComponent(name)}`, { method: 'DELETE' }),
   )
+}
+
+// ── Software update ──────────────────────────────────────────
+
+export async function fetchUpdate(): Promise<UpdateState> {
+  const res = await check(await fetch('/api/update'))
+  return (await res.json()) as UpdateState
+}
+
+/** Look for a release now (the server rate-limits this). */
+export async function checkForUpdate(): Promise<UpdateState> {
+  const res = await postJson('/api/update/check', {})
+  return (await res.json()) as UpdateState
+}
+
+/** Hide the header notice for one release; Settings keeps showing it. */
+export async function dismissUpdate(version: string): Promise<UpdateState> {
+  const res = await postJson('/api/update/dismiss', { version })
+  return (await res.json()) as UpdateState
+}
+
+/** The outcome of the last update has been shown; stop reporting it. */
+export async function ackUpdateResult(): Promise<UpdateState> {
+  const res = await postJson('/api/update/ack-result', {})
+  return (await res.json()) as UpdateState
 }

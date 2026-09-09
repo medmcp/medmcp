@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fetchExternalMcp, fetchGpus, fetchSettings, saveSettings } from '../api'
-import type { ExternalMcpState, GpuInfo, SettingsState } from '../types'
+import type { ExternalMcpState, GpuInfo, SettingsState, UpdateState } from '../types'
 import { Row } from './SettingsControls'
 import { ChevronRightIcon, XIcon } from './icons'
 
@@ -16,6 +16,36 @@ interface SettingsDrawerProps {
   onManageExternal: () => void
   /** Bumped when external-MCP state changed, so the summary re-reads it. */
   externalVersion: number
+  /** The release record (owned by App, which also polls it). */
+  update: UpdateState | null
+  /** Ask the server to look for a release now. */
+  onCheckUpdate: () => Promise<void>
+  /** Open the update window. */
+  onOpenUpdate: () => void
+}
+
+/** "2 h ago" for the version row; empty when unknown. */
+function ago(iso: string | null): string {
+  if (!iso) return ''
+  const ms = Date.now() - new Date(iso).getTime()
+  if (!Number.isFinite(ms) || ms < 0) return ''
+  const min = Math.round(ms / 60000)
+  if (min < 2) return 'just now'
+  if (min < 60) return `${min} min ago`
+  const h = Math.round(min / 60)
+  if (h < 36) return `${h} h ago`
+  return `${Math.round(h / 24)} d ago`
+}
+
+function versionHint(u: UpdateState | null, checking: boolean): string {
+  if (!u) return ''
+  if (u.available) return `v${u.latest?.version} is available.`
+  if (!u.enabled) return 'Automatic release checks are off (MEDMCP_UPDATE_CHECK=0).'
+  if (checking) return 'Checking…'
+  if (u.error && !u.latest) return `Could not check for releases: ${u.error}`
+  if (!u.checked_at) return 'Not checked yet.'
+  const when = ago(u.checked_at)
+  return `Up to date${when ? ` · checked ${when}` : ''}.`
 }
 
 /**
@@ -30,7 +60,11 @@ export function SettingsDrawer({
   onAdvancedToggle,
   onManageExternal,
   externalVersion,
+  update,
+  onCheckUpdate,
+  onOpenUpdate,
 }: SettingsDrawerProps) {
+  const [checking, setChecking] = useState(false)
   const [state, setState] = useState<SettingsState | null>(null)
   const [gpus, setGpus] = useState<GpuInfo[]>([])
   // Just enough external-MCP state to say what is connected; the window owns
@@ -146,6 +180,36 @@ export function SettingsDrawer({
                     <option value={state.gpu}>{state.gpu}</option>
                   )}
                 </select>
+              </div>
+
+              <div className="settings-row">
+                <div className="settings-row-text">
+                  <div className="settings-row-label">
+                    Version
+                    {update && <span className="settings-version">v{update.current.version}</span>}
+                  </div>
+                  <div className={`settings-row-hint${update?.available ? ' settings-hint-update' : ''}`}>
+                    {versionHint(update, checking)}
+                  </div>
+                </div>
+                {update?.available ? (
+                  <button className="btn-primary" onClick={onOpenUpdate}>
+                    Update…
+                  </button>
+                ) : (
+                  update?.enabled && (
+                    <button
+                      className="btn-plain"
+                      disabled={checking}
+                      onClick={() => {
+                        setChecking(true)
+                        onCheckUpdate().finally(() => setChecking(false))
+                      }}
+                    >
+                      Check now
+                    </button>
+                  )
+                )}
               </div>
 
               {/* Provenance is on, and meant to stay on — it is the record of what

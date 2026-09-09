@@ -65,6 +65,7 @@ from medmcp import (
     settings,
     share,
     titles,
+    update,
     workflow,
 )
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict, VibeAcpClient
@@ -144,6 +145,12 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     interrupted = await asyncio.to_thread(runs.reconcile_interrupted)
     if interrupted:
         _audit.warning("marked %d interrupted replay run(s) as failed", interrupted)
+    # An update helper that ran while no core was alive left its outcome on the
+    # state volume; fold it in so the UI can say what happened.
+    outcome = await asyncio.to_thread(update.collect_updater_result)
+    if outcome:
+        _audit.info("update outcome: %s", outcome)
+    check_task = asyncio.create_task(_update_check_loop()) if update.check_enabled() else None
     if settings.stack_pool_enabled():
         # Proxy children read MEDMCP_WORKSPACE for their fallback cwd; export it.
         os.environ.setdefault("MEDMCP_WORKSPACE", str(WORKSPACE_ROOT))
@@ -159,6 +166,10 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     try:
         yield
     finally:
+        if check_task is not None:
+            check_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await check_task
         await _runs.shutdown()
         if _broker is not None:
             await _broker.aclose()
@@ -166,6 +177,24 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
             await _pool.aclose()
         _broker = None
         _pool = None
+
+
+async def _update_check_loop() -> None:
+    """Look for a newer release once a day, starting a minute after boot.
+
+    Off the boot path on purpose: a slow or absent network must never delay the
+    UI. The hourly wake-up only re-evaluates the 24 h gate on ``checked_at``, so
+    a restart does not reset the cadence and a long-running instance still
+    checks daily. Failures are logged and retried at the next due time.
+    """
+    await asyncio.sleep(update.FIRST_CHECK_DELAY_SEC)
+    while True:
+        try:
+            if update.check_due(update.load_state()):
+                await update.run_check()
+        except Exception:
+            log.exception("release check failed")
+        await asyncio.sleep(3600)
 
 
 class OriginGuard:
@@ -486,6 +515,124 @@ async def healthz() -> JsonDict:
     what it is — the first question any bug report has to answer.
     """
     return {"status": "ok", "version": __version__, "build": BUILD}
+
+
+# ── Update API ──────────────────────────────────────────────
+
+
+class UpdateDismissBody(BaseModel):
+    """Body of ``POST /api/update/dismiss``."""
+
+    version: str
+
+
+async def _update_status() -> JsonDict:
+    """The update payload; the apply plan is only computed when there is something to apply."""
+    state = await asyncio.to_thread(update.load_state)
+    latest = cast("JsonDict | None", state.get("latest"))
+    reason: update.PlanError | None = None
+    if latest and update.is_newer(str(latest.get("version", "")), __version__):
+        reason = await asyncio.to_thread(update.plan_error)
+    return update.status(current_version=__version__, build=BUILD, plan_error=reason, state=state)
+
+
+@app.get("/api/update")
+async def get_update() -> JsonDict:
+    """Current version, the newest known release, and whether the UI can apply it."""
+    return await _update_status()
+
+
+@app.post("/api/update/check")
+async def post_update_check() -> JsonDict:
+    """Check for a release now (rate-limited; a no-op when checks are disabled)."""
+    await update.run_check(force=True)
+    return await _update_status()
+
+
+@app.post("/api/update/dismiss")
+async def post_update_dismiss(body: UpdateDismissBody) -> JsonDict:
+    """Hide the header notice for one version; Settings keeps showing it."""
+    await asyncio.to_thread(update.dismiss, body.version)
+    return await _update_status()
+
+
+@app.post("/api/update/ack-result")
+async def post_update_ack_result() -> JsonDict:
+    """Forget the last update's outcome once it has been shown."""
+    await asyncio.to_thread(update.ack_result)
+    return await _update_status()
+
+
+@app.websocket("/ws/update")
+async def ws_update(ws: WebSocket) -> None:
+    """Apply the newest release with streamed progress.
+
+    First client message: ``{"version": "0.3.0"}`` — it must name the release
+    the last check found, so the image pulled is never a client-chosen one.
+    Streams ``progress`` lines from the image pull (the old server is still up
+    for that part, and a failed pull leaves everything untouched), then starts
+    the helper and sends ``restarting``. The helper recreates this container,
+    so the socket simply drops; the client polls ``/healthz`` until the new
+    version answers.
+    """
+    await ws.accept()
+    try:
+        first = cast("JsonDict", await ws.receive_json())
+    except WebSocketDisconnect:
+        return
+    version = str(first.get("version", "")).strip()
+    state = await asyncio.to_thread(update.load_state)
+    latest = cast("JsonDict | None", state.get("latest"))
+    if not latest or latest.get("version") != version or not update.is_newer(version, __version__):
+        await ws.send_json({"type": "error", "message": "That release is not the one on record."})
+        await ws.close()
+        return
+    tag = str(latest.get("tag", ""))
+    try:
+        plan = await asyncio.to_thread(update.current_plan)
+    except update.UpdateNotApplicableError as exc:
+        await ws.send_json({"type": "error", "message": str(exc)})
+        await ws.close()
+        return
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[JsonDict] = asyncio.Queue()
+
+    def on_progress(line: str) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", "line": line})
+
+    async def run() -> None:
+        try:
+            await asyncio.to_thread(settings.pull_image, plan.image(tag), on_progress)
+            _audit.info(
+                "update started: %s -> %s (container %s)", plan.current_tag, tag, plan.container_id
+            )
+            helper = await asyncio.to_thread(update.start_updater, plan, tag)
+            _audit.info("update helper started: %s", helper[:12])
+            await queue.put(
+                {
+                    "type": "restarting",
+                    "version": version,
+                    "host_commands": update.host_commands(plan, tag),
+                }
+            )
+        except Exception as exc:  # relayed to the client as an error frame
+            _audit.warning("update to %s failed before restart: %s", tag, exc)
+            await queue.put({"type": "error", "message": str(exc)})
+
+    task = asyncio.create_task(run())
+    try:
+        while True:
+            frame = await queue.get()
+            await ws.send_json(frame)
+            if frame["type"] in ("restarting", "error"):
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await task
+        with contextlib.suppress(Exception):
+            await ws.close()
 
 
 @app.get("/api/gpus")

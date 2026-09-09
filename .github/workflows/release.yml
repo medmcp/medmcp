@@ -155,6 +155,11 @@ jobs:
             "import json,urllib.request; print(json.load(urllib.request.urlopen('http://localhost:8100/healthz'))['version'])")
           [ "$reported" = "$VERSION" ] \
             || { echo "::error::image reports version $reported, releasing $VERSION"; exit 1; }
+          # The update helper needs the compose plugin and the baked compose file.
+          docker exec medmcp-smoke docker compose version >/dev/null \
+            || { echo "::error::compose plugin missing from the image"; exit 1; }
+          docker exec medmcp-smoke test -f /app/docker-compose.ghcr.yml \
+            || { echo "::error::docker-compose.ghcr.yml not baked into the image"; exit 1; }
           echo "smoke test passed (version $reported)"
       - name: Smoke test cleanup
         if: always()

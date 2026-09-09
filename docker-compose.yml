@@ -122,6 +122,10 @@ services:
       # live (answer text streams as written) or buffered (answer held back so
       # every truncation can be retried invisibly).
       MEDMCP_SHIM_RELAY: "${MEDMCP_SHIM_RELAY:-live}"
+      # Release check (one anonymous request to GitHub a day; off with 0) and
+      # where to read the newest release from (a mirror serving the same JSON).
+      MEDMCP_UPDATE_CHECK: "${MEDMCP_UPDATE_CHECK:-}"
+      MEDMCP_UPDATE_URL: "${MEDMCP_UPDATE_URL:-}"
     healthcheck:
       test:
         - CMD

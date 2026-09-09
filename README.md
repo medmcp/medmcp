@@ -85,7 +85,7 @@ To report a vulnerability, see **[SECURITY.md](SECURITY.md)**.
 Every published image and the compose artifact are signed in CI with [Sigstore](https://www.sigstore.dev/) keyless signing: the signature is bound to this repository's release workflow, and there is no signing key to protect. The workspace verifies a signature before it applies an update or installs a stack, and refuses anything that does not verify. To check a release yourself:
 
 ```bash
-cosign verify ghcr.io/medmcp/core:v0.2.4 \
+cosign verify ghcr.io/medmcp/core:v0.3.0 \
   --certificate-identity-regexp '^https://github\.com/medmcp/medmcp/\.github/workflows/release\.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```

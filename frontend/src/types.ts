@@ -368,3 +368,44 @@ export interface ExternalMcpState {
   transports: string[]
   servers: ExternalServer[]
 }
+
+/** The newest release the server knows about (GET /api/update). */
+export interface UpdateRelease {
+  version: string
+  tag: string
+  /** Release notes as markdown (the CHANGELOG section). */
+  notes: string
+  url: string
+  published_at: string
+}
+
+/** Outcome of the last update the helper ran, shown once after it. */
+export interface UpdateResult {
+  from: string
+  to: string
+  status: 'ok' | 'rolled_back' | 'failed'
+  detail: string
+  at: string
+}
+
+export interface UpdateState {
+  current: { version: string; build: string }
+  /** False when MEDMCP_UPDATE_CHECK=0: nothing is ever fetched, not even by hand. */
+  enabled: boolean
+  /** The daily unattended check (the operator's switch in Settings › Advanced). */
+  auto_check: boolean
+  checked_at: string | null
+  error: string | null
+  latest: UpdateRelease | null
+  /** A newer release than the one running exists. */
+  available: boolean
+  /** The header notice for it was dismissed (Settings still shows it). */
+  dismissed: boolean
+  /** The UI can apply it here; otherwise `apply_reason` says what to do instead. */
+  can_apply: boolean
+  apply_reason: string | null
+  host_commands: { update: string; rollback: string } | null
+  last_result: UpdateResult | null
+  /** A rehearsal is set up: the release is a stand-in and the update installs nothing. */
+  rehearsal: boolean
+}

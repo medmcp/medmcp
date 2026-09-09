@@ -644,6 +644,10 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         raise
 
 
+# Public name for modules outside settings that keep small state files of their own.
+atomic_write_json = _atomic_write_json
+
+
 def save_active_server_names(names: set[str]) -> None:
     """Persist the active server set to ``.vibe/active_stacks.json``."""
     _atomic_write_json(ACTIVE_STACKS_PATH, {"active": sorted(names)})
@@ -1278,6 +1282,11 @@ def _pull_streaming(image: str, on_progress: ProgressFn | None) -> None:
                 "(`docker login ghcr.io`) or set GHCR_USER/GHCR_TOKEN."
             )
         raise RuntimeError(f"docker pull {image} failed")
+
+
+def pull_image(image: str, on_progress: ProgressFn | None = None) -> None:
+    """Pull *image* on the host daemon, streaming status lines (see ``_pull_streaming``)."""
+    _pull_streaming(image, on_progress)
 
 
 def _write_stack_manifest(name: str, entry: JsonDict) -> None:

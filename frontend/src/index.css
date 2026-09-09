@@ -170,9 +170,45 @@ button:hover {
   font-weight: 500;
 }
 
-.app-header-gear {
+/* Everything right of the wordmark. The header aligns on the text baseline, so
+   the buttons opt out and centre themselves as a group. */
+.app-header-right {
   margin-left: auto;
   align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* The release notice: a small brand-blue pill, not a banner. An update is an
+   invitation, not a warning, and it is dismissible — the standing external-MCP
+   strip is the shape reserved for something that must not be ignored. */
+.update-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 10px 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--blue-xl);
+  background: rgba(58, 99, 204, 0.14);
+  border: 1px solid rgba(127, 168, 245, 0.35);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.update-pill:hover {
+  color: var(--text);
+  background: rgba(58, 99, 204, 0.26);
+}
+
+.update-pill-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--blue-l);
+  box-shadow: 0 0 0 3px rgba(58, 99, 204, 0.25);
 }
 
 .app-main {
@@ -1444,7 +1480,7 @@ button:hover {
   position: absolute;
   left: 16px;
   right: 16px;
-  bottom: 16px;
+  bottom: 64px;
   font-size: 12px;
   color: var(--blue-xl);
   background: rgba(24, 28, 37, 0.96);
@@ -3406,4 +3442,239 @@ textarea.wf-input {
   border-radius: 8px;
   padding: 8px 12px;
   font-size: 12.5px;
+}
+
+/* ── Software update ─────────────────────────────────────────────────────── */
+
+.upwin {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 580px;
+  max-width: 92vw;
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--dark2);
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  z-index: 41;
+  overflow: hidden;
+}
+
+.upwin-body {
+  padding: 16px 20px 18px;
+  overflow-y: auto;
+}
+
+.upwin-versions {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.upwin-ver {
+  font-family: var(--mono);
+  color: var(--muted2);
+}
+
+.upwin-ver.new {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.upwin-arrow {
+  color: var(--muted);
+}
+
+.upwin-date {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* The CHANGELOG section for the release, rendered small and boxed so a long
+   one scrolls inside the window rather than pushing the buttons off it. */
+.upwin-notes {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px 14px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted2);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.upwin-notes h1,
+.upwin-notes h2,
+.upwin-notes h3,
+.upwin-notes h4 {
+  margin: 12px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.upwin-notes ul {
+  margin: 4px 0 8px;
+  padding-left: 18px;
+}
+
+.upwin-notes li {
+  margin: 3px 0;
+}
+
+.upwin-notes code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.upwin-link {
+  display: inline-block;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--blue-xl);
+}
+
+.upwin-status {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.upwin-error {
+  color: var(--red-tint);
+}
+
+.upwin-muted {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.upwin-muted code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted2);
+}
+
+.upwin-reason {
+  margin-top: 14px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted2);
+}
+
+.upwin-reason p {
+  margin: 0 0 6px;
+}
+
+/* A command to copy: selectable as one unit, wrapping rather than scrolling. */
+.upwin-cmd {
+  margin: 4px 0 10px;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--card);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}
+
+.upwin-log {
+  max-height: 200px;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted2);
+  white-space: pre-wrap;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/* Reports what the last update did — shown once, on the first page after it,
+   which is the only place the outcome can be shown at all. Under the header on
+   the right, where nothing is typed or clicked; the chat input owns the bottom
+   corner. Below the settings drawer, which may cover it. */
+.app-toast {
+  position: fixed;
+  top: 50px;
+  right: 18px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 460px;
+  padding: 9px 8px 9px 14px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--blue-xl);
+  background: rgba(24, 28, 37, 0.97);
+  border: 1px solid rgba(127, 168, 245, 0.3);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  animation: drawer-toast-in 140ms ease-out;
+}
+
+.app-toast-error {
+  color: var(--red-tint);
+  border-color: rgba(210, 34, 41, 0.4);
+}
+
+/* The foot of the settings drawer: version on the left, the release check or
+   the update on the right. Pinned below the scrolling body, so it is in the
+   same place however long the settings above it get. */
+.drawer-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  padding: 10px 18px;
+  border-top: 1px solid var(--border);
+}
+
+.drawer-footer-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.drawer-footer-version {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--muted2);
+}
+
+.drawer-footer-hint {
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawer-footer-hint.available {
+  color: var(--blue-xl);
 }

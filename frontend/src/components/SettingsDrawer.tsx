@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fetchExternalMcp, fetchGpus, fetchSettings, saveSettings } from '../api'
-import type { ExternalMcpState, GpuInfo, SettingsState } from '../types'
+import type { ExternalMcpState, GpuInfo, SettingsState, UpdateState } from '../types'
 import { Row } from './SettingsControls'
 import { ChevronRightIcon, XIcon } from './icons'
 
@@ -16,6 +16,39 @@ interface SettingsDrawerProps {
   onManageExternal: () => void
   /** Bumped when external-MCP state changed, so the summary re-reads it. */
   externalVersion: number
+  /** The release record (owned by App, which also polls it). */
+  update: UpdateState | null
+  /** Ask the server to look for a release now. */
+  onCheckUpdate: () => Promise<void>
+  /** Open the update window. */
+  onOpenUpdate: () => void
+  /** Switch the daily release check on or off. */
+  onSetAutoCheck: (enabled: boolean) => Promise<void>
+}
+
+/** "2 h ago" for the version row; empty when unknown. */
+function ago(iso: string | null): string {
+  if (!iso) return ''
+  const ms = Date.now() - new Date(iso).getTime()
+  if (!Number.isFinite(ms) || ms < 0) return ''
+  const min = Math.round(ms / 60000)
+  if (min < 2) return 'just now'
+  if (min < 60) return `${min} min ago`
+  const h = Math.round(min / 60)
+  if (h < 36) return `${h} h ago`
+  return `${Math.round(h / 24)} d ago`
+}
+
+function versionHint(u: UpdateState | null, checking: boolean): string {
+  if (!u) return ''
+  if (u.available) return `v${u.latest?.version} is available.`
+  if (!u.enabled) return 'Release checks are off (MEDMCP_UPDATE_CHECK=0).'
+  if (checking) return 'Checking…'
+  if (u.error && !u.latest) return `Could not check for releases: ${u.error}`
+  if (!u.checked_at) return u.auto_check ? 'Not checked yet.' : 'Automatic checks are off.'
+  const when = ago(u.checked_at)
+  const status = `Up to date${when ? ` · checked ${when}` : ''}.`
+  return u.auto_check ? status : `${status} Automatic checks are off.`
 }
 
 /**
@@ -30,7 +63,12 @@ export function SettingsDrawer({
   onAdvancedToggle,
   onManageExternal,
   externalVersion,
+  update,
+  onCheckUpdate,
+  onOpenUpdate,
+  onSetAutoCheck,
 }: SettingsDrawerProps) {
+  const [checking, setChecking] = useState(false)
   const [state, setState] = useState<SettingsState | null>(null)
   const [gpus, setGpus] = useState<GpuInfo[]>([])
   // Just enough external-MCP state to say what is connected; the window owns
@@ -163,7 +201,7 @@ export function SettingsDrawer({
                   className={advancedOpen ? 'settings-chevron open' : 'settings-chevron'}
                 />
                 {!advancedOpen && (
-                  <span className="settings-advanced-peek">provenance, external servers</span>
+                  <span className="settings-advanced-peek">provenance, release checks, external servers</span>
                 )}
               </button>
               {advancedOpen && (
@@ -174,6 +212,21 @@ export function SettingsDrawer({
                     checked={state.record_provenance}
                     onChange={(v) => apply({ ...state, record_provenance: v })}
                   />
+                  {update && (
+                    <Row
+                      label="Check for updates automatically"
+                      hint={
+                        update.enabled
+                          ? 'Once a day the workspace asks github.com for the newest release. Nothing about this workspace, its data or its use is sent. Off, you can still check by hand from the bottom of this panel.'
+                          : 'Turned off for this deployment (MEDMCP_UPDATE_CHECK=0).'
+                      }
+                      checked={update.auto_check}
+                      disabled={!update.enabled}
+                      onChange={(v) => {
+                        onSetAutoCheck(v).catch(() => {})
+                      }}
+                    />
+                  )}
                   <div className="settings-row">
                     <div className="settings-row-text">
                       <div className="settings-row-label">External MCP servers</div>
@@ -195,6 +248,37 @@ export function SettingsDrawer({
             </>
           )}
         </div>
+        {/* The version lives at the foot of the drawer rather than among the
+            settings: it is not a choice, and a release check is something you
+            reach for occasionally, from the same spot every time. */}
+        {update && (
+          <div className="drawer-footer">
+            <div className="drawer-footer-text">
+              <span className="drawer-footer-version">MedMCP v{update.current.version}</span>
+              <span className={`drawer-footer-hint${update.available ? ' available' : ''}`}>
+                {versionHint(update, checking)}
+              </span>
+            </div>
+            {update.available ? (
+              <button className="btn-primary" onClick={onOpenUpdate}>
+                Update…
+              </button>
+            ) : (
+              update.enabled && (
+                <button
+                  className="btn-plain"
+                  disabled={checking}
+                  onClick={() => {
+                    setChecking(true)
+                    onCheckUpdate().finally(() => setChecking(false))
+                  }}
+                >
+                  Check for update
+                </button>
+              )
+            )}
+          </div>
+        )}
         {/* Pinned over the drawer rather than placed in the flow. As the first
             child of the body it pushed every control down the moment a setting
             was saved — so the row you had just clicked moved out from under the

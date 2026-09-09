@@ -20,6 +20,9 @@ FROM ${BASE_IMAGE} AS runtime
 # docker CLI only (multi-arch, daemonless) so the core can spawn stack containers
 # (`docker run -i`) over the mounted rootless socket.
 COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
+# compose plugin (multi-arch static binary) so the update helper can bring the
+# operator's compose project up on the new release from inside a container.
+COPY --from=docker/compose-bin:v5.0.2 /docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
 
 WORKDIR /app
 
@@ -38,6 +41,9 @@ COPY .vibe/prompts ./.vibe/prompts
 COPY Modelfile.muse ./Modelfile.muse
 COPY catalog.json ./catalog.json
 COPY catalog.ghcr.json ./catalog.ghcr.json
+# The deploy compose this release ships with: the update helper runs it with
+# MEDMCP_TAG set to this image's tag, and the server reads its defaults.
+COPY docker-compose.ghcr.yml ./docker-compose.ghcr.yml
 COPY docker/entrypoint.sh /usr/local/bin/medmcp-entrypoint
 RUN chmod +x /usr/local/bin/medmcp-entrypoint
 

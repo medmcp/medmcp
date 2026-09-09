@@ -6,12 +6,28 @@ import { ExternalMcpWindow } from './components/ExternalMcpWindow'
 import { FileExplorer } from './components/FileExplorer'
 import { StackMarketplace } from './components/StackMarketplace'
 import { SettingsDrawer } from './components/SettingsDrawer'
+import { UpdateWindow } from './components/UpdateWindow'
 import { Viewer } from './components/Viewer'
 import { WorkflowPanel } from './components/WorkflowPanel'
-import { GearIcon, StoreIcon } from './components/icons'
+import { GearIcon, StoreIcon, XIcon } from './components/icons'
+import { ackUpdateResult, checkForUpdate, dismissUpdate, fetchUpdate, setUpdateAutoCheck } from './api'
+import type { UpdateState } from './types'
 
 /** localStorage key holding the last active chat session id (for auto-resume). */
 const ACTIVE_SESSION_KEY = 'medmcp.activeSession'
+/** How often the page re-reads the release record the server keeps. */
+const UPDATE_POLL_MS = 30 * 60 * 1000
+/** Right after a load the outcome of an update may still be on its way (the
+ *  helper finishes after the new server is up), so the first minutes poll fast. */
+const UPDATE_POLL_EARLY_MS = 10 * 1000
+const UPDATE_POLL_EARLY_FOR_MS = 3 * 60 * 1000
+
+function describeUpdateResult(r: NonNullable<UpdateState['last_result']>): string {
+  if (r.status === 'ok') return `Updated to ${r.to}.`
+  if (r.status === 'rolled_back')
+    return `The update to ${r.to} did not start; ${r.from} was put back. ${r.detail}`.trim()
+  return `The update to ${r.to} failed. ${r.detail}`.trim()
+}
 
 /**
  * Four-panel workspace: explorer (top left), viewer (top right),
@@ -31,6 +47,64 @@ export default function App() {
   const [externalVersion, setExternalVersion] = useState(0)
   const notifyExternalChanged = useCallback(() => setExternalVersion((v) => v + 1), [])
   const [marketOpen, setMarketOpen] = useState(false)
+  // The release record the server keeps (checked daily there); the header
+  // notice and the Settings row both read it, the window applies it.
+  const [updateState, setUpdateState] = useState<UpdateState | null>(null)
+  const [updateOpen, setUpdateOpen] = useState(false)
+  const loadUpdate = useCallback(() => {
+    // Best-effort: an unreachable endpoint must not blank the app.
+    fetchUpdate()
+      .then(setUpdateState)
+      .catch(() => {})
+  }, [])
+  useEffect(() => {
+    loadUpdate()
+    const started = Date.now()
+    let timer = 0
+    const tick = () => {
+      loadUpdate()
+      const early = Date.now() - started < UPDATE_POLL_EARLY_FOR_MS
+      timer = window.setTimeout(tick, early ? UPDATE_POLL_EARLY_MS : UPDATE_POLL_MS)
+    }
+    timer = window.setTimeout(tick, UPDATE_POLL_EARLY_MS)
+    return () => window.clearTimeout(timer)
+  }, [loadUpdate])
+  const setAutoCheck = useCallback(
+    (enabled: boolean) =>
+      setUpdateAutoCheck(enabled)
+        .then(setUpdateState)
+        .catch(() => {}),
+    [],
+  )
+  const checkUpdate = useCallback(
+    () =>
+      checkForUpdate()
+        .then(setUpdateState)
+        .catch(() => {}),
+    [],
+  )
+  const dismissUpdateNotice = useCallback(() => {
+    const v = updateState?.latest?.version
+    setUpdateOpen(false)
+    if (v)
+      dismissUpdate(v)
+        .then(setUpdateState)
+        .catch(() => {})
+  }, [updateState])
+  const ackUpdate = useCallback(() => {
+    ackUpdateResult()
+      .then(setUpdateState)
+      .catch(() => {})
+  }, [])
+  const updateResult = updateState?.last_result ?? null
+  // A successful update needs no acknowledging; the failures stay until read.
+  useEffect(() => {
+    if (updateResult?.status !== 'ok') return
+    const t = window.setTimeout(ackUpdate, 12000)
+    return () => window.clearTimeout(t)
+  }, [updateResult, ackUpdate])
+  const updateNotice =
+    updateState?.available && !updateState.dismissed ? updateState.latest : null
   // The vibe session that received the last prompt — what "Save chat as
   // workflow" distills. Survives a reconnect (which starts an empty session).
   const [distillSessionId, setDistillSessionId] = useState<string | null>(null)
@@ -99,16 +173,23 @@ export default function App() {
       <header className="app-header">
         <span className="app-logo">MedMCP</span>
         <span className="app-subtitle">workspace</span>
-        <button
-          className="btn-icon app-header-gear"
-          title="Tool stacks"
-          onClick={() => setMarketOpen(true)}
-        >
-          <StoreIcon />
-        </button>
-        <button className="btn-icon" title="Settings" onClick={() => setSettingsOpen(true)}>
-          <GearIcon />
-        </button>
+        <span className="app-header-right">
+          {updateNotice && (
+            <button
+              className="update-pill"
+              title="A newer MedMCP release is available"
+              onClick={() => setUpdateOpen(true)}
+            >
+              <span className="update-pill-dot" />v{updateNotice.version} available
+            </button>
+          )}
+          <button className="btn-icon" title="Tool stacks" onClick={() => setMarketOpen(true)}>
+            <StoreIcon />
+          </button>
+          <button className="btn-icon" title="Settings" onClick={() => setSettingsOpen(true)}>
+            <GearIcon />
+          </button>
+        </span>
       </header>
       <ExternalMcpBanner
         refreshSignal={externalVersion}
@@ -124,7 +205,25 @@ export default function App() {
         onAdvancedToggle={setSettingsAdvanced}
         onManageExternal={() => setExternalOpen(true)}
         externalVersion={externalVersion}
+        update={updateState}
+        onCheckUpdate={checkUpdate}
+        onOpenUpdate={() => setUpdateOpen(true)}
+        onSetAutoCheck={setAutoCheck}
       />
+      <UpdateWindow
+        open={updateOpen}
+        onClose={() => setUpdateOpen(false)}
+        state={updateState}
+        onDismiss={dismissUpdateNotice}
+      />
+      {updateResult && (
+        <div className={`app-toast${updateResult.status === 'ok' ? '' : ' app-toast-error'}`} role="status">
+          <span>{describeUpdateResult(updateResult)}</span>
+          <button className="btn-icon" title="Dismiss" onClick={ackUpdate}>
+            <XIcon />
+          </button>
+        </div>
+      )}
       <ExternalMcpWindow
         open={externalOpen}
         onClose={() => setExternalOpen(false)}

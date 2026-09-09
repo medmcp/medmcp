@@ -491,6 +491,9 @@ class ApplyPlan:
     state_volume: str
     env: dict[str, str]
     docker_config_source: str | None = None
+    # The registry digest the running image was pulled under, when known: a
+    # rollback then goes back to exactly this image rather than to a tag.
+    current_digest: str | None = None
 
     def image(self, tag: str) -> str:
         """The image reference for release *tag*."""
@@ -664,7 +667,16 @@ def plan_apply(
         if models is not None and models.get("Type") == "bind":
             env["OLLAMA_MODELS_DIR"] = str(models.get("Source") or "")
 
+    current_digest: str | None = None
+    for entry in cast(
+        "list[str]", cast("JsonDict", self_info.get("Image_RepoDigests") or {}) or []
+    ):
+        entry_repo, _, entry_digest = entry.partition("@")
+        if entry_repo == repo and entry_digest.startswith("sha256:"):
+            current_digest = entry_digest
+            break
     return ApplyPlan(
+        current_digest=current_digest,
         container_id=str(self_info.get("Id") or self_container_id()),
         image_repo=repo,
         current_tag=tag,
@@ -690,10 +702,16 @@ def current_plan() -> ApplyPlan:
         defaults = compose_defaults(BAKED_COMPOSE_PATH.read_text(encoding="utf-8"))
     project = _labels(self_info).get(f"{_COMPOSE_LABEL_PREFIX}project", "")
     llm_info = find_project_container(project, "llm") if project else None
+    image = str(cast("JsonDict", self_info.get("Config") or {}).get("Image") or "")
+    image_info = inspect_ref(image) if image else None
+    if image_info is not None:
+        self_info["Image_RepoDigests"] = image_info.get("RepoDigests") or []
     return plan_apply(self_info, llm_info, defaults=defaults)
 
 
-def updater_command(plan: ApplyPlan, target_tag: str) -> list[str]:
+def updater_command(
+    plan: ApplyPlan, target_tag: str, target_digest: str | None = None
+) -> list[str]:
     """The ``docker run`` that starts the helper from the *new* image.
 
     The helper is the new release's ``medmcp-update apply``; this command line
@@ -728,10 +746,16 @@ def updater_command(plan: ApplyPlan, target_tag: str) -> list[str]:
         "-e",
         f"MEDMCP_UPDATE_PREVIOUS_TAG={plan.current_tag}",
         "-e",
+        f"MEDMCP_UPDATE_PREVIOUS_DIGEST={plan.current_digest or ''}",
+        "-e",
+        f"MEDMCP_UPDATE_DIGEST={target_digest or ''}",
+        "-e",
         f"MEDMCP_UPDATE_ENV={json.dumps(plan.env, sort_keys=True)}",
         "--entrypoint",
         "medmcp-update",
-        plan.image(target_tag),
+        # Started by digest when one was verified: the tag could be moved
+        # between verification and here, the digest cannot.
+        f"{plan.image_repo}@{target_digest}" if target_digest else plan.image(target_tag),
         "apply",
     ]
     return args
@@ -770,10 +794,10 @@ def remove_stale_updater() -> None:
         log.warning("could not remove %s: %s", UPDATER_CONTAINER, exc)
 
 
-def start_updater(plan: ApplyPlan, target_tag: str) -> str:
+def start_updater(plan: ApplyPlan, target_tag: str, target_digest: str | None = None) -> str:
     """Start the helper; returns its container id. The image must already be pulled."""
     remove_stale_updater()
-    args = updater_command(plan, target_tag)
+    args = updater_command(plan, target_tag, target_digest)
     shown = [
         f"{a.partition('=')[0]}=<redacted>" if a.startswith("MEDMCP_UPDATE_ENV=") else a
         for a in args

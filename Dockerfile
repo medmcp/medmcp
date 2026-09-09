@@ -23,6 +23,14 @@ COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
 # compose plugin (multi-arch static binary) so the update helper can bring the
 # operator's compose project up on the new release from inside a container.
 COPY --from=docker/compose-bin:v5.0.2 /docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+# cosign verifies the signature on every image the core pulls to run (the next
+# release, a stack) against signing-policy.json. The Sigstore trust root is
+# fetched here, at build time, so verification needs no Sigstore access at run
+# time — only the registry the image came from (see src/medmcp/signing.py).
+COPY --from=ghcr.io/sigstore/cosign/cosign:v3.1.3 /ko-app/cosign /usr/local/bin/cosign
+RUN cosign initialize >/dev/null \
+    && mkdir -p /app/sigstore \
+    && cp /root/.sigstore/root/tuf-repo-cdn.sigstore.dev/targets/trusted_root.json /app/sigstore/trusted_root.json
 
 WORKDIR /app
 
@@ -44,6 +52,7 @@ COPY catalog.ghcr.json ./catalog.ghcr.json
 # The deploy compose this release ships with: the update helper runs it with
 # MEDMCP_TAG set to this image's tag, and the server reads its defaults.
 COPY docker-compose.ghcr.yml ./docker-compose.ghcr.yml
+COPY signing-policy.json ./signing-policy.json
 COPY docker/entrypoint.sh /usr/local/bin/medmcp-entrypoint
 RUN chmod +x /usr/local/bin/medmcp-entrypoint
 

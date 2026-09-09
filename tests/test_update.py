@@ -588,3 +588,26 @@ class TestRehearsal:
         assert frames[0]["line"] == "v0.9.0: one"
         assert frames[2]["version"] == "0.9.0"
         assert update.load_state()["simulate"] is None
+
+
+class TestCurrentDigest:
+    """The running image's registry digest rides along, for a digest-pinned rollback."""
+
+    def test_plan_records_the_running_digest(self) -> None:
+        """RepoDigests of the container's image, matched on the repository."""
+        info = _core_info()
+        info["Image_RepoDigests"] = [
+            "mirror/core@sha256:" + "11" * 32,
+            "ghcr.io/medmcp/core@sha256:" + "22" * 32,
+        ]
+        plan = update.plan_apply(info, None)
+        assert plan.current_digest == "sha256:" + "22" * 32
+        assert "MEDMCP_UPDATE_PREVIOUS_DIGEST=sha256:" + "22" * 32 in update.updater_command(
+            plan, "v0.3.0"
+        )
+
+    def test_plan_without_digest_is_still_a_plan(self) -> None:
+        """A local build has none; the rollback then goes by tag."""
+        plan = update.plan_apply(_core_info(), None)
+        assert plan.current_digest is None
+        assert "MEDMCP_UPDATE_PREVIOUS_DIGEST=" in update.updater_command(plan, "v0.3.0")

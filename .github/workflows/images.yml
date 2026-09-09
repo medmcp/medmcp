@@ -23,6 +23,7 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write # sign the images with this workflow's identity (Sigstore keyless)
 
 # Two merges landing close together used to race: both runs push the bare
 # :main tag, and whichever finished LAST won it — which was the run that had
@@ -145,6 +146,20 @@ jobs:
             done
           done
           echo "both platforms present on base + core"
+      - uses: sigstore/cosign-installer@v4.1.2
+      - name: Sign the images (Sigstore keyless, by digest)
+        run: |
+          # :main and :<sha> share a digest, so one signature covers both. The
+          # identity is this workflow on refs/heads/main, which the policy in
+          # signing-policy.json accepts alongside release.yml on a v* tag.
+          for img in base core; do
+            digest=$(docker buildx imagetools inspect "ghcr.io/medmcp/$img:main" \
+              --format '{{.Manifest.Digest}}')
+            cosign sign --yes --recursive "ghcr.io/medmcp/$img@$digest"
+            cosign verify "ghcr.io/medmcp/$img@$digest" \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/images.yml@${GITHUB_REF}" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
+          done
       - name: Publish deploy compose as an OCI artifact
         run: |
           # Publish the self-contained deploy compose so nodes can run it with no

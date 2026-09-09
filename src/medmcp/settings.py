@@ -41,6 +41,7 @@ from urllib.parse import urlparse
 import httpx
 import tomli_w
 
+from medmcp import signing
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict
 from medmcp.workflow import list_workflows
 
@@ -1331,6 +1332,17 @@ def install_stack_image(
     if not _image_present(image):
         report(f"Pulling {image}…")
         _pull_streaming(image, on_progress)
+
+    # Before anything of the image is read: an image whose repository has a
+    # signing policy must verify against it (SignatureError otherwise). One
+    # without a policy is installed unverified, said out loud — the policy file
+    # grows a line per stack repository as their release workflows sign.
+    if signing.policy_for(image) is not None:
+        verified = signing.verify_image(image)
+        report(signing.describe(verified))
+    else:
+        report("No signing policy covers this image; installing it unverified.")
+        log.warning("stack image %s has no signing policy; installed unverified", image)
 
     # Refuse a foreign-architecture image here rather than letting it install
     # cleanly and fail at first tool call with "exec format error".

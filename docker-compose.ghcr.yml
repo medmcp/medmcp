@@ -88,7 +88,9 @@ services:
     restart: "no"
 
   medmcp:
-    image: ghcr.io/medmcp/core:${MEDMCP_TAG:-main}
+    # MEDMCP_CORE_DIGEST (set by the in-UI updater after verifying the
+    # signature) pins the image to a digest; the tag is then informational.
+    image: ghcr.io/medmcp/core:${MEDMCP_TAG:-main}${MEDMCP_CORE_DIGEST:+@${MEDMCP_CORE_DIGEST}}
     pull_policy: always
     depends_on:
       llm:

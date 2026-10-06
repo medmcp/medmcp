@@ -405,6 +405,7 @@ export const Chat = memo(function Chat({
   onNewChat,
   currentSessionId,
   onSelectSession,
+  onOpenModels,
 }: {
   /** Called with the vibe session id whenever a prompt is sent into it. */
   onPromptedSession?: (id: string) => void
@@ -422,12 +423,16 @@ export const Chat = memo(function Chat({
   currentSessionId?: string | null
   /** Open a previous session (parent remounts this component to resume it). */
   onSelectSession?: (id: string) => void
+  /** Open the Models window (the header's model name is its entry point). */
+  onOpenModels?: () => void
 }) {
   const [items, setItems] = useState<ChatItem[]>([])
   const [toolCalls, setToolCalls] = useState<Record<string, ToolCallState>>({})
   const [status, setStatus] = useState<ChatSocketStatus>('connecting')
   const [busy, setBusy] = useState(false)
   const [model, setModel] = useState<string | null>(null)
+  // Whether that model is hosted outside this machine (the cloud-model setting).
+  const [cloud, setCloud] = useState(false)
   // The chat's name: user-set or generated (server-owned; arrives on ready and as title frames).
   const [title, setTitle] = useState<string | null>(null)
   // A backend retry in flight (vibe ≥2.24 announces them); cleared by the next real frame.
@@ -631,6 +636,7 @@ export const Chat = memo(function Chat({
           setPermission(null)
           setRewind(null)
           if (frame.model) setModel(frame.model)
+          setCloud(frame.cloud === true)
           setTitle(frame.title ?? null)
           setRetrying(null)
           onSessionEstablishedRef.current?.(frame.sessionId)
@@ -746,7 +752,19 @@ export const Chat = memo(function Chat({
           </span>
         )}
         <span className="panel-actions chat-meta">
-          {model != null && <span className="model-name">{model}</span>}
+          {model != null && (
+            <button
+              className={`model-name${cloud ? ' model-cloud' : ''}`}
+              title={
+                cloud
+                  ? 'Cloud model: this chat is sent outside this machine. Click to see the models.'
+                  : 'Change the model'
+              }
+              onClick={onOpenModels}
+            >
+              {model}
+            </button>
+          )}
           {usage != null && <ContextMeter used={usage.used} size={usage.size} />}
           <span
             className={`conn conn-${retrying ? 'retrying' : status}`}

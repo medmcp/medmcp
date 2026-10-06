@@ -6,6 +6,18 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+## 0.3.1 — 2026-10-06
+
+### Added
+
+- Choose the local model: click the model name in the chat (or Settings → Model) to switch between seven models. A model downloads the first time you pick it and can be deleted again; Muse Glimmer stays the default.
+- Optional cloud model: Settings → Advanced → Cloud model runs chats on Claude, ChatGPT or another OpenAI-compatible service with your own API key. Off by default; it asks for consent and shows a red banner while on, because chats then leave your machine.
+
+### Changed
+
+- Shorter text in Settings and in the External MCP window.
+- A chat's provenance record now says where its model ran.
+
 ## 0.3.0 — 2026-09-09
 
 ### Security

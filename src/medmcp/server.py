@@ -38,7 +38,7 @@ import logging
 import os
 import shutil
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Coroutine
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -55,6 +55,7 @@ from medmcp import (
     batchplan,
     distill,
     explain,
+    localmodels,
     origincheck,
     pathcheck,
     pathguard,
@@ -274,10 +275,11 @@ app.add_middleware(OriginGuard)
 # One vibe-acp subprocess shared by every websocket connection. The subprocess
 # cwd must stay PROJECT_ROOT — `uv run` resolves the project from it; the
 # agent's working directory is set per session via session/new's cwd instead.
-# The agent process is where an external server's credential is needed; this
-# process holds it so the operator does not have to plumb one into the
-# deployment by hand. Passed as a provider, re-read on every (re)start.
-_client: VibeAcpClient = VibeAcpClient(extra_env=settings.external_secret_env)
+# The agent process is where an external server's credential — and a cloud
+# model's API key — is needed; this process holds them so the operator does not
+# have to plumb one into the deployment by hand. Passed as a provider, re-read
+# on every (re)start.
+_client: VibeAcpClient = VibeAcpClient(extra_env=settings.agent_secret_env)
 
 # Live websocket connections, so a settings-triggered vibe restart can close
 # them (each client auto-reconnects into a fresh session on the new process).
@@ -1063,6 +1065,275 @@ async def delete_external_server(name: str) -> JsonDict:
     return {"ok": True, "restarted": True}
 
 
+# ── Local models ────────────────────────────────────────────────────────────
+# Which model on this machine chats run on. A switch downloads the model if
+# needed (the one outbound request here, made by the Ollama server and started
+# by a person), re-syncs the vibe config and restarts the agent.
+
+
+def _spawn_background(coro: Coroutine[Any, Any, None]) -> None:
+    """Run *coro* detached, holding a reference until it finishes."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+@app.get("/api/models")
+async def get_models() -> JsonDict:
+    """Return the local model catalog with each model's state."""
+    return await localmodels.list_models()
+
+
+@app.delete("/api/models/{model_id}")
+async def delete_model(model_id: str) -> JsonDict:
+    """Remove a downloaded model that is not in use."""
+    try:
+        await localmodels.delete(model_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except localmodels.ModelError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit.info("local model removed: %s", model_id)
+    return {"ok": True}
+
+
+@app.websocket("/ws/models/select")
+async def ws_model_select(ws: WebSocket) -> None:
+    """Switch the local model with streamed progress.
+
+    First client message: ``{"id": "...", "accept_license": bool}``. Streams
+    ``{"type":"progress","stage","text","completed"?,"total"?}`` frames, then a
+    final ``{"type":"done","id","model"}`` or ``{"type":"error","message"}``.
+    A model whose licence has to be accepted first ends the run with
+    ``{"type":"needs_license","id","label","license"}`` instead, before anything
+    is downloaded, so the client can ask and re-issue with consent.
+
+    Closing the socket (or sending anything further) cancels the switch. That
+    is safe at every point: the choice is recorded last, and Ollama resumes a
+    partial download the next time.
+    """
+    await ws.accept()
+    try:
+        first = cast("JsonDict", await ws.receive_json())
+    except WebSocketDisconnect:
+        return
+    model_id = str(first.get("id", "")).strip()
+    accept_license = bool(first.get("accept_license"))
+    queue: asyncio.Queue[JsonDict] = asyncio.Queue()
+
+    def on_progress(frame: JsonDict) -> None:
+        queue.put_nowait({"type": "progress", **frame})
+
+    async def run() -> None:
+        try:
+            entry = await localmodels.select(
+                model_id, accept_license=accept_license, on_progress=on_progress
+            )
+            await asyncio.to_thread(_apply_stack_change)
+            _audit.info("local model selected: %s (%s)", entry["id"], entry["model"])
+            await _restart_vibe()
+            # Load it now so the first prompt after the switch is not a cold start.
+            _spawn_background(localmodels.preload(str(entry["model"])))
+            await queue.put({"type": "done", "id": entry["id"], "model": entry["model"]})
+        except localmodels.LicenseConsentRequiredError as exc:
+            await queue.put(
+                {
+                    "type": "needs_license",
+                    "id": exc.model.id,
+                    "label": exc.model.label,
+                    "license": exc.model.license,
+                }
+            )
+        except FileNotFoundError as exc:
+            await queue.put({"type": "error", "message": str(exc)})
+        except localmodels.ModelError as exc:
+            await queue.put({"type": "error", "message": str(exc)})
+        except Exception as exc:  # relayed to the client as an error frame
+            log.exception("model switch failed")
+            await queue.put({"type": "error", "message": str(exc)})
+
+    async def watch() -> None:
+        # Any further message, or the socket closing, means "stop".
+        with contextlib.suppress(Exception):
+            await ws.receive_text()
+
+    task = asyncio.create_task(run())
+    watcher = asyncio.create_task(watch())
+    try:
+        while True:
+            getter = asyncio.create_task(queue.get())
+            done, _ = await asyncio.wait({getter, watcher}, return_when=asyncio.FIRST_COMPLETED)
+            if getter not in done:
+                getter.cancel()
+                task.cancel()
+                break
+            frame = getter.result()
+            await ws.send_json(frame)
+            if frame["type"] in ("done", "error", "needs_license"):
+                break
+    except WebSocketDisconnect:
+        task.cancel()
+    finally:
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+        with contextlib.suppress(Exception):
+            await ws.close()
+
+
+# ── Cloud model (advanced) ──────────────────────────────────────────────────
+# Same treatment as external MCP, for a wider exit: with a cloud model in force
+# the whole conversation leaves the machine, not one tool call's arguments.
+
+
+class CloudModelEnabledPayload(BaseModel):
+    """Request body for switching chats to the cloud model or back."""
+
+    enabled: bool
+
+
+class CloudModelConfigPayload(BaseModel):
+    """Request body for choosing which cloud model to use."""
+
+    provider: str
+    model: str
+    # Only read for a provider without a fixed endpoint.
+    api_base: str = ""
+    # The key itself, stored by this process and handed to the agent. Mutually
+    # exclusive with api_key_env, which names a variable the deployment sets.
+    # Both empty keeps the current key, as long as the endpoint is unchanged.
+    api_key: str = ""
+    api_key_env: str = ""
+    compact_threshold: int | None = None
+
+
+def _cloud_model_state() -> JsonDict:
+    """What ``GET /api/cloud-model`` returns. Never carries the key."""
+    state = settings.load_cloud_model()
+    stored = cast("JsonDict | None", state["model"])
+    model: JsonDict | None = None
+    if stored is not None:
+        env_var = str(stored.get("api_key_env") or "")
+        model = {
+            **stored,
+            "key_managed": env_var == settings.CLOUD_MODEL_KEY_ENV,
+            "key_present": settings.cloud_model_key_present(stored),
+        }
+    return {
+        "enabled": bool(state["enabled"]),
+        "acknowledged": bool(state["acknowledged_at"]),
+        "acknowledged_at": state["acknowledged_at"],
+        # Whether chats are on the cloud model right now. Differs from `enabled`
+        # when the key is missing: the workspace then stays on the local model.
+        "active": settings.active_cloud_model() is not None,
+        "local_model": settings.local_model_name(),
+        "model": model,
+        "providers": [
+            {
+                "id": provider_id,
+                "label": preset.label,
+                "api_base": preset.api_base,
+                "models": list(preset.models),
+                "compact_threshold": preset.compact_threshold,
+                "key_required": preset.key_required,
+            }
+            for provider_id, preset in settings.CLOUD_PROVIDERS.items()
+        ],
+    }
+
+
+def _cloud_active() -> bool:
+    return settings.active_cloud_model() is not None
+
+
+async def _apply_cloud_change(was_active: bool) -> bool:
+    """Re-sync and restart the agent if the model in force may have changed.
+
+    Saving a configuration while the feature is off changes nothing the agent
+    reads, so open chats are left alone then. Returns whether it restarted.
+    """
+    if not (was_active or await asyncio.to_thread(_cloud_active)):
+        return False
+    await asyncio.to_thread(_apply_stack_change)
+    await _restart_vibe()
+    return True
+
+
+@app.get("/api/cloud-model")
+async def get_cloud_model() -> JsonDict:
+    """Return the cloud-model state: toggle, acknowledgement, configuration, presets."""
+    return await asyncio.to_thread(_cloud_model_state)
+
+
+@app.post("/api/cloud-model/acknowledge")
+async def post_cloud_model_acknowledge() -> JsonDict:
+    """Record that the operator accepted that conversations leave the machine."""
+    state = await asyncio.to_thread(settings.acknowledge_cloud_model)
+    _audit.info("cloud model acknowledged at %s", state["acknowledged_at"])
+    return {"ok": True, "acknowledged_at": state["acknowledged_at"]}
+
+
+@app.put("/api/cloud-model")
+async def put_cloud_model(payload: CloudModelEnabledPayload) -> JsonDict:
+    """Switch chats to the cloud model or back (enabling requires the acknowledgement)."""
+    was_active = await asyncio.to_thread(_cloud_active)
+    try:
+        state = await asyncio.to_thread(settings.set_cloud_model_enabled, payload.enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    target = cast("JsonDict", state["model"] or {})
+    _audit.info(
+        "cloud model %s: %s at %s",
+        "enabled" if payload.enabled else "disabled",
+        target.get("model", "-"),
+        target.get("api_base", "-"),
+    )
+    restarted = await _apply_cloud_change(was_active)
+    return {"ok": True, "enabled": payload.enabled, "restarted": restarted}
+
+
+@app.put("/api/cloud-model/config")
+async def put_cloud_model_config(payload: CloudModelConfigPayload) -> JsonDict:
+    """Choose the cloud model: provider, model id, endpoint, key."""
+    was_active = await asyncio.to_thread(_cloud_active)
+    try:
+        entry = await asyncio.to_thread(
+            settings.configure_cloud_model,
+            payload.provider,
+            payload.model,
+            payload.api_base,
+            payload.api_key,
+            payload.api_key_env,
+            payload.compact_threshold,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # The key is deliberately absent from this line: the trail records where
+    # conversations may go and that a credential changed, never the credential.
+    _audit.info(
+        "cloud model configured: %s (%s) at %s%s",
+        entry["model"],
+        entry["provider"],
+        entry["api_base"],
+        ", key replaced" if payload.api_key.strip() else "",
+    )
+    restarted = await _apply_cloud_change(was_active)
+    return {"ok": True, "model": entry, "restarted": restarted}
+
+
+@app.delete("/api/cloud-model/config")
+async def delete_cloud_model_config() -> JsonDict:
+    """Forget the cloud model and its key; chats return to the local model."""
+    was_active = await asyncio.to_thread(_cloud_active)
+    try:
+        await asyncio.to_thread(settings.remove_cloud_model)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _audit.info("cloud model removed")
+    restarted = await _apply_cloud_change(was_active)
+    return {"ok": True, "restarted": restarted}
+
+
 @app.get("/api/workflows")
 async def get_workflows() -> JsonDict:
     """List the personal workflows available to the replay engine."""
@@ -1560,7 +1831,7 @@ async def delete_run(run_id: str) -> JsonDict:
 # Wire protocol (JSON messages):
 #
 #   server → client
-#     {"type": "ready", "sessionId": str, "model": str, "title": str | None}
+#     {"type": "ready", "sessionId": str, "model": str, "cloud": bool, "title": str | None}
 #     {"type": "chunk", "text": str}
 #     {"type": "title", "title": str}            # a generated chat title landed
 #     {"type": "retrying", "category": str, "detail": str}  # vibe is retrying the model
@@ -1631,8 +1902,13 @@ def _replayed_user_text(update: JsonDict) -> str:
     return _strip_workspace_note(str(content.get("text") or ""))
 
 
-def _usage_window(update: JsonDict) -> int:
+def _usage_window(
+    update: JsonDict, cloud_budget: int | None = None, local_window: int | None = None
+) -> int:
     """Pick the context-window size for a usage frame (no I/O).
+
+    *cloud_budget* is set while a cloud model answers, *local_window* while a
+    local model other than the default does (both captured per connection).
 
     Ollama's ``num_ctx`` is the deployment truth, so the fetched value wins
     (vibe's ``size`` comes from its model registry — e.g. 200k for a model
@@ -1641,13 +1917,20 @@ def _usage_window(update: JsonDict) -> int:
     fetch here: it would stall the relay of every queued frame behind an
     Ollama round-trip; the cache is warmed at connect time in ws_chat.
     """
+    size_raw = update.get("size")
+    size = size_raw if isinstance(size_raw, int) and size_raw > 0 else None
+    if cloud_budget is not None:
+        # Ollama's number describes the local model, which is not the one
+        # answering. vibe's size is the configured budget; so is the fallback.
+        return size or cloud_budget
+    if local_window is not None:
+        # The context the selected model was prepared with; the fetched value
+        # below describes the default model.
+        return local_window
     fetched = settings.fetched_context_window()
     if fetched is not None:
         return fetched
-    size_raw = update.get("size")
-    if isinstance(size_raw, int) and size_raw > 0:
-        return size_raw
-    return settings.cached_context_window()
+    return size or settings.cached_context_window()
 
 
 def _tool_name(update: JsonDict) -> str:
@@ -1733,8 +2016,15 @@ class _ChatConnection:
         *,
         resumed: bool = False,
         canonical_id: str | None = None,
+        cloud: JsonDict | None = None,
+        local: JsonDict | None = None,
     ) -> None:
         """Bind the websocket to its registered session queue.
+
+        ``cloud`` is the cloud model in force at connect time and ``local`` the
+        selected non-default local model, each ``None`` when not in play — like
+        ``servers`` they cannot go stale, since changing either restarts every
+        connection.
 
         ``servers`` is the active-server list captured at connect time; a
         stack change restarts vibe-acp and closes every connection, so it
@@ -1750,6 +2040,10 @@ class _ChatConnection:
         self.canonical_id = canonical_id or session_id
         self.queue = queue
         self.servers = servers
+        chosen = cloud or local
+        self.model_name: str = str(chosen["model"]) if chosen else settings.OLLAMA_MODEL
+        self._cloud_budget: int | None = int(cloud["compact_threshold"]) if cloud else None
+        self._local_window: int | None = int(local["num_ctx"]) if local and not cloud else None
         self._resumed = resumed
         # Relays unsolicited frames before the first prompt (see start_idle_pump).
         self._idle_pump: asyncio.Task[None] | None = None
@@ -1927,7 +2221,7 @@ class _ChatConnection:
                         lambda: provenance.write_manifest(
                             self.canonical_id,
                             servers=self.servers,
-                            model_name=settings.OLLAMA_MODEL,
+                            model_name=self.model_name,
                         )
                     )
         # Frames can still trickle in between a cancel and this prompt
@@ -2184,7 +2478,13 @@ class _ChatConnection:
             elif update_type == "usage_update":
                 used = update.get("used")
                 if isinstance(used, int):
-                    await self._send({"type": "usage", "used": used, "size": _usage_window(update)})
+                    await self._send(
+                        {
+                            "type": "usage",
+                            "used": used,
+                            "size": _usage_window(update, self._cloud_budget, self._local_window),
+                        }
+                    )
         elif method == "session/request_permission":
             await self._handle_permission(msg)
         elif method == "_session/retrying":
@@ -2668,12 +2968,16 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
         # uv-tool stack discovery (one subprocess per stack) and must not
         # block the event loop. The list is captured for the connection so
         # per-frame provenance writes don't re-derive it.
-        def _sync_config() -> list[JsonDict]:
+        def _sync_config() -> tuple[list[JsonDict], JsonDict | None, JsonDict | None]:
             servers = settings.active_servers()
             settings.sync_servers_to_vibe_config(servers)
-            return servers
+            return servers, settings.active_cloud_model(), settings.load_local_model()
 
-        servers = await asyncio.to_thread(_sync_config)
+        servers, cloud, local = await asyncio.to_thread(_sync_config)
+        if local is not None:
+            # Something else may have loaded the default model since the switch
+            # (the compose warm-up does on every start); keep one in memory.
+            _spawn_background(localmodels.unload_others(str(local["model"])))
         # Warm the context-window cache off the frame path; usage frames read
         # the cached value only (the badge corrects itself once this lands).
         prefetch = asyncio.create_task(settings.fetch_context_window())
@@ -2719,7 +3023,14 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
 
         assert queue is not None
         conn = _ChatConnection(
-            ws, session_id, queue, servers, resumed=replayed, canonical_id=canonical_id
+            ws,
+            session_id,
+            queue,
+            servers,
+            resumed=replayed,
+            canonical_id=canonical_id,
+            cloud=cloud,
+            local=local,
         )
         _connections.add(conn)
         # The chat's current title (user-set or generated), so a resumed chat
@@ -2731,7 +3042,8 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
             {
                 "type": "ready",
                 "sessionId": conn.canonical_id,
-                "model": settings.OLLAMA_MODEL,
+                "model": conn.model_name,
+                "cloud": cloud is not None,
                 "title": current_title if isinstance(current_title, str) else None,
             }
         )

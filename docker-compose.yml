@@ -83,8 +83,9 @@ services:
         condition: service_healthy
       llm-init:
         condition: service_completed_successfully
-    # Secrets for external MCP servers (Settings -> Advanced). The UI stores only
-    # the *name* of an environment variable, never a token, so the value has to
+    # Secrets for external MCP servers and a cloud model (Settings -> Advanced),
+    # when they are named as environment variables rather than entered in the UI.
+    # Only the variable's *name* is stored then, never its value, so the value has to
     # reach this container some other way — and `environment:` below is a fixed
     # allowlist that cannot forward a variable it does not already name. Put
     # `MY_SERVICE_TOKEN=...` lines in this file (default ./medmcp.env, override

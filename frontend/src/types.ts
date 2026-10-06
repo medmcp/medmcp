@@ -290,7 +290,8 @@ export interface RewindResult {
 
 /** Frames the server sends over /ws/chat. */
 export type ServerFrame =
-  | { type: 'ready'; sessionId: string; model?: string; title?: string | null }
+  // `cloud`: the model answering is hosted outside this machine.
+  | { type: 'ready'; sessionId: string; model?: string; cloud?: boolean; title?: string | null }
   | { type: 'chunk'; text: string }
   /** A generated chat title landed (a user-set name is never overwritten). */
   | { type: 'title'; title: string }
@@ -367,6 +368,76 @@ export interface ExternalMcpState {
   /** Transports the server will accept, in preference order. */
   transports: string[]
   servers: ExternalServer[]
+}
+
+/** One model of the local catalog (GET /api/models). */
+export interface LocalModelRow {
+  id: string
+  label: string
+  vendor: string
+  /** The tag in the Ollama library. */
+  tag: string
+  params: string
+  size_gb: number
+  license: string
+  /** Not Apache-2.0: its terms are accepted before the download starts. */
+  license_ack: boolean
+  default: boolean
+  /** The local model in use. */
+  active: boolean
+  downloaded: boolean
+  deletable: boolean
+  /** Context length the model was prepared with; known for a selected model. */
+  num_ctx: number | null
+}
+
+/** The local model catalog and its state. */
+export interface LocalModelsState {
+  models: LocalModelRow[]
+  active: string
+  /** False when the model server did not answer; download state is then unknown. */
+  reachable: boolean
+}
+
+/** A provider the cloud-model form offers (GET /api/cloud-model). */
+export interface CloudProviderPreset {
+  id: string
+  label: string
+  /** Fixed endpoint; empty means the operator supplies one. */
+  api_base: string
+  /** Suggested model ids — not an allowlist. */
+  models: string[]
+  compact_threshold: number
+  key_required: boolean
+}
+
+/** The configured cloud model. Never carries the key. */
+export interface CloudModelConfig {
+  provider: string
+  model: string
+  api_base: string
+  /** Name of the env var holding the key — never the key itself. */
+  api_key_env: string
+  /** Tokens of history before the agent compacts; also the context meter's size. */
+  compact_threshold: number
+  /** Whether the key is stored by MedMCP rather than named as a deployment variable. */
+  key_managed: boolean
+  /** Whether the key is actually available where the agent runs. Presence only. */
+  key_present: boolean
+}
+
+/** State of the cloud-model feature (advanced settings). */
+export interface CloudModelState {
+  enabled: boolean
+  /** Whether the operator has accepted responsibility; required before enabling. */
+  acknowledged: boolean
+  acknowledged_at: string | null
+  /** Whether chats run on the cloud model right now. False while `enabled` when
+   *  the key is missing: the workspace then stays on the local model. */
+  active: boolean
+  local_model: string
+  model: CloudModelConfig | null
+  providers: CloudProviderPreset[]
 }
 
 /** The newest release the server knows about (GET /api/update). */

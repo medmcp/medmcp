@@ -31,7 +31,7 @@ import httpx
 
 from medmcp import provenance
 from medmcp.acp import JsonDict
-from medmcp.settings import OLLAMA_BASE_URL, OLLAMA_MODEL
+from medmcp.settings import OLLAMA_BASE_URL, local_helper_request
 from medmcp.workspace_note import display_content_text, strip_workspace_note
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
@@ -283,16 +283,15 @@ async def generate_title(
     if not transcript:
         return None
     payload: JsonDict = {
-        "model": OLLAMA_MODEL,
+        # Native /api/chat like explain.py: the OpenAI-compatible endpoint
+        # ignores think:false and a thinking model then answers in "reasoning"
+        # only. Deterministic — a title should not wander between refreshes.
+        **local_helper_request(),
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": _user_prompt(transcript, previous_title)},
         ],
         "stream": False,
-        # Native /api/chat like explain.py: the OpenAI-compatible endpoint
-        # ignores think:false and a thinking model then answers in "reasoning"
-        # only. Deterministic — a title should not wander between refreshes.
-        "think": False,
         "options": {"temperature": 0.0, "num_predict": policy.max_tokens},
     }
     try:

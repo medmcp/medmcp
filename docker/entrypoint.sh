@@ -56,24 +56,37 @@ sys.exit(0 if s.connect_ex(('127.0.0.1', $shim_port)) == 0 else 1)
     fi
 fi
 
-# Rewrite the single [[providers]] api_base from $LLM_TARGET_URL. Idempotent —
-# runs on every start, before sync_servers_to_vibe_config (which leaves providers
-# untouched). Trailing slashes are stripped so we always emit "<base>/v1".
+# Rewrite the local [[providers]] api_base from $LLM_TARGET_URL. Idempotent —
+# runs on every start, before sync_servers_to_vibe_config (which leaves the local
+# provider untouched). Trailing slashes are stripped so we always emit "<base>/v1".
+#
+# Point the local [[models]] entry at $OLLAMA_MODEL for the same reason:
+# config.toml has no env expansion, and the model the agent chats with is named
+# there while the auxiliary calls (explanations, chat titles) read the env var.
+# Rewriting here keeps the two from drifting apart, and makes swapping models a
+# one-variable change with no image rebuild.
+#
+# Both rewrites touch the first match only. A cloud model, when one is enabled,
+# adds a second provider and a second model after the local ones, and those must
+# keep their own endpoint and name. The model's `name` is matched inside the
+# [[models]] block because [[providers]] carries its own `name` and comes first
+# in the file — renaming that would leave the agent without a backend.
 if [ -f "$CONFIG" ]; then
-    base="${LLM_TARGET_URL%/}"
-    sed -i -E "s#^api_base = \".*\"#api_base = \"${base}/v1\"#" "$CONFIG"
+    python3 - "$CONFIG" "${LLM_TARGET_URL%/}/v1" "${OLLAMA_MODEL:-}" <<'PY'
+import re, sys
 
-    # Point the single [[models]] entry at $OLLAMA_MODEL for the same reason:
-    # config.toml has no env expansion, and the model the agent chats with is
-    # named there while the auxiliary calls (explanations, distillation prose)
-    # read the env var. Rewriting here keeps the two from drifting apart, and
-    # makes swapping models a one-variable change with no image rebuild.
-    # Scoped to the [[models]] block: [[providers]] carries its own `name` and
-    # comes first in the file, so an unanchored substitution renames the provider
-    # and the agent loses its backend entirely.
-    if [ -n "${OLLAMA_MODEL:-}" ]; then
-        sed -i -E "/^\[\[models\]\]/,/^name = / s#^name = \".*\"#name = \"${OLLAMA_MODEL}\"#" "$CONFIG"
-    fi
+path, api_base, model = sys.argv[1:4]
+text = open(path).read()
+text = re.sub(r'(?m)^api_base = ".*"', lambda _: f'api_base = "{api_base}"', text, count=1)
+if model:
+    text = re.sub(
+        r'(?ms)(^\[\[models\]\]\n.*?^name = )".*?"',
+        lambda m: f'{m.group(1)}"{model}"',
+        text,
+        count=1,
+    )
+open(path, "w").write(text)
+PY
 fi
 
 # Sanitize the mounted host docker config: keep only `auths`, dropping the host's

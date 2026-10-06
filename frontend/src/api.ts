@@ -1,9 +1,11 @@
 import type {
   BatchFromPlanResult,
   CatalogEntry,
+  CloudModelState,
   ExternalMcpState,
   GpuInfo,
   InstalledStack,
+  LocalModelsState,
   ReplayPreviewResult,
   RunSummary,
   RewindResult,
@@ -314,6 +316,55 @@ export async function removeExternalServer(name: string): Promise<void> {
   await check(
     await fetch(`/api/external-mcp/servers/${encodeURIComponent(name)}`, { method: 'DELETE' }),
   )
+}
+
+// ── Local models ─────────────────────────────────────────────
+// Switching goes over /ws/models/select (streamed download progress); the
+// window owns that socket.
+
+export async function fetchLocalModels(): Promise<LocalModelsState> {
+  const res = await check(await fetch('/api/models'))
+  return (await res.json()) as LocalModelsState
+}
+
+/** Remove a downloaded model that is not in use. */
+export async function deleteLocalModel(id: string): Promise<void> {
+  await check(await fetch(`/api/models/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+}
+
+// ── Cloud model (advanced) ───────────────────────────────────
+// A change to the model in force restarts the agent server-side, so callers
+// should refetch rather than assume their optimistic view survived.
+
+export async function fetchCloudModel(): Promise<CloudModelState> {
+  const res = await check(await fetch('/api/cloud-model'))
+  return (await res.json()) as CloudModelState
+}
+
+/** Record that the operator accepted the risks. Required before enabling. */
+export async function acknowledgeCloudModel(): Promise<void> {
+  await postJson('/api/cloud-model/acknowledge', {})
+}
+
+export async function setCloudModelEnabled(enabled: boolean): Promise<void> {
+  await sendJson('PUT', '/api/cloud-model', { enabled })
+}
+
+export async function saveCloudModelConfig(config: {
+  provider: string
+  model: string
+  api_base: string
+  /** The key itself — stored server-side, never returned by any endpoint.
+   *  Empty (with no env var) keeps the stored one while the endpoint is unchanged. */
+  api_key: string
+  api_key_env: string
+  compact_threshold: number | null
+}): Promise<void> {
+  await sendJson('PUT', '/api/cloud-model/config', config)
+}
+
+export async function removeCloudModelConfig(): Promise<void> {
+  await check(await fetch('/api/cloud-model/config', { method: 'DELETE' }))
 }
 
 // ── Software update ──────────────────────────────────────────

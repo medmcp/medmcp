@@ -1095,6 +1095,30 @@ button:hover {
   font-family: var(--mono);
 }
 
+/* The model name is the way into the Models window, so it is a button — but it
+   keeps the look of the label it was: no box, no weight, same size as its row. */
+button.model-name {
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  cursor: pointer;
+}
+
+button.model-name:hover {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* The model answering is hosted outside this machine: the warning colour, so
+   the header says it even with the banner scrolled out of mind. */
+.model-name.model-cloud {
+  color: var(--red-tint);
+}
+
 .conn {
   display: inline-flex;
   align-items: center;
@@ -2834,6 +2858,71 @@ textarea.wf-input {
 .extwin-body {
   padding: 14px 18px 18px;
   overflow-y: auto;
+}
+
+/* ── Models window ───────────────────────────────────────────────────────── */
+
+/* Doubled class: `.ext-mcp` comes later in this file and would otherwise win.
+   The list is the window's whole content here, so it needs no rule above it. */
+.ext-mcp.models-list {
+  gap: 14px;
+  margin-top: 0;
+  padding-top: 2px;
+  border-top: none;
+}
+
+/* Pinned to the top of the row rather than centred: the text beside it is 33px
+   tall, and centring a 22px mark in an odd height lands it on a half pixel. */
+.models-logo {
+  flex: none;
+  align-self: flex-start;
+  width: 22px;
+  height: 22px;
+  margin-top: 5px;
+  object-fit: contain;
+}
+
+.models-logo.mono {
+  background-color: var(--muted2);
+  mask: center / contain no-repeat;
+  -webkit-mask: center / contain no-repeat;
+}
+
+/* Takes the slack, so the actions stay at the right edge with a mark in front. */
+.models-text {
+  flex: 1;
+}
+
+.models-row {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.models-state {
+  margin-left: 8px;
+  font-weight: 500;
+}
+
+/* A licence that is not the one every other row carries. */
+.models-license-other {
+  color: var(--red-tint);
+}
+
+.models-notice {
+  margin-top: 8px;
+  color: var(--ok);
+}
+
+.models-foot {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.models-license-title {
+  margin: 0 0 12px;
+  font-size: 15px;
 }
 
 /* The summary row in Advanced, when something is actually reachable. */

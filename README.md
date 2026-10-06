@@ -10,87 +10,47 @@
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
-MedMCP is an open, community-driven agentic framework that exposes validated medical imaging tools through a natural-language interface.
-It is designed to enable clinicians, radiologists, and domain researchers to apply state-of-the-art image analysis methods without requiring expertise in command-line interfaces, Python environment management, or library-specific APIs.
+MedMCP lets clinicians, radiologists, and researchers run validated medical imaging tools by describing what they need in plain language, with no command line, Python environments, or library APIs.
 
-Everything runs **on-premise**: a locally served model plans and sequences the work, all computation is delegated to tested implementations, and no imaging data, patient metadata, or results leave your infrastructure. You work through a single workspace that contains a *file explorer, image viewer, replay engine for personal workflows, and the chat interface*.
+It runs **on-premise**: a locally served model plans the work, tested tools do the computation, and no imaging data, patient metadata, or results leave your infrastructure unless you choose to connect an outside service.
 
 > [!WARNING]
 > MedMCP is under active development and **not licensed for clinical use**.
 
----
-
 ## Quick start
 
-The easiest way to run MedMCP is with the prebuilt Docker images.
-
-**Start with a single command:** Set `MEDMCP_WORKSPACE` to the folder where your imaging data lives and results should be saved (any absolute path):
+Set `MEDMCP_WORKSPACE` to the folder that holds your imaging data (any absolute path) and start MedMCP:
 
 ```bash
 MEDMCP_WORKSPACE="$HOME/medmcp-data" \
   docker compose -f oci://ghcr.io/medmcp/compose:latest up -d
 ```
+
 Then open **http://localhost:8100**.
 
-**Requirements:** Linux OS with an NVIDIA GPU (≥ 24 GB VRAM recommended for the local Muse Glimmer 30B model), a recent driver (≥ R570 / CUDA 12.8), and Docker with GPU access via the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/) (CDI; rootless Docker works).
+- **Requirements:** Linux, an NVIDIA GPU (≥ 24 GB VRAM recommended) with driver ≥ R570, and Docker with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/).
+- **Stop:** `docker compose -f oci://ghcr.io/medmcp/compose:latest down`
+- **Update:** click *Update now* when the workspace announces a new release, or re-run the start command with `--pull always`.
+- **Pin a version:** replace `latest` with a release tag such as `v0.3.0`. Release tags are never moved.
 
-**Stop** with `docker compose -f oci://ghcr.io/medmcp/compose:latest down`.
-
-**Update** from the workspace: when a new release is out, a notice appears in the header — open it to read what changed and click *Update now*. MedMCP pulls the new images, restarts, and puts the previous release back if the new one does not start. The same can be done on the host by re-running the start command with `--pull always`. The release check is one anonymous request to github.com a day that carries nothing about the workspace, the machine, or its use; switch it off in Settings → Advanced, or for a whole deployment with `MEDMCP_UPDATE_CHECK=0` (which also disables manual checks). `MEDMCP_UPDATE_URL` reads releases from a mirror instead. Nothing else in MedMCP contacts the internet unless you install a stack or connect an external MCP server.
-
-**Versions:** `latest` is the newest release. Pin a specific one with
-`oci://ghcr.io/medmcp/compose:v0.2.0` — release tags are never moved, so a
-pinned fleet stays put. `main` is the rolling development build.
-
-> Want to build from source or run host-native? See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
-
----
-
-## See it in action
-
-A short **[launch trailer](https://www.youtube.com/watch?v=wvc-MAnzHVA)** demonstrating MedMCP's capabilities at launch.
-
----
+To build from source or run without Docker, see **[CONTRIBUTING.md](CONTRIBUTING.md)**. For a quick impression, watch the **[launch trailer](https://www.youtube.com/watch?v=wvc-MAnzHVA)**.
 
 ## Features
 
-- **Chat & Agent**: a familiar interface to interact with your local models, tools, and skills.
-- **File explorer**: a builtin file explorer to organize your data.
-- **Image viewer**: a builtin image viewer for medical images (`.nii.gz`, `.nrrd`, `.dcm`, ...) and other file formats (`.pdf`, `.csv`, ...).
-- **Replay engine**: a replay engine for distilling and replaying processing pipelines into shareable workflows.
-- **Easy to extend**: easily install new imaging capabilities through the UI.
-
----
+- **Chat & agent**: ask for an analysis in plain language; the agent picks and runs the tools.
+- **File explorer and image viewer**: browse your data and view medical images (`.nii.gz`, `.nrrd`, `.dcm`, ...) and other files (`.pdf`, `.csv`, ...).
+- **Workflows**: turn a chat into a workflow you can replay on new data and share.
+- **Tool stacks**: install new imaging capabilities from the UI.
+- **Model choice**: switch between seven local models, or optionally use a cloud model with your own API key.
 
 ## Security
 
-MedMCP assumes the local model can be steered by prompt injection (e.g. text pasted from untrusted documents), so its safety model is built around explicit user control:
+- **You approve every action**: writing or editing a file, fetching a URL, or running a command with side effects needs a click each time. There is no "always allow".
+- **Local by default**: the server listens on localhost only, `web_search` is disabled, `web_fetch` requires approval, and tool stacks run without network access.
+- **Outside services are opt-in**: external MCP servers and a cloud model stay off until you switch them on, and a banner shows for as long as they are in use.
+- **Signed releases**: published images are signed, and the workspace verifies them before it updates or installs a stack.
 
-- **Nothing is changed or sent without your approval**: writing a file, editing
-  one, fetching a URL, or running a command with side effects each require an
-  explicit click. There is no "always allow" and no session-wide approval — each
-  call is approved on its own. Read-only shell commands (`ls`, `cat`, `grep`, …)
-  run without a prompt *inside your workspace*; pointed outside it, they ask
-  first, and `find -exec` is treated as execution, not reading.
-- **Localhost only**: the server binds to localhost. Do not expose port 8100 over a network without adding real authentication.
-- **No data egress**: `web_search` is disabled and `web_fetch` requires approval.
-- **Isolated tool stacks**: stack containers run with `--network none`, all capabilities dropped, and no privilege escalation. They bake their models at build time, so a tool call cannot reach the network even if the agent is steered into making one. A stack that genuinely needs egress must declare it in its image label.
-
-To report a vulnerability, see **[SECURITY.md](SECURITY.md)**.
-
----
-
-### Signed images
-
-Every published image and the compose artifact are signed in CI with [Sigstore](https://www.sigstore.dev/) keyless signing: the signature is bound to this repository's release workflow, and there is no signing key to protect. The workspace verifies a signature before it applies an update or installs a stack, and refuses anything that does not verify. To check a release yourself:
-
-```bash
-cosign verify ghcr.io/medmcp/core:v0.3.0 \
-  --certificate-identity-regexp '^https://github\.com/medmcp/medmcp/\.github/workflows/release\.yml@refs/tags/v' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
-```
-
-When mirroring images into a private registry, copy the signatures along with them (`cosign copy` does; a plain image copy does not).
+The details, how to verify a release yourself, and how to report a vulnerability are in **[SECURITY.md](SECURITY.md)**.
 
 ## Contributing
 
@@ -119,21 +79,11 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)** to set up a development environment a
 
 This project follows the [all-contributors](https://allcontributors.org) specification — contributions of any kind are welcome!
 
----
-
 ## Acknowledgements
 
-MedMCP builds on a lot of open-source work. In particular:
+MedMCP builds on a lot of open-source work, in particular [mistral-vibe](https://github.com/mistralai/mistral-vibe) and the [Agent Client Protocol](https://github.com/agentclientprotocol/python-sdk), [FastAPI](https://github.com/fastapi/fastapi), [React](https://github.com/facebook/react), [Vite](https://github.com/vitejs/vite), [Niivue](https://github.com/niivue/niivue), [Ollama](https://github.com/ollama/ollama), and Meta's [Muse Glimmer](https://huggingface.co/meta-models/Muse-Glimmer-30B).
 
-- **Agent runtime**: [mistral-vibe](https://github.com/mistralai/mistral-vibe) over the [Agent Client Protocol](https://github.com/agentclientprotocol/python-sdk)
-- **Web server**: [FastAPI](https://github.com/fastapi/fastapi), [Starlette](https://github.com/Kludex/starlette), and [Uvicorn](https://github.com/Kludex/uvicorn)
-- **Frontend**: [React](https://github.com/facebook/react) and [Vite](https://github.com/vitejs/vite), with [Niivue](https://github.com/niivue/niivue) for the medical-image viewer and [react-markdown](https://github.com/remarkjs/react-markdown) for chat rendering
-- **Typefaces**: [Inter](https://github.com/rsms/inter) and [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono)
-- **Local inference**: [Ollama](https://github.com/ollama/ollama), serving Meta's [Muse Glimmer](https://huggingface.co/meta-models/Muse-Glimmer-30B) by default (Apache 2.0)
-
-A complete list of bundled components and their licenses is in
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md); model and base-layer
-attributions are in [`NOTICE`](NOTICE).
+The complete list of bundled components and their licenses is in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md); model and base-layer attributions are in [`NOTICE`](NOTICE).
 
 ## License
 

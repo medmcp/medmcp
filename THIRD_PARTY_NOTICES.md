@@ -112,13 +112,14 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | zipp | 3.23.1 | MIT |
 | zstandard | 0.25.0 | BSD-3-Clause |
 
-## JavaScript / frontend (159 packages, production closure)
+## JavaScript / frontend (160 packages, production closure)
 
 | Component | Version | License |
 | --- | --- | --- |
 | @babel/runtime | 7.29.7 | MIT |
 | @fontsource/inter | 5.2.8 | OFL-1.1 |
 | @fontsource/jetbrains-mono | 5.2.8 | OFL-1.1 |
+| @lobehub/icons-static-svg | 1.95.1 | MIT |
 | @lukeed/csprng | 1.1.0 | MIT |
 | @lukeed/uuid | 2.0.1 | MIT |
 | @niivue/niivue | 0.69.0 | BSD-2-Clause |

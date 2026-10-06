@@ -227,8 +227,11 @@ __marimo__/
 .vibe/state/
 # Tokens for external MCP servers, passed to the core container via env_file.
 medmcp.env
-# Derived from .vibe/prompts/medmcp.md at sync time when external MCP is in use.
+# Derived from .vibe/prompts/medmcp.md at sync time when external MCP or a cloud
+# model is in use.
 .vibe/prompts/medmcp-external.md
+.vibe/prompts/medmcp-cloud.md
+.vibe/prompts/medmcp-cloud-external.md
 .vibe/provenance/
 .vibe/runs/
 .vibe/workflows/

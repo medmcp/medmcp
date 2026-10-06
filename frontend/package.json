@@ -12,6 +12,7 @@
   "dependencies": {
     "@fontsource/inter": "^5.2.8",
     "@fontsource/jetbrains-mono": "^5.2.8",
+    "@lobehub/icons-static-svg": "^1.95.1",
     "@niivue/niivue": "^0.69.0",
     "katex": "^0.17.0",
     "react": "^19.2.6",

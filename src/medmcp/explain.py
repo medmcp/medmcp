@@ -18,7 +18,7 @@ from typing import cast
 import httpx
 
 from medmcp.acp import JsonDict
-from medmcp.settings import OLLAMA_BASE_URL, OLLAMA_MODEL
+from medmcp.settings import OLLAMA_BASE_URL, local_helper_request
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
 
@@ -115,10 +115,9 @@ async def generate_explanation(tc: JsonDict) -> tuple[str, list[str]] | None:
             resp = await client.post(
                 f"{OLLAMA_BASE_URL}/api/chat",
                 json={
-                    "model": OLLAMA_MODEL,
+                    **local_helper_request(),
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
-                    "think": False,
                     "options": {"temperature": 0.2, "num_predict": 1024},
                 },
             )

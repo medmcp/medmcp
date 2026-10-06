@@ -22,6 +22,13 @@ among them — ship under bespoke terms carrying attribution and use-restriction
 obligations that travel with the model and any derivative of it. Check before
 substituting one.
 
+The Models window offers further models from the Ollama library. They are
+downloaded by the operator's own Ollama server on request and are not part of
+this distribution; each row names a licence that is not Apache 2.0. The marks
+shown beside the models are trademarks of their respective owners, used only to
+identify whose model a row is. Their artwork comes from the
+@lobehub/icons-static-svg package (MIT).
+
 ------------------------------------------------------------------------------
 Container base layers
 ------------------------------------------------------------------------------

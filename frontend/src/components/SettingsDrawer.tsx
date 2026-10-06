@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
-import { fetchExternalMcp, fetchGpus, fetchSettings, saveSettings } from '../api'
-import type { ExternalMcpState, GpuInfo, SettingsState, UpdateState } from '../types'
+import { fetchCloudModel, fetchExternalMcp, fetchGpus, fetchSettings, saveSettings } from '../api'
+import type {
+  CloudModelState,
+  ExternalMcpState,
+  GpuInfo,
+  SettingsState,
+  UpdateState,
+} from '../types'
 import { Row } from './SettingsControls'
 import { ChevronRightIcon, XIcon } from './icons'
 
@@ -16,6 +22,12 @@ interface SettingsDrawerProps {
   onManageExternal: () => void
   /** Bumped when external-MCP state changed, so the summary re-reads it. */
   externalVersion: number
+  /** Open the cloud-model window. */
+  onManageCloud: () => void
+  /** Open the Models window (which local model answers chats). */
+  onManageModels: () => void
+  /** Bumped when cloud-model state changed, so the summary re-reads it. */
+  cloudVersion: number
   /** The release record (owned by App, which also polls it). */
   update: UpdateState | null
   /** Ask the server to look for a release now. */
@@ -63,6 +75,9 @@ export function SettingsDrawer({
   onAdvancedToggle,
   onManageExternal,
   externalVersion,
+  onManageCloud,
+  onManageModels,
+  cloudVersion,
   update,
   onCheckUpdate,
   onOpenUpdate,
@@ -74,6 +89,7 @@ export function SettingsDrawer({
   // Just enough external-MCP state to say what is connected; the window owns
   // the rest.
   const [external, setExternal] = useState<ExternalMcpState | null>(null)
+  const [cloud, setCloud] = useState<CloudModelState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -111,13 +127,20 @@ export function SettingsDrawer({
       .catch(() => setExternal(null)) // summary hides rather than guesses
   }, [open, externalVersion])
 
+  useEffect(() => {
+    if (!open) return
+    fetchCloudModel()
+      .then(setCloud)
+      .catch(() => setCloud(null)) // summary hides rather than guesses
+  }, [open, cloudVersion])
+
   const apply = (next: SettingsState) => {
     setState(next)
     setSaving(true)
     saveSettings(next)
       .then((restarted) => {
         setError(null)
-        setNotice(restarted ? 'Agent restarted. The chat starts a fresh session.' : null)
+        setNotice(restarted ? 'Agent restarted.' : null)
       })
       .catch((e: unknown) => setError(String(e)))
       .finally(() => setSaving(false))
@@ -132,8 +155,17 @@ export function SettingsDrawer({
     : connected
       ? `${connectedServers.length} connected: ${connectedServers.map((s) => s.name).join(', ')}`
       : external.enabled
-        ? 'On, with nothing connected.'
-        : 'Off. Nothing is sent outside this machine.'
+        ? 'On, nothing connected.'
+        : 'Off.'
+
+  // "In use" means chats are actually sent there: on, and the key available.
+  const cloudSummary = !cloud
+    ? 'A model hosted outside this machine.'
+    : cloud.active && cloud.model
+      ? `In use: ${cloud.model.model}`
+      : cloud.enabled
+        ? 'On, but the API key is missing.'
+        : 'Off.'
 
   if (!open) return null
 
@@ -159,14 +191,23 @@ export function SettingsDrawer({
               <div className="settings-section">General</div>
               <Row
                 label="Explain tool calls"
-                hint="Adds a plain-language explanation and risk tags to each permission prompt."
+                hint="Explains each permission prompt in plain language."
                 checked={state.explain_tools}
                 onChange={(v) => apply({ ...state, explain_tools: v })}
               />
               <div className="settings-row">
                 <div className="settings-row-text">
+                  <div className="settings-row-label">Model</div>
+                  <div className="settings-row-hint">The local model that answers chats.</div>
+                </div>
+                <button className="btn-plain" onClick={onManageModels}>
+                  Change…
+                </button>
+              </div>
+              <div className="settings-row">
+                <div className="settings-row-text">
                   <div className="settings-row-label">GPU</div>
-                  <div className="settings-row-hint">Used by imaging stacks. The chat model is set at startup.</div>
+                  <div className="settings-row-hint">Used by imaging stacks.</div>
                 </div>
                 <select
                   className="wf-input gpu-select"
@@ -201,14 +242,14 @@ export function SettingsDrawer({
                   className={advancedOpen ? 'settings-chevron open' : 'settings-chevron'}
                 />
                 {!advancedOpen && (
-                  <span className="settings-advanced-peek">provenance, release checks, external servers</span>
+                  <span className="settings-advanced-peek">provenance, updates, external servers, cloud model</span>
                 )}
               </button>
               {advancedOpen && (
                 <div className="settings-advanced-body">
                   <Row
                     label="Record provenance"
-                    hint="Keeps a record of what each chat did, so you can review it later or turn it into a workflow. With this off, a chat leaves no trail."
+                    hint="Keeps a record of what each chat did."
                     checked={state.record_provenance}
                     onChange={(v) => apply({ ...state, record_provenance: v })}
                   />
@@ -217,8 +258,8 @@ export function SettingsDrawer({
                       label="Check for updates automatically"
                       hint={
                         update.enabled
-                          ? 'Once a day the workspace asks github.com for the newest release. Nothing about this workspace, its data or its use is sent. Off, you can still check by hand from the bottom of this panel.'
-                          : 'Turned off for this deployment (MEDMCP_UPDATE_CHECK=0).'
+                          ? 'Asks github.com once a day. No workspace data is sent.'
+                          : 'Turned off for this deployment.'
                       }
                       checked={update.auto_check}
                       disabled={!update.enabled}
@@ -238,11 +279,22 @@ export function SettingsDrawer({
                       Manage…
                     </button>
                   </div>
+                  <div className="settings-row">
+                    <div className="settings-row-text">
+                      <div className="settings-row-label">Cloud model</div>
+                      <div className={`settings-row-hint${cloud?.active ? ' ext-summary-on' : ''}`}>
+                        {cloudSummary}
+                      </div>
+                    </div>
+                    <button className="btn-plain" onClick={onManageCloud}>
+                      Manage…
+                    </button>
+                  </div>
                 </div>
               )}
 
               <div className="drawer-footnote">
-                GPU and external server changes restart the agent. Open chats reconnect into a fresh session.
+                Model, GPU and external access changes restart the agent.
                 {saving ? ' Saving…' : ''}
               </div>
             </>

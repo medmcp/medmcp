@@ -83,7 +83,9 @@ def _read_model_config(model_name: str) -> JsonDict:
     """Return the ``[[models]]`` entry for *model_name* from config.toml, or ``{}``.
 
     The match is by ``name`` first, then by ``alias`` (the active model in
-    config.toml is referenced by alias, e.g. ``"local"``).
+    config.toml is referenced by alias, e.g. ``"local"``). The provider's
+    ``api_base`` is added as ``endpoint``, so the record says where the model
+    ran — the local server, or a cloud service.
     """
     config_path = VIBE_HOME / "config.toml"
     if not config_path.exists():
@@ -96,7 +98,11 @@ def _read_model_config(model_name: str) -> JsonDict:
     models = cast("list[JsonDict]", cfg.get("models", []))
     for model in models:
         if model.get("name") == model_name or model.get("alias") == model_name:
-            return {k: v for k, v in model.items() if k not in ("input_price", "output_price")}
+            entry = {k: v for k, v in model.items() if k not in ("input_price", "output_price")}
+            for provider in cast("list[JsonDict]", cfg.get("providers", [])):
+                if provider.get("name") == model.get("provider") and provider.get("api_base"):
+                    entry["endpoint"] = provider["api_base"]
+            return entry
     return {}
 
 
@@ -556,10 +562,10 @@ def render_report(session_id: str) -> str:
         model_name = model.get("name", "?")
         temp = model.get("temperature")
         thinking = model.get("thinking")
+        endpoint = model.get("endpoint")
         model_line = f"- **Model:** `{model_name}`"
-        extras = [
-            f"{k}={v}" for k, v in (("temperature", temp), ("thinking", thinking)) if v is not None
-        ]
+        settings = (("temperature", temp), ("thinking", thinking), ("endpoint", endpoint))
+        extras = [f"{k}={v}" for k, v in settings if v is not None]
         if extras:
             model_line += f" ({', '.join(extras)})"
         lines.append(model_line)

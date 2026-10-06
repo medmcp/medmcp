@@ -31,6 +31,7 @@ import tempfile
 import threading
 import tomllib
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -1038,28 +1039,554 @@ def external_servers() -> list[JsonDict]:
     return out
 
 
+# ── Cloud model (advanced) ───────────────────────────────────────────────────
+# The second sanctioned way out of the on-premise boundary, and the wider one.
+# An external MCP server receives what one approved tool call passes it; a cloud
+# model receives the conversation — every prompt, every file the agent reads,
+# every tool result — on every turn, with no per-call gate in between. So the
+# same double gate applies (toggle and recorded acknowledgement), the key follows
+# the rule an external token does (only the *name* of an environment variable is
+# ever written to config.toml), and the auxiliary passes — tool-call explanations
+# and chat titles — stay on the local model whatever is selected here.
+CLOUD_MODEL_PATH: Path = VIBE_STATE_DIR / "cloud_model.json"
+CLOUD_MODEL_SECRET_PATH: Path = VIBE_STATE_DIR / "cloud_model_secret.json"
+# The variable this process hands the agent for a key entered through the UI.
+CLOUD_MODEL_KEY_ENV: str = "MEDMCP_CLOUD_API_KEY"
+# The `[[providers]]` name and `[[models]]` alias this module owns in config.toml.
+# Entries carrying them are rebuilt from the state file on every sync and removed
+# when the feature is off; nothing else in either list is touched.
+CLOUD_PROVIDER_NAME: str = "cloud"
+CLOUD_MODEL_ALIAS: str = "cloud"
+_MODEL_ID_RE: re.Pattern[str] = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}")
+_COMPACT_THRESHOLD_RANGE: tuple[int, int] = (8_000, 1_000_000)
+
+
+@dataclass(frozen=True)
+class CloudProvider:
+    """A provider the cloud-model form offers, and how vibe has to talk to it."""
+
+    label: str
+    # Fixed endpoint; empty means the operator supplies one (a gateway, Azure…).
+    api_base: str
+    # vibe's adapter name — decides the wire format and the auth header.
+    api_style: str
+    # Suggestions for the form, not an allowlist: providers ship models faster
+    # than this file is released.
+    models: tuple[str, ...]
+    # Tokens of history before vibe compacts. vibe also reports this number as
+    # the context size, so it is what the chat's context meter fills against.
+    compact_threshold: int
+    # An institutional gateway may authenticate by network position alone.
+    key_required: bool
+    # vibe sends this as the request's reasoning effort unless it is "off". A
+    # known reasoning model gets one; an arbitrary endpoint does not, because
+    # many reject the parameter for a model that cannot use it.
+    thinking: str = "medium"
+
+
+CLOUD_PROVIDERS: dict[str, CloudProvider] = {
+    "anthropic": CloudProvider(
+        label="Anthropic (Claude)",
+        api_base="https://api.anthropic.com",
+        api_style="anthropic",
+        models=("claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"),
+        compact_threshold=180_000,
+        key_required=True,
+    ),
+    "openai": CloudProvider(
+        label="OpenAI (ChatGPT)",
+        api_base="https://api.openai.com/v1",
+        api_style="openai-responses",
+        models=(),
+        compact_threshold=180_000,
+        key_required=True,
+    ),
+    "openai-compatible": CloudProvider(
+        label="OpenAI-compatible endpoint",
+        api_base="",
+        api_style="openai",
+        models=(),
+        compact_threshold=100_000,
+        key_required=False,
+        thinking="off",
+    ),
+}
+
+
+def _default_cloud_state() -> JsonDict:
+    return {"enabled": False, "acknowledged_at": None, "model": None}
+
+
+def load_cloud_model() -> JsonDict:
+    """Return the cloud-model state (``enabled``/``acknowledged_at``/``model``)."""
+    if not CLOUD_MODEL_PATH.exists():
+        return _default_cloud_state()
+    try:
+        data = cast("JsonDict", json.loads(CLOUD_MODEL_PATH.read_text()))
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("could not read %s; treating as disabled: %s", CLOUD_MODEL_PATH, exc)
+        return _default_cloud_state()
+    state = _default_cloud_state()
+    state["enabled"] = bool(data.get("enabled"))
+    ack = data.get("acknowledged_at")
+    state["acknowledged_at"] = str(ack) if ack else None
+    model = data.get("model")
+    state["model"] = dict(cast("JsonDict", model)) if isinstance(model, dict) else None
+    return state
+
+
+def _save_cloud_model(state: JsonDict) -> None:
+    _atomic_write_json(CLOUD_MODEL_PATH, state)
+
+
+def load_cloud_model_key() -> str:
+    """Return the API key entered through the UI, or ``""``.
+
+    Held apart from ``cloud_model.json`` (which the API returns) and from
+    ``config.toml`` (rewritten on every sync) for the reason an external token
+    is: so it cannot reach a response body or the agent's config by accident.
+    """
+    if not CLOUD_MODEL_SECRET_PATH.exists():
+        return ""
+    try:
+        data = cast("JsonDict", json.loads(CLOUD_MODEL_SECRET_PATH.read_text()))
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("could not read %s; treating as empty: %s", CLOUD_MODEL_SECRET_PATH, exc)
+        return ""
+    key = data.get("api_key")
+    return key if isinstance(key, str) else ""
+
+
+def _set_cloud_model_key(api_key: str) -> None:
+    _atomic_write_json(CLOUD_MODEL_SECRET_PATH, {"api_key": api_key})
+
+
+def _delete_cloud_model_key() -> None:
+    with contextlib.suppress(FileNotFoundError):
+        CLOUD_MODEL_SECRET_PATH.unlink()
+
+
+def _validate_cloud_model(entry: JsonDict) -> CloudProvider:
+    """Raise ``ValueError`` if a cloud-model entry is unusable; return its provider."""
+    provider = CLOUD_PROVIDERS.get(str(entry.get("provider", "")))
+    if provider is None:
+        allowed = ", ".join(CLOUD_PROVIDERS)
+        raise ValueError(f"invalid provider: {entry.get('provider')!r} (allowed: {allowed})")
+    model = str(entry.get("model", ""))
+    if not _MODEL_ID_RE.fullmatch(model):
+        raise ValueError(f"invalid model id: {model!r}")
+    api_base = str(entry.get("api_base", ""))
+    parsed = urlparse(api_base)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError(f"invalid endpoint: {api_base!r} (must be an http(s) URL)")
+    # The endpoint is written to config.toml, which must never hold a secret —
+    # and a key in the URL is exactly how some gateways are documented.
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("the endpoint must not carry credentials or a query string")
+    env_var = str(entry.get("api_key_env") or "")
+    if env_var and not _ENV_VAR_RE.fullmatch(env_var):
+        raise ValueError(f"invalid environment variable name: {env_var!r}")
+    if provider.key_required and not env_var:
+        raise ValueError(f"{provider.label} needs an API key")
+    threshold = entry.get("compact_threshold")
+    low, high = _COMPACT_THRESHOLD_RANGE
+    if not isinstance(threshold, int) or isinstance(threshold, bool):
+        raise ValueError("the context budget must be a whole number of tokens")
+    if not low <= threshold <= high:
+        raise ValueError(f"the context budget must be between {low} and {high} tokens")
+    return provider
+
+
+def configure_cloud_model(
+    provider: str,
+    model: str,
+    api_base: str = "",
+    api_key: str = "",
+    api_key_env: str = "",
+    compact_threshold: int | None = None,
+) -> JsonDict:
+    """Store which cloud model to use and return the stored entry.
+
+    Configuring is not enabling: the entry sits unused until the feature is
+    switched on through the acknowledgement, and replacing it while the feature
+    is on changes where conversations go without a second dialog — which is why
+    the caller audit-logs every call.
+
+    An *api_key* is stored here and handed to the agent through a variable this
+    process owns; naming an existing variable in *api_key_env* is the path for a
+    deployment that manages its own secrets. Giving neither keeps whatever was
+    configured, so correcting a model id does not mean pasting the key again —
+    but only while the endpoint is unchanged. A stored key never follows the
+    configuration to a different host: re-pointing the endpoint would otherwise
+    be a way to have a write-only secret delivered somewhere else.
+    """
+    provider, model = provider.strip(), model.strip()
+    api_key, api_key_env = api_key.strip(), api_key_env.strip()
+    if api_key and api_key_env:
+        raise ValueError("give either an API key or an environment variable name, not both")
+    preset = CLOUD_PROVIDERS.get(provider)
+    if preset is None:
+        allowed = ", ".join(CLOUD_PROVIDERS)
+        raise ValueError(f"invalid provider: {provider!r} (allowed: {allowed})")
+    api_base = preset.api_base or api_base.strip().rstrip("/")
+
+    state = load_cloud_model()
+    previous = cast("JsonDict", state["model"] or {})
+    if api_key:
+        env_var = CLOUD_MODEL_KEY_ENV
+    elif api_key_env:
+        env_var = api_key_env
+    elif previous.get("api_base") == api_base:
+        env_var = str(previous.get("api_key_env") or "")
+    else:
+        env_var = ""
+
+    entry: JsonDict = {
+        "provider": provider,
+        "model": model,
+        "api_base": api_base,
+        "api_key_env": env_var,
+        "compact_threshold": (
+            preset.compact_threshold if compact_threshold is None else compact_threshold
+        ),
+    }
+    _validate_cloud_model(entry)
+
+    # Secret first: a failure here must not leave an entry pointing at a variable
+    # that was never written. A key no longer referenced is not kept around.
+    if api_key:
+        _set_cloud_model_key(api_key)
+    elif env_var != CLOUD_MODEL_KEY_ENV:
+        _delete_cloud_model_key()
+    state["model"] = entry
+    _save_cloud_model(state)
+    return entry
+
+
+def remove_cloud_model() -> None:
+    """Forget the configured cloud model and its key, and switch the feature off."""
+    if load_cloud_model()["model"] is None:
+        raise FileNotFoundError("no cloud model is configured")
+    _save_cloud_model(_default_cloud_state())
+    _delete_cloud_model_key()
+
+
+def acknowledge_cloud_model() -> JsonDict:
+    """Record that the operator accepted that conversations leave the machine.
+
+    Idempotent within one activation; :func:`set_cloud_model_enabled` clears it
+    on disable, so an acknowledgement covers the period it was given for.
+    """
+    state = load_cloud_model()
+    if not state["acknowledged_at"]:
+        state["acknowledged_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+        _save_cloud_model(state)
+    return state
+
+
+def set_cloud_model_enabled(enabled: bool) -> JsonDict:
+    """Switch chats to the cloud model or back; enabling needs a current acknowledgement.
+
+    Disabling clears the acknowledgement for the reason external MCP's does: the
+    control that ends the on-premise guarantee must not be re-armable in silence.
+    """
+    state = load_cloud_model()
+    if enabled and not state["acknowledged_at"]:
+        raise ValueError("the cloud model must be acknowledged before it can be enabled")
+    if enabled and state["model"] is None:
+        raise ValueError("configure a cloud model before enabling it")
+    state["enabled"] = bool(enabled)
+    if not enabled:
+        state["acknowledged_at"] = None
+    _save_cloud_model(state)
+    return state
+
+
+def cloud_model_key_present(entry: JsonDict) -> bool:
+    """Whether the key *entry* names is actually available — presence, never the value."""
+    env_var = str(entry.get("api_key_env") or "")
+    if env_var == CLOUD_MODEL_KEY_ENV:
+        return bool(load_cloud_model_key())
+    return external_token_present(env_var)
+
+
+def active_cloud_model() -> JsonDict | None:
+    """Return the cloud model chats run on right now, or ``None`` for the local one.
+
+    Both the toggle and the acknowledgement are required — a state file carrying
+    ``enabled`` without one is treated as off rather than trusted. The entry is
+    re-validated on the way out, and a preset provider's endpoint is taken from
+    the preset, so a hand-edited state file cannot re-point one.
+
+    A configured key that is missing also means ``None``. vibe refuses to build a
+    session at all when the active provider's key variable is unset, so selecting
+    the cloud model without one would not fail towards the cloud — it would take
+    every chat down. Falling back keeps the workspace usable and sends nothing.
+    """
+    state = load_cloud_model()
+    if not (state["enabled"] and state["acknowledged_at"]):
+        return None
+    stored = cast("JsonDict | None", state["model"])
+    if stored is None:
+        return None
+    preset = CLOUD_PROVIDERS.get(str(stored.get("provider", "")))
+    entry: JsonDict = {**stored}
+    if preset is not None and preset.api_base:
+        entry["api_base"] = preset.api_base
+    try:
+        preset = _validate_cloud_model(entry)
+    except ValueError as exc:
+        log.warning("ignoring the malformed cloud model entry: %s", exc)
+        return None
+    if entry["api_key_env"] and not cloud_model_key_present(entry):
+        log.warning(
+            "cloud model %s is enabled but its API key is missing; using the local model",
+            entry["model"],
+        )
+        return None
+    return {
+        **entry,
+        "api_style": preset.api_style,
+        "label": preset.label,
+        "thinking": preset.thinking,
+    }
+
+
+def cloud_model_env() -> dict[str, str]:
+    """The stored API key as a variable for the agent subprocess, or ``{}``.
+
+    Empty unless the cloud model is actually in force: a switch that is off must
+    mean the agent process does not hold the credential at all.
+    """
+    cloud = active_cloud_model()
+    if cloud is None or cloud["api_key_env"] != CLOUD_MODEL_KEY_ENV:
+        return {}
+    return {CLOUD_MODEL_KEY_ENV: load_cloud_model_key()}
+
+
+def agent_secret_env() -> dict[str, str]:
+    """Every credential this process holds on the agent's behalf.
+
+    Read afresh on each agent spawn (the client takes it as a callable), so a
+    change takes effect on the restart every such change already triggers.
+    """
+    return {**external_secret_env(), **cloud_model_env()}
+
+
+# ── Local model choice ───────────────────────────────────────────────────────
+# Which model on this machine chats run on. The default is the one the deployment
+# was built around (``OLLAMA_MODEL``, created by the compose stack); the Models
+# window can select another from its catalog. ``localmodels.py`` owns the catalog
+# and the Ollama side — download, derived model, load and unload — and records
+# the result here, in the one file the config sync reads.
+LOCAL_MODEL_PATH: Path = VIBE_STATE_DIR / "local_model.json"
+# The `[[models]]` alias this module owns for a non-default choice. The shipped
+# `local` entry is never edited, so returning to the default restores it exactly.
+LOCAL_SELECTED_ALIAS: str = "local-selected"
+_THINKING_LEVELS: tuple[str, ...] = ("off", "low", "medium", "high", "max")
+
+
+def load_local_model() -> JsonDict | None:
+    """Return the selected non-default local model, or ``None`` for the default.
+
+    The record is written once the model is downloaded and prepared, so its
+    presence means "ready to use". A malformed one is ignored rather than
+    trusted: the default model is always there to fall back to.
+    """
+    if not LOCAL_MODEL_PATH.exists():
+        return None
+    try:
+        data = cast("JsonDict", json.loads(LOCAL_MODEL_PATH.read_text()))
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("could not read %s; using the default model: %s", LOCAL_MODEL_PATH, exc)
+        return None
+    entry = data.get("selected")
+    if not isinstance(entry, dict):
+        return None
+    selected = cast("JsonDict", entry)
+    temperature = selected.get("temperature")
+    ok = (
+        _MODEL_ID_RE.fullmatch(str(selected.get("model", ""))) is not None
+        and isinstance(selected.get("id"), str)
+        and isinstance(temperature, int | float)
+        and not isinstance(temperature, bool)
+        and selected.get("thinking") in _THINKING_LEVELS
+        and isinstance(selected.get("num_ctx"), int)
+        and isinstance(selected.get("compact_threshold"), int)
+    )
+    if not ok:
+        log.warning("ignoring the malformed local model selection in %s", LOCAL_MODEL_PATH)
+        return None
+    return dict(selected)
+
+
+def save_local_model(entry: JsonDict | None) -> None:
+    """Record the selected local model; ``None`` returns to the default."""
+    _atomic_write_json(LOCAL_MODEL_PATH, {"selected": entry})
+
+
+def local_model_name() -> str:
+    """The Ollama model in use on this machine: the selection, else the default.
+
+    This is also the model the auxiliary passes (tool-call explanations, chat
+    titles) run on — only one model is kept loaded, and those passes stay local
+    even while chats run on a cloud model.
+    """
+    selected = load_local_model()
+    return str(selected["model"]) if selected else OLLAMA_MODEL
+
+
+def local_helper_request() -> JsonDict:
+    """The ``model`` and ``think`` fields of a native ``/api/chat`` helper call.
+
+    The helper passes want a direct answer, so thinking is switched off — but
+    only for a model that has it: the field is left out for one that does not,
+    since there is nothing to switch off and no reason to find out how each
+    Ollama version treats the request.
+    """
+    selected = load_local_model()
+    if selected is None:
+        return {"model": OLLAMA_MODEL, "think": False}
+    if selected["thinking"] == "off":
+        return {"model": selected["model"]}
+    return {"model": selected["model"], "think": False}
+
+
+def active_model_name() -> str:
+    """The id of the model chats run on: the cloud model when in force, else the local one."""
+    cloud = active_cloud_model()
+    return str(cloud["model"]) if cloud else local_model_name()
+
+
+def _apply_model_selection_to_config(cfg: dict[str, Any]) -> bool:
+    """Write the model chats run on into *cfg*; return whether it is a cloud model.
+
+    The entries this module owns — the cloud provider and model, and the entry
+    for a non-default local model — are rebuilt from the state files each time,
+    so switching a choice off removes them. ``active_model`` is only ever moved
+    onto or off an owned alias; a hand-set local choice is left alone.
+    """
+    raw_providers: Any = cfg.get("providers", [])
+    raw_models: Any = cfg.get("models", [])
+    if not isinstance(raw_providers, list) or not isinstance(raw_models, list):
+        # vibe also accepts `[models.<alias>]` tables; the shipped configs use the
+        # list form, and guessing at the other would risk dropping someone's models.
+        log.warning("providers/models are not lists in config.toml; model choice not applied")
+        return False
+    owned_aliases = (CLOUD_MODEL_ALIAS, LOCAL_SELECTED_ALIAS)
+    providers = [
+        p for p in cast("list[JsonDict]", raw_providers) if p.get("name") != CLOUD_PROVIDER_NAME
+    ]
+    models = [m for m in cast("list[JsonDict]", raw_models) if m.get("alias") not in owned_aliases]
+    default_alias = str(models[0].get("alias", "local")) if models else "local"
+    target: str | None = None
+
+    # Appended, never inserted: the shipped provider and model stay first, which
+    # is what the container entrypoint's rewrite of them relies on.
+    selected = load_local_model()
+    if selected is not None and models:
+        models.append(
+            {
+                "name": selected["model"],
+                # Served by the same local server as the default model.
+                "provider": models[0].get("provider", "ollama"),
+                "alias": LOCAL_SELECTED_ALIAS,
+                "temperature": float(selected["temperature"]),
+                "input_price": 0.0,
+                "output_price": 0.0,
+                "thinking": selected["thinking"],
+                "auto_compact_threshold": selected["compact_threshold"],
+            }
+        )
+        target = LOCAL_SELECTED_ALIAS
+
+    cloud = active_cloud_model()
+    if cloud is not None:
+        providers.append(
+            {
+                "name": CLOUD_PROVIDER_NAME,
+                "api_base": cloud["api_base"],
+                # The variable's name. vibe reads the value from its environment.
+                "api_key_env_var": cloud["api_key_env"],
+                "api_style": cloud["api_style"],
+                "backend": "generic",
+            }
+        )
+        models.append(
+            {
+                "name": cloud["model"],
+                "provider": CLOUD_PROVIDER_NAME,
+                "alias": CLOUD_MODEL_ALIAS,
+                "input_price": 0.0,
+                "output_price": 0.0,
+                "thinking": cloud["thinking"],
+                "auto_compact_threshold": cloud["compact_threshold"],
+            }
+        )
+        target = CLOUD_MODEL_ALIAS
+
+    if target is not None:
+        cfg["active_model"] = target
+    elif cfg.get("active_model") in owned_aliases:
+        cfg["active_model"] = default_alias
+
+    if providers or "providers" in cfg:
+        cfg["providers"] = providers
+    if models or "models" in cfg:
+        cfg["models"] = models
+    return cloud is not None
+
+
 # The base prompt tells the agent it runs entirely on-premise and must never
 # suggest sending data to external services. With an external server wired up
 # that is no longer true, and an agent holding tools it has been told never to
-# use behaves erratically — it refuses them, or narrates the contradiction.
+# use behaves erratically — it refuses them, or narrates the contradiction. A
+# cloud model is in the same position from the other side: told it runs
+# on-premise, it would assure people of something that is false.
 #
 # vibe resolves `system_prompt_id` to exactly one file with no append hook, so
-# the enabled state needs its own prompt. It is *derived* from the base rather
-# than checked in beside it: two hand-maintained copies of a 70-line prompt drift,
+# each posture needs its own prompt. They are *derived* from the base rather
+# than checked in beside it: hand-maintained copies of a 70-line prompt drift,
 # and the drift is silent. The anchor below is asserted by a test, so editing it
 # out of the base prompt fails CI instead of quietly producing an identical file.
 BASE_SYSTEM_PROMPT_ID: str = "medmcp"
 EXTERNAL_SYSTEM_PROMPT_ID: str = "medmcp-external"
+CLOUD_SYSTEM_PROMPT_ID: str = "medmcp-cloud"
+CLOUD_EXTERNAL_SYSTEM_PROMPT_ID: str = "medmcp-cloud-external"
 ONPREM_RULE: str = "- You run entirely on-premise. Never suggest sending data to external services."
 EXTERNAL_RULE: str = (
     "- Your tool stacks run on-premise. This workspace also has external MCP servers "
     "configured; the operator enabled them and accepted responsibility for what they "
     "receive, so use their tools when they fit the task."
 )
+_CLOUD_RULE_HEAD: str = (
+    "- You are a cloud-hosted model: this conversation, including every file and tool "
+    "result you read, is processed outside the operator's infrastructure. The operator "
+    "enabled this and accepted responsibility for it. Never describe this session as "
+    "on-premise, and keep what you read to what the task needs — prefer tools that "
+    "process files in place over reading patient data into the conversation. Your tool "
+    "stacks still run on-premise."
+)
+CLOUD_RULE: str = _CLOUD_RULE_HEAD + " Never suggest sending data to any further external service."
+CLOUD_EXTERNAL_RULE: str = (
+    _CLOUD_RULE_HEAD + " This workspace also has external MCP servers configured, under the "
+    "same acceptance, so use their tools when they fit the task."
+)
+# (cloud model in force, external servers in use) → the prompt and its rule.
+_PROMPT_VARIANTS: dict[tuple[bool, bool], tuple[str, str]] = {
+    (False, True): (EXTERNAL_SYSTEM_PROMPT_ID, EXTERNAL_RULE),
+    (True, False): (CLOUD_SYSTEM_PROMPT_ID, CLOUD_RULE),
+    (True, True): (CLOUD_EXTERNAL_SYSTEM_PROMPT_ID, CLOUD_EXTERNAL_RULE),
+}
+OWNED_SYSTEM_PROMPT_IDS: tuple[str, ...] = (
+    "",
+    BASE_SYSTEM_PROMPT_ID,
+    *(prompt_id for prompt_id, _ in _PROMPT_VARIANTS.values()),
+)
 
 
-def write_external_prompt_variant() -> bool:
-    """Derive the external-enabled system prompt next to the base one.
+def write_prompt_variant(prompt_id: str, rule: str) -> bool:
+    """Derive the system prompt *prompt_id* next to the base one, carrying *rule*.
 
     Returns ``False`` — leaving the base prompt in force — when the source is
     missing or no longer carries the on-premise rule, so a prompt edit can never
@@ -1078,13 +1605,16 @@ def write_external_prompt_variant() -> bool:
         )
         return False
     try:
-        (prompts / f"{EXTERNAL_SYSTEM_PROMPT_ID}.md").write_text(
-            text.replace(ONPREM_RULE, EXTERNAL_RULE)
-        )
+        (prompts / f"{prompt_id}.md").write_text(text.replace(ONPREM_RULE, rule))
     except OSError as exc:
-        log.warning("could not write the external system prompt: %s", exc)
+        log.warning("could not write the %s system prompt: %s", prompt_id, exc)
         return False
     return True
+
+
+def write_external_prompt_variant() -> bool:
+    """Derive the external-enabled system prompt next to the base one."""
+    return write_prompt_variant(EXTERNAL_SYSTEM_PROMPT_ID, EXTERNAL_RULE)
 
 
 # ── Container-stack install / uninstall (UI-driven) ──────────────────────────
@@ -1800,15 +2330,19 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
 
     cfg["mcp_servers"] = new_entries
 
+    # Select the model chats run on: the cloud model while it is in force, else
+    # the local model chosen in the Models window, else the one the config names.
+    cloud_in_force = _apply_model_selection_to_config(cfg)
+
     # Point vibe at the prompt that matches the posture actually in force. Only a
     # value this function owns is overwritten, so a hand-set custom prompt id is
     # left alone rather than being reset on the next sync.
-    use_external = any(s.get("external") for s in servers) and write_external_prompt_variant()
-    owned_prompt_ids = ("", BASE_SYSTEM_PROMPT_ID, EXTERNAL_SYSTEM_PROMPT_ID)
-    if str(cfg.get("system_prompt_id", "")) in owned_prompt_ids:
-        cfg["system_prompt_id"] = (
-            EXTERNAL_SYSTEM_PROMPT_ID if use_external else BASE_SYSTEM_PROMPT_ID
-        )
+    prompt_id = BASE_SYSTEM_PROMPT_ID
+    variant = _PROMPT_VARIANTS.get((cloud_in_force, any(s.get("external") for s in servers)))
+    if variant is not None and write_prompt_variant(*variant):
+        prompt_id = variant[0]
+    if str(cfg.get("system_prompt_id", "")) in OWNED_SYSTEM_PROMPT_IDS:
+        cfg["system_prompt_id"] = prompt_id
 
     # Collect skills_path values from discovered servers and write them to
     # skill_paths so vibe-acp loads the bundled skill docs automatically.

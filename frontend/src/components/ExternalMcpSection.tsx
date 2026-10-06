@@ -111,7 +111,7 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
     <>
       <Row
         label="Allow external servers"
-        hint="Lets the agent use tools hosted outside this machine. Off by default, because anything sent to such a server leaves your infrastructure."
+        hint="Lets the agent use tools hosted outside this machine."
         checked={state.enabled}
         onChange={onToggle}
       />
@@ -123,7 +123,7 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
           than broken. */}
       {busy && (
         <div className="settings-row-hint ext-mcp-applying">
-          Applying. The agent restarts, so open chats reconnect.
+          Applying…
         </div>
       )}
 
@@ -132,7 +132,6 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
       {!state.enabled && (
         <div className="settings-row-hint ext-mcp-disconnected">
           Off. Nothing is sent outside this machine.
-          {state.servers.length > 0 && ' The servers below stay configured until you remove them.'}
         </div>
       )}
 
@@ -160,9 +159,7 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
                     unauthenticated rather than failing where the cause is. */}
                 {s.api_key_env && s.token_present === false && (
                   <div className="settings-row-hint ext-mcp-missing-token">
-                    ${s.api_key_env} is not set where the agent runs, so requests go out with
-                    no credential. Add it to medmcp.env and restart, or store a token here
-                    instead.
+                    ${s.api_key_env} is not set, so requests go out with no credential.
                   </div>
                 )}
                 {replacing === s.name ? (
@@ -441,9 +438,7 @@ function AddServerForm({
             onChange={(e) => setEnvVar(e.target.value)}
           />
           <span className="settings-row-hint">
-            The name of a variable already set where the agent runs, for a deployment that
-            manages its own secrets. In the container install that means an entry in{' '}
-            <code>medmcp.env</code> and a restart.
+            A variable already set where the agent runs (<code>medmcp.env</code>).
           </span>
         </label>
       ) : (
@@ -459,10 +454,7 @@ function AddServerForm({
           />
           {/* Kept out of config.toml and out of every response body; handed to the
               agent process at startup. See settings.load_external_secrets. */}
-          <span className="settings-row-hint">
-            Stored on this machine and given to the agent when it starts. It is never written to
-            the agent's config and never sent back to this page.
-          </span>
+          <span className="settings-row-hint">Stored on this machine; never shown again.</span>
         </label>
       )}
       <button
@@ -496,8 +488,8 @@ function AddServerForm({
                 onChange={(e) => setFormat(e.target.value)}
               />
               <span className="settings-row-hint">
-                Must contain <code>{'{token}'}</code>. For an API-key service, try header{' '}
-                <code>X-API-Key</code> with format <code>{'{token}'}</code>.
+                Must contain <code>{'{token}'}</code>. Example: header <code>X-API-Key</code>,
+                format <code>{'{token}'}</code>.
               </span>
             </label>
           </>

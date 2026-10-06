@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Group, Panel, Separator } from 'react-resizable-panels'
 import { Chat } from './components/Chat'
+import { CloudModelBanner } from './components/CloudModelBanner'
+import { CloudModelWindow } from './components/CloudModelWindow'
 import { ExternalMcpBanner } from './components/ExternalMcpBanner'
 import { ExternalMcpWindow } from './components/ExternalMcpWindow'
+import { ModelsWindow } from './components/ModelsWindow'
 import { FileExplorer } from './components/FileExplorer'
 import { StackMarketplace } from './components/StackMarketplace'
 import { SettingsDrawer } from './components/SettingsDrawer'
@@ -46,6 +49,13 @@ export default function App() {
   // warning re-reads it instead of waiting for a reload.
   const [externalVersion, setExternalVersion] = useState(0)
   const notifyExternalChanged = useCallback(() => setExternalVersion((v) => v + 1), [])
+  // The cloud-model window and its standing warning, wired the same way.
+  const [cloudOpen, setCloudOpen] = useState(false)
+  const [cloudVersion, setCloudVersion] = useState(0)
+  const notifyCloudChanged = useCallback(() => setCloudVersion((v) => v + 1), [])
+  // The Models window: reached from the chat header's model name and from Settings.
+  const [modelsOpen, setModelsOpen] = useState(false)
+  const openModels = useCallback(() => setModelsOpen(true), [])
   const [marketOpen, setMarketOpen] = useState(false)
   // The release record the server keeps (checked daily there); the header
   // notice and the Settings row both read it, the window applies it.
@@ -191,6 +201,7 @@ export default function App() {
           </button>
         </span>
       </header>
+      <CloudModelBanner refreshSignal={cloudVersion} onReview={() => setCloudOpen(true)} />
       <ExternalMcpBanner
         refreshSignal={externalVersion}
         onReview={() => setExternalOpen(true)}
@@ -205,6 +216,9 @@ export default function App() {
         onAdvancedToggle={setSettingsAdvanced}
         onManageExternal={() => setExternalOpen(true)}
         externalVersion={externalVersion}
+        onManageCloud={() => setCloudOpen(true)}
+        onManageModels={openModels}
+        cloudVersion={cloudVersion}
         update={updateState}
         onCheckUpdate={checkUpdate}
         onOpenUpdate={() => setUpdateOpen(true)}
@@ -229,6 +243,12 @@ export default function App() {
         onClose={() => setExternalOpen(false)}
         onChanged={notifyExternalChanged}
       />
+      <CloudModelWindow
+        open={cloudOpen}
+        onClose={() => setCloudOpen(false)}
+        onChanged={notifyCloudChanged}
+      />
+      <ModelsWindow open={modelsOpen} onClose={() => setModelsOpen(false)} />
       <StackMarketplace open={marketOpen} onClose={() => setMarketOpen(false)} />
       <Group
         orientation="vertical"
@@ -277,6 +297,7 @@ export default function App() {
                 resumeSessionId={resumeId}
                 onSessionEstablished={handleSessionEstablished}
                 onNewChat={startNewChat}
+                onOpenModels={openModels}
                 currentSessionId={resumeId}
                 onSelectSession={openSession}
               />

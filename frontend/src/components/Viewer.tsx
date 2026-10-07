@@ -524,7 +524,6 @@ function VolumeView({
         overlayValue: ov ? ov.value : null,
         pane: loc.axCorSag,
       }
-      if (loc.axCorSag >= 0 && loc.axCorSag <= 2) paneRef.current = loc.axCorSag
       if (!raf) {
         raf = requestAnimationFrame(() => {
           raf = 0
@@ -701,6 +700,53 @@ function VolumeView({
     nv.createOnLocationChange()
   }
 
+  /** Read position, intensity and label under the pointer — what a reader
+   *  expects from a status bar, where Niivue itself only reports the crosshair
+   *  (set by clicking). Also remembers which pane the pointer is over, for the
+   *  slice keys. Coalesced to one update per frame. */
+  const hoverRaf = useRef(0)
+  const onPointerMove = (e: React.PointerEvent) => {
+    const nv = nvRef.current
+    const canvas = canvasRef.current
+    if (!nv || !canvas || nv.volumes.length === 0) return
+    const rect = canvas.getBoundingClientRect()
+    const dpr = nv.uiData.dpr ?? 1
+    const x = (e.clientX - rect.left) * dpr
+    const y = (e.clientY - rect.top) * dpr
+    const tile = nv.screenSlices.find((t) => {
+      const [l, tp, w, h] = t.leftTopWidthHeight
+      return x >= l && x < l + w && y >= tp && y < tp + h
+    })
+    if (!tile || tile.axCorSag > 2) return
+    paneRef.current = tile.axCorSag
+    const frac = nv.canvasPos2frac([x, y])
+    if (frac[0] < 0) return
+    const mm = nv.frac2mm(frac)
+    const vox = nv.frac2vox(frac)
+    const values = nv.volumes.map((v) => {
+      const vx = v.mm2vox([mm[0], mm[1], mm[2]])
+      return v.getValue(vx[0], vx[1], vx[2], v.frame4D)
+    })
+    const next: Readout = {
+      vox: [vox[0], vox[1], vox[2]],
+      mm: [mm[0], mm[1], mm[2]],
+      baseValue: values[0] ?? NaN,
+      overlayValue: values.length > 1 ? values[1] : null,
+      pane: tile.axCorSag,
+    }
+    if (!hoverRaf.current) {
+      hoverRaf.current = requestAnimationFrame(() => {
+        hoverRaf.current = 0
+        setReadout(next)
+      })
+    }
+  }
+  const onPointerLeave = () => {
+    // Back to the crosshair's values once the pointer is off the image.
+    const nv = nvRef.current
+    if (nv && nv.volumes.length > 0) nv.createOnLocationChange()
+  }
+
   const applyWindow = (min: number, max: number) => {
     const nv = nvRef.current
     if (!nv || nv.volumes.length === 0) return
@@ -869,6 +915,8 @@ function VolumeView({
           onDropCapture={onDrop}
           onKeyDown={onKeyDown}
           onPointerDownCapture={() => dropRef.current?.focus({ preventScroll: true })}
+          onPointerMove={onPointerMove}
+          onPointerLeave={onPointerLeave}
         >
           <canvas ref={canvasRef} className="niivue-canvas" />
           {dragOver && <div className="dropzone-hint">Drop to overlay</div>}

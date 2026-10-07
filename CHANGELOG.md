@@ -16,6 +16,8 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Fixed
 
+- Viewer: label overlays drew several ids in one colour and a hidden label showed when its neighbour was visible (Niivue's generic shader filters the colour table); label maps now go through its atlas shader, which looks ids up exactly.
+- Viewer: the legend says which sidecar file would name the labels when none is found.
 - Viewer: `.dcm` files showed a Niivue error; they now say to convert the series to NIfTI with the DICOM stack.
 - Viewer: a panel resize no longer re-downloads the volume.
 

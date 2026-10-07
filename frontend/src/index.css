@@ -4004,6 +4004,20 @@ textarea.wf-input {
   cursor: default;
 }
 
+.label-legend-foot {
+  padding: 6px 12px 7px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.label-legend-foot code {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted2);
+}
+
 .label-swatch {
   width: 10px;
   height: 10px;

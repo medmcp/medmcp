@@ -42,9 +42,60 @@ import {
 import { ViewerSettingsPanel } from './ViewerSettings'
 
 // Niivue COLORMAP_TYPE.ZERO_TO_MAX_TRANSPARENT_BELOW_MIN — voxels below cal_min
-// are fully transparent (the 3D render honours it; the 2D slices honour the
-// LUT's alpha). The enum isn't exported, so we use its numeric value.
+// are fully transparent. The enum isn't exported, so we use its numeric value.
 const COLORMAP_TYPE_TRANSPARENT_BELOW_MIN = 1
+
+// NIfTI intent code for label images. Niivue draws a volume carrying it with
+// its atlas shader: an exact per-id lookup into the label colour table whose
+// alpha it honours. Its generic shader instead samples the table as a
+// linearly filtered gradient and clamps small ids to one texel — measured on a
+// FreeSurfer map, ids 2–13 all came out the same colour and a hidden id showed
+// whenever its neighbour was visible.
+const NII_INTENT_LABEL = 1002
+const DT_UINT8 = 2
+const DT_INT16 = 4
+const DT_UINT16 = 512
+
+/** Mark *vol* as a label image so Niivue's atlas shader draws it. That shader
+ *  reads integer textures only, so the voxels are converted to the narrowest
+ *  integer type that holds the ids (as Niivue itself does for FreeSurfer
+ *  files it recognises by name). Returns false — leaving the generic shader in
+ *  charge — when the data cannot be expressed that way. */
+function routeThroughAtlasShader(vol: NVImage, minId: number, maxId: number): boolean {
+  const hdr = vol.hdr
+  const img = vol.img
+  if (!hdr || !img) return false
+  // The atlas shader reads raw voxel values; a scaled file would mislabel.
+  if ((hdr.scl_slope !== 0 && hdr.scl_slope !== 1) || hdr.scl_inter !== 0) return false
+  let target: number
+  if (minId < 0) {
+    if (minId < -32768 || maxId > 32767) return false
+    target = DT_INT16
+  } else if (maxId <= 255) {
+    target = DT_UINT8
+  } else if (maxId <= 65535) {
+    target = DT_UINT16
+  } else {
+    return false
+  }
+  const dt = hdr.datatypeCode
+  const alreadyFits =
+    dt === target || (dt === DT_INT16 && minId >= 0 && maxId <= 32767) || (dt === DT_UINT16 && minId >= 0)
+  if (!alreadyFits) {
+    const out =
+      target === DT_UINT8
+        ? new Uint8Array(img.length)
+        : target === DT_INT16
+          ? new Int16Array(img.length)
+          : new Uint16Array(img.length)
+    for (let i = 0; i < img.length; i++) out[i] = Math.round(img[i])
+    vol.img = out
+    hdr.datatypeCode = target
+    hdr.numBitsPerVoxel = target === DT_UINT8 ? 8 : 16
+  }
+  hdr.intent_code = NII_INTENT_LABEL
+  return true
+}
 
 // ── Volume bytes cache ───────────────────────────────────────────
 //
@@ -241,6 +292,7 @@ async function describeOverlay(vol: NVImage, path: string, forcedKind: OverlayKi
   if (kind === 'label') {
     stats = labelStats(img, dims)
     maxLabel = stats.length ? stats[stats.length - 1].id : Math.ceil(vol.global_max ?? 1)
+    routeThroughAtlasShader(vol, Math.min(0, Math.floor(vol.global_min ?? 0)), maxLabel)
     names = await fetchLabelNames(path)
     const ids = stats.map((s) => s.id)
     if (names.size === 0 && looksLikeFreeSurfer(ids)) {
@@ -296,6 +348,8 @@ function styleOverlay(nv: Niivue, vol: NVImage, info: OverlayInfo, state: Overla
         state.isolate ? new Set(state.isolate) : undefined,
       ),
     )
+    // The atlas shader (see routeThroughAtlasShader) takes colour and alpha
+    // straight from the table; these only matter on the generic fallback path.
     vol.colormapType = COLORMAP_TYPE_TRANSPARENT_BELOW_MIN
     vol.cal_min = 0.5
     vol.cal_max = Math.max(info.maxLabel, 1) + 0.5
@@ -924,6 +978,7 @@ function VolumeView({
         {legendOpen && info?.kind === 'label' && (
           <LabelLegend
             info={info}
+            path={overlay.path}
             isolate={overlay.isolate}
             onJump={jumpToLabel}
             onToggle={toggleIsolate}
@@ -1019,6 +1074,7 @@ function formatNumber(v: number): string {
  *  crosshair to the structure; its eye isolates it (several can be combined). */
 function LabelLegend({
   info,
+  path,
   isolate,
   onJump,
   onToggle,
@@ -1026,6 +1082,7 @@ function LabelLegend({
   onClose,
 }: {
   info: OverlayInfo
+  path: string
   isolate: number[] | null
   onJump: (s: LabelStat) => void
   onToggle: (id: number) => void
@@ -1091,9 +1148,18 @@ function LabelLegend({
         })}
         {rows.length === 0 && <div className="label-row empty">No match</div>}
       </div>
+      {info.names.size === 0 && (
+        <div className="label-legend-foot" title={LABEL_NAMES_HELP}>
+          No names. Add <code>{labelFileCandidates(path)[0].split('/').pop()}</code> (index, name)
+          beside the file.
+        </div>
+      )}
     </div>
   )
 }
+
+const LABEL_NAMES_HELP =
+  'A tab- or comma-separated table with an id column and a name column, as in BIDS (_dseg.tsv: index, name). FreeSurfer-coded maps are named from the FreeSurfer table without one.'
 
 /** Intensity window: presets plus editable bounds. Opens above the status bar. */
 function WindowPopover({

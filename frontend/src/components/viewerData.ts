@@ -209,17 +209,23 @@ export function freesurferColor(id: number): [number, number, number] {
   return FREESURFER_LUT.get(id)?.rgb ?? labelColor(id)
 }
 
-/** Candidate sidecar files naming the labels of a segmentation, best first:
- *  the TotalSegmentator stack's `<stem>_labels.csv` (stem = name without
- *  `_dseg`), and the BIDS `<name>_dseg.tsv` beside a `_dseg.nii.gz`. */
+/** Candidate sidecar files naming the labels of a segmentation, best first.
+ *
+ *  The viewer knows nothing about which tool made a label map; names come
+ *  from a table beside it. The contract for stacks is BIDS: `<name>_dseg.tsv`
+ *  (`index`, `name` columns) next to `<name>_dseg.nii.gz`. Also accepted:
+ *  `<stem>_labels.csv`/`.tsv` (what the TotalSegmentator stack writes) and,
+ *  for a file not named `_dseg`, `<file>.tsv`/`.csv`. Without any of these a
+ *  FreeSurfer-coded map is named from FreeSurfer's table; anything else shows
+ *  ids only. */
 export function labelFileCandidates(volumePath: string): string[] {
   const base = volumePath.replace(/\.(nii(\.gz)?|mgz|mgh|nrrd|nhdr|mha|mhd)$/i, '')
   const out: string[] = []
   if (/_dseg$/i.test(base)) {
     const stem = base.replace(/_dseg$/i, '')
-    out.push(`${stem}_labels.csv`, `${base}.tsv`, `${stem}_labels.tsv`)
+    out.push(`${base}.tsv`, `${stem}_labels.csv`, `${stem}_labels.tsv`)
   } else {
-    out.push(`${base}_labels.csv`, `${base}_labels.tsv`, `${base}.tsv`, `${base}.csv`)
+    out.push(`${base}.tsv`, `${base}_labels.csv`, `${base}_labels.tsv`, `${base}.csv`)
   }
   return out
 }

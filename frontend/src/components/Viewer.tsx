@@ -368,7 +368,6 @@ function VolumeView({
     max: number
     robustMin: number
     robustMax: number
-    dtype: number
     frames: number
     isCT: boolean
   } | null>(null)
@@ -570,7 +569,6 @@ function VolumeView({
           max: gmax,
           robustMin: base.robust_min ?? base.cal_min ?? gmin,
           robustMax: base.robust_max ?? base.cal_max ?? gmax,
-          dtype: hdr?.datatypeCode ?? 0,
           frames: base.nFrame4D ?? 1,
           isCT: looksLikeCT(gmin, gmax),
         })
@@ -888,7 +886,10 @@ function VolumeView({
       </div>
       {baseInfo && (
         <div className="viewer-status">
-          <span className="st-item" title="Voxel index under the crosshair">
+          <span
+            className="st-item"
+            title={`Voxel index under the crosshair. Grid ${baseInfo.dims.join('×')} voxels of ${formatSpacing(baseInfo.pixDims)}${baseInfo.frames > 1 ? `, ${baseInfo.frames} frames` : ''}`}
+          >
             <span className="st-key">Voxel</span>
             <span className="st-val">{readout ? readout.vox.join(' ') : '–'}</span>
           </span>
@@ -937,15 +938,6 @@ function VolumeView({
                 onClose={() => setWindowOpen(false)}
               />
             )}
-          </span>
-          <span
-            className="st-item st-grid"
-            title={`Data type code ${baseInfo.dtype}${baseInfo.frames > 1 ? ` · ${baseInfo.frames} frames` : ''} · range ${formatNumber(baseInfo.min)} to ${formatNumber(baseInfo.max)}`}
-          >
-            <span className="st-key">Grid</span>
-            <span className="st-val">
-              {baseInfo.dims.join('×')} · {formatSpacing(baseInfo.pixDims)}
-            </span>
           </span>
         </div>
       )}

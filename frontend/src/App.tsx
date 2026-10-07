@@ -11,9 +11,18 @@ import { StackMarketplace } from './components/StackMarketplace'
 import { SettingsDrawer } from './components/SettingsDrawer'
 import { UpdateWindow } from './components/UpdateWindow'
 import { Viewer } from './components/Viewer'
+import { EMPTY_OVERLAY, overlayFor, type OverlayState } from './components/viewerData'
+import { isVolumePath } from './fileKinds'
 import { WorkflowPanel } from './components/WorkflowPanel'
 import { GearIcon, StoreIcon, XIcon } from './components/icons'
-import { ackUpdateResult, checkForUpdate, dismissUpdate, fetchUpdate, setUpdateAutoCheck } from './api'
+import {
+  ackUpdateResult,
+  checkForUpdate,
+  dismissUpdate,
+  fetchUpdate,
+  fetchWorkspaceRoot,
+  setUpdateAutoCheck,
+} from './api'
 import type { UpdateState } from './types'
 
 /** localStorage key holding the last active chat session id (for auto-resume). */
@@ -38,6 +47,28 @@ function describeUpdateResult(r: NonNullable<UpdateState['last_result']>): strin
  */
 export default function App() {
   const [openPath, setOpenPath] = useState<string | null>(null)
+  // What is overlaid on the open volume. Lives here rather than in the viewer so
+  // the chat can set it (a tool result's "Overlay" chip) and so it survives the
+  // viewer's resize rebuild.
+  const [overlay, setOverlay] = useState<OverlayState>(EMPTY_OVERLAY)
+  const overlayFile = useCallback(
+    (p: string) => {
+      // Nothing to overlay onto (or the same file): open it as the base instead.
+      if (!isVolumePath(openPath) || openPath === p) {
+        setOpenPath(p)
+        return
+      }
+      setOverlay(overlayFor(openPath, p))
+    },
+    [openPath],
+  )
+  // The absolute workspace root, for mapping paths in tool results.
+  const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null)
+  useEffect(() => {
+    fetchWorkspaceRoot()
+      .then(setWorkspaceRoot)
+      .catch(() => {})
+  }, [])
   // Files multi-selected in the explorer — feeds the workflow batch editor.
   const [selectedPaths, setSelectedPaths] = useState<string[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -272,7 +303,12 @@ export default function App() {
             </Panel>
             <Separator className="sep sep-v" />
             <Panel minSize="30%">
-              <Viewer path={openPath} isResizing={resizing} />
+              <Viewer
+                path={openPath}
+                isResizing={resizing}
+                overlay={overlay}
+                onOverlayChange={setOverlay}
+              />
             </Panel>
           </Group>
         </Panel>
@@ -298,6 +334,9 @@ export default function App() {
                 onSessionEstablished={handleSessionEstablished}
                 onNewChat={startNewChat}
                 onOpenModels={openModels}
+                workspaceRoot={workspaceRoot}
+                onOpenFile={setOpenPath}
+                onOverlayFile={overlayFile}
                 currentSessionId={resumeId}
                 onSelectSession={openSession}
               />

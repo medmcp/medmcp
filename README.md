@@ -38,7 +38,7 @@ To build from source or run without Docker, see **[CONTRIBUTING.md](CONTRIBUTING
 ## Features
 
 - **Chat & agent**: ask for an analysis in plain language; the agent picks and runs the tools.
-- **File explorer and image viewer**: browse your data and view medical images (`.nii.gz`, `.nrrd`, `.dcm`, ...) and other files (`.pdf`, `.csv`, ...).
+- **File explorer and image viewer**: browse your data and view medical images (`.nii.gz`, `.mgz`, `.nrrd`, ...) with segmentation and map overlays, a label legend and intensity windows, plus other files (`.pdf`, `.csv`, ...).
 - **Workflows**: turn a chat into a workflow you can replay on new data and share.
 - **Tool stacks**: install new imaging capabilities from the UI.
 - **Model choice**: switch between seven local models, or optionally use a cloud model with your own API key.

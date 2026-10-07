@@ -15,6 +15,7 @@ import type {
 } from '../types'
 import { ChatsMenu } from './ChatsMenu'
 import { PlusIcon, ShieldIcon } from './icons'
+import { extractWorkspacePaths, isVolumePath } from '../fileKinds'
 
 // vibe-acp >= 2.14 sends a tool call's rawInput as a JSON-encoded *string*
 // (read/edit/write tools) rather than an object. Parse it back so the card
@@ -92,7 +93,49 @@ const PlanCard = memo(function PlanCard({ items }: { items: TodoItem[] }) {
 
 // Memoized so a streaming update to the newest message doesn't re-render
 // (and re-parse the markdown of) every earlier row in the transcript.
-const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
+/** Files a finished tool call named, offered straight into the viewer. The
+ *  agent writes a segmentation and says where; without this the person has to
+ *  find it in the explorer by hand. Volumes can also be laid over the open one. */
+function ResultFiles({
+  paths,
+  onOpen,
+  onOverlay,
+}: {
+  paths: string[]
+  onOpen?: (path: string) => void
+  onOverlay?: (path: string) => void
+}) {
+  if (paths.length === 0 || !onOpen) return null
+  return (
+    <div className="tool-files">
+      {paths.map((p) => (
+        <span key={p} className="tool-file" title={p}>
+          <span className="tool-file-name">{p.split('/').pop()}</span>
+          <button className="btn-text" onClick={() => onOpen(p)}>
+            View
+          </button>
+          {onOverlay && isVolumePath(p) && (
+            <button className="btn-text" onClick={() => onOverlay(p)}>
+              Overlay
+            </button>
+          )}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+const ToolCard = memo(function ToolCard({
+  tc,
+  workspaceRoot,
+  onOpenFile,
+  onOverlayFile,
+}: {
+  tc: ToolCallState
+  workspaceRoot?: string | null
+  onOpenFile?: (path: string) => void
+  onOverlayFile?: (path: string) => void
+}) {
   // The path guard turned this call back before it ran, and the agent corrects
   // the path and calls again by itself. A red "failed" card would be untrue —
   // nothing failed and nothing ran — and would leave you looking for a problem
@@ -132,6 +175,13 @@ const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
           <summary>output</summary>
           <pre>{tc.output}</pre>
         </details>
+      )}
+      {tc.status === 'completed' && tc.output && (
+        <ResultFiles
+          paths={extractWorkspacePaths(tc.output, workspaceRoot ?? null)}
+          onOpen={onOpenFile}
+          onOverlay={onOverlayFile}
+        />
       )}
     </div>
   )
@@ -406,6 +456,9 @@ export const Chat = memo(function Chat({
   currentSessionId,
   onSelectSession,
   onOpenModels,
+  workspaceRoot,
+  onOpenFile,
+  onOverlayFile,
 }: {
   /** Called with the vibe session id whenever a prompt is sent into it. */
   onPromptedSession?: (id: string) => void
@@ -425,6 +478,13 @@ export const Chat = memo(function Chat({
   onSelectSession?: (id: string) => void
   /** Open the Models window (the header's model name is its entry point). */
   onOpenModels?: () => void
+  /** Absolute workspace root, to turn the absolute paths in tool results into
+   *  workspace-relative ones the viewer can open. */
+  workspaceRoot?: string | null
+  /** Open a workspace file in the viewer. */
+  onOpenFile?: (path: string) => void
+  /** Lay a workspace volume over the one open in the viewer. */
+  onOverlayFile?: (path: string) => void
 }) {
   const [items, setItems] = useState<ChatItem[]>([])
   const [toolCalls, setToolCalls] = useState<Record<string, ToolCallState>>({})
@@ -781,7 +841,15 @@ export const Chat = memo(function Chat({
         {items.map((item, i) => {
           if (item.kind === 'tool') {
             const tc = toolCalls[item.toolCallId]
-            return tc ? <ToolCard key={i} tc={tc} /> : null
+            return tc ? (
+              <ToolCard
+                key={i}
+                tc={tc}
+                workspaceRoot={workspaceRoot}
+                onOpenFile={onOpenFile}
+                onOverlayFile={onOverlayFile}
+              />
+            ) : null
           }
           if (item.kind === 'user') {
             const mid = item.messageId

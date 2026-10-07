@@ -282,7 +282,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
         <div className="panel-header">
           <span>Tool stacks</span>
           <span className="panel-actions">
-            <button className="btn-icon" title="Close" onClick={onClose}>
+            <button className="btn-icon" aria-label="Close" onClick={onClose}>
               <XIcon />
             </button>
           </span>
@@ -341,7 +341,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
                         ? 'Installed outside the catalogue.'
                         : 'No description provided.')}
                   </div>
-                  <div className="market-image" title={i.image}>
+                  <div className="market-image" aria-label={i.image}>
                     {i.version ? `v${i.version}` : i.image}
                   </div>
                   <div className="market-card-foot">

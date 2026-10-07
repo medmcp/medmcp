@@ -145,7 +145,7 @@ export function ModelsWindow({ open, onClose }: ModelsWindowProps) {
         <div className="panel-header">
           <span>Models</span>
           <span className="panel-actions">
-            <button className="btn-icon" title="Close" onClick={onClose}>
+            <button className="btn-icon" aria-label="Close" onClick={onClose}>
               <XIcon />
             </button>
           </span>
@@ -281,7 +281,6 @@ function ModelLogo({ id, vendor }: { id: string; vendor: string }) {
       className="models-logo mono"
       role="img"
       aria-label={vendor}
-      title={vendor}
       style={{ maskImage: mask, WebkitMaskImage: mask }}
     />
   )

@@ -202,7 +202,7 @@ export function ChatsMenu({
       >
         <span
           className={`prov-dot${s.hasProvenance ? ' on' : ''}`}
-          title={s.hasProvenance ? 'Has a provenance record' : 'No provenance record'}
+          aria-label={s.hasProvenance ? 'Has a provenance record' : 'No provenance record'}
         />
         <span className="session-main">
           {editing ? (
@@ -232,7 +232,7 @@ export function ChatsMenu({
           {!isArchived && isCurrent && (
             <button
               className="btn-icon"
-              title="Branch this chat (duplicate to try a different path)"
+              aria-label="Branch this chat (duplicate to try a different path)"
               onClick={() => branch(s.id)}
             >
               <BranchIcon size={14} />
@@ -241,7 +241,7 @@ export function ChatsMenu({
           {!isArchived && (
             <button
               className="btn-icon"
-              title="Rename"
+              aria-label="Rename"
               onClick={() => {
                 setEditValue(s.title ?? '')
                 setEditingId(s.id)
@@ -252,12 +252,12 @@ export function ChatsMenu({
           )}
           <button
             className="btn-icon"
-            title={isArchived ? 'Restore' : 'Archive'}
+            aria-label={isArchived ? 'Restore' : 'Archive'}
             onClick={() => act(archiveSession(s.id, !isArchived))}
           >
             <ArchiveIcon size={14} />
           </button>
-          <button className="btn-icon danger" title="Delete" onClick={() => confirmDelete(s.id)}>
+          <button className="btn-icon danger" aria-label="Delete" onClick={() => confirmDelete(s.id)}>
             <TrashIcon size={14} />
           </button>
         </span>
@@ -279,7 +279,7 @@ export function ChatsMenu({
       <button
         ref={triggerRef}
         className="btn-plain chats-menu-trigger"
-        title="Open a previous chat"
+        aria-label="Open a previous chat"
         onClick={toggle}
       >
         Chats

@@ -109,7 +109,7 @@ function ResultFiles({
   return (
     <div className="tool-files">
       {paths.map((p) => (
-        <span key={p} className="tool-file" title={p}>
+        <span key={p} className="tool-file" aria-label={p}>
           <span className="tool-file-name">{p.split('/').pop()}</span>
           <button className="btn-text" onClick={() => onOpen(p)}>
             View
@@ -144,7 +144,7 @@ const ToolCard = memo(function ToolCard({
   // record stays in the provenance log either way.
   if (tc.pathGuardRetry) {
     return (
-      <div className="tool-retry-note" title={tc.output ?? undefined}>
+      <div className="tool-retry-note" aria-label={tc.output ?? undefined}>
         ↻ corrected an invalid path in {tc.title}
       </div>
     )
@@ -204,7 +204,7 @@ function ContextMeter({ used, size }: { used: number; size: number | null }) {
   return (
     <span
       className="ctx-meter"
-      title={`Context: ${used.toLocaleString()} of ${size.toLocaleString()} tokens (${Math.round(frac * 100)}%)`}
+      aria-label={`Context: ${used.toLocaleString()} of ${size.toLocaleString()} tokens (${Math.round(frac * 100)}%)`}
     >
       <span className="ctx-bar">
         <span className={`ctx-fill ctx-${level}`} style={{ width: `${frac * 100}%` }} />
@@ -336,7 +336,7 @@ function PermissionCard({
       {perm.risks && perm.risks.length > 0 && (
         <div className="risk-chips">
           {perm.risks.map((r) => (
-            <span key={r.key} className={`risk-chip risk-${r.severity}`} title={r.key}>
+            <span key={r.key} className={`risk-chip risk-${r.severity}`} aria-label={r.key}>
               {r.label}
             </span>
           ))}
@@ -351,7 +351,7 @@ function PermissionCard({
         // is worth as much as flagging one that isn't.
         <ul className="approval-paths">
           {perm.paths.map((p, i) => (
-            <li key={`${p.param}-${i}`} className={`path-${p.severity}`} title={p.value}>
+            <li key={`${p.param}-${i}`} className={`path-${p.severity}`} aria-label={p.value}>
               <span className="path-mark" aria-hidden="true">
                 {p.severity === 'error' ? '✕' : p.severity === 'warning' ? '!' : '✓'}
               </span>
@@ -786,7 +786,7 @@ export const Chat = memo(function Chat({
         <span className="chat-head-left">
           <span>Chat</span>
           {onNewChat && (
-            <button className="btn-plain chat-new-btn" onClick={onNewChat} title="Start a new chat">
+            <button className="btn-plain chat-new-btn" onClick={onNewChat} aria-label="Start a new chat">
               <PlusIcon size={12} />
               New chat
             </button>
@@ -807,7 +807,7 @@ export const Chat = memo(function Chat({
         {/* The chat's name takes the slack between the controls and the meta,
             so it never shifts either group; it truncates instead of growing. */}
         {title && (
-          <span className="chat-title" title={title}>
+          <span className="chat-title" aria-label={title}>
             {title}
           </span>
         )}
@@ -815,7 +815,7 @@ export const Chat = memo(function Chat({
           {model != null && (
             <button
               className={`model-name${cloud ? ' model-cloud' : ''}`}
-              title={
+              aria-label={
                 cloud
                   ? 'Cloud model: this chat is sent outside this machine. Click to see the models.'
                   : 'Change the model'
@@ -828,7 +828,7 @@ export const Chat = memo(function Chat({
           {usage != null && <ContextMeter used={usage.used} size={usage.size} />}
           <span
             className={`conn conn-${retrying ? 'retrying' : status}`}
-            title={retrying ? `${retrying.category}: ${retrying.detail}` : undefined}
+            aria-label={retrying ? `${retrying.category}: ${retrying.detail}` : undefined}
           >
             {retrying ? 'retrying…' : status === 'open' ? 'running' : status}
           </span>
@@ -859,7 +859,7 @@ export const Chat = memo(function Chat({
                   {mid && !busy && (
                     <button
                       className="btn-icon rewind-btn"
-                      title="Rewind the chat to before this message"
+                      aria-label="Rewind the chat to before this message"
                       onClick={() => void askRewind(mid)}
                     >
                       ↺

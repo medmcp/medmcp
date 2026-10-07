@@ -118,7 +118,7 @@ function NodeRow({
           }}
         />
       ) : (
-        <span className="tree-name" title={node.data.id}>
+        <span className="tree-name" aria-label={node.data.id}>
           {node.data.name}
         </span>
       )}
@@ -289,7 +289,7 @@ export const FileExplorer = memo(function FileExplorer({
         <span className="panel-actions">
           <button
             className="btn-icon"
-            title="New folder"
+            aria-label="New folder"
             onClick={() => {
               const name = window.prompt('New folder name')
               if (name) run(mkdir(name))
@@ -297,10 +297,10 @@ export const FileExplorer = memo(function FileExplorer({
           >
             <FolderPlusIcon />
           </button>
-          <button className="btn-icon" title="Upload file" onClick={() => fileInputRef.current?.click()}>
+          <button className="btn-icon" aria-label="Upload file" onClick={() => fileInputRef.current?.click()}>
             <UploadIcon />
           </button>
-          <button className="btn-icon" title="Refresh" onClick={reload}>
+          <button className="btn-icon" aria-label="Refresh" onClick={reload}>
             <RefreshIcon />
           </button>
         </span>

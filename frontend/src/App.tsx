@@ -218,16 +218,16 @@ export default function App() {
           {updateNotice && (
             <button
               className="update-pill"
-              title="A newer MedMCP release is available"
+              aria-label="A newer MedMCP release is available"
               onClick={() => setUpdateOpen(true)}
             >
               <span className="update-pill-dot" />v{updateNotice.version} available
             </button>
           )}
-          <button className="btn-icon" title="Tool stacks" onClick={() => setMarketOpen(true)}>
+          <button className="btn-icon" aria-label="Tool stacks" onClick={() => setMarketOpen(true)}>
             <StoreIcon />
           </button>
-          <button className="btn-icon" title="Settings" onClick={() => setSettingsOpen(true)}>
+          <button className="btn-icon" aria-label="Settings" onClick={() => setSettingsOpen(true)}>
             <GearIcon />
           </button>
         </span>
@@ -264,7 +264,7 @@ export default function App() {
       {updateResult && (
         <div className={`app-toast${updateResult.status === 'ok' ? '' : ' app-toast-error'}`} role="status">
           <span>{describeUpdateResult(updateResult)}</span>
-          <button className="btn-icon" title="Dismiss" onClick={ackUpdate}>
+          <button className="btn-icon" aria-label="Dismiss" onClick={ackUpdate}>
             <XIcon />
           </button>
         </div>

@@ -876,13 +876,13 @@ function VolumeView({
           controls for a state the viewer is usually not in. */}
       {overlay.path && (
         <div className="overlay-bar">
-          <span className="overlay-label" title={overlay.path}>
+          <span className="overlay-label" aria-label={overlay.path}>
             {overlayName}
           </span>
           {info && (
             <select
               className="vs-select overlay-kind"
-              title="How the overlay is drawn: a label map (one colour per id) or a continuous map"
+              aria-label="How the overlay is drawn: a label map (one colour per id) or a continuous map"
               value={info.kind}
               onChange={(e) => patchOverlay({ kind: e.target.value as OverlayKind, isolate: null })}
             >
@@ -894,7 +894,7 @@ function VolumeView({
             <>
               <select
                 className="vs-select overlay-cmap"
-                title="Colormap"
+                aria-label="Colormap"
                 value={overlay.colormap}
                 onChange={(e) => patchOverlay({ colormap: e.target.value })}
               >
@@ -904,7 +904,7 @@ function VolumeView({
                   </option>
                 ))}
               </select>
-              <label className="overlay-threshold" title="Voxels below this value are transparent">
+              <label className="overlay-threshold" aria-label="Voxels below this value are transparent">
                 <span className="overlay-opacity-label">≥</span>
                 <input
                   type="number"
@@ -921,7 +921,7 @@ function VolumeView({
           {info?.kind === 'label' && (
             <button
               className={legendOpen ? 'btn-icon active' : 'btn-icon'}
-              title="Labels: names, volumes, isolate"
+              aria-label="Labels: names, volumes, isolate"
               onClick={() => setLegendOpen((v) => !v)}
             >
               <ListIcon size={13} />
@@ -935,17 +935,17 @@ function VolumeView({
             max={1}
             step={0.05}
             value={overlay.opacity}
-            title={`Opacity ${Math.round(overlay.opacity * 100)}%`}
+            aria-label={`Opacity ${Math.round(overlay.opacity * 100)}%`}
             onChange={(e) => patchOverlay({ opacity: Number(e.target.value) })}
           />
           <button
             className={overlay.hidden ? 'btn-icon active' : 'btn-icon'}
-            title={overlay.hidden ? 'Show overlay (o)' : 'Hide overlay (o)'}
+            aria-label={overlay.hidden ? 'Show overlay (o)' : 'Hide overlay (o)'}
             onClick={() => patchOverlay({ hidden: !overlay.hidden })}
           >
             {overlay.hidden ? <EyeOffIcon size={13} /> : <EyeIcon size={13} />}
           </button>
-          <button className="btn-icon" title="Remove overlay" onClick={() => setOverlayPath('')}>
+          <button className="btn-icon" aria-label="Remove overlay" onClick={() => setOverlayPath('')}>
             <XIcon size={13} />
           </button>
         </div>
@@ -983,23 +983,23 @@ function VolumeView({
         <div className="viewer-status">
           <span
             className="st-item"
-            title={`Voxel index under the crosshair. Grid ${baseInfo.dims.join('×')} voxels of ${formatSpacing(baseInfo.pixDims)}${baseInfo.frames > 1 ? `, ${baseInfo.frames} frames` : ''}`}
+            aria-label={`Voxel index under the crosshair. Grid ${baseInfo.dims.join('×')} voxels of ${formatSpacing(baseInfo.pixDims)}${baseInfo.frames > 1 ? `, ${baseInfo.frames} frames` : ''}`}
           >
             <span className="st-key">Voxel</span>
             <span className="st-val">{readout ? readout.vox.join(' ') : '–'}</span>
           </span>
-          <span className="st-item" title="World coordinates under the crosshair">
+          <span className="st-item" aria-label="World coordinates under the crosshair">
             <span className="st-key">mm</span>
             <span className="st-val">{readout ? readout.mm.map(formatMm).join(' ') : '–'}</span>
           </span>
-          <span className="st-item" title="Intensity under the crosshair">
+          <span className="st-item" aria-label="Intensity under the crosshair">
             <span className="st-key">Value</span>
             <span className="st-val st-strong">
               {readout ? formatIntensity(readout.baseValue, isCT) : '–'}
             </span>
           </span>
           {info && (
-            <span className="st-item st-label" title="Overlay under the crosshair">
+            <span className="st-item st-label" aria-label="Overlay under the crosshair">
               <span className="st-key">{info.kind === 'label' ? 'Label' : 'Overlay'}</span>
               <span className="st-val st-strong">
                 {!readout
@@ -1013,7 +1013,7 @@ function VolumeView({
             </span>
           )}
           <span className="status-spacer" />
-          <span className="st-item status-window-anchor" title="Intensity window (right-drag on the image also adjusts it)">
+          <span className="st-item status-window-anchor" aria-label="Intensity window (right-drag on the image also adjusts it)">
             <span className="st-key">Window</span>
             <button
               className={windowOpen ? 'status-window active' : 'status-window'}
@@ -1099,7 +1099,7 @@ function LabelLegend({
             Show all
           </button>
         )}
-        <button className="btn-icon" title="Close" onClick={onClose}>
+        <button className="btn-icon" aria-label="Close" onClick={onClose}>
           <XIcon size={12} />
         </button>
       </div>
@@ -1118,7 +1118,7 @@ function LabelLegend({
             <div
               key={s.id}
               className={`label-row${shown ? '' : ' dim'}`}
-              title="Click to jump to this structure"
+              aria-label="Click to jump to this structure"
               onClick={() => onJump(s)}
             >
               <span className="label-swatch" style={{ background: cssColor(info.color(s.id)) }} />
@@ -1127,7 +1127,7 @@ function LabelLegend({
               <span className="label-ml">{formatMl(voxelsToMl(s.voxels, info.pixDims))}</span>
               <button
                 className="btn-icon"
-                title={shown && isolate ? 'Hide' : 'Show only this (add others with further clicks)'}
+                aria-label={shown && isolate ? 'Hide' : 'Show only this (add others with further clicks)'}
                 onClick={(e) => {
                   e.stopPropagation()
                   onToggle(s.id)
@@ -1141,7 +1141,7 @@ function LabelLegend({
         {rows.length === 0 && <div className="label-row empty">No match</div>}
       </div>
       {info.names.size === 0 && (
-        <div className="label-legend-foot" title={LABEL_NAMES_HELP}>
+        <div className="label-legend-foot" aria-label={LABEL_NAMES_HELP}>
           No names. Add <code>{labelFileCandidates(path)[0].split('/').pop()}</code> beside the
           file.
         </div>
@@ -1337,14 +1337,14 @@ export const Viewer = memo(function Viewer({
   return (
     <div className="panel">
       <div className="panel-header">
-        <span className="viewer-title" title={path}>
+        <span className="viewer-title" aria-label={path}>
           {path}
         </span>
         <span className="panel-actions">
           {kind === 'volume' && (
             <button
               className="btn-icon"
-              title="Save a PNG of the current view"
+              aria-label="Save a PNG of the current view"
               onClick={() => setSnapshotToken((t) => t + 1)}
             >
               <CameraIcon />
@@ -1353,7 +1353,7 @@ export const Viewer = memo(function Viewer({
           {kind === 'volume' && (
             <button
               className="btn-icon"
-              title="Reset view"
+              aria-label="Reset view"
               onClick={() => setResetToken((t) => t + 1)}
             >
               <RecenterIcon />
@@ -1363,7 +1363,7 @@ export const Viewer = memo(function Viewer({
             <span className="viewer-settings-anchor">
               <button
                 className={settingsOpen ? 'btn-icon active' : 'btn-icon'}
-                title="Viewer settings"
+                aria-label="Viewer settings"
                 onClick={() => setSettingsOpen((v) => !v)}
               >
                 <GearIcon />

@@ -61,14 +61,21 @@ export const MAX_LABELS = 4096
 
 export type LabelColorFn = (id: number) => [number, number, number]
 
-/** A discrete colormap covering ids 0..maxLabel: 0 transparent (background),
- *  every other id a distinct colour from *color*. */
-export function buildLabelColormap(maxLabel: number, color: LabelColorFn = labelColor): LabelColorMap {
+/** A discrete colormap covering ids 0..maxLabel, every id a distinct colour
+ *  from *color*. Id 0 is the background: transparent by default; *opaqueZero*
+ *  gives it full alpha for Niivue's atlas shader, which never draws id 0 but
+ *  averages each voxel's alpha with its neighbours' — a transparent background
+ *  would thin every label's edge voxels and fade thin structures. */
+export function buildLabelColormap(
+  maxLabel: number,
+  color: LabelColorFn = labelColor,
+  opaqueZero = false,
+): LabelColorMap {
   const n = Number.isFinite(maxLabel) ? Math.max(1, Math.min(MAX_LABELS, Math.ceil(maxLabel))) : 1
   const R = [0]
   const G = [0]
   const B = [0]
-  const A = [0]
+  const A = [opaqueZero ? 255 : 0]
   const I = [0]
   for (let i = 1; i <= n; i++) {
     const [r, g, b] = color(i)

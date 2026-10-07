@@ -249,9 +249,11 @@ function loadViewerSettings(): ViewerSettings {
 
 const CROSSHAIR_WIDTH_PERCENT = 0.3
 
-/** Apply the full settings set to a live Niivue instance (idempotent). */
-function applyViewerSettings(nv: Niivue, s: ViewerSettings): void {
-  nv.setInterpolation(s.interpolation === 'nearest')
+/** Apply the full settings set to a live Niivue instance (idempotent).
+ *  Niivue filters every layer the same way, and a label map sampled linearly
+ *  blends ids into colours no label has — so a label overlay pins nearest. */
+function applyViewerSettings(nv: Niivue, s: ViewerSettings, labelOverlay: boolean): void {
+  nv.setInterpolation(s.interpolation === 'nearest' || labelOverlay)
   nv.setRadiologicalConvention(s.radiological)
   nv.setSliceType(SLICE_TYPE_BY_PLANE[s.slicePlane])
   // Niivue sizes the crosshair in voxels by default, so it is thick on a
@@ -360,7 +362,9 @@ function defaultThreshold(info: OverlayInfo): number {
 function styleOverlay(nv: Niivue, ov: OverlayVol, state: OverlayState): void {
   const { vol, info } = ov
   if (info.kind === 'label') {
-    vol.setColormapLabel(buildLabelColormap(Math.max(info.maxLabel, 1), labelColor))
+    // Opaque background entry only on the atlas route: the generic fallback
+    // shader would paint id 0 with it.
+    vol.setColormapLabel(buildLabelColormap(Math.max(info.maxLabel, 1), labelColor, info.exactColors))
     // Isolation zeroes the hidden ids in the uploaded voxels rather than making
     // their colours transparent: Niivue's atlas shader averages a voxel's alpha
     // with its six neighbours', so a transparent id next to a visible one would
@@ -584,6 +588,11 @@ function VolumeView({
         overlayVolRef.current = loaded
         setOverlayVol(loaded)
       }
+      // The overlay set changed: a label map pins nearest sampling.
+      nv.setInterpolation(
+        settingsRef.current.interpolation === 'nearest' ||
+          overlayVolRef.current?.info.kind === 'label',
+      )
       setLoadError(null)
     } catch (e) {
       // A torn-down instance must not clear the overlay a newer mount is restoring.
@@ -669,7 +678,7 @@ function VolumeView({
         if (cancelled) return
         await loadVolume(nv, path, { replace: true })
         if (cancelled) return
-        applyViewerSettings(nv, settingsRef.current)
+        applyViewerSettings(nv, settingsRef.current, overlayVolRef.current?.info.kind === 'label')
         const base = nv.volumes[0]
         const hdr = base.hdr
         const gmin = base.global_min ?? 0
@@ -729,7 +738,7 @@ function VolumeView({
   // mount before the volume has loaded; the load effect applies settings then.
   useEffect(() => {
     const nv = nvRef.current
-    if (nv && nv.volumes.length > 0) applyViewerSettings(nv, settings)
+    if (nv && nv.volumes.length > 0) applyViewerSettings(nv, settings, overlayVolRef.current?.info.kind === 'label')
   }, [settings])
 
   // Restore the default view when the panel's reset button fires. Token 0 is the

@@ -62,13 +62,8 @@ export const MAX_LABELS = 4096
 export type LabelColorFn = (id: number) => [number, number, number]
 
 /** A discrete colormap covering ids 0..maxLabel: 0 transparent (background),
- *  every other id a distinct colour from *color*. With *visible* set, ids
- *  outside it are transparent too — how "isolate this structure" is drawn. */
-export function buildLabelColormap(
-  maxLabel: number,
-  color: LabelColorFn = labelColor,
-  visible?: ReadonlySet<number>,
-): LabelColorMap {
+ *  every other id a distinct colour from *color*. */
+export function buildLabelColormap(maxLabel: number, color: LabelColorFn = labelColor): LabelColorMap {
   const n = Number.isFinite(maxLabel) ? Math.max(1, Math.min(MAX_LABELS, Math.ceil(maxLabel))) : 1
   const R = [0]
   const G = [0]
@@ -80,7 +75,7 @@ export function buildLabelColormap(
     R.push(r)
     G.push(g)
     B.push(b)
-    A.push(visible && !visible.has(i) ? 0 : 255)
+    A.push(255)
     I.push(i)
   }
   return { R, G, B, A, I }

@@ -351,15 +351,21 @@ function defaultThreshold(info: OverlayInfo): number {
 
 /** Apply the overlay's styling (kind, colormap, threshold, isolation, visibility)
  *  to the loaded overlay volume. Re-run on every state change. */
-function styleOverlay(nv: Niivue, vol: NVImage, info: OverlayInfo, state: OverlayState): void {
+function styleOverlay(nv: Niivue, ov: OverlayVol, state: OverlayState): void {
+  const { vol, info } = ov
   if (info.kind === 'label') {
-    vol.setColormapLabel(
-      buildLabelColormap(
-        Math.max(info.maxLabel, 1),
-        labelColor,
-        state.isolate ? new Set(state.isolate) : undefined,
-      ),
-    )
+    vol.setColormapLabel(buildLabelColormap(Math.max(info.maxLabel, 1), labelColor))
+    // Isolation zeroes the hidden ids in the uploaded voxels rather than making
+    // their colours transparent: Niivue's atlas shader averages a voxel's alpha
+    // with its six neighbours', so a transparent id next to a visible one would
+    // still be drawn at 1/7 — a faint shadow of the hidden structure. Id 0 is
+    // skipped before that step. The original data stays in `raw` for the
+    // readout and the legend's jump.
+    const key = state.isolate ? state.isolate.join(',') : ''
+    if (key !== ov.isolateKey) {
+      vol.img = state.isolate ? maskLabels(ov.raw, state.isolate, info.maxLabel) : ov.raw
+      ov.isolateKey = key
+    }
     // The atlas shader (see routeThroughAtlasShader) takes colour and alpha
     // straight from the table; these only matter on the generic fallback path.
     vol.colormapType = COLORMAP_TYPE_TRANSPARENT_BELOW_MIN
@@ -388,7 +394,31 @@ interface Readout {
   overlayValue: number | null
 }
 
-type OverlayVol = { path: string; vol: NVImage; info: OverlayInfo }
+type OverlayVol = {
+  path: string
+  vol: NVImage
+  info: OverlayInfo
+  /** The loaded voxels, untouched by isolation (`vol.img` may be a masked copy). */
+  raw: NonNullable<NVImage['img']>
+  /** The isolation `vol.img` currently reflects ('' = none). */
+  isolateKey: string
+}
+
+/** A copy of *raw* with every id not in *keep* set to 0 (background). */
+function maskLabels(
+  raw: NonNullable<NVImage['img']>,
+  keep: readonly number[],
+  maxLabel: number,
+): NonNullable<NVImage['img']> {
+  const table = new Uint8Array(Math.max(0, Math.floor(maxLabel)) + 1)
+  for (const id of keep) if (id >= 0 && id < table.length) table[id] = 1
+  const out = new (raw.constructor as new (n: number) => typeof raw)(raw.length)
+  for (let i = 0; i < raw.length; i++) {
+    const v = raw[i]
+    out[i] = v > 0 && v < table.length && table[v] === 1 ? v : 0
+  }
+  return out
+}
 
 /**
  * Niivue-backed volume view: multiplanar slices + 3D render, wheel scrolls
@@ -521,7 +551,7 @@ function VolumeView({
     const current = overlayVolRef.current
     try {
       if (current && current.path === state.path && (!state.kind || state.kind === current.info.kind)) {
-        styleOverlay(nv, current.vol, current.info, state)
+        styleOverlay(nv, current, state)
         return
       }
       // Drop every overlay, whatever got stacked (index 0 is the base image).
@@ -537,8 +567,14 @@ function VolumeView({
         // The instance may have been torn down, or the request superseded,
         // while the data was being read; a later chained call handles the rest.
         if (nvRef.current !== nv || overlayRef.current.path !== state.path) return
-        styleOverlay(nv, vol, info, overlayRef.current)
-        const loaded = { path: state.path, vol, info }
+        const loaded: OverlayVol = {
+          path: state.path,
+          vol,
+          info,
+          raw: vol.img ?? new Uint8Array(),
+          isolateKey: '',
+        }
+        styleOverlay(nv, loaded, overlayRef.current)
         overlayVolRef.current = loaded
         setOverlayVol(loaded)
       }
@@ -805,6 +841,16 @@ function VolumeView({
       const vx = v.mm2vox([mm[0], mm[1], mm[2]])
       return v.getValue(vx[0], vx[1], vx[2], v.frame4D)
     })
+    // The overlay's uploaded voxels may be masked by isolation; report the file's.
+    const ov = overlayVolRef.current
+    if (ov && values.length > 1 && ov.vol.img !== ov.raw) {
+      const [nx, ny, nz] = ov.info.dims
+      const [i, j, k] = ov.vol.mm2vox([mm[0], mm[1], mm[2]])
+      values[1] =
+        i >= 0 && j >= 0 && k >= 0 && i < nx && j < ny && k < nz
+          ? ov.raw[i + j * nx + k * nx * ny]
+          : NaN
+    }
     hoverNext.current = {
       vox: [vox[0], vox[1], vox[2]],
       mm: [mm[0], mm[1], mm[2]],
@@ -842,8 +888,8 @@ function VolumeView({
     const ov = overlayVolRef.current
     if (!nv || !ov) return
     const affine = ov.vol.hdr?.affine
-    const img = ov.vol.img
-    if (!affine || !img) return
+    const img = ov.raw
+    if (!affine) return
     const [nx, ny, nz] = ov.info.dims
     const at = (i: number, j: number, k: number) => Math.round(img[i + j * nx + k * nx * ny])
     let [i, j, k] = stat.centroid.map(Math.round)

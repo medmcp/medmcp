@@ -4,7 +4,7 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
-## Unreleased
+## 0.4.0 — 2026-10-07
 
 ### Added
 

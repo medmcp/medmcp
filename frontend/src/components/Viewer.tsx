@@ -24,13 +24,10 @@ import {
   formatIntensity,
   formatMl,
   formatMm,
-  freesurferColor,
-  freesurferNames,
   labelColor,
   labelFileCandidates,
   labelStats,
   looksLikeCT,
-  looksLikeFreeSurfer,
   parseLabelNames,
   overlayFor,
   voxelsToMl,
@@ -163,7 +160,7 @@ interface OverlayInfo {
   maxLabel: number
   stats: LabelStat[]
   names: Map<number, string>
-  /** Colour per label id — the generated palette, or FreeSurfer's table. */
+  /** Colour per label id (the generated palette). */
   color: LabelColorFn
   dims: [number, number, number]
   pixDims: [number, number, number]
@@ -287,18 +284,13 @@ async function describeOverlay(vol: NVImage, path: string, forcedKind: OverlayKi
   const kind = forcedKind ?? classifyOverlayData(img, hdr?.scl_slope ?? 1, hdr?.scl_inter ?? 0)
   let stats: LabelStat[] = []
   let names = new Map<number, string>()
-  let color: LabelColorFn = labelColor
+  const color: LabelColorFn = labelColor
   let maxLabel = 0
   if (kind === 'label') {
     stats = labelStats(img, dims)
     maxLabel = stats.length ? stats[stats.length - 1].id : Math.ceil(vol.global_max ?? 1)
     routeThroughAtlasShader(vol, Math.min(0, Math.floor(vol.global_min ?? 0)), maxLabel)
     names = await fetchLabelNames(path)
-    const ids = stats.map((s) => s.id)
-    if (names.size === 0 && looksLikeFreeSurfer(ids)) {
-      names = freesurferNames(ids)
-      color = freesurferColor
-    }
   }
   return {
     kind,
@@ -1150,8 +1142,8 @@ function LabelLegend({
       </div>
       {info.names.size === 0 && (
         <div className="label-legend-foot" title={LABEL_NAMES_HELP}>
-          No names. Add <code>{labelFileCandidates(path)[0].split('/').pop()}</code> (index, name)
-          beside the file.
+          No names. Add <code>{labelFileCandidates(path)[0].split('/').pop()}</code> beside the
+          file.
         </div>
       )}
     </div>
@@ -1159,7 +1151,7 @@ function LabelLegend({
 }
 
 const LABEL_NAMES_HELP =
-  'A tab- or comma-separated table with an id column and a name column, as in BIDS (_dseg.tsv: index, name). FreeSurfer-coded maps are named from the FreeSurfer table without one.'
+  'A CSV with a label,structure header: one row per label id and its name, as the stacks write it. The viewer ships no colour table of its own.'
 
 /** Intensity window: presets plus editable bounds. Opens above the status bar. */
 function WindowPopover({

@@ -1,5 +1,3 @@
-import { FREESURFER_LUT } from './freesurferLut'
-
 /** Pure helpers behind the volume viewer: label palettes, overlay classification,
  *  label statistics, label-name files and intensity-window presets. No React, no
  *  Niivue instance — everything here is testable with plain arrays. */
@@ -187,52 +185,24 @@ export function labelStats(img: ArrayLike<number>, dims: [number, number, number
     .sort((a, b) => a.id - b.id)
 }
 
-/** Whether a set of present label ids reads as a FreeSurfer/FastSurfer
- *  segmentation: at least a handful of ids, nearly all of them in the table.
- *  Then FreeSurfer's own names and colours apply — the ones its users know. */
-export function looksLikeFreeSurfer(ids: readonly number[]): boolean {
-  if (ids.length < 5) return false
-  const known = ids.filter((i) => FREESURFER_LUT.has(i)).length
-  return known / ids.length >= 0.9
-}
-
-export function freesurferNames(ids: readonly number[]): Map<number, string> {
-  const names = new Map<number, string>()
-  for (const i of ids) {
-    const e = FREESURFER_LUT.get(i)
-    if (e) names.set(i, e.name)
-  }
-  return names
-}
-
-export function freesurferColor(id: number): [number, number, number] {
-  return FREESURFER_LUT.get(id)?.rgb ?? labelColor(id)
-}
-
-/** Candidate sidecar files naming the labels of a segmentation, best first.
+/** Sidecar files that may name the labels of a segmentation, best first.
  *
- *  The viewer knows nothing about which tool made a label map; names come
- *  from a table beside it. The contract for stacks is BIDS: `<name>_dseg.tsv`
- *  (`index`, `name` columns) next to `<name>_dseg.nii.gz`. Also accepted:
- *  `<stem>_labels.csv`/`.tsv` (what the TotalSegmentator stack writes) and,
- *  for a file not named `_dseg`, `<file>.tsv`/`.csv`. Without any of these a
- *  FreeSurfer-coded map is named from FreeSurfer's table; anything else shows
- *  ids only. */
+ *  The viewer knows nothing about which tool made a label map and ships no
+ *  colour table; names come only from a file beside the volume. The stacks'
+ *  convention: `<stem>_dseg.nii.gz` is accompanied by `<stem>_labels.csv` with
+ *  a `label,structure` header (what the TotalSegmentator stack writes). A
+ *  volume not named `_dseg` is paired with `<name>_labels.csv`. Without the
+ *  file the legend shows ids only. */
 export function labelFileCandidates(volumePath: string): string[] {
   const base = volumePath.replace(/\.(nii(\.gz)?|mgz|mgh|nrrd|nhdr|mha|mhd)$/i, '')
-  const out: string[] = []
-  if (/_dseg$/i.test(base)) {
-    const stem = base.replace(/_dseg$/i, '')
-    out.push(`${base}.tsv`, `${stem}_labels.csv`, `${stem}_labels.tsv`)
-  } else {
-    out.push(`${base}.tsv`, `${base}_labels.csv`, `${base}_labels.tsv`, `${base}.csv`)
-  }
-  return out
+  const stem = base.replace(/_dseg$/i, '')
+  return stem === base ? [`${base}_labels.csv`] : [`${stem}_labels.csv`, `${base}_labels.csv`]
 }
 
-/** Parse a label-name table. Accepts a header row (`label,structure`,
- *  `index\tname`, …) or none; the first numeric column is the id, the first
- *  non-numeric column after it the name. Comma, tab or semicolon separated. */
+/** Parse a label-name table. Expects the stacks' `label,structure` header but
+ *  tolerates none or another (`index\tname`): the first numeric column is the
+ *  id, the first non-numeric column after it the name. Comma, tab or semicolon
+ *  separated. */
 export function parseLabelNames(text: string): Map<number, string> {
   const names = new Map<number, string>()
   for (const raw of text.split(/\r?\n/)) {

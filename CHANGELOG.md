@@ -8,7 +8,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Added
 
-- Viewer: label overlays size their colour table to the data (a 117-structure TotalSegmentator result no longer collapses above label 64), and a legend lists the structures present with names (from the stack's labels file, or FreeSurfer's table for FastSurfer output), volumes in mL, click-to-jump and isolate.
+- Viewer: label overlays size their colour table to the data (a 117-structure TotalSegmentator result no longer collapses above label 64), and a legend lists the structures present with names (from the `_labels.csv` the stack writes beside the segmentation), volumes in mL, click-to-jump and isolate.
 - Viewer: continuous overlays (probability maps, co-registered images, warps) render with a colormap and threshold instead of being forced into label colours; the type can be switched by hand.
 - Viewer: a status bar reads out voxel, millimetre position, intensity and label under the crosshair, the volume's grid, and the intensity window with presets (Auto, Full range, and CT soft tissue/lung/bone/brain/liver on Hounsfield data).
 - Viewer: files a tool result names appear as chips in the chat with View and Overlay actions, so the agent's output opens without hunting in the explorer.
@@ -17,7 +17,7 @@ Notable, user-visible changes to MedMCP. Format follows
 ### Fixed
 
 - Viewer: label overlays drew several ids in one colour and a hidden label showed when its neighbour was visible (Niivue's generic shader filters the colour table); label maps now go through its atlas shader, which looks ids up exactly.
-- Viewer: the legend says which sidecar file would name the labels when none is found.
+- Viewer: the legend says which `_labels.csv` would name the labels when none is found; the viewer carries no label table of its own.
 - Viewer: `.dcm` files showed a Niivue error; they now say to convert the series to NIfTI with the DICOM stack.
 - Viewer: a panel resize no longer re-downloads the volume.
 

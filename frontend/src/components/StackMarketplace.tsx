@@ -278,7 +278,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
   return (
     <>
       <div className="modal-backdrop" onClick={onClose} />
-      <div className="market" role="dialog" aria-label="Tool stacks">
+      <div className="market" role="dialog">
         <div className="panel-header">
           <span>Tool stacks</span>
           <span className="panel-actions">
@@ -341,7 +341,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
                         ? 'Installed outside the catalogue.'
                         : 'No description provided.')}
                   </div>
-                  <div className="market-image" aria-label={i.image}>
+                  <div className="market-image">
                     {i.version ? `v${i.version}` : i.image}
                   </div>
                   <div className="market-card-foot">

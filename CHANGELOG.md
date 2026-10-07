@@ -16,6 +16,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Fixed
 
+- Chat: a tool result, and its View/Overlay chips, stays after a reload or resume; the replayed call arrived without its output before.
 - No more browser tooltips popping up over the workspace: hover titles are gone, icon buttons keep an accessible label.
 - Viewer: label overlays drew several ids in one colour and a hidden label showed when its neighbour was visible (Niivue's generic shader filters the colour table); label maps now go through its atlas shader, which looks ids up exactly.
 - Viewer: the legend says which `_labels.csv` would name the labels when none is found; the viewer carries no label table of its own.

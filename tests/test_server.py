@@ -585,6 +585,41 @@ class TestToolCallRawInput:
         assert update_frame["rawInput"] == {"image": "/data/T1.nii.gz"}
 
     @pytest.mark.asyncio
+    async def test_replayed_settled_call_carries_its_output(self) -> None:
+        """A finished call replayed on resume keeps its output.
+
+        vibe replays it as one ``tool_call`` frame with the output in ``content``
+        and no ``tool_call_update`` after it; the browser needs that output to show
+        the result and its file chips.
+        """
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        conn = server._ChatConnection(cast("Any", _StubWs()), "sid", cast("Any", queue), [])
+        await queue.put(
+            self._update(
+                {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_1",
+                    "title": "medmcp-neuro-core_segment_brain",
+                    "status": "completed",
+                    "rawInput": {"input_path": "/data/T1.nii.gz"},
+                    "content": [
+                        {
+                            "type": "content",
+                            "content": {"type": "text", "text": "Seg labels: /data/T1_dseg.mgz"},
+                        }
+                    ],
+                }
+            )
+        )
+        conn.start_idle_pump()
+        await asyncio.sleep(0.05)
+        await conn._stop_idle_pump()
+
+        frame = next(m for m in cast("_StubWs", conn.ws).sent if m.get("type") == "tool_call")
+        assert frame["output"] == "Seg labels: /data/T1_dseg.mgz"
+        assert frame["pathGuardRetry"] is False
+
+    @pytest.mark.asyncio
     async def test_update_without_arguments_keeps_the_known_ones(self) -> None:
         """A status-only update (vibe sends rawInput only when detail changed)."""
         queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
@@ -1076,3 +1111,14 @@ class TestReplayRuns:
         with client.websocket_connect("/ws/replay", headers=_WS_HEADERS) as ws:
             ws.send_json({"attach": "nope"})
             assert ws.receive_json()["ok"] is False
+
+
+def test_clip_output_cuts_on_whitespace() -> None:
+    """A long output is shortened at a word boundary, never through a path."""
+    path = "/data/sub-01/T1_dseg.nii.gz"
+    text = ("x" * 1990) + " " + path
+    clipped = server._clip_output(text)
+    assert clipped == ("x" * 1990) + " …"
+    assert server._clip_output("short") == "short"
+    # No whitespace anywhere near the limit: fall back to a hard cut.
+    assert len(server._clip_output("y" * 5000)) == 2000 + 2

@@ -271,7 +271,6 @@ function PathCell({
       className={dropReady ? `${className} drop-ready` : className}
       value={value}
       placeholder={placeholder}
-      aria-label={value || undefined}
       onFocus={onFocus}
       onChange={(e) => onChange(e.target.value)}
       onDragOver={(e) => {
@@ -318,9 +317,10 @@ function Requirements({ requires }: { requires: StackRequirement[] }) {
               : ''
           const s = r.status ? REQ_STATUS[r.status] : null
           return (
-            <li key={r.stack} aria-label={pin ? `${s?.title ?? ''} · ${pin}`.replace(/^ · /, '') : s?.title}>
+            <li key={r.stack}>
               {s && <span className={`wf-req-status ${s.cls}`}>{s.icon}</span>}
               <code>{r.stack}</code>
+              {pin && <span className="wf-req-pin">{pin}</span>}
             </li>
           )
         })}
@@ -339,7 +339,7 @@ function StepList({ steps }: { steps: { server: string; tool: string }[] }) {
   return (
     <ol className="wf-steps">
       {steps.map((s, i) => (
-        <li key={i} aria-label={`${s.server}:${s.tool}`}>
+        <li key={i}>
           <code>{s.tool}</code>
         </li>
       ))}
@@ -477,7 +477,13 @@ function ItemRows({
 function ProgressBar({ frac, label, active }: { frac: number; label: string; active?: boolean }) {
   const pct = Math.round(Math.min(Math.max(frac, 0), 1) * 100)
   return (
-    <div className="wf-progress" aria-label={`${pct}%`}>
+    <div
+      className="wf-progress"
+      role="progressbar"
+      aria-valuenow={pct}
+      aria-valuemin={0}
+      aria-valuemax={100}
+    >
       <span className={active ? 'wf-progress-bar active' : 'wf-progress-bar'}>
         <span className="wf-progress-fill" style={{ width: `${pct}%` }} />
       </span>
@@ -1080,7 +1086,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         }}
       >
         {required.length > 0 && (
-          <div className="wf-source-cards" role="radiogroup" aria-label="Where the inputs come from">
+          <div className="wf-source-cards" role="radiogroup">
             {SOURCES.map((o) => (
               <button
                 key={o.value}
@@ -1126,7 +1132,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             <div className="wf-batch-row wf-batch-head">
               <span className="wf-batch-idx">#</span>
               {required.map((i) => (
-                <span key={i.name} className="wf-batch-col" aria-label={`${i.name}${i.description ? ` — ${i.description}` : ''}`}>
+                <span key={i.name} className="wf-batch-col">
                   {inputTitle(i)}
                 </span>
               ))}
@@ -1157,15 +1163,6 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                   ))}
                   <span
                     className={`wf-batch-status ${verdict ? (verdict.ok ? (warn ? 'warn' : 'ok') : 'fail') : ''}`}
-                    aria-label={
-                      verdict
-                        ? verdict.ok
-                          ? warn
-                            ? warn.note
-                              : 'ready'
-                          : (verdict.error ?? 'cannot run')
-                        : ''
-                    }
                   >
                     {verdict ? (verdict.ok ? (warn ? '⚠' : '✓') : '✗') : ''}
                   </span>
@@ -1286,7 +1283,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                     <code>{s.tool}</code>
                     <span className="wf-args-inline">
                       {Object.entries(s.arguments).map(([k, v]) => (
-                        <span key={k} aria-label={typeof v === 'string' ? v : undefined}>
+                        <span key={k}>
                           {k}: {display(v, root)}
                         </span>
                       ))}
@@ -1474,7 +1471,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
           <div className="wf-run-card">
             <div className="wf-run-card-head">
               <PlayIcon size={12} /> {run.workflow}
-              <span className="wf-recent-muted wf-run-card-id" aria-label={run.runId}>
+              <span className="wf-recent-muted wf-run-card-id">
                 {run.total > 1 ? `${run.total} items` : 'single run'}
               </span>
             </div>

@@ -202,6 +202,7 @@ export function ChatsMenu({
       >
         <span
           className={`prov-dot${s.hasProvenance ? ' on' : ''}`}
+          role="img"
           aria-label={s.hasProvenance ? 'Has a provenance record' : 'No provenance record'}
         />
         <span className="session-main">
@@ -279,7 +280,6 @@ export function ChatsMenu({
       <button
         ref={triggerRef}
         className="btn-plain chats-menu-trigger"
-        aria-label="Open a previous chat"
         onClick={toggle}
       >
         Chats

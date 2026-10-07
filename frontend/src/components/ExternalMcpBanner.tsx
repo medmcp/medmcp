@@ -65,7 +65,7 @@ export function ExternalMcpBanner({ refreshSignal, onReview }: ExternalMcpBanner
         </strong>{' '}
         Anything the agent sends to an external server leaves this machine.
       </span>
-      <span className="ext-banner-names" aria-label="Enabled external servers">
+      <span className="ext-banner-names">
         {active.map((s) => s.name).join(', ')}
       </span>
       <button className="btn-plain ext-banner-action" onClick={onReview} disabled={busy}>

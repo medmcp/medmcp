@@ -138,7 +138,7 @@ export function UpdateWindow({ open, onClose, state, onDismiss }: UpdateWindowPr
   return (
     <>
       <div className="modal-backdrop" onClick={close} />
-      <div className="upwin" role="dialog" aria-label="Software update">
+      <div className="upwin" role="dialog">
         <div className="panel-header">
           <span>Software update</span>
           <span className="panel-actions">

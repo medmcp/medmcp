@@ -118,7 +118,7 @@ function NodeRow({
           }}
         />
       ) : (
-        <span className="tree-name" aria-label={node.data.id}>
+        <span className="tree-name">
           {node.data.name}
         </span>
       )}

@@ -141,7 +141,7 @@ export function ModelsWindow({ open, onClose }: ModelsWindowProps) {
   return (
     <>
       <div className="modal-backdrop" onClick={onClose} />
-      <div className="extwin" role="dialog" aria-label="Models">
+      <div className="extwin" role="dialog">
         <div className="panel-header">
           <span>Models</span>
           <span className="panel-actions">
@@ -274,13 +274,12 @@ export function ModelsWindow({ open, onClose }: ModelsWindowProps) {
 function ModelLogo({ id, vendor }: { id: string; vendor: string }) {
   const logo = MODEL_LOGOS[id]
   if (!logo) return <span className="models-logo" aria-hidden="true" />
-  if (!logo.mono) return <img className="models-logo" src={logo.src} alt={vendor} title={vendor} />
+  if (!logo.mono) return <img className="models-logo" src={logo.src} alt={vendor} />
   const mask = `url("${logo.src}")`
   return (
     <span
       className="models-logo mono"
       role="img"
-      aria-label={vendor}
       style={{ maskImage: mask, WebkitMaskImage: mask }}
     />
   )

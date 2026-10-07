@@ -55,7 +55,7 @@ export function CloudModelBanner({ refreshSignal, onReview }: CloudModelBannerPr
         <strong>Cloud model in use.</strong> Everything in a chat, including what the agent
         reads, is sent outside this machine.
       </span>
-      <span className="ext-banner-names" aria-label="The model chats are sent to">
+      <span className="ext-banner-names">
         {model.model} · {model.api_base}
       </span>
       <button className="btn-plain ext-banner-action" onClick={onReview} disabled={busy}>

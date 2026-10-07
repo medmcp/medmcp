@@ -2190,6 +2190,13 @@ textarea.wf-input {
   text-align: center;
 }
 
+.wf-req-pin {
+  margin-left: 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
 .wf-req-status.ok {
   color: var(--ok);
 }
@@ -4057,6 +4064,7 @@ textarea.wf-input {
   display: inline-flex;
   align-items: center;
   gap: 2px;
+  line-height: 16px;
   max-width: 100%;
   background: var(--dark);
   border: 1px solid var(--border);

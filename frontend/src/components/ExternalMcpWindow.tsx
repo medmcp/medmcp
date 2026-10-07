@@ -24,7 +24,7 @@ export function ExternalMcpWindow({ open, onClose, onChanged }: ExternalMcpWindo
   return (
     <>
       <div className="modal-backdrop" onClick={onClose} />
-      <div className="extwin" role="dialog" aria-label="External MCP servers">
+      <div className="extwin" role="dialog">
         <div className="panel-header">
           <span>External MCP servers</span>
           <span className="panel-actions">

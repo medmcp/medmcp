@@ -51,17 +51,22 @@ export default function App() {
   // the chat can set it (a tool result's "Overlay" chip) and so it survives the
   // viewer's resize rebuild.
   const [overlay, setOverlay] = useState<OverlayState>(EMPTY_OVERLAY)
-  const overlayFile = useCallback(
-    (p: string) => {
-      // Nothing to overlay onto (or the same file): open it as the base instead.
-      if (!isVolumePath(openPath) || openPath === p) {
-        setOpenPath(p)
-        return
-      }
-      setOverlay(overlayFor(openPath, p))
-    },
-    [openPath],
-  )
+  // Read through a ref so the callback keeps its identity: it reaches every
+  // memoised tool card in the chat, which would otherwise re-render (and
+  // re-scan its output for paths) each time a file is opened.
+  const openPathRef = useRef(openPath)
+  useEffect(() => {
+    openPathRef.current = openPath
+  }, [openPath])
+  const overlayFile = useCallback((p: string) => {
+    const base = openPathRef.current
+    // Nothing to overlay onto (or the same file): open it as the base instead.
+    if (!isVolumePath(base) || base === p) {
+      setOpenPath(p)
+      return
+    }
+    setOverlay(overlayFor(base, p))
+  }, [])
   // The absolute workspace root, for mapping paths in tool results.
   const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null)
   useEffect(() => {
@@ -218,7 +223,6 @@ export default function App() {
           {updateNotice && (
             <button
               className="update-pill"
-              aria-label="A newer MedMCP release is available"
               onClick={() => setUpdateOpen(true)}
             >
               <span className="update-pill-dot" />v{updateNotice.version} available

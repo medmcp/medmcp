@@ -309,6 +309,9 @@ export type ServerFrame =
       kind?: string | null
       toolName?: string
       rawInput?: unknown
+      /** A settled call replayed on resume carries its output here. */
+      output?: string | null
+      pathGuardRetry?: boolean
     }
   | {
       type: 'tool_call_update'

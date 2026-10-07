@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import { Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import type { NVImage, NiiVueLocation } from '@niivue/niivue'
 import { rawUrl } from '../api'
@@ -26,12 +26,12 @@ import {
   formatMm,
   labelColor,
   labelFileCandidates,
+  NII_INTENT_LABEL,
   labelStats,
   looksLikeCT,
   parseLabelNames,
   overlayFor,
   voxelsToMl,
-  type LabelColorFn,
   type LabelStat,
   type OverlayKind,
   type OverlayState,
@@ -48,44 +48,33 @@ const COLORMAP_TYPE_TRANSPARENT_BELOW_MIN = 1
 // linearly filtered gradient and clamps small ids to one texel — measured on a
 // FreeSurfer map, ids 2–13 all came out the same colour and a hidden id showed
 // whenever its neighbour was visible.
-const NII_INTENT_LABEL = 1002
 const DT_UINT8 = 2
 const DT_INT16 = 4
+const DT_RGB24 = 128
 const DT_UINT16 = 512
+const DT_RGBA32 = 2304
 
 /** Mark *vol* as a label image so Niivue's atlas shader draws it. That shader
  *  reads integer textures only, so the voxels are converted to the narrowest
  *  integer type that holds the ids (as Niivue itself does for FreeSurfer
  *  files it recognises by name). Returns false — leaving the generic shader in
  *  charge — when the data cannot be expressed that way. */
-function routeThroughAtlasShader(vol: NVImage, minId: number, maxId: number): boolean {
+function routeThroughAtlasShader(vol: NVImage, maxId: number): boolean {
   const hdr = vol.hdr
   const img = vol.img
   if (!hdr || !img) return false
+  const dt = hdr.datatypeCode
+  // Colour volumes interleave channels; their bytes are not ids.
+  if (dt === DT_RGB24 || dt === DT_RGBA32) return false
   // The atlas shader reads raw voxel values; a scaled file would mislabel.
   if ((hdr.scl_slope !== 0 && hdr.scl_slope !== 1) || hdr.scl_inter !== 0) return false
-  let target: number
-  if (minId < 0) {
-    if (minId < -32768 || maxId > 32767) return false
-    target = DT_INT16
-  } else if (maxId <= 255) {
-    target = DT_UINT8
-  } else if (maxId <= 65535) {
-    target = DT_UINT16
-  } else {
-    return false
-  }
-  const dt = hdr.datatypeCode
-  const alreadyFits =
-    dt === target || (dt === DT_INT16 && minId >= 0 && maxId <= 32767) || (dt === DT_UINT16 && minId >= 0)
+  if (maxId > 65535) return false
+  const target = maxId <= 255 ? DT_UINT8 : DT_UINT16
+  const alreadyFits = dt === target || dt === DT_UINT16 || (dt === DT_INT16 && maxId <= 32767)
   if (!alreadyFits) {
-    const out =
-      target === DT_UINT8
-        ? new Uint8Array(img.length)
-        : target === DT_INT16
-          ? new Int16Array(img.length)
-          : new Uint16Array(img.length)
-    for (let i = 0; i < img.length; i++) out[i] = Math.round(img[i])
+    const out = target === DT_UINT8 ? new Uint8Array(img.length) : new Uint16Array(img.length)
+    // Negative values (a sign-flipped background) read as id 0.
+    for (let i = 0; i < img.length; i++) out[i] = Math.max(0, Math.round(img[i]))
     vol.img = out
     hdr.datatypeCode = target
     hdr.numBitsPerVoxel = target === DT_UINT8 ? 8 : 16
@@ -108,7 +97,15 @@ interface CachedVolume {
 }
 
 const volumeCache = new Map<string, CachedVolume>()
-const VOLUME_CACHE_MAX = 4
+/** Byte budget for the cache: a few compressed volumes, not a few of whatever
+ *  size the server sends — four uncompressed 512³ int16 scans would be a GB. */
+const VOLUME_CACHE_BYTES = 256 * 1024 * 1024
+
+function cachedBytes(): number {
+  let n = 0
+  for (const v of volumeCache.values()) n += v.buffer.byteLength
+  return n
+}
 
 function headerStamp(r: Response): string {
   return `${r.headers.get('last-modified') ?? ''}|${r.headers.get('content-length') ?? ''}|${r.headers.get('etag') ?? ''}`
@@ -132,7 +129,8 @@ async function fetchVolumeBytes(url: string): Promise<ArrayBuffer> {
   if (!r.ok) throw new Error(`could not load volume (HTTP ${r.status})`)
   const buffer = await r.arrayBuffer()
   volumeCache.set(url, { buffer, etag: headerStamp(r) })
-  while (volumeCache.size > VOLUME_CACHE_MAX) {
+  // Evict least recently used until under budget; the newest entry always stays.
+  while (volumeCache.size > 1 && cachedBytes() > VOLUME_CACHE_BYTES) {
     const oldest = volumeCache.keys().next().value
     if (oldest === undefined) break
     volumeCache.delete(oldest)
@@ -141,11 +139,20 @@ async function fetchVolumeBytes(url: string): Promise<ArrayBuffer> {
 }
 
 /** Load *path* into `nv` as the base volume (replace = true) or as an added
- *  overlay, from the bytes cache. Niivue takes the file type from `name`. */
+ *  overlay, from the bytes cache. Niivue takes the file type from `name`.
+ *
+ *  Analyze pairs (`.hdr` + `.img`) bypass the cache: Niivue finds the sibling
+ *  by rewriting the URL's extension, which a blob URL has none of. */
 async function loadVolume(nv: Niivue, path: string, opts: { opacity?: number; replace: boolean }) {
+  const name = path.split('/').pop() ?? path
+  if (/\.(hdr|img)$/i.test(name)) {
+    const url = rawUrl(path)
+    if (opts.replace) await nv.loadVolumes([{ url, name }])
+    else await nv.addVolumeFromUrl({ url, name, opacity: opts.opacity ?? 1 })
+    return
+  }
   const bytes = await fetchVolumeBytes(rawUrl(path))
   const blobUrl = URL.createObjectURL(new Blob([bytes]))
-  const name = path.split('/').pop() ?? path
   try {
     if (opts.replace) await nv.loadVolumes([{ url: blobUrl, name }])
     else await nv.addVolumeFromUrl({ url: blobUrl, name, opacity: opts.opacity ?? 1 })
@@ -160,8 +167,9 @@ interface OverlayInfo {
   maxLabel: number
   stats: LabelStat[]
   names: Map<number, string>
-  /** Colour per label id (the generated palette). */
-  color: LabelColorFn
+  /** False when the file could not be routed through the atlas shader and is
+   *  drawn by Niivue's generic one, whose label colours are approximate. */
+  exactColors: boolean
   dims: [number, number, number]
   pixDims: [number, number, number]
   min: number
@@ -230,10 +238,12 @@ function loadViewerSettings(): ViewerSettings {
       if (!(merged.renderScale in RENDER_SCALE_DPR)) merged.renderScale = 'native'
       return merged
     }
+    // Legacy standalone preference, migrated into the settings object on save.
+    return { ...DEFAULT_VIEWER_SETTINGS, radiological: localStorage.getItem(RADIOLOGICAL_KEY) === 'true' }
   } catch {
-    // malformed storage — fall back to defaults (+ legacy migration below)
+    // storage blocked or malformed — defaults for this session
+    return { ...DEFAULT_VIEWER_SETTINGS }
   }
-  return { ...DEFAULT_VIEWER_SETTINGS, radiological: localStorage.getItem(RADIOLOGICAL_KEY) === 'true' }
 }
 
 /** Apply the full settings set to a live Niivue instance (idempotent). */
@@ -281,15 +291,21 @@ async function describeOverlay(vol: NVImage, path: string, forcedKind: OverlayKi
     hdr?.pixDims[2] ?? 1,
     hdr?.pixDims[3] ?? 1,
   ]
-  const kind = forcedKind ?? classifyOverlayData(img, hdr?.scl_slope ?? 1, hdr?.scl_inter ?? 0)
+  const dt = hdr?.datatypeCode ?? 0
+  const isColor = dt === DT_RGB24 || dt === DT_RGBA32
+  const kind =
+    forcedKind ??
+    (isColor
+      ? 'continuous'
+      : classifyOverlayData(img, hdr?.scl_slope ?? 1, hdr?.scl_inter ?? 0, hdr?.intent_code ?? 0))
   let stats: LabelStat[] = []
   let names = new Map<number, string>()
-  const color: LabelColorFn = labelColor
   let maxLabel = 0
+  let exactColors = true
   if (kind === 'label') {
     stats = labelStats(img, dims)
     maxLabel = stats.length ? stats[stats.length - 1].id : Math.ceil(vol.global_max ?? 1)
-    routeThroughAtlasShader(vol, Math.min(0, Math.floor(vol.global_min ?? 0)), maxLabel)
+    exactColors = routeThroughAtlasShader(vol, maxLabel)
     names = await fetchLabelNames(path)
   }
   return {
@@ -297,7 +313,7 @@ async function describeOverlay(vol: NVImage, path: string, forcedKind: OverlayKi
     maxLabel,
     stats,
     names,
-    color,
+    exactColors,
     dims,
     pixDims,
     min: vol.global_min ?? 0,
@@ -322,21 +338,24 @@ async function fetchLabelNames(volumePath: string): Promise<Map<number, string>>
   return new Map()
 }
 
-/** Default threshold for a continuous overlay: hide exact zeros of a
- *  non-negative map (probabilities, lesion maps), show everything of a signed one. */
+/** Default threshold for a continuous overlay: hide the zeros of a non-negative
+ *  map (probabilities, lesion maps); for a signed map start at the 2nd
+ *  percentile, as Niivue does. A constant map is shown whole. */
 function defaultThreshold(info: OverlayInfo): number {
-  if (info.min >= 0) return Math.max(info.robustMin, info.min + 1e-6)
+  if (info.max <= info.min) return info.min
+  // Just above the minimum, scaled to the map so the field reads 0.001, not 1e-6.
+  if (info.min >= 0) return Math.max(info.robustMin, info.min + (info.max - info.min) * 1e-3)
   return info.robustMin
 }
 
 /** Apply the overlay's styling (kind, colormap, threshold, isolation, visibility)
- *  to the loaded overlay volume. Re-run on every state change; cheap. */
+ *  to the loaded overlay volume. Re-run on every state change. */
 function styleOverlay(nv: Niivue, vol: NVImage, info: OverlayInfo, state: OverlayState): void {
   if (info.kind === 'label') {
     vol.setColormapLabel(
       buildLabelColormap(
         Math.max(info.maxLabel, 1),
-        info.color,
+        labelColor,
         state.isolate ? new Set(state.isolate) : undefined,
       ),
     )
@@ -347,7 +366,8 @@ function styleOverlay(nv: Niivue, vol: NVImage, info: OverlayInfo, state: Overla
     vol.cal_max = Math.max(info.maxLabel, 1) + 0.5
   } else {
     vol.colormapLabel = null
-    vol.colormap = state.colormap
+    // The colormap setter re-histograms the whole volume; only touch it on a change.
+    if (vol.colormap !== state.colormap) vol.colormap = state.colormap
     vol.colormapType = COLORMAP_TYPE_TRANSPARENT_BELOW_MIN
     vol.cal_min = state.threshold ?? defaultThreshold(info)
     // Top of the colour scale at the robust maximum, not the global one: a few
@@ -365,8 +385,6 @@ interface Readout {
   mm: [number, number, number]
   baseValue: number
   overlayValue: number | null
-  /** 0 axial, 1 coronal, 2 sagittal — the pane the pointer is over. */
-  pane: number
 }
 
 type OverlayVol = { path: string; vol: NVImage; info: OverlayInfo }
@@ -500,11 +518,11 @@ function VolumeView({
     if (!nv) return
     const state = overlayRef.current
     const current = overlayVolRef.current
-    if (current && current.path === state.path && (!state.kind || state.kind === current.info.kind)) {
-      styleOverlay(nv, current.vol, current.info, state)
-      return
-    }
     try {
+      if (current && current.path === state.path && (!state.kind || state.kind === current.info.kind)) {
+        styleOverlay(nv, current.vol, current.info, state)
+        return
+      }
       // Drop every overlay, whatever got stacked (index 0 is the base image).
       while (nv.volumes.length > 1) {
         nv.removeVolume(nv.volumes[nv.volumes.length - 1])
@@ -525,6 +543,8 @@ function VolumeView({
       }
       setLoadError(null)
     } catch (e) {
+      // A torn-down instance must not clear the overlay a newer mount is restoring.
+      if (nvRef.current !== nv) return
       onOverlayChangeRef.current({ ...EMPTY_OVERLAY, base: path })
       setLoadError(`Could not load overlay: ${String(e)}`)
     }
@@ -568,7 +588,6 @@ function VolumeView({
         mm: [loc.mm[0], loc.mm[1], loc.mm[2]],
         baseValue: base?.value ?? NaN,
         overlayValue: ov ? ov.value : null,
-        pane: loc.axCorSag,
       }
       if (!raf) {
         raf = requestAnimationFrame(() => {
@@ -592,7 +611,12 @@ function VolumeView({
         // memory-constrained GPUs — so it's toggleable. Independent of the
         // render scale (supersampling), which is set via forceDevicePixelRatio.
         await nv.attachToCanvas(canvas, s0.antialias)
-        nv.setSliceType(SLICE_TYPE.MULTIPLANAR)
+        // Niivue makes the canvas focusable and binds its own hotkeys to it
+        // (V cycles the layout, M the drag mode, H/J/K/L move the crosshair),
+        // which would silently diverge from the settings shown. Keep focus on
+        // the dropzone, whose handler owns the keys; wheel scrolling does not
+        // need focus.
+        canvas.removeAttribute('tabindex')
         // Niivue streams the download/inflate, but parsing the volume and the
         // initial WebGL upload + 3D render run synchronously on the main thread
         // — a big volume briefly freezes the tab. Yield a frame here so the
@@ -639,6 +663,9 @@ function VolumeView({
       nvRef.current = null
       overlayVolRef.current = null
       if (raf) cancelAnimationFrame(raf)
+      // The hover frame (hoverRaf) is left to fire: a setState after unmount
+      // is a no-op in React 19, and touching that ref here would make the
+      // pointer handler's writes trip react-hooks/immutability.
       // Each opened file (and each resize-settle) remounts this view and builds
       // a fresh Niivue + WebGL context. cleanup() removes Niivue's observers and
       // listeners, then we force-release the GL context: browsers cap live
@@ -683,7 +710,8 @@ function VolumeView({
   // Every overlay change goes through the serialized chain; applyOverlay works
   // out whether that means a load, a re-read or only a restyle.
   useEffect(() => {
-    overlayOpRef.current = overlayOpRef.current.then(applyOverlay)
+    // A rejected link must not end the chain: every later change would be ignored.
+    overlayOpRef.current = overlayOpRef.current.then(applyOverlay, () => undefined)
   }, [overlay, applyOverlay])
 
   const patchOverlay = (patch: Partial<OverlayState>) =>
@@ -726,7 +754,7 @@ function VolumeView({
   const onKeyDown = (e: React.KeyboardEvent) => {
     const nv = nvRef.current
     if (!nv || nv.volumes.length === 0) return
-    if (e.key === 'o' || e.key === 'O') {
+    if ((e.key === 'o' || e.key === 'O') && !e.ctrlKey && !e.metaKey && !e.altKey) {
       if (overlayRef.current.path) patchOverlay({ hidden: !overlayRef.current.hidden })
       e.preventDefault()
       return
@@ -740,17 +768,18 @@ function VolumeView({
     const plane = settingsRef.current.slicePlane
     const pane =
       plane === 'axial' ? 0 : plane === 'coronal' ? 1 : plane === 'sagittal' ? 2 : paneRef.current
+    // moveCrosshairInVox redraws and fires onLocationChange itself.
     if (pane === 0) nv.moveCrosshairInVox(0, 0, step)
     else if (pane === 1) nv.moveCrosshairInVox(0, step, 0)
     else nv.moveCrosshairInVox(step, 0, 0)
-    nv.createOnLocationChange()
   }
 
   /** Read position, intensity and label under the pointer — what a reader
    *  expects from a status bar, where Niivue itself only reports the crosshair
    *  (set by clicking). Also remembers which pane the pointer is over, for the
-   *  slice keys. Coalesced to one update per frame. */
+   *  slice keys. Coalesced to one update per frame — the last sample wins. */
   const hoverRaf = useRef(0)
+  const hoverNext = useRef<Readout | null>(null)
   const onPointerMove = (e: React.PointerEvent) => {
     const nv = nvRef.current
     const canvas = canvasRef.current
@@ -767,23 +796,24 @@ function VolumeView({
     paneRef.current = tile.axCorSag
     const frac = nv.canvasPos2frac([x, y])
     if (frac[0] < 0) return
-    const mm = nv.frac2mm(frac)
+    // World mm (isForceSliceMM): without it Niivue returns its orthogonalised
+    // slice space, which differs from world on an oblique scan.
+    const mm = nv.frac2mm(frac, 0, true)
     const vox = nv.frac2vox(frac)
     const values = nv.volumes.map((v) => {
       const vx = v.mm2vox([mm[0], mm[1], mm[2]])
       return v.getValue(vx[0], vx[1], vx[2], v.frame4D)
     })
-    const next: Readout = {
+    hoverNext.current = {
       vox: [vox[0], vox[1], vox[2]],
       mm: [mm[0], mm[1], mm[2]],
       baseValue: values[0] ?? NaN,
       overlayValue: values.length > 1 ? values[1] : null,
-      pane: tile.axCorSag,
     }
     if (!hoverRaf.current) {
       hoverRaf.current = requestAnimationFrame(() => {
         hoverRaf.current = 0
-        setReadout(next)
+        if (hoverNext.current) setReadout(hoverNext.current)
       })
     }
   }
@@ -845,7 +875,7 @@ function VolumeView({
     for (let r = 0; r < 3; r++) {
       mm[r] = affine[r][0] * i + affine[r][1] * j + affine[r][2] * k + affine[r][3]
     }
-    const frac = nv.mm2frac(mm)
+    const frac = nv.mm2frac(mm, 0, true)
     nv.scene.crosshairPos = [frac[0], frac[1], frac[2]]
     nv.drawScene()
     nv.createOnLocationChange()
@@ -876,7 +906,7 @@ function VolumeView({
           controls for a state the viewer is usually not in. */}
       {overlay.path && (
         <div className="overlay-bar">
-          <span className="overlay-label" aria-label={overlay.path}>
+          <span className="overlay-label">
             {overlayName}
           </span>
           {info && (
@@ -904,18 +934,10 @@ function VolumeView({
                   </option>
                 ))}
               </select>
-              <label className="overlay-threshold" aria-label="Voxels below this value are transparent">
-                <span className="overlay-opacity-label">≥</span>
-                <input
-                  type="number"
-                  step="any"
-                  value={formatNumber(overlay.threshold ?? defaultThreshold(info))}
-                  onChange={(e) => {
-                    const v = Number(e.target.value)
-                    if (Number.isFinite(v)) patchOverlay({ threshold: v })
-                  }}
-                />
-              </label>
+              <ThresholdInput
+                value={overlay.threshold ?? defaultThreshold(info)}
+                onCommit={(v) => patchOverlay({ threshold: v })}
+              />
             </>
           )}
           {info?.kind === 'label' && (
@@ -983,23 +1005,22 @@ function VolumeView({
         <div className="viewer-status">
           <span
             className="st-item"
-            aria-label={`Voxel index under the crosshair. Grid ${baseInfo.dims.join('×')} voxels of ${formatSpacing(baseInfo.pixDims)}${baseInfo.frames > 1 ? `, ${baseInfo.frames} frames` : ''}`}
           >
             <span className="st-key">Voxel</span>
             <span className="st-val">{readout ? readout.vox.join(' ') : '–'}</span>
           </span>
-          <span className="st-item" aria-label="World coordinates under the crosshair">
+          <span className="st-item">
             <span className="st-key">mm</span>
             <span className="st-val">{readout ? readout.mm.map(formatMm).join(' ') : '–'}</span>
           </span>
-          <span className="st-item" aria-label="Intensity under the crosshair">
+          <span className="st-item">
             <span className="st-key">Value</span>
             <span className="st-val st-strong">
               {readout ? formatIntensity(readout.baseValue, isCT) : '–'}
             </span>
           </span>
           {info && (
-            <span className="st-item st-label" aria-label="Overlay under the crosshair">
+            <span className="st-item st-label">
               <span className="st-key">{info.kind === 'label' ? 'Label' : 'Overlay'}</span>
               <span className="st-val st-strong">
                 {!readout
@@ -1013,7 +1034,7 @@ function VolumeView({
             </span>
           )}
           <span className="status-spacer" />
-          <span className="st-item status-window-anchor" aria-label="Intensity window (right-drag on the image also adjusts it)">
+          <span className="st-item status-window-anchor">
             <span className="st-key">Window</span>
             <button
               className={windowOpen ? 'status-window active' : 'status-window'}
@@ -1024,7 +1045,6 @@ function VolumeView({
             </button>
             {windowOpen && win && (
               <WindowPopover
-                key={`${win.min}|${win.max}`}
                 window={win}
                 isCT={isCT}
                 robust={[baseInfo.robustMin, baseInfo.robustMax]}
@@ -1049,11 +1069,47 @@ function VolumeView({
   )
 }
 
-/** Voxel spacing: one number when isotropic ("0.7 mm"), else all three. */
-function formatSpacing(p: [number, number, number]): string {
-  const f = (v: number) => v.toFixed(2).replace(/\.?0+$/, '')
-  const iso = Math.abs(p[0] - p[1]) < 1e-3 && Math.abs(p[1] - p[2]) < 1e-3
-  return iso ? `${f(p[0])} mm` : `${p.map(f).join('×')} mm`
+
+/** A number as text for an input field: enough precision to round-trip what
+ *  the user typed, no trailing zeros. */
+function editNumber(v: number): string {
+  if (!Number.isFinite(v)) return ''
+  return String(Number(v.toPrecision(6)))
+}
+
+/** The continuous overlay's lower bound. Local text while typing, committed on
+ *  blur or Enter so a partial entry ("0.1" on the way to "0.125") is never
+ *  applied or rewritten; cleared = back to the automatic threshold. */
+function ThresholdInput({ value, onCommit }: { value: number; onCommit: (v: number | null) => void }) {
+  const [seen, setSeen] = useState(value)
+  const [text, setText] = useState(editNumber(value))
+  if (seen !== value) {
+    setSeen(value)
+    setText(editNumber(value))
+  }
+  const commit = () => {
+    const t = text.trim()
+    if (t === '') {
+      onCommit(null)
+      return
+    }
+    const v = Number(t)
+    if (Number.isFinite(v) && Math.abs(v - value) > 1e-9) onCommit(v)
+  }
+  return (
+    <label className="overlay-threshold">
+      <span className="overlay-opacity-label">≥</span>
+      <input
+        type="number"
+        step="any"
+        aria-label="Threshold"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => e.key === 'Enter' && commit()}
+      />
+    </label>
+  )
 }
 
 function formatNumber(v: number): string {
@@ -1118,16 +1174,21 @@ function LabelLegend({
             <div
               key={s.id}
               className={`label-row${shown ? '' : ' dim'}`}
-              aria-label="Click to jump to this structure"
               onClick={() => onJump(s)}
             >
-              <span className="label-swatch" style={{ background: cssColor(info.color(s.id)) }} />
+              <span className="label-swatch" style={{ background: cssColor(labelColor(s.id)) }} />
               <span className="label-id">{s.id}</span>
               <span className="label-name">{info.names.get(s.id) ?? ''}</span>
               <span className="label-ml">{formatMl(voxelsToMl(s.voxels, info.pixDims))}</span>
               <button
                 className="btn-icon"
-                aria-label={shown && isolate ? 'Hide' : 'Show only this (add others with further clicks)'}
+                aria-label={
+                  shown && isolate
+                    ? isolate.length === 1
+                      ? 'Show all'
+                      : 'Hide'
+                    : 'Show only this (add others with further clicks)'
+                }
                 onClick={(e) => {
                   e.stopPropagation()
                   onToggle(s.id)
@@ -1141,17 +1202,18 @@ function LabelLegend({
         {rows.length === 0 && <div className="label-row empty">No match</div>}
       </div>
       {info.names.size === 0 && (
-        <div className="label-legend-foot" aria-label={LABEL_NAMES_HELP}>
+        <div className="label-legend-foot">
           No names. Add <code>{labelFileCandidates(path)[0].split('/').pop()}</code> beside the
           file.
         </div>
+      )}
+      {!info.exactColors && (
+        <div className="label-legend-foot">Colours are approximate for this file type.</div>
       )}
     </div>
   )
 }
 
-const LABEL_NAMES_HELP =
-  'A CSV with a label,structure header: one row per label id and its name, as the stacks write it. The viewer ships no colour table of its own.'
 
 /** Intensity window: presets plus editable bounds. Opens above the status bar. */
 function WindowPopover({
@@ -1169,10 +1231,17 @@ function WindowPopover({
   onApply: (min: number, max: number) => void
   onClose: () => void
 }) {
-  // Remounted by the parent (keyed on the window) whenever the window changes,
-  // so the fields start from the current bounds without syncing in an effect.
-  const [min, setMin] = useState(formatNumber(win.min))
-  const [max, setMax] = useState(formatNumber(win.max))
+  // The fields follow the window when it changes from outside (a preset, a
+  // right-drag) — derived state compared during render, rather than a keyed
+  // remount, so a field being edited keeps its focus when the other commits.
+  const [seen, setSeen] = useState(win)
+  const [min, setMin] = useState(editNumber(win.min))
+  const [max, setMax] = useState(editNumber(win.max))
+  if (seen !== win) {
+    setSeen(win)
+    setMin(editNumber(win.min))
+    setMax(editNumber(win.max))
+  }
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -1183,7 +1252,10 @@ function WindowPopover({
   const commit = () => {
     const a = Number(min)
     const b = Number(max)
-    if (Number.isFinite(a) && Number.isFinite(b) && a !== b) onApply(a, b)
+    if (!Number.isFinite(a) || !Number.isFinite(b) || a >= b) return
+    // Leaving a field untouched must not re-apply its rounded display value.
+    if (Math.abs(a - win.min) < 1e-6 && Math.abs(b - win.max) < 1e-6) return
+    onApply(a, b)
   }
   const presets = [
     { name: 'Auto', min: robust[0], max: robust[1] },
@@ -1193,7 +1265,7 @@ function WindowPopover({
   return (
     <>
       <div className="vs-backdrop" onClick={onClose} />
-      <div className="wl-popover" role="dialog" aria-label="Intensity window">
+      <div className="wl-popover" role="dialog">
         <div className="wl-presets">
           {presets.map((p) => (
             <button
@@ -1290,7 +1362,10 @@ export const Viewer = memo(function Viewer({
   const [snapshotToken, setSnapshotToken] = useState(0)
   // The overlay is tagged with the base file it belongs to, so it's transparently
   // ignored once a different file is opened — no state reset needed.
-  const overlayForThisFile = overlay.base === path ? overlay : { ...EMPTY_OVERLAY, base: path ?? '' }
+  const overlayForThisFile = useMemo(
+    () => (overlay.base === path ? overlay : { ...EMPTY_OVERLAY, base: path ?? '' }),
+    [overlay, path],
+  )
   const updateSettings = useCallback((patch: Partial<ViewerSettings>) => {
     setSettings((prev) => {
       const next = { ...prev, ...patch }
@@ -1337,7 +1412,7 @@ export const Viewer = memo(function Viewer({
   return (
     <div className="panel">
       <div className="panel-header">
-        <span className="viewer-title" aria-label={path}>
+        <span className="viewer-title">
           {path}
         </span>
         <span className="panel-actions">

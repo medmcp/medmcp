@@ -1,3 +1,8 @@
+import { VOLUME_EXT } from '../fileKinds'
+
+/** Case-insensitive form of the viewer's volume extensions, for stripping. */
+const VOLUME_EXT_I = new RegExp(VOLUME_EXT.source, 'i')
+
 /** Pure helpers behind the volume viewer: label palettes, overlay classification,
  *  label statistics, label-name files and intensity-window presets. No React, no
  *  Niivue instance — everything here is testable with plain arrays. */
@@ -64,7 +69,7 @@ export function buildLabelColormap(
   color: LabelColorFn = labelColor,
   visible?: ReadonlySet<number>,
 ): LabelColorMap {
-  const n = Math.max(1, Math.min(MAX_LABELS, Math.ceil(maxLabel)))
+  const n = Number.isFinite(maxLabel) ? Math.max(1, Math.min(MAX_LABELS, Math.ceil(maxLabel))) : 1
   const R = [0]
   const G = [0]
   const B = [0]
@@ -105,7 +110,7 @@ export interface OverlayState {
   hidden: boolean
 }
 
-export const EMPTY_OVERLAY: OverlayState = {
+export const EMPTY_OVERLAY: OverlayState = Object.freeze({
   base: '',
   path: '',
   opacity: 0.6,
@@ -114,35 +119,52 @@ export const EMPTY_OVERLAY: OverlayState = {
   threshold: null,
   isolate: null,
   hidden: false,
-}
+})
 
 export function overlayFor(base: string, path: string): OverlayState {
   return { ...EMPTY_OVERLAY, base, path }
 }
 
 
+/** NIfTI intent code marking a label image. */
+export const NII_INTENT_LABEL = 1002
+
 /** Decide whether an overlay is a label map (integer ids) or a continuous map
- *  (probabilities, intensities, deformation magnitudes). Sampled, so a large
- *  volume costs the same as a small one. Integer-typed anatomical images (an
- *  int16 T1) fall out as continuous through the distinct-value count. */
+ *  (probabilities, intensities, deformation magnitudes). A header that says
+ *  label is believed; otherwise the data decides, sampled so a large volume
+ *  costs the same as a small one: any non-integer or negative value, more
+ *  than 1024 distinct values or an id above MAX_LABELS means continuous. An
+ *  integer anatomical image (a uint8 template, an int16 T1) can pass all of
+ *  those, so the last test is what sets a label map apart from any image of
+ *  anatomy: it is piecewise constant, so most neighbouring voxels are equal
+ *  (measured ~1.0 for a segmentation, below 0.03 for MR). */
 export function classifyOverlayData(
   img: ArrayLike<number>,
   sclSlope = 1,
   sclInter = 0,
+  intentCode = 0,
 ): OverlayKind {
+  if (intentCode === NII_INTENT_LABEL) return 'label'
   const n = img.length
   if (n === 0) return 'continuous'
   const slope = sclSlope === 0 ? 1 : sclSlope
   const step = Math.max(1, Math.floor(n / 300_000))
   const seen = new Set<number>()
   let max = 0
+  let pairs = 0
+  let equal = 0
   for (let i = 0; i < n; i += step) {
     const v = img[i] * slope + sclInter
     if (v !== Math.round(v) || v < 0) return 'continuous'
     if (v > max) max = v
     if (seen.size <= 1024) seen.add(v)
+    if (i + 1 < n) {
+      pairs++
+      if (img[i + 1] === img[i]) equal++
+    }
   }
   if (max > MAX_LABELS || seen.size > 1024) return 'continuous'
+  if (pairs > 0 && equal / pairs < 0.5) return 'continuous'
   return 'label'
 }
 
@@ -161,9 +183,10 @@ export function labelStats(img: ArrayLike<number>, dims: [number, number, number
   for (let k = 0; k < nz; k++) {
     for (let j = 0; j < ny; j++) {
       for (let i = 0; i < nx; i++, idx++) {
-        const v = img[idx]
-        if (v === 0 || v === undefined) continue
-        const id = Math.round(v)
+        const id = Math.round(img[idx])
+        // 0 is background; a NaN voxel (forced label kind on float data) or a
+        // negative value (sign-flipped background) is no id.
+        if (!(id > 0) || !Number.isFinite(id)) continue
         let acc = counts.get(id)
         if (!acc) {
           acc = { n: 0, x: 0, y: 0, z: 0 }
@@ -194,24 +217,25 @@ export function labelStats(img: ArrayLike<number>, dims: [number, number, number
  *  volume not named `_dseg` is paired with `<name>_labels.csv`. Without the
  *  file the legend shows ids only. */
 export function labelFileCandidates(volumePath: string): string[] {
-  const base = volumePath.replace(/\.(nii(\.gz)?|mgz|mgh|nrrd|nhdr|mha|mhd)$/i, '')
+  const base = volumePath.replace(VOLUME_EXT_I, '')
   const stem = base.replace(/_dseg$/i, '')
   return stem === base ? [`${base}_labels.csv`] : [`${stem}_labels.csv`, `${base}_labels.csv`]
 }
 
 /** Parse a label-name table. Expects the stacks' `label,structure` header but
- *  tolerates none or another (`index\tname`): the first numeric column is the
- *  id, the first non-numeric column after it the name. Comma, tab or semicolon
- *  separated. */
+ *  tolerates none or another (`index\tname`): the first integer column is the
+ *  id, the first non-numeric column (after it, else before it) the name.
+ *  Comma, tab or semicolon separated; a quoted cell may contain the separator. */
 export function parseLabelNames(text: string): Map<number, string> {
   const names = new Map<number, string>()
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim()
     if (!line || line.startsWith('#')) continue
-    const cells = line.split(/\t|,|;/).map((c) => c.trim().replace(/^"|"$/g, ''))
+    const cells = (line.match(/"[^"]*"|[^\t,;]+/g) ?? []).map((c) => c.trim().replace(/^"|"$/g, ''))
     const idIdx = cells.findIndex((c) => /^\d+$/.test(c))
     if (idIdx < 0) continue
-    const name = cells.slice(idIdx + 1).find((c) => c && !/^[\d.]+$/.test(c))
+    const isName = (c: string) => c !== '' && !/^[\d.]+$/.test(c)
+    const name = cells.slice(idIdx + 1).find(isName) ?? cells.slice(0, idIdx).find(isName)
     if (!name) continue
     names.set(Number(cells[idIdx]), name)
   }
@@ -256,7 +280,11 @@ export function voxelsToMl(voxels: number, pixDims: [number, number, number]): n
 }
 
 export function formatMl(ml: number): string {
-  if (ml >= 100) return `${ml.toFixed(0)} mL`
-  if (ml >= 1) return `${ml.toFixed(1)} mL`
-  return `${(ml * 1000).toFixed(0)} mm³`
+  if (!Number.isFinite(ml)) return '–'
+  // Pick the unit from the rounded value, so 0.9999 mL reads "1.0 mL", not
+  // "1000 mm³", and a single small voxel is not "0 mm³".
+  if (ml >= 99.95) return `${ml.toFixed(0)} mL`
+  if (ml >= 0.95) return `${ml.toFixed(1)} mL`
+  const mm3 = ml * 1000
+  return mm3 < 9.95 ? `${mm3.toFixed(1)} mm³` : `${mm3.toFixed(0)} mm³`
 }

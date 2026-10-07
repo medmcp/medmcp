@@ -34,15 +34,21 @@ export function isViewable(kind: FileKind): boolean {
   return kind === 'volume' || kind === 'image' || kind === 'pdf' || kind === 'html'
 }
 
-const VIEWABLE_EXT = String.raw`\.(?:nii(?:\.gz)?|mgz|mgh|nrrd|nhdr|mha|mhd|png|jpe?g|gif|webp|pdf|html?)`
+// Extensions offered as chips: the volume and image lists above (minus the
+// paired Analyze `.hdr`/`.img` and `.v16`, which a tool result rarely names and
+// which need their sibling file), plus pdf and html. Must end the token: a
+// following word or `.word` (`x.nii.gz.bak`) means it is not the extension.
+const VIEWABLE_EXT = String.raw`\.(?:nii(?:\.gz)?|mgz|mgh|nrrd|nhdr|mha|mhd|png|jpe?g|gif|svg|webp|bmp|pdf|html?)(?!\w|\.\w)`
 
 // A path inside a JSON/quoted string: may contain spaces, ends at the quote.
-const QUOTED_PATH = new RegExp(String.raw`"([^"\n]*?${VIEWABLE_EXT})"`, 'gi')
+const QUOTED_PATH = new RegExp(String.raw`"([^"\n]*?${VIEWABLE_EXT})"`, 'giu')
 // A path token in free text: slash-separated segments of filename characters,
-// ending in an extension the viewer handles. Absolute or relative.
+// ending in an extension the viewer handles. Absolute or relative; a token
+// glued to `:` or `\` (a URL port, a Windows path) is not a workspace path.
+const SEGMENT = String.raw`[\p{L}\p{N}_.+@%-]+`
 const PATH_TOKEN = new RegExp(
-  String.raw`(?:/|(?<![\w./-]))(?:[\w.+@%-]+/)*[\w.+@%-]+${VIEWABLE_EXT}\b`,
-  'gi',
+  String.raw`(?:/|(?<![\p{L}\p{N}_./:\\-]))(?:${SEGMENT}/)*${SEGMENT}${VIEWABLE_EXT}`,
+  'giu',
 )
 
 /** Workspace-relative paths of viewable files mentioned in *text*.
@@ -55,13 +61,24 @@ export function extractWorkspacePaths(text: string, workspaceRoot: string | null
   const root = workspaceRoot ? workspaceRoot.replace(/\/+$/, '') : null
   const out: string[] = []
   const seen = new Set<string>()
-  // Quoted paths first (they may contain spaces), then the free text with those
-  // spans removed, so a quoted path is not re-found as a truncated token.
-  const candidates = [
-    ...[...text.matchAll(QUOTED_PATH)].map((m) => m[1]),
-    ...[...text.replace(QUOTED_PATH, '""').matchAll(PATH_TOKEN)].map((m) => m[0]),
-  ]
-  for (const raw of candidates) {
+  // Quoted spans may hold a path with spaces — or a sentence that happens to
+  // end in one ("Wrote x to /ws/out.nii.gz"), told apart by how the span
+  // starts. The spans are blanked before the free-text pass so a quoted path
+  // is not re-found as a truncated token; both passes keep their offsets so
+  // the result is in order of first mention.
+  const candidates: { at: number; path: string }[] = []
+  for (const m of text.matchAll(QUOTED_PATH)) {
+    const span = m[1]
+    const at = m.index + 1
+    // A JSON key that happens to look like a file name is not a path.
+    if (/^\s*:/.test(text.slice(m.index + m[0].length))) continue
+    if (!/\s/.test(span) || /^\.?\//.test(span)) candidates.push({ at, path: span })
+    else for (const t of span.matchAll(PATH_TOKEN)) candidates.push({ at: at + t.index, path: t[0] })
+  }
+  const blanked = text.replace(QUOTED_PATH, (m) => '"'.padEnd(m.length - 1) + '"')
+  for (const m of blanked.matchAll(PATH_TOKEN)) candidates.push({ at: m.index, path: m[0] })
+  candidates.sort((a, b) => a.at - b.at)
+  for (const { path: raw } of candidates) {
     let p = raw.trim()
     if (p.startsWith('/')) {
       if (!root || !p.startsWith(root + '/')) continue

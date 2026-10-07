@@ -106,21 +106,26 @@ function ResultFiles({
   onOverlay?: (path: string) => void
 }) {
   if (paths.length === 0 || !onOpen) return null
+  const names = paths.map((p) => p.split('/').pop() ?? p)
   return (
     <div className="tool-files">
-      {paths.map((p) => (
-        <span key={p} className="tool-file" aria-label={p}>
-          <span className="tool-file-name">{p.split('/').pop()}</span>
-          <button className="btn-text" onClick={() => onOpen(p)}>
-            View
-          </button>
-          {onOverlay && isVolumePath(p) && (
-            <button className="btn-text" onClick={() => onOverlay(p)}>
-              Overlay
+      {paths.map((p, i) => {
+        // One file name per subject in a batch result: show the folder too.
+        const ambiguous = names.indexOf(names[i]) !== names.lastIndexOf(names[i])
+        return (
+          <span key={p} className="tool-file">
+            <span className="tool-file-name">{ambiguous ? p : names[i]}</span>
+            <button className="btn-text" aria-label={`View ${p}`} onClick={() => onOpen(p)}>
+              View
             </button>
-          )}
-        </span>
-      ))}
+            {onOverlay && isVolumePath(p) && (
+              <button className="btn-text" aria-label={`Overlay ${p}`} onClick={() => onOverlay(p)}>
+                Overlay
+              </button>
+            )}
+          </span>
+        )
+      })}
     </div>
   )
 }
@@ -136,6 +141,13 @@ const ToolCard = memo(function ToolCard({
   onOpenFile?: (path: string) => void
   onOverlayFile?: (path: string) => void
 }) {
+  const resultPaths = useMemo(
+    () =>
+      tc.status === 'completed' && tc.output
+        ? extractWorkspacePaths(tc.output, workspaceRoot ?? null)
+        : [],
+    [tc.status, tc.output, workspaceRoot],
+  )
   // The path guard turned this call back before it ran, and the agent corrects
   // the path and calls again by itself. A red "failed" card would be untrue —
   // nothing failed and nothing ran — and would leave you looking for a problem
@@ -144,7 +156,7 @@ const ToolCard = memo(function ToolCard({
   // record stays in the provenance log either way.
   if (tc.pathGuardRetry) {
     return (
-      <div className="tool-retry-note" aria-label={tc.output ?? undefined}>
+      <div className="tool-retry-note">
         ↻ corrected an invalid path in {tc.title}
       </div>
     )
@@ -176,13 +188,7 @@ const ToolCard = memo(function ToolCard({
           <pre>{tc.output}</pre>
         </details>
       )}
-      {tc.status === 'completed' && tc.output && (
-        <ResultFiles
-          paths={extractWorkspacePaths(tc.output, workspaceRoot ?? null)}
-          onOpen={onOpenFile}
-          onOverlay={onOverlayFile}
-        />
-      )}
+      <ResultFiles paths={resultPaths} onOpen={onOpenFile} onOverlay={onOverlayFile} />
     </div>
   )
 })
@@ -204,7 +210,6 @@ function ContextMeter({ used, size }: { used: number; size: number | null }) {
   return (
     <span
       className="ctx-meter"
-      aria-label={`Context: ${used.toLocaleString()} of ${size.toLocaleString()} tokens (${Math.round(frac * 100)}%)`}
     >
       <span className="ctx-bar">
         <span className={`ctx-fill ctx-${level}`} style={{ width: `${frac * 100}%` }} />
@@ -336,7 +341,7 @@ function PermissionCard({
       {perm.risks && perm.risks.length > 0 && (
         <div className="risk-chips">
           {perm.risks.map((r) => (
-            <span key={r.key} className={`risk-chip risk-${r.severity}`} aria-label={r.key}>
+            <span key={r.key} className={`risk-chip risk-${r.severity}`}>
               {r.label}
             </span>
           ))}
@@ -351,7 +356,7 @@ function PermissionCard({
         // is worth as much as flagging one that isn't.
         <ul className="approval-paths">
           {perm.paths.map((p, i) => (
-            <li key={`${p.param}-${i}`} className={`path-${p.severity}`} aria-label={p.value}>
+            <li key={`${p.param}-${i}`} className={`path-${p.severity}`}>
               <span className="path-mark" aria-hidden="true">
                 {p.severity === 'error' ? '✕' : p.severity === 'warning' ? '!' : '✓'}
               </span>
@@ -595,7 +600,8 @@ export const Chat = memo(function Chat({
               kind: frame.kind,
               toolName: frame.toolName,
               rawInput: frame.rawInput,
-              output: prev[frame.toolCallId]?.output,
+              output: frame.output ?? prev[frame.toolCallId]?.output,
+              pathGuardRetry: frame.pathGuardRetry || prev[frame.toolCallId]?.pathGuardRetry,
             },
           }))
           break
@@ -786,7 +792,7 @@ export const Chat = memo(function Chat({
         <span className="chat-head-left">
           <span>Chat</span>
           {onNewChat && (
-            <button className="btn-plain chat-new-btn" onClick={onNewChat} aria-label="Start a new chat">
+            <button className="btn-plain chat-new-btn" onClick={onNewChat}>
               <PlusIcon size={12} />
               New chat
             </button>
@@ -807,7 +813,7 @@ export const Chat = memo(function Chat({
         {/* The chat's name takes the slack between the controls and the meta,
             so it never shifts either group; it truncates instead of growing. */}
         {title && (
-          <span className="chat-title" aria-label={title}>
+          <span className="chat-title">
             {title}
           </span>
         )}
@@ -815,11 +821,6 @@ export const Chat = memo(function Chat({
           {model != null && (
             <button
               className={`model-name${cloud ? ' model-cloud' : ''}`}
-              aria-label={
-                cloud
-                  ? 'Cloud model: this chat is sent outside this machine. Click to see the models.'
-                  : 'Change the model'
-              }
               onClick={onOpenModels}
             >
               {model}
@@ -828,9 +829,12 @@ export const Chat = memo(function Chat({
           {usage != null && <ContextMeter used={usage.used} size={usage.size} />}
           <span
             className={`conn conn-${retrying ? 'retrying' : status}`}
-            aria-label={retrying ? `${retrying.category}: ${retrying.detail}` : undefined}
           >
-            {retrying ? 'retrying…' : status === 'open' ? 'running' : status}
+            {retrying
+              ? `retrying… ${retrying.category.replace(/_/g, ' ')}`
+              : status === 'open'
+                ? 'running'
+                : status}
           </span>
         </span>
       </div>

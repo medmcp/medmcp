@@ -247,12 +247,18 @@ function loadViewerSettings(): ViewerSettings {
   }
 }
 
+const CROSSHAIR_WIDTH_PERCENT = 0.3
+
 /** Apply the full settings set to a live Niivue instance (idempotent). */
 function applyViewerSettings(nv: Niivue, s: ViewerSettings): void {
   nv.setInterpolation(s.interpolation === 'nearest')
   nv.setRadiologicalConvention(s.radiological)
   nv.setSliceType(SLICE_TYPE_BY_PLANE[s.slicePlane])
-  nv.setCrosshairWidth(s.crosshair ? 1 : 0)
+  // Niivue sizes the crosshair in voxels by default, so it is thick on a
+  // coarse volume, thin on a fine one and grows when zooming in. A fraction
+  // of the field of view keeps it the same on screen for any volume.
+  nv.opts.crosshairWidthUnit = 'percent'
+  nv.setCrosshairWidth(s.crosshair ? CROSSHAIR_WIDTH_PERCENT : 0)
   nv.opts.multiplanarShowRender = s.showRender ? SHOW_RENDER.ALWAYS : SHOW_RENDER.NEVER
   nv.drawScene()
 }
@@ -943,7 +949,7 @@ function VolumeView({
   const isCT = baseInfo?.isCT ?? false
   const overlayLabel =
     info && info.kind === 'label' && readout?.overlayValue != null && readout.overlayValue > 0
-      ? `${Math.round(readout.overlayValue)}${info.names.get(Math.round(readout.overlayValue)) ? ' · ' + info.names.get(Math.round(readout.overlayValue)) : ''}`
+      ? `${Math.round(readout.overlayValue)} ${info.names.get(Math.round(readout.overlayValue)) ?? ''}`.trimEnd()
       : null
 
   return (

@@ -1857,6 +1857,24 @@ async def delete_run(run_id: str) -> JsonDict:
 #     {"type": "cancel"}
 
 
+_OUTPUT_LIMIT = 2000
+
+
+def _clip_output(text: str, limit: int = _OUTPUT_LIMIT) -> str:
+    """Shorten a tool output for the browser without cutting a token in half.
+
+    The browser offers the files a result names as chips; a path cut mid-way
+    (``…/x_dseg.nii`` losing its ``.gz``) would make a chip for a file that does
+    not exist, so the cut lands on the last whitespace before the limit.
+    """
+    if len(text) <= limit:
+        return text
+    cut = max(text.rfind(" ", 0, limit), text.rfind("\n", 0, limit))
+    if cut < limit // 2:
+        cut = limit
+    return text[:cut].rstrip() + " …"
+
+
 def _extract_text(content: object) -> str:
     """Pull plain text out of an ACP content-block list (best effort)."""
     parts: list[str] = []
@@ -2409,6 +2427,16 @@ class _ChatConnection:
                 info["status"] = status
                 if update.get("rawInput") is not None:
                     info["rawInput"] = update.get("rawInput")
+                # A settled call replayed on resume arrives as this one frame,
+                # output included (vibe's `_effect_start`); no update follows.
+                output = _extract_text(update.get("content"))
+                raw_output = update.get("rawOutput")
+                if not output and raw_output is not None:
+                    output = str(raw_output)
+                if raw_output is not None:
+                    info["rawOutput"] = raw_output
+                elif output:
+                    info["outputText"] = output
                 await self._send(
                     {
                         "type": "tool_call",
@@ -2418,6 +2446,8 @@ class _ChatConnection:
                         "kind": update.get("kind"),
                         "toolName": _tool_name(update),
                         "rawInput": update.get("rawInput"),
+                        "output": _clip_output(output) if output else None,
+                        "pathGuardRetry": _is_pathguard_denial(output),
                     }
                 )
             elif update_type == "tool_call_update":
@@ -2453,7 +2483,7 @@ class _ChatConnection:
                         "type": "tool_call_update",
                         "toolCallId": tc_id,
                         "status": status,
-                        "output": output[:2000] if output else None,
+                        "output": _clip_output(output) if output else None,
                         "rawInput": raw_input,
                         "pathGuardRetry": _is_pathguard_denial(output),
                     }

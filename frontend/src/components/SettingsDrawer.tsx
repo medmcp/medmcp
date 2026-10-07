@@ -177,7 +177,7 @@ export function SettingsDrawer({
         <div className="panel-header">
           <span>Settings</span>
           <span className="panel-actions">
-            <button className="btn-icon" title="Close" onClick={onClose}>
+            <button className="btn-icon" aria-label="Close" onClick={onClose}>
               <XIcon />
             </button>
           </span>

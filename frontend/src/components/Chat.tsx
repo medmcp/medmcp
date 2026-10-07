@@ -15,6 +15,7 @@ import type {
 } from '../types'
 import { ChatsMenu } from './ChatsMenu'
 import { PlusIcon, ShieldIcon } from './icons'
+import { extractWorkspacePaths, isVolumePath } from '../fileKinds'
 
 // vibe-acp >= 2.14 sends a tool call's rawInput as a JSON-encoded *string*
 // (read/edit/write tools) rather than an object. Parse it back so the card
@@ -92,7 +93,61 @@ const PlanCard = memo(function PlanCard({ items }: { items: TodoItem[] }) {
 
 // Memoized so a streaming update to the newest message doesn't re-render
 // (and re-parse the markdown of) every earlier row in the transcript.
-const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
+/** Files a finished tool call named, offered straight into the viewer. The
+ *  agent writes a segmentation and says where; without this the person has to
+ *  find it in the explorer by hand. Volumes can also be laid over the open one. */
+function ResultFiles({
+  paths,
+  onOpen,
+  onOverlay,
+}: {
+  paths: string[]
+  onOpen?: (path: string) => void
+  onOverlay?: (path: string) => void
+}) {
+  if (paths.length === 0 || !onOpen) return null
+  const names = paths.map((p) => p.split('/').pop() ?? p)
+  return (
+    <div className="tool-files">
+      {paths.map((p, i) => {
+        // One file name per subject in a batch result: show the folder too.
+        const ambiguous = names.indexOf(names[i]) !== names.lastIndexOf(names[i])
+        return (
+          <span key={p} className="tool-file">
+            <span className="tool-file-name">{ambiguous ? p : names[i]}</span>
+            <button className="btn-text" aria-label={`View ${p}`} onClick={() => onOpen(p)}>
+              View
+            </button>
+            {onOverlay && isVolumePath(p) && (
+              <button className="btn-text" aria-label={`Overlay ${p}`} onClick={() => onOverlay(p)}>
+                Overlay
+              </button>
+            )}
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
+const ToolCard = memo(function ToolCard({
+  tc,
+  workspaceRoot,
+  onOpenFile,
+  onOverlayFile,
+}: {
+  tc: ToolCallState
+  workspaceRoot?: string | null
+  onOpenFile?: (path: string) => void
+  onOverlayFile?: (path: string) => void
+}) {
+  const resultPaths = useMemo(
+    () =>
+      tc.status === 'completed' && tc.output
+        ? extractWorkspacePaths(tc.output, workspaceRoot ?? null)
+        : [],
+    [tc.status, tc.output, workspaceRoot],
+  )
   // The path guard turned this call back before it ran, and the agent corrects
   // the path and calls again by itself. A red "failed" card would be untrue —
   // nothing failed and nothing ran — and would leave you looking for a problem
@@ -101,7 +156,7 @@ const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
   // record stays in the provenance log either way.
   if (tc.pathGuardRetry) {
     return (
-      <div className="tool-retry-note" title={tc.output ?? undefined}>
+      <div className="tool-retry-note">
         ↻ corrected an invalid path in {tc.title}
       </div>
     )
@@ -133,6 +188,7 @@ const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
           <pre>{tc.output}</pre>
         </details>
       )}
+      <ResultFiles paths={resultPaths} onOpen={onOpenFile} onOverlay={onOverlayFile} />
     </div>
   )
 })
@@ -154,7 +210,6 @@ function ContextMeter({ used, size }: { used: number; size: number | null }) {
   return (
     <span
       className="ctx-meter"
-      title={`Context: ${used.toLocaleString()} of ${size.toLocaleString()} tokens (${Math.round(frac * 100)}%)`}
     >
       <span className="ctx-bar">
         <span className={`ctx-fill ctx-${level}`} style={{ width: `${frac * 100}%` }} />
@@ -286,7 +341,7 @@ function PermissionCard({
       {perm.risks && perm.risks.length > 0 && (
         <div className="risk-chips">
           {perm.risks.map((r) => (
-            <span key={r.key} className={`risk-chip risk-${r.severity}`} title={r.key}>
+            <span key={r.key} className={`risk-chip risk-${r.severity}`}>
               {r.label}
             </span>
           ))}
@@ -301,7 +356,7 @@ function PermissionCard({
         // is worth as much as flagging one that isn't.
         <ul className="approval-paths">
           {perm.paths.map((p, i) => (
-            <li key={`${p.param}-${i}`} className={`path-${p.severity}`} title={p.value}>
+            <li key={`${p.param}-${i}`} className={`path-${p.severity}`}>
               <span className="path-mark" aria-hidden="true">
                 {p.severity === 'error' ? '✕' : p.severity === 'warning' ? '!' : '✓'}
               </span>
@@ -406,6 +461,9 @@ export const Chat = memo(function Chat({
   currentSessionId,
   onSelectSession,
   onOpenModels,
+  workspaceRoot,
+  onOpenFile,
+  onOverlayFile,
 }: {
   /** Called with the vibe session id whenever a prompt is sent into it. */
   onPromptedSession?: (id: string) => void
@@ -425,6 +483,13 @@ export const Chat = memo(function Chat({
   onSelectSession?: (id: string) => void
   /** Open the Models window (the header's model name is its entry point). */
   onOpenModels?: () => void
+  /** Absolute workspace root, to turn the absolute paths in tool results into
+   *  workspace-relative ones the viewer can open. */
+  workspaceRoot?: string | null
+  /** Open a workspace file in the viewer. */
+  onOpenFile?: (path: string) => void
+  /** Lay a workspace volume over the one open in the viewer. */
+  onOverlayFile?: (path: string) => void
 }) {
   const [items, setItems] = useState<ChatItem[]>([])
   const [toolCalls, setToolCalls] = useState<Record<string, ToolCallState>>({})
@@ -535,7 +600,8 @@ export const Chat = memo(function Chat({
               kind: frame.kind,
               toolName: frame.toolName,
               rawInput: frame.rawInput,
-              output: prev[frame.toolCallId]?.output,
+              output: frame.output ?? prev[frame.toolCallId]?.output,
+              pathGuardRetry: frame.pathGuardRetry || prev[frame.toolCallId]?.pathGuardRetry,
             },
           }))
           break
@@ -726,7 +792,7 @@ export const Chat = memo(function Chat({
         <span className="chat-head-left">
           <span>Chat</span>
           {onNewChat && (
-            <button className="btn-plain chat-new-btn" onClick={onNewChat} title="Start a new chat">
+            <button className="btn-plain chat-new-btn" onClick={onNewChat}>
               <PlusIcon size={12} />
               New chat
             </button>
@@ -747,7 +813,7 @@ export const Chat = memo(function Chat({
         {/* The chat's name takes the slack between the controls and the meta,
             so it never shifts either group; it truncates instead of growing. */}
         {title && (
-          <span className="chat-title" title={title}>
+          <span className="chat-title">
             {title}
           </span>
         )}
@@ -755,11 +821,6 @@ export const Chat = memo(function Chat({
           {model != null && (
             <button
               className={`model-name${cloud ? ' model-cloud' : ''}`}
-              title={
-                cloud
-                  ? 'Cloud model: this chat is sent outside this machine. Click to see the models.'
-                  : 'Change the model'
-              }
               onClick={onOpenModels}
             >
               {model}
@@ -768,9 +829,12 @@ export const Chat = memo(function Chat({
           {usage != null && <ContextMeter used={usage.used} size={usage.size} />}
           <span
             className={`conn conn-${retrying ? 'retrying' : status}`}
-            title={retrying ? `${retrying.category}: ${retrying.detail}` : undefined}
           >
-            {retrying ? 'retrying…' : status === 'open' ? 'running' : status}
+            {retrying
+              ? `retrying… ${retrying.category.replace(/_/g, ' ')}`
+              : status === 'open'
+                ? 'running'
+                : status}
           </span>
         </span>
       </div>
@@ -781,7 +845,15 @@ export const Chat = memo(function Chat({
         {items.map((item, i) => {
           if (item.kind === 'tool') {
             const tc = toolCalls[item.toolCallId]
-            return tc ? <ToolCard key={i} tc={tc} /> : null
+            return tc ? (
+              <ToolCard
+                key={i}
+                tc={tc}
+                workspaceRoot={workspaceRoot}
+                onOpenFile={onOpenFile}
+                onOverlayFile={onOverlayFile}
+              />
+            ) : null
           }
           if (item.kind === 'user') {
             const mid = item.messageId
@@ -791,7 +863,7 @@ export const Chat = memo(function Chat({
                   {mid && !busy && (
                     <button
                       className="btn-icon rewind-btn"
-                      title="Rewind the chat to before this message"
+                      aria-label="Rewind the chat to before this message"
                       onClick={() => void askRewind(mid)}
                     >
                       ↺

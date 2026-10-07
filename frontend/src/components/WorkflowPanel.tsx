@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { useConfirm } from '../confirm'
 import type { ReactNode } from 'react'
 import {
   batchFromPlan,
@@ -218,7 +219,7 @@ function FileChips({
             key={p}
             type="button"
             className={openable ? 'wf-file-chip' : 'wf-file-chip static'}
-            title={openable ? `${rel} — open in viewer` : p}
+            aria-label={openable ? `${rel} — open in viewer` : p}
             disabled={!openable}
             onClick={() => rel !== null && onOpenFile?.(rel)}
           >
@@ -271,7 +272,6 @@ function PathCell({
       className={dropReady ? `${className} drop-ready` : className}
       value={value}
       placeholder={placeholder}
-      title={value || undefined}
       onFocus={onFocus}
       onChange={(e) => onChange(e.target.value)}
       onDragOver={(e) => {
@@ -318,9 +318,10 @@ function Requirements({ requires }: { requires: StackRequirement[] }) {
               : ''
           const s = r.status ? REQ_STATUS[r.status] : null
           return (
-            <li key={r.stack} title={pin ? `${s?.title ?? ''} · ${pin}`.replace(/^ · /, '') : s?.title}>
+            <li key={r.stack}>
               {s && <span className={`wf-req-status ${s.cls}`}>{s.icon}</span>}
               <code>{r.stack}</code>
+              {pin && <span className="wf-req-pin">{pin}</span>}
             </li>
           )
         })}
@@ -339,7 +340,7 @@ function StepList({ steps }: { steps: { server: string; tool: string }[] }) {
   return (
     <ol className="wf-steps">
       {steps.map((s, i) => (
-        <li key={i} title={`${s.server}:${s.tool}`}>
+        <li key={i}>
           <code>{s.tool}</code>
         </li>
       ))}
@@ -430,7 +431,6 @@ function ItemRows({
           type="button"
           className={`wf-itemrow ${dot}`}
           onClick={() => setOpen(expanded ? null : i)}
-          title={expanded ? 'Hide steps' : 'Show steps'}
         >
           <span className={`status-dot ${dot}`} />
           <span className="wf-itemrow-label">{labels[i]}</span>
@@ -478,7 +478,13 @@ function ItemRows({
 function ProgressBar({ frac, label, active }: { frac: number; label: string; active?: boolean }) {
   const pct = Math.round(Math.min(Math.max(frac, 0), 1) * 100)
   return (
-    <div className="wf-progress" title={`${pct}%`}>
+    <div
+      className="wf-progress"
+      role="progressbar"
+      aria-valuenow={pct}
+      aria-valuemin={0}
+      aria-valuemax={100}
+    >
       <span className={active ? 'wf-progress-bar active' : 'wf-progress-bar'}>
         <span className="wf-progress-fill" style={{ width: `${pct}%` }} />
       </span>
@@ -853,8 +859,12 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       showWorkflow(wf)
     })
 
-  const remove = (name: string) => {
-    if (!window.confirm(`Delete workflow "${name}"? This cannot be undone.`)) return
+  const confirmDialog = useConfirm()
+  const remove = (name: string) =>
+    void confirmDialog(`Delete workflow "${name}"?`, { body: 'This cannot be undone.' }).then(
+      (ok) => ok && doRemove(name),
+    )
+  const doRemove = (name: string) => {
     void withBusy('Deleting…', async () => {
       await deleteWorkflow(name)
       detailForRef.current = null
@@ -1028,7 +1038,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
               {retryRuns.length > 0 && (
                 <button
                   className="btn-primary"
-                  title={
+                  aria-label={
                     r.status === 'cancelled'
                       ? 'Continue with the items that did not finish.'
                       : 'Run only what failed.'
@@ -1081,7 +1091,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         }}
       >
         {required.length > 0 && (
-          <div className="wf-source-cards" role="radiogroup" aria-label="Where the inputs come from">
+          <div className="wf-source-cards" role="radiogroup">
             {SOURCES.map((o) => (
               <button
                 key={o.value}
@@ -1127,7 +1137,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             <div className="wf-batch-row wf-batch-head">
               <span className="wf-batch-idx">#</span>
               {required.map((i) => (
-                <span key={i.name} className="wf-batch-col" title={`${i.name}${i.description ? ` — ${i.description}` : ''}`}>
+                <span key={i.name} className="wf-batch-col">
                   {inputTitle(i)}
                 </span>
               ))}
@@ -1158,22 +1168,13 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                   ))}
                   <span
                     className={`wf-batch-status ${verdict ? (verdict.ok ? (warn ? 'warn' : 'ok') : 'fail') : ''}`}
-                    title={
-                      verdict
-                        ? verdict.ok
-                          ? warn
-                            ? warn.note
-                              : 'ready'
-                          : (verdict.error ?? 'cannot run')
-                        : ''
-                    }
                   >
                     {verdict ? (verdict.ok ? (warn ? '⚠' : '✓') : '✗') : ''}
                   </span>
                   <button
                     type="button"
                     className="btn-icon wf-batch-rm"
-                    title="Remove row"
+                    aria-label="Remove row"
                     onClick={() => setMode({ ...m, rows: m.rows.filter((_, j) => j !== ri) })}
                   >
                     <XIcon size={12} />
@@ -1287,7 +1288,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                     <code>{s.tool}</code>
                     <span className="wf-args-inline">
                       {Object.entries(s.arguments).map(([k, v]) => (
-                        <span key={k} title={typeof v === 'string' ? v : undefined}>
+                        <span key={k}>
                           {k}: {display(v, root)}
                         </span>
                       ))}
@@ -1304,7 +1305,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
               className="btn-primary"
               type="submit"
               disabled={!canRun}
-            title={
+            aria-label={
               canRun
                 ? 'Run these exact steps. No LLM, no permission prompts.'
                 : complete === 0
@@ -1363,7 +1364,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             <button
               className="btn-primary wf-run-btn"
               disabled={!d.replayable}
-              title={
+              aria-label={
                 d.replayable
                   ? 'Run these exact steps on new inputs. No LLM involved.'
                   : (d.replay_error ?? '')
@@ -1381,7 +1382,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
               </button>
               <button
                 className="btn-text"
-                title="Export as a shareable .workflow.yaml file"
+                aria-label="Export as a shareable .workflow.yaml file"
                 onClick={() => void exportFile(d.name)}
               >
                 Export
@@ -1430,7 +1431,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         <span className="panel-actions">
           <button
             className="btn-icon"
-            title={
+            aria-label={
               distillSessionId
                 ? 'Save the current chat as a reusable workflow'
                 : 'Send a message in the chat first'
@@ -1442,13 +1443,13 @@ export const WorkflowPanel = memo(function WorkflowPanel({
           </button>
           <button
             className="btn-icon"
-            title="Import a shared workflow (.workflow.yaml)"
+            aria-label="Import a shared workflow (.workflow.yaml)"
             disabled={busy !== null}
             onClick={() => fileInputRef.current?.click()}
           >
             <DownloadIcon />
           </button>
-          <button className="btn-icon" title="Refresh" onClick={() => void reload()}>
+          <button className="btn-icon" aria-label="Refresh" onClick={() => void reload()}>
             <RefreshIcon />
           </button>
           <input
@@ -1475,7 +1476,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
           <div className="wf-run-card">
             <div className="wf-run-card-head">
               <PlayIcon size={12} /> {run.workflow}
-              <span className="wf-recent-muted wf-run-card-id" title={run.runId}>
+              <span className="wf-recent-muted wf-run-card-id">
                 {run.total > 1 ? `${run.total} items` : 'single run'}
               </span>
             </div>

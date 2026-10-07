@@ -50,9 +50,9 @@ export function ViewerSettingsPanel({ settings, onChange, onClose }: Props) {
   return (
     <>
       <div className="vs-backdrop" onClick={onClose} />
-      <div className="vs-popover" role="dialog" aria-label="Viewer settings">
+      <div className="vs-popover" role="dialog">
         <div className="vs-row">
-          <span className="vs-label" title="Image-left = patient-left (neuro) or patient-right (rad)">
+          <span className="vs-label">
             Orientation
           </span>
           <Segmented
@@ -80,7 +80,7 @@ export function ViewerSettingsPanel({ settings, onChange, onClose }: Props) {
         </div>
 
         <label className="vs-row vs-check">
-          <span className="vs-label" title="Show the 3D render alongside the slices (multiplanar only)">
+          <span className="vs-label">
             3D render
           </span>
           <input
@@ -112,7 +112,7 @@ export function ViewerSettingsPanel({ settings, onChange, onClose }: Props) {
         {advanced && (
           <>
             <div className="vs-row">
-              <span className="vs-label" title="Nearest = exact voxels & crisp labels; linear = smoothed">
+              <span className="vs-label">
                 Interpolation
               </span>
               <Segmented
@@ -126,7 +126,7 @@ export function ViewerSettingsPanel({ settings, onChange, onClose }: Props) {
             </div>
 
             <div className="vs-row">
-              <span className="vs-label" title="MSAA edge smoothing; uses more GPU memory">
+              <span className="vs-label">
                 Anti-aliasing
               </span>
               <Segmented
@@ -140,7 +140,7 @@ export function ViewerSettingsPanel({ settings, onChange, onClose }: Props) {
             </div>
 
             <div className="vs-row">
-              <span className="vs-label" title="Supersample N× then downsample; Native matches your display">
+              <span className="vs-label">
                 Render scale
               </span>
               <select

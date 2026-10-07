@@ -4,7 +4,27 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
-## Unreleased
+## 0.4.0 — 2026-10-07
+
+### Added
+
+- Viewer: label overlays size their colour table to the data (a 117-structure TotalSegmentator result no longer collapses above label 64), and a legend lists the structures present with names (from the `_labels.csv` the stack writes beside the segmentation), volumes in mL, click-to-jump and isolate.
+- Viewer: continuous overlays (probability maps, co-registered images, warps) render with a colormap and threshold instead of being forced into label colours; the type can be switched by hand.
+- Viewer: a status bar reads out voxel, millimetre position, intensity and label under the pointer, and the intensity window with presets (Auto, Full range, and CT soft tissue/lung/bone/brain/liver on Hounsfield data).
+- Viewer: files a tool result names appear as chips in the chat with View and Overlay actions, so the agent's output opens without hunting in the explorer.
+- Viewer: PNG snapshot of the current view, ↑/↓ and PageUp/PageDown step slices (Shift = 10), `o` hides the overlay for a before/after look.
+
+### Fixed
+
+- Chat: a tool result, and its View/Overlay chips, stays after a reload or resume; the replayed call arrived without its output before.
+- No more browser tooltips popping up over the workspace: hover titles are gone, icon buttons keep an accessible label.
+- Delete confirmations are the app's own dialog, not the browser's popup.
+- Viewer: the PNG snapshot is flattened onto black; the raw canvas kept partial alpha along the crosshair and edges, which image viewers showed washed out.
+- Viewer: label overlays drew several ids in one colour and a hidden label showed when its neighbour was visible (Niivue's generic shader filters the colour table); label maps now go through its atlas shader, which looks ids up exactly.
+- Viewer: a label overlay is always sampled nearest-neighbour, whatever the interpolation setting; linear sampling blended ids into colours no label has.
+- Viewer: the legend says which `_labels.csv` would name the labels when none is found; the viewer carries no label table of its own.
+- Viewer: `.dcm` files showed a Niivue error; they now say to convert the series to NIfTI with the DICOM stack.
+- Viewer: a panel resize no longer re-downloads the volume.
 
 ## 0.3.1 — 2026-10-06
 

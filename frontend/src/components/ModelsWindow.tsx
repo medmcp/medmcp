@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useConfirm } from '../confirm'
 import { createPortal } from 'react-dom'
 import { deleteLocalModel, fetchCloudModel, fetchLocalModels } from '../api'
 import { MODEL_LOGOS } from '../modelLogos'
@@ -120,8 +121,10 @@ export function ModelsWindow({ open, onClose }: ModelsWindowProps) {
 
   const cancel = () => socket.current?.close()
 
-  const remove = (model: LocalModelRow) => {
-    if (!window.confirm(`Delete ${model.label}?`)) return
+  const confirmDialog = useConfirm()
+  const remove = (model: LocalModelRow) =>
+    void confirmDialog(`Delete ${model.label}?`).then((ok) => ok && doRemove(model))
+  const doRemove = (model: LocalModelRow) => {
     setError(null)
     setNotice(null)
     setDeleting(model.id)
@@ -141,11 +144,11 @@ export function ModelsWindow({ open, onClose }: ModelsWindowProps) {
   return (
     <>
       <div className="modal-backdrop" onClick={onClose} />
-      <div className="extwin" role="dialog" aria-label="Models">
+      <div className="extwin" role="dialog">
         <div className="panel-header">
           <span>Models</span>
           <span className="panel-actions">
-            <button className="btn-icon" title="Close" onClick={onClose}>
+            <button className="btn-icon" aria-label="Close" onClick={onClose}>
               <XIcon />
             </button>
           </span>
@@ -274,14 +277,12 @@ export function ModelsWindow({ open, onClose }: ModelsWindowProps) {
 function ModelLogo({ id, vendor }: { id: string; vendor: string }) {
   const logo = MODEL_LOGOS[id]
   if (!logo) return <span className="models-logo" aria-hidden="true" />
-  if (!logo.mono) return <img className="models-logo" src={logo.src} alt={vendor} title={vendor} />
+  if (!logo.mono) return <img className="models-logo" src={logo.src} alt={vendor} />
   const mask = `url("${logo.src}")`
   return (
     <span
       className="models-logo mono"
       role="img"
-      aria-label={vendor}
-      title={vendor}
       style={{ maskImage: mask, WebkitMaskImage: mask }}
     />
   )

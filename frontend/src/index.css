@@ -652,6 +652,8 @@ button:hover {
 }
 
 .niivue-sizer {
+  /* The label legend is positioned against this box, not the whole view. */
+  position: relative;
   flex: 1;
   min-height: 0;
   min-width: 0;
@@ -2188,6 +2190,13 @@ textarea.wf-input {
   text-align: center;
 }
 
+.wf-req-pin {
+  margin-left: 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
 .wf-req-status.ok {
   color: var(--ok);
 }
@@ -3357,6 +3366,23 @@ textarea.wf-input {
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
 }
 
+.confirm-dialog {
+  width: 400px;
+}
+
+.confirm-dialog h3 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 20px;
+}
+
+.confirm-dialog p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;
@@ -3766,4 +3792,315 @@ textarea.wf-input {
 
 .drawer-footer-hint.available {
   color: var(--blue-xl);
+}
+
+/* ── Volume viewer: status bar, window popover, label legend, result chips ── */
+
+/* Position, intensity and label under the crosshair; the intensity window;
+   the volume's grid. Labelled pairs on one baseline; wraps onto a second line
+   when the panel is narrow rather than running the values together. */
+.viewer-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 18px;
+  row-gap: 2px;
+  padding: 4px 12px;
+  min-height: 26px;
+  background: var(--dark2);
+  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+  line-height: 18px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.st-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.st-key {
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.st-val {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted2);
+}
+
+.st-strong {
+  color: var(--text);
+}
+
+.st-label .st-val {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-spacer {
+  flex: 1;
+}
+
+.status-window-anchor {
+  position: relative;
+}
+
+.status-window {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  margin: -2px -6px;
+  padding: 1px 6px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.status-window:hover,
+.status-window.active {
+  border-color: var(--border);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* Opens upward from the status bar, so it is anchored at the bottom. */
+.wl-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  z-index: 41;
+  width: 272px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--text);
+  white-space: normal;
+}
+
+.wl-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wl-presets .vs-seg {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.wl-bounds {
+  display: flex;
+  gap: 10px;
+}
+
+.wl-bounds label {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.wl-bounds input,
+.overlay-threshold input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--dark);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 6px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.wl-hint {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.overlay-kind,
+.overlay-cmap {
+  max-width: 110px;
+}
+
+.overlay-threshold {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.overlay-threshold input {
+  width: 72px;
+}
+
+/* The label legend floats over the right of the canvas, below the overlay bar. */
+.label-legend {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  bottom: 8px;
+  width: 260px;
+  display: flex;
+  flex-direction: column;
+  background: rgba(14, 20, 36, 0.92);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+  font-size: 11.5px;
+  color: var(--text);
+  z-index: 5;
+  overflow: hidden;
+}
+
+.label-legend-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.label-legend-head span {
+  flex: 1;
+}
+
+.label-legend-search {
+  margin: 6px 8px 2px;
+  background: var(--dark);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  color: var(--text);
+  font-size: 11.5px;
+}
+
+.label-legend-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.label-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 8px 2px 12px;
+  height: 24px;
+  cursor: pointer;
+}
+
+.label-row:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.label-row.dim .label-name,
+.label-row.dim .label-id,
+.label-row.dim .label-ml {
+  opacity: 0.4;
+}
+
+.label-row.empty {
+  color: var(--muted);
+  cursor: default;
+}
+
+.label-legend-foot {
+  padding: 6px 12px 7px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.label-legend-foot code {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted2);
+}
+
+.label-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.label-id {
+  font-family: var(--mono);
+  color: var(--muted);
+  min-width: 24px;
+  text-align: right;
+}
+
+.label-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.label-ml {
+  font-family: var(--mono);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* Files a tool result named, as chips with viewer actions. */
+.tool-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.tool-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  line-height: 16px;
+  max-width: 100%;
+  background: var(--dark);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2px 4px 2px 8px;
+  font-size: 11.5px;
+}
+
+.tool-file-name {
+  font-family: var(--mono);
+  color: var(--muted2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
+  margin-right: 4px;
+}
+
+.tool-file .btn-text {
+  padding: 1px 6px;
+  font-size: 11px;
 }

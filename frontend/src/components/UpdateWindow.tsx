@@ -138,11 +138,11 @@ export function UpdateWindow({ open, onClose, state, onDismiss }: UpdateWindowPr
   return (
     <>
       <div className="modal-backdrop" onClick={close} />
-      <div className="upwin" role="dialog" aria-label="Software update">
+      <div className="upwin" role="dialog">
         <div className="panel-header">
           <span>Software update</span>
           <span className="panel-actions">
-            <button className="btn-icon" title="Close" disabled={busy} onClick={close}>
+            <button className="btn-icon" aria-label="Close" disabled={busy} onClick={close}>
               <XIcon />
             </button>
           </span>

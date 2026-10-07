@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react'
+import { useConfirm } from '../confirm'
 import { createPortal } from 'react-dom'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { Tree } from 'react-arborist'
@@ -118,7 +119,7 @@ function NodeRow({
           }}
         />
       ) : (
-        <span className="tree-name" title={node.data.id}>
+        <span className="tree-name">
           {node.data.name}
         </span>
       )}
@@ -144,6 +145,7 @@ export const FileExplorer = memo(function FileExplorer({
   onSelectionChange,
   isResizing,
 }: FileExplorerProps) {
+  const confirmDialog = useConfirm()
   const [data, setData] = useState<TreeNode[]>([])
   const [error, setError] = useState<string | null>(null)
   const [size, setSize] = useState({ width: 280, height: 400 })
@@ -289,7 +291,7 @@ export const FileExplorer = memo(function FileExplorer({
         <span className="panel-actions">
           <button
             className="btn-icon"
-            title="New folder"
+            aria-label="New folder"
             onClick={() => {
               const name = window.prompt('New folder name')
               if (name) run(mkdir(name))
@@ -297,10 +299,10 @@ export const FileExplorer = memo(function FileExplorer({
           >
             <FolderPlusIcon />
           </button>
-          <button className="btn-icon" title="Upload file" onClick={() => fileInputRef.current?.click()}>
+          <button className="btn-icon" aria-label="Upload file" onClick={() => fileInputRef.current?.click()}>
             <UploadIcon />
           </button>
-          <button className="btn-icon" title="Refresh" onClick={reload}>
+          <button className="btn-icon" aria-label="Refresh" onClick={reload}>
             <RefreshIcon />
           </button>
         </span>
@@ -347,9 +349,9 @@ export const FileExplorer = memo(function FileExplorer({
           onDelete={({ nodes }) => {
             if (nodes.length === 0) return
             const label = nodes.length > 1 ? `${nodes.length} items` : (nodes[0]?.data.name ?? '')
-            if (window.confirm(`Delete ${label}?`)) {
-              deleteMany(nodes.map((n) => n.data.id))
-            }
+            void confirmDialog(`Delete ${label}?`).then(
+              (ok) => ok && deleteMany(nodes.map((n) => n.data.id)),
+            )
           }}
         >
           {(props) => <NodeRow {...props} onMenu={openMenu} />}
@@ -387,9 +389,9 @@ export const FileExplorer = memo(function FileExplorer({
                 <button
                   className="danger"
                   onClick={menuAction(() => {
-                    if (window.confirm(`Delete ${label}?`)) {
-                      deleteMany(targets.map((n) => n.data.id))
-                    }
+                    void confirmDialog(`Delete ${label}?`).then(
+                      (ok) => ok && deleteMany(targets.map((n) => n.data.id)),
+                    )
                   })}
                 >
                   {targets.length > 1 ? `Delete ${targets.length} items` : 'Delete'}

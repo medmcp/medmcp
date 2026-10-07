@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useConfirm } from '../confirm'
 import { createPortal } from 'react-dom'
 import { archiveSession, deleteSession, fetchSessions, forkSession, renameSession } from '../api'
 import type { SessionInfo } from '../types'
@@ -159,8 +160,12 @@ export function ChatsMenu({
     act(renameSession(id, title).then(() => onRenamed?.(id, title)))
   }
 
-  const confirmDelete = (id: string) => {
-    if (!confirm('Delete this chat for good? Its transcript and provenance are removed too.')) return
+  const confirmDialog = useConfirm()
+  const confirmDelete = (id: string) =>
+    void confirmDialog('Delete this chat for good?', {
+      body: 'Its transcript and provenance are removed too.',
+    }).then((ok) => ok && doDelete(id))
+  const doDelete = (id: string) => {
     deleteSession(id)
       .then(() => {
         // Deleting the open chat would otherwise leave its (now-gone) transcript
@@ -202,7 +207,8 @@ export function ChatsMenu({
       >
         <span
           className={`prov-dot${s.hasProvenance ? ' on' : ''}`}
-          title={s.hasProvenance ? 'Has a provenance record' : 'No provenance record'}
+          role="img"
+          aria-label={s.hasProvenance ? 'Has a provenance record' : 'No provenance record'}
         />
         <span className="session-main">
           {editing ? (
@@ -232,7 +238,7 @@ export function ChatsMenu({
           {!isArchived && isCurrent && (
             <button
               className="btn-icon"
-              title="Branch this chat (duplicate to try a different path)"
+              aria-label="Branch this chat (duplicate to try a different path)"
               onClick={() => branch(s.id)}
             >
               <BranchIcon size={14} />
@@ -241,7 +247,7 @@ export function ChatsMenu({
           {!isArchived && (
             <button
               className="btn-icon"
-              title="Rename"
+              aria-label="Rename"
               onClick={() => {
                 setEditValue(s.title ?? '')
                 setEditingId(s.id)
@@ -252,12 +258,12 @@ export function ChatsMenu({
           )}
           <button
             className="btn-icon"
-            title={isArchived ? 'Restore' : 'Archive'}
+            aria-label={isArchived ? 'Restore' : 'Archive'}
             onClick={() => act(archiveSession(s.id, !isArchived))}
           >
             <ArchiveIcon size={14} />
           </button>
-          <button className="btn-icon danger" title="Delete" onClick={() => confirmDelete(s.id)}>
+          <button className="btn-icon danger" aria-label="Delete" onClick={() => confirmDelete(s.id)}>
             <TrashIcon size={14} />
           </button>
         </span>
@@ -279,7 +285,6 @@ export function ChatsMenu({
       <button
         ref={triggerRef}
         className="btn-plain chats-menu-trigger"
-        title="Open a previous chat"
         onClick={toggle}
       >
         Chats

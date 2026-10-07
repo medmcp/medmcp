@@ -29,11 +29,11 @@ export function CloudModelWindow({ open, onClose, onChanged }: CloudModelWindowP
   return (
     <>
       <div className="modal-backdrop" onClick={onClose} />
-      <div className="extwin" role="dialog" aria-label="Cloud model">
+      <div className="extwin" role="dialog">
         <div className="panel-header">
           <span>Cloud model</span>
           <span className="panel-actions">
-            <button className="btn-icon" title="Close" onClick={onClose}>
+            <button className="btn-icon" aria-label="Close" onClick={onClose}>
               <XIcon />
             </button>
           </span>

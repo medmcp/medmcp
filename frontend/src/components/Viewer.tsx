@@ -22,7 +22,7 @@ import {
   classifyOverlayData,
   cssColor,
   formatIntensity,
-  formatMl,
+  formatVolume,
   formatMm,
   labelColor,
   labelFileCandidates,
@@ -32,6 +32,7 @@ import {
   parseLabelNames,
   overlayFor,
   voxelsToMl,
+  volumeUnit,
   type LabelStat,
   type OverlayKind,
   type OverlayState,
@@ -1139,6 +1140,7 @@ function LabelLegend({
 }) {
   const [query, setQuery] = useState('')
   const q = query.trim().toLowerCase()
+  const unit = volumeUnit(Math.max(0, ...info.stats.map((s) => voxelsToMl(s.voxels, info.pixDims))))
   const rows = info.stats.filter((s) => {
     if (!q) return true
     const name = info.names.get(s.id) ?? ''
@@ -1179,7 +1181,9 @@ function LabelLegend({
               <span className="label-swatch" style={{ background: cssColor(labelColor(s.id)) }} />
               <span className="label-id">{s.id}</span>
               <span className="label-name">{info.names.get(s.id) ?? ''}</span>
-              <span className="label-ml">{formatMl(voxelsToMl(s.voxels, info.pixDims))}</span>
+              <span className="label-ml">
+                {formatVolume(voxelsToMl(s.voxels, info.pixDims), unit)}
+              </span>
               <button
                 className="btn-icon"
                 aria-label={

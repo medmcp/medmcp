@@ -279,12 +279,21 @@ export function voxelsToMl(voxels: number, pixDims: [number, number, number]): n
   return (voxels * pixDims[0] * pixDims[1] * pixDims[2]) / 1000
 }
 
-export function formatMl(ml: number): string {
+export type VolumeUnit = 'mL' | 'mm³'
+
+/** One unit for a whole legend, chosen from its largest structure: mL once
+ *  anything reaches a millilitre, else mm³. Mixed units in one column read as
+ *  if the small structures were the large ones. */
+export function volumeUnit(maxMl: number): VolumeUnit {
+  return maxMl >= 1 ? 'mL' : 'mm³'
+}
+
+export function formatVolume(ml: number, unit: VolumeUnit): string {
   if (!Number.isFinite(ml)) return '–'
-  // Pick the unit from the rounded value, so 0.9999 mL reads "1.0 mL", not
-  // "1000 mm³", and a single small voxel is not "0 mm³".
-  if (ml >= 99.95) return `${ml.toFixed(0)} mL`
-  if (ml >= 0.95) return `${ml.toFixed(1)} mL`
-  const mm3 = ml * 1000
-  return mm3 < 9.95 ? `${mm3.toFixed(1)} mm³` : `${mm3.toFixed(0)} mm³`
+  if (unit === 'mm³') {
+    const mm3 = ml * 1000
+    return `${mm3 < 9.95 ? mm3.toFixed(1) : mm3.toFixed(0)} mm³`
+  }
+  const digits = ml >= 99.95 ? 0 : ml >= 9.995 ? 1 : 2
+  return `${ml.toFixed(digits)} mL`
 }

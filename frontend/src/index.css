@@ -3366,6 +3366,23 @@ textarea.wf-input {
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
 }
 
+.confirm-dialog {
+  width: 400px;
+}
+
+.confirm-dialog h3 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 20px;
+}
+
+.confirm-dialog p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;

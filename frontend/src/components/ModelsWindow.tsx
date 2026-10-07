@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useConfirm } from '../confirm'
 import { createPortal } from 'react-dom'
 import { deleteLocalModel, fetchCloudModel, fetchLocalModels } from '../api'
 import { MODEL_LOGOS } from '../modelLogos'
@@ -120,8 +121,10 @@ export function ModelsWindow({ open, onClose }: ModelsWindowProps) {
 
   const cancel = () => socket.current?.close()
 
-  const remove = (model: LocalModelRow) => {
-    if (!window.confirm(`Delete ${model.label}?`)) return
+  const confirmDialog = useConfirm()
+  const remove = (model: LocalModelRow) =>
+    void confirmDialog(`Delete ${model.label}?`).then((ok) => ok && doRemove(model))
+  const doRemove = (model: LocalModelRow) => {
     setError(null)
     setNotice(null)
     setDeleting(model.id)

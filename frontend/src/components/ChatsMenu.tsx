@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useConfirm } from '../confirm'
 import { createPortal } from 'react-dom'
 import { archiveSession, deleteSession, fetchSessions, forkSession, renameSession } from '../api'
 import type { SessionInfo } from '../types'
@@ -159,8 +160,12 @@ export function ChatsMenu({
     act(renameSession(id, title).then(() => onRenamed?.(id, title)))
   }
 
-  const confirmDelete = (id: string) => {
-    if (!confirm('Delete this chat for good? Its transcript and provenance are removed too.')) return
+  const confirmDialog = useConfirm()
+  const confirmDelete = (id: string) =>
+    void confirmDialog('Delete this chat for good?', {
+      body: 'Its transcript and provenance are removed too.',
+    }).then((ok) => ok && doDelete(id))
+  const doDelete = (id: string) => {
     deleteSession(id)
       .then(() => {
         // Deleting the open chat would otherwise leave its (now-gone) transcript

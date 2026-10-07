@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { useConfirm } from '../confirm'
 import type { ReactNode } from 'react'
 import {
   batchFromPlan,
@@ -858,8 +859,12 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       showWorkflow(wf)
     })
 
-  const remove = (name: string) => {
-    if (!window.confirm(`Delete workflow "${name}"? This cannot be undone.`)) return
+  const confirmDialog = useConfirm()
+  const remove = (name: string) =>
+    void confirmDialog(`Delete workflow "${name}"?`, { body: 'This cannot be undone.' }).then(
+      (ok) => ok && doRemove(name),
+    )
+  const doRemove = (name: string) => {
     void withBusy('Deleting…', async () => {
       await deleteWorkflow(name)
       detailForRef.current = null

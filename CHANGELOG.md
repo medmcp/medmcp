@@ -18,6 +18,8 @@ Notable, user-visible changes to MedMCP. Format follows
 
 - Chat: a tool result, and its View/Overlay chips, stays after a reload or resume; the replayed call arrived without its output before.
 - No more browser tooltips popping up over the workspace: hover titles are gone, icon buttons keep an accessible label.
+- Delete confirmations are the app's own dialog, not the browser's popup.
+- Viewer: the PNG snapshot is flattened onto black; the raw canvas kept partial alpha along the crosshair and edges, which image viewers showed washed out.
 - Viewer: label overlays drew several ids in one colour and a hidden label showed when its neighbour was visible (Niivue's generic shader filters the colour table); label maps now go through its atlas shader, which looks ids up exactly.
 - Viewer: a label overlay is always sampled nearest-neighbour, whatever the interpolation setting; linear sampling blended ids into colours no label has.
 - Viewer: the legend says which `_labels.csv` would name the labels when none is found; the viewer carries no label table of its own.

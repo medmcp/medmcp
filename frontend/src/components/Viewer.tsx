@@ -3,7 +3,7 @@ import { Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import type { NVImage, NiiVueLocation } from '@niivue/niivue'
 import { rawUrl } from '../api'
 import { getDraggedFilePath } from '../dragState'
-import { classify, isVolumePath } from '../fileKinds'
+import { classify, isVolumePath, VOLUME_EXT } from '../fileKinds'
 import { DRAG_PATH_MIME } from '../types'
 import {
   CameraIcon,
@@ -38,6 +38,8 @@ import {
   type OverlayState,
 } from './viewerData'
 import { ViewerSettingsPanel } from './ViewerSettings'
+
+const VOLUME_EXT_I = new RegExp(VOLUME_EXT.source, 'i')
 
 // Niivue COLORMAP_TYPE.ZERO_TO_MAX_TRANSPARENT_BELOW_MIN — voxels below cal_min
 // are fully transparent. The enum isn't exported, so we use its numeric value.
@@ -754,9 +756,11 @@ function VolumeView({
   useEffect(() => {
     if (snapshotToken === 0) return
     const nv = nvRef.current
-    if (!nv || nv.volumes.length === 0) return
-    const stem = (path.split('/').pop() ?? 'volume').replace(/\.(nii(\.gz)?|mgz|mgh|nrrd|nhdr|mha|mhd)$/i, '')
-    void nv.saveScene(`${stem}.png`)
+    const canvas = canvasRef.current
+    if (!nv || !canvas || nv.volumes.length === 0) return
+    const stem = (path.split('/').pop() ?? 'volume').replace(VOLUME_EXT_I, '')
+    nv.drawScene()
+    saveCanvasPng(canvas, `${stem}.png`)
   }, [snapshotToken, path])
 
   // Every overlay change goes through the serialized chain; applyOverlay works
@@ -1131,6 +1135,30 @@ function VolumeView({
   )
 }
 
+
+/** Download the WebGL canvas as an opaque PNG. The GL framebuffer keeps partial
+ *  alpha where the crosshair and anti-aliased edges were blended; on screen the
+ *  browser composites that over the dark page, but an exported file would show
+ *  it washed out over white in any image viewer — so flatten onto the viewer's
+ *  black first. Must run right after a draw: the buffer is not preserved. */
+function saveCanvasPng(canvas: HTMLCanvasElement, filename: string): void {
+  const flat = document.createElement('canvas')
+  flat.width = canvas.width
+  flat.height = canvas.height
+  const ctx = flat.getContext('2d')
+  if (!ctx) return
+  ctx.fillStyle = '#000'
+  ctx.fillRect(0, 0, flat.width, flat.height)
+  ctx.drawImage(canvas, 0, 0)
+  flat.toBlob((blob) => {
+    if (!blob) return
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(a.href)
+  })
+}
 
 /** A number as text for an input field: enough precision to round-trip what
  *  the user typed, no trailing zeros. */

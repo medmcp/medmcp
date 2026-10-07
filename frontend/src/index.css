@@ -3773,40 +3773,55 @@ textarea.wf-input {
 /* ── Volume viewer: status bar, window popover, label legend, result chips ── */
 
 /* Position, intensity and label under the crosshair; the intensity window;
-   the volume's grid. One line, mono, muted — a readout, not a toolbar. */
+   the volume's grid. Labelled pairs on one baseline; wraps onto a second line
+   when the panel is narrow rather than running the values together. */
 .viewer-status {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  padding: 0 12px;
-  height: 26px;
+  column-gap: 18px;
+  row-gap: 2px;
+  padding: 4px 12px;
+  min-height: 26px;
   background: var(--dark2);
   border-top: 1px solid var(--border);
-  font-family: var(--mono);
-  font-size: 11px;
-  line-height: 26px;
+  font-size: 11.5px;
+  line-height: 18px;
   color: var(--muted);
-  white-space: nowrap;
   flex-shrink: 0;
 }
 
-/* The window popover opens upward out of this bar, so the bar itself must not
-   clip; the position readout is what truncates when space runs out. */
-.status-pos {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.st-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
 }
 
-.status-value {
+.st-key {
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.st-val {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted2);
+}
+
+.st-strong {
   color: var(--text);
 }
 
-.status-overlay {
-  color: var(--text);
+.st-label .st-val {
+  max-width: 260px;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 40%;
 }
 
 .status-spacer {
@@ -3815,30 +3830,26 @@ textarea.wf-input {
 
 .status-window-anchor {
   position: relative;
-  display: inline-flex;
 }
 
 .status-window {
   background: none;
   border: 1px solid transparent;
-  border-radius: 6px;
-  padding: 0 6px;
-  height: 20px;
+  border-radius: 5px;
+  margin: -2px -6px;
+  padding: 1px 6px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
   line-height: 18px;
-  font: inherit;
-  color: var(--muted);
+  color: var(--text);
   cursor: pointer;
 }
 
 .status-window:hover,
 .status-window.active {
-  color: var(--text);
   border-color: var(--border);
-  background: rgba(255, 255, 255, 0.05);
-}
-
-.status-dims {
-  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 /* Opens upward from the status bar, so it is anchored at the bottom. */

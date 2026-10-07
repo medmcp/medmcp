@@ -7,7 +7,6 @@ import { classify, isVolumePath } from '../fileKinds'
 import { DRAG_PATH_MIME } from '../types'
 import {
   CameraIcon,
-  DownloadIcon,
   EyeIcon,
   EyeOffIcon,
   GearIcon,
@@ -889,31 +888,42 @@ function VolumeView({
       </div>
       {baseInfo && (
         <div className="viewer-status">
-          <span className="status-pos" title="Voxel index · world coordinates (mm)">
-            {readout
-              ? `${readout.vox[0]}, ${readout.vox[1]}, ${readout.vox[2]} · ${formatMm(readout.mm[0])}, ${formatMm(readout.mm[1])}, ${formatMm(readout.mm[2])} mm`
-              : 'Move the pointer over the image'}
+          <span className="st-item" title="Voxel index under the crosshair">
+            <span className="st-key">Voxel</span>
+            <span className="st-val">{readout ? readout.vox.join(' ') : '–'}</span>
           </span>
-          <span className="status-value" title="Intensity under the crosshair">
-            {readout ? formatIntensity(readout.baseValue, isCT) : ''}
+          <span className="st-item" title="World coordinates under the crosshair">
+            <span className="st-key">mm</span>
+            <span className="st-val">{readout ? readout.mm.map(formatMm).join(' ') : '–'}</span>
           </span>
-          {readout && info && (
-            <span className="status-overlay" title="Overlay value under the crosshair">
-              {info.kind === 'label'
-                ? overlayLabel ?? 'background'
-                : readout.overlayValue == null
-                  ? ''
-                  : formatIntensity(readout.overlayValue, false)}
+          <span className="st-item" title="Intensity under the crosshair">
+            <span className="st-key">Value</span>
+            <span className="st-val st-strong">
+              {readout ? formatIntensity(readout.baseValue, isCT) : '–'}
+            </span>
+          </span>
+          {info && (
+            <span className="st-item st-label" title="Overlay under the crosshair">
+              <span className="st-key">{info.kind === 'label' ? 'Label' : 'Overlay'}</span>
+              <span className="st-val st-strong">
+                {!readout
+                  ? '–'
+                  : info.kind === 'label'
+                    ? (overlayLabel ?? 'background')
+                    : readout.overlayValue == null
+                      ? '–'
+                      : formatIntensity(readout.overlayValue, false)}
+              </span>
             </span>
           )}
           <span className="status-spacer" />
-          <span className="status-window-anchor">
+          <span className="st-item status-window-anchor" title="Intensity window (right-drag on the image also adjusts it)">
+            <span className="st-key">Window</span>
             <button
               className={windowOpen ? 'status-window active' : 'status-window'}
-              title="Intensity window (right-drag on the image also adjusts it)"
               onClick={() => setWindowOpen((v) => !v)}
             >
-              W {win ? `${formatNumber(win.min)} – ${formatNumber(win.max)}` : ''}
+              {win ? `${formatNumber(win.min)} – ${formatNumber(win.max)}` : '–'}
               {isCT ? ' HU' : ''}
             </button>
             {windowOpen && win && (
@@ -929,10 +939,13 @@ function VolumeView({
             )}
           </span>
           <span
-            className="status-dims"
+            className="st-item st-grid"
             title={`Data type code ${baseInfo.dtype}${baseInfo.frames > 1 ? ` · ${baseInfo.frames} frames` : ''} · range ${formatNumber(baseInfo.min)} to ${formatNumber(baseInfo.max)}`}
           >
-            {baseInfo.dims.join('×')} · {baseInfo.pixDims.map((p) => p.toFixed(2).replace(/\.?0+$/, '')).join('×')} mm
+            <span className="st-key">Grid</span>
+            <span className="st-val">
+              {baseInfo.dims.join('×')} · {formatSpacing(baseInfo.pixDims)}
+            </span>
           </span>
         </div>
       )}
@@ -947,6 +960,13 @@ function VolumeView({
       )}
     </div>
   )
+}
+
+/** Voxel spacing: one number when isotropic ("0.7 mm"), else all three. */
+function formatSpacing(p: [number, number, number]): string {
+  const f = (v: number) => v.toFixed(2).replace(/\.?0+$/, '')
+  const iso = Math.abs(p[0] - p[1]) < 1e-3 && Math.abs(p[1] - p[2]) < 1e-3
+  return iso ? `${f(p[0])} mm` : `${p.map(f).join('×')} mm`
 }
 
 function formatNumber(v: number): string {
@@ -1259,9 +1279,6 @@ export const Viewer = memo(function Viewer({
               )}
             </span>
           )}
-          <a href={url} download title="Download">
-            <DownloadIcon />
-          </a>
         </span>
       </div>
       <div className="panel-body viewer-body">

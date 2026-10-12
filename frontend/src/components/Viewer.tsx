@@ -11,6 +11,8 @@ import {
   EyeOffIcon,
   GearIcon,
   ListIcon,
+  PauseIcon,
+  PlayIcon,
   RecenterIcon,
   XIcon,
 } from './icons'
@@ -316,6 +318,13 @@ async function describeOverlay(vol: NVImage, path: string, forcedKind: OverlayKi
   if (kind === 'label') {
     stats = labelStats(img, dims)
     maxLabel = stats.length ? stats[stats.length - 1].id : Math.ceil(vol.global_max ?? 1)
+    // A 4D label map (a cine segmentation) is counted one frame at a time, but
+    // the colour table must cover every id in every frame.
+    if ((vol.nFrame4D ?? 1) > 1) {
+      let m = 0
+      for (let i = 0; i < img.length; i++) if (img[i] > m) m = img[i]
+      maxLabel = Math.max(maxLabel, Math.ceil(m))
+    }
     exactColors = routeThroughAtlasShader(vol, maxLabel)
     names = await fetchLabelNames(path)
   }
@@ -406,6 +415,15 @@ interface Readout {
   overlayValue: number | null
 }
 
+/** Playback rate for a 4D volume. A fixed rate rather than the header's time
+ *  step: converters write the sequence TR there (a few ms for a cine), not the
+ *  frame interval, and 20 fps runs a 20–30 frame cine at about a cycle a second. */
+const FRAME_INTERVAL_MS = 50
+
+/** The frame last shown per 4D file, so the resize-rebuild (which remounts the
+ *  view) and reopening a file resume where the reader was. */
+const lastFrameByPath = new Map<string, number>()
+
 type OverlayVol = {
   path: string
   vol: NVImage
@@ -479,6 +497,11 @@ function VolumeView({
     isCT: boolean
   } | null>(null)
   const [overlayVol, setOverlayVol] = useState<OverlayVol | null>(null)
+  // 4D volumes (a cine, a time series): the frame on screen and whether it
+  // plays. Niivue holds every frame and uploads one; a switch is a re-upload.
+  const [frame, setFrame] = useState(() => lastFrameByPath.get(path) ?? 0)
+  const [playing, setPlaying] = useState(false)
+  const frameRef = useRef(lastFrameByPath.get(path) ?? 0)
   const [legendOpen, setLegendOpen] = useState(false)
   const [windowOpen, setWindowOpen] = useState(false)
   // Read inside the url-keyed load effect (constructor seeding + post-load) and
@@ -553,6 +576,90 @@ function VolumeView({
   const overlayOpRef = useRef<Promise<void>>(Promise.resolve())
   const overlayVolRef = useRef<OverlayVol | null>(null)
 
+  /** Read position, intensity and label under the pointer — what a reader
+   *  expects from a status bar, where Niivue itself only reports the crosshair
+   *  (set by clicking). Also remembers which pane the pointer is over, for the
+   *  slice keys. Coalesced to one update per frame — the last sample wins.
+   *  Re-run on a 4D frame change, so a still pointer reads the frame shown. */
+  const hoverRaf = useRef(0)
+  const hoverNext = useRef<Readout | null>(null)
+  const pointerRef = useRef<{ x: number; y: number } | null>(null)
+  const sampleAt = useCallback((clientX: number, clientY: number) => {
+    const nv = nvRef.current
+    const canvas = canvasRef.current
+    if (!nv || !canvas || nv.volumes.length === 0) return
+    const rect = canvas.getBoundingClientRect()
+    const dpr = nv.uiData.dpr ?? 1
+    const x = (clientX - rect.left) * dpr
+    const y = (clientY - rect.top) * dpr
+    const tile = nv.screenSlices.find((t) => {
+      const [l, tp, w, h] = t.leftTopWidthHeight
+      return x >= l && x < l + w && y >= tp && y < tp + h
+    })
+    if (!tile || tile.axCorSag > 2) return
+    paneRef.current = tile.axCorSag
+    const frac = nv.canvasPos2frac([x, y])
+    if (frac[0] < 0) return
+    // World mm (isForceSliceMM): without it Niivue returns its orthogonalised
+    // slice space, which differs from world on an oblique scan.
+    const mm = nv.frac2mm(frac, 0, true)
+    const vox = nv.frac2vox(frac)
+    const values = nv.volumes.map((v) => {
+      const vx = v.mm2vox([mm[0], mm[1], mm[2]])
+      return v.getValue(vx[0], vx[1], vx[2], v.frame4D)
+    })
+    // The overlay's uploaded voxels may be masked by isolation; report the file's.
+    const ov = overlayVolRef.current
+    if (ov && values.length > 1 && ov.vol.img !== ov.raw) {
+      const [nx, ny, nz] = ov.info.dims
+      const [i, j, k] = ov.vol.mm2vox([mm[0], mm[1], mm[2]])
+      values[1] =
+        i >= 0 && j >= 0 && k >= 0 && i < nx && j < ny && k < nz
+          ? ov.raw[i + j * nx + k * nx * ny + ov.vol.frame4D * nx * ny * nz]
+          : NaN
+    }
+    hoverNext.current = {
+      vox: [vox[0], vox[1], vox[2]],
+      mm: [mm[0], mm[1], mm[2]],
+      baseValue: values[0] ?? NaN,
+      overlayValue: values.length > 1 ? values[1] : null,
+    }
+    if (!hoverRaf.current) {
+      hoverRaf.current = requestAnimationFrame(() => {
+        hoverRaf.current = 0
+        if (hoverNext.current) setReadout(hoverNext.current)
+      })
+    }
+  }, [])
+
+  /** Show frame `f` of a 4D base (wrapping), and the same frame of a 4D
+   *  overlay so a cine segmentation stays on its image. Both volumes are
+   *  switched before the one GL update. */
+  const applyFrame = useCallback((f: number) => {
+    const nv = nvRef.current
+    if (!nv || nv.volumes.length === 0) return
+    const base = nv.volumes[0]
+    const n = base.nFrame4D ?? 1
+    const next = n > 1 ? ((f % n) + n) % n : 0
+    const ov = overlayVolRef.current
+    const ovFrames = ov?.vol.nFrame4D ?? 1
+    const ovNext = Math.min(next, ovFrames - 1)
+    const changed = base.frame4D !== next || (ov != null && ov.vol.frame4D !== ovNext)
+    base.frame4D = next
+    if (ov) ov.vol.frame4D = ovNext
+    if (changed) nv.updateGLVolume()
+    if (ov && ovFrames > 1 && ov.info.kind === 'label' && changed) {
+      // The legend counts the frame on screen.
+      ov.info = { ...ov.info, stats: labelStats(ov.raw, ov.info.dims, ovNext) }
+      setOverlayVol({ ...ov })
+    }
+    frameRef.current = next
+    lastFrameByPath.set(path, next)
+    setFrame(next)
+    const p = pointerRef.current
+    if (p) sampleAt(p.x, p.y)
+  }, [path, sampleAt])
+
   /** Bring the overlaid volume in line with the latest overlay state: load a
    *  new file (or remove the old one), re-read it when the kind was overridden,
    *  otherwise just restyle. Idempotent, so it can run after every change. */
@@ -589,6 +696,8 @@ function VolumeView({
         styleOverlay(nv, loaded, overlayRef.current)
         overlayVolRef.current = loaded
         setOverlayVol(loaded)
+        // A 4D overlay joins the base on its current frame.
+        if ((vol.nFrame4D ?? 1) > 1) applyFrame(frameRef.current)
       }
       // The overlay set changed: a label map pins nearest sampling.
       nv.setInterpolation(
@@ -602,7 +711,7 @@ function VolumeView({
       onOverlayChangeRef.current({ ...EMPTY_OVERLAY, base: path })
       setLoadError(`Could not load overlay: ${String(e)}`)
     }
-  }, [path])
+  }, [path, applyFrame])
 
   // Base volume: one Niivue instance per mounted view (remounted via key on
   // path change, and on resize-settle), so overlay state always starts clean.
@@ -697,6 +806,8 @@ function VolumeView({
         })
         setWin({ min: base.cal_min ?? gmin, max: base.cal_max ?? gmax })
         nv.createOnLocationChange()
+        // Resume a 4D file on the frame it was last shown at.
+        if (frameRef.current > 0) applyFrame(frameRef.current)
         // Restore a persisted overlay so it survives the resize-rebuild remount
         // (which rebuilds this view fresh — see the parent Viewer).
         if (overlayRef.current.path && !cancelled) {
@@ -732,7 +843,7 @@ function VolumeView({
         // best-effort teardown
       }
     }
-  }, [url, path, applyOverlay])
+  }, [url, path, applyOverlay, applyFrame])
 
   // Apply live setting changes to the open volume. `antialias` and
   // `renderScale` are excluded here — both are creation-time, so changing them
@@ -749,8 +860,18 @@ function VolumeView({
   useEffect(() => {
     if (resetToken === 0) return
     const nv = nvRef.current
-    if (nv && nv.volumes.length > 0) resetView(nv)
-  }, [resetToken])
+    if (nv && nv.volumes.length > 0) {
+      resetView(nv)
+      applyFrame(0)
+    }
+  }, [resetToken, applyFrame])
+
+  // Playback: advance the frame on a timer; the interval dies with the view.
+  useEffect(() => {
+    if (!playing) return
+    const id = window.setInterval(() => applyFrame(frameRef.current + 1), FRAME_INTERVAL_MS)
+    return () => window.clearInterval(id)
+  }, [playing, applyFrame])
 
   // Save the current canvas as a PNG named after the file.
   useEffect(() => {
@@ -806,14 +927,28 @@ function VolumeView({
   }
 
   // Keyboard: step slices in the pane under the pointer (↑/↓, PageUp/PageDown;
-  // Shift = 10 at a time), `o` hides/shows the overlay for a before/after look.
+  // Shift = 10 at a time), `o` hides/shows the overlay for a before/after look;
+  // on a 4D volume ←/→ step frames (Shift = 10) and space plays/pauses.
   const onKeyDown = (e: React.KeyboardEvent) => {
     const nv = nvRef.current
     if (!nv || nv.volumes.length === 0) return
-    if ((e.key === 'o' || e.key === 'O') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return
+    if (e.key === 'o' || e.key === 'O') {
       if (overlayRef.current.path) patchOverlay({ hidden: !overlayRef.current.hidden })
       e.preventDefault()
       return
+    }
+    if ((nv.volumes[0].nFrame4D ?? 1) > 1) {
+      if (e.key === ' ') {
+        setPlaying((p) => !p)
+        e.preventDefault()
+        return
+      }
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        applyFrame(frameRef.current + (e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 10 : 1))
+        e.preventDefault()
+        return
+      }
     }
     let dir = 0
     if (e.key === 'ArrowUp' || e.key === 'PageUp') dir = 1
@@ -830,60 +965,12 @@ function VolumeView({
     else nv.moveCrosshairInVox(step, 0, 0)
   }
 
-  /** Read position, intensity and label under the pointer — what a reader
-   *  expects from a status bar, where Niivue itself only reports the crosshair
-   *  (set by clicking). Also remembers which pane the pointer is over, for the
-   *  slice keys. Coalesced to one update per frame — the last sample wins. */
-  const hoverRaf = useRef(0)
-  const hoverNext = useRef<Readout | null>(null)
   const onPointerMove = (e: React.PointerEvent) => {
-    const nv = nvRef.current
-    const canvas = canvasRef.current
-    if (!nv || !canvas || nv.volumes.length === 0) return
-    const rect = canvas.getBoundingClientRect()
-    const dpr = nv.uiData.dpr ?? 1
-    const x = (e.clientX - rect.left) * dpr
-    const y = (e.clientY - rect.top) * dpr
-    const tile = nv.screenSlices.find((t) => {
-      const [l, tp, w, h] = t.leftTopWidthHeight
-      return x >= l && x < l + w && y >= tp && y < tp + h
-    })
-    if (!tile || tile.axCorSag > 2) return
-    paneRef.current = tile.axCorSag
-    const frac = nv.canvasPos2frac([x, y])
-    if (frac[0] < 0) return
-    // World mm (isForceSliceMM): without it Niivue returns its orthogonalised
-    // slice space, which differs from world on an oblique scan.
-    const mm = nv.frac2mm(frac, 0, true)
-    const vox = nv.frac2vox(frac)
-    const values = nv.volumes.map((v) => {
-      const vx = v.mm2vox([mm[0], mm[1], mm[2]])
-      return v.getValue(vx[0], vx[1], vx[2], v.frame4D)
-    })
-    // The overlay's uploaded voxels may be masked by isolation; report the file's.
-    const ov = overlayVolRef.current
-    if (ov && values.length > 1 && ov.vol.img !== ov.raw) {
-      const [nx, ny, nz] = ov.info.dims
-      const [i, j, k] = ov.vol.mm2vox([mm[0], mm[1], mm[2]])
-      values[1] =
-        i >= 0 && j >= 0 && k >= 0 && i < nx && j < ny && k < nz
-          ? ov.raw[i + j * nx + k * nx * ny]
-          : NaN
-    }
-    hoverNext.current = {
-      vox: [vox[0], vox[1], vox[2]],
-      mm: [mm[0], mm[1], mm[2]],
-      baseValue: values[0] ?? NaN,
-      overlayValue: values.length > 1 ? values[1] : null,
-    }
-    if (!hoverRaf.current) {
-      hoverRaf.current = requestAnimationFrame(() => {
-        hoverRaf.current = 0
-        if (hoverNext.current) setReadout(hoverNext.current)
-      })
-    }
+    pointerRef.current = { x: e.clientX, y: e.clientY }
+    sampleAt(e.clientX, e.clientY)
   }
   const onPointerLeave = () => {
+    pointerRef.current = null
     // Back to the crosshair's values once the pointer is off the image.
     const nv = nvRef.current
     if (nv && nv.volumes.length > 0) nv.createOnLocationChange()
@@ -1100,6 +1187,36 @@ function VolumeView({
             </span>
           )}
           <span className="status-spacer" />
+          {baseInfo.frames > 1 && (
+            <span className="st-item status-frame">
+              <span className="st-key">Frame</span>
+              <button
+                className="btn-icon"
+                aria-label={playing ? 'Pause (space)' : 'Play (space)'}
+                onClick={() => setPlaying((p) => !p)}
+              >
+                {playing ? <PauseIcon size={14} /> : <PlayIcon size={14} />}
+              </button>
+              <input
+                className="frame-slider"
+                type="range"
+                min={0}
+                max={baseInfo.frames - 1}
+                step={1}
+                value={frame}
+                aria-label={`Frame ${frame + 1} of ${baseInfo.frames}`}
+                onChange={(e) => applyFrame(Number(e.target.value))}
+              />
+              {/* Sized for the widest value, so the slider does not move
+                  when the number gains a digit. */}
+              <span
+                className="st-val st-strong frame-count"
+                style={{ minWidth: `${2 * String(baseInfo.frames).length + 1}ch` }}
+              >
+                {frame + 1}/{baseInfo.frames}
+              </span>
+            </span>
+          )}
           <span className="st-item status-window-anchor">
             <span className="st-key">Window</span>
             <button

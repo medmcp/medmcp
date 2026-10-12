@@ -3852,6 +3852,27 @@ textarea.wf-input {
   flex: 1;
 }
 
+/* 4D: play/pause, a frame slider and the count, centred on the row. The button
+   is 14px icon + 2px padding = 18px, the row's line height, so it sits on
+   whole pixels. */
+.status-frame {
+  align-items: center;
+}
+
+.status-frame .btn-icon {
+  padding: 2px;
+}
+
+.frame-slider {
+  width: 220px;
+  margin: 0;
+  accent-color: var(--blue-l);
+}
+
+.frame-count {
+  text-align: right;
+}
+
 .status-window-anchor {
   position: relative;
 }

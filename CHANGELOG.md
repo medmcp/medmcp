@@ -4,6 +4,12 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## 0.4.1 — 2026-10-12
+
+### Added
+
+- Viewer: 4D volumes (cine MRI, time series) get a frame slider with play/pause in the status bar; ←/→ step frames (Shift = 10), space plays; a 4D label overlay follows the image frame and the legend counts the frame on screen.
+
 ## 0.4.0 — 2026-10-07
 
 ### Added

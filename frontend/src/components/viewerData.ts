@@ -177,11 +177,16 @@ export interface LabelStat {
   centroid: [number, number, number]
 }
 
-/** Count voxels and a centroid per label id in one pass over the raw data. */
-export function labelStats(img: ArrayLike<number>, dims: [number, number, number]): LabelStat[] {
+/** Count voxels and a centroid per label id in one pass over one frame of the
+ *  raw data: frame 0 unless the map is 4D, in which case `frame` picks one. */
+export function labelStats(
+  img: ArrayLike<number>,
+  dims: [number, number, number],
+  frame = 0,
+): LabelStat[] {
   const [nx, ny, nz] = dims
   const counts = new Map<number, { n: number; x: number; y: number; z: number }>()
-  let idx = 0
+  let idx = frame * nx * ny * nz
   for (let k = 0; k < nz; k++) {
     for (let j = 0; j < ny; j++) {
       for (let i = 0; i < nx; i++, idx++) {

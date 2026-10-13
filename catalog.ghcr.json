@@ -24,6 +24,12 @@
       "image": "ghcr.io/medmcp/totalsegmentator:main",
       "description": "Whole-body anatomy segmentation on CT and MR, plus focused models for the spine, lungs, liver, head and neck, and teeth (TotalSegmentator).",
       "gpu": true
+    },
+    {
+      "name": "medmcp-cardiac",
+      "image": "ghcr.io/medmcp/cardiac:main",
+      "description": "Cardiac MRI and CT: ventricle segmentation on short- and long-axis cines (CineMA), ejection fraction, volumes, LV mass and cardiac output, AHA 16-segment wall analysis, Agatston calcium score.",
+      "gpu": true
     }
   ]
 }

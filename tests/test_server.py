@@ -93,6 +93,87 @@ class TestSafePath:
 # ── _resolve_input_path: workspace-relative replay inputs → absolute ──────────
 
 
+class TestMountedSubtrees:
+    """Mounted folders (external drives) get a bounded tree and cannot be deleted."""
+
+    @pytest.fixture
+    def drives(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """A workspace whose ``external_drives`` folder counts as a mount point."""
+        root = tmp_path.resolve()
+        monkeypatch.setattr(server, "WORKSPACE_ROOT", root)
+        drives = root / "external_drives"
+        # A bind mount from the same filesystem, which os.path.ismount cannot see:
+        # how /media/<user> really lands in the workspace.
+        monkeypatch.setattr(server, "_mount_points", lambda: {Path("/"), drives})
+        for disk in ("DISK_A", "DISK_B"):
+            for i in range(3):
+                series = drives / disk / f"series{i}"
+                series.mkdir(parents=True)
+                for j in range(4):
+                    (series / f"img{j}.dcm").write_bytes(b"x")
+        (root / "notes.txt").write_text("hi")
+        return drives
+
+    @staticmethod
+    def _count(nodes: list[Any]) -> int:
+        return sum(1 + TestMountedSubtrees._count(n.get("children", [])) for n in nodes)
+
+    def test_small_drive_is_listed_in_full(self, drives: Path) -> None:
+        """Under the budget the mounted subtree matches a plain walk."""
+        tree = server._tree_node(server.WORKSPACE_ROOT, 0)["children"]
+        node = next(n for n in tree if n["name"] == "external_drives")
+        assert self._count(node["children"]) == 2 * (1 + 3 * (1 + 4))
+        assert "truncated" not in node
+
+    def test_budget_is_spent_breadth_first(
+        self, drives: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A spent budget still shows every drive and flags what it cut."""
+        monkeypatch.setattr(server, "_TREE_MAX_MOUNT_NODES", 5)
+        node = server._tree_node(drives, 1)
+        names = [d["name"] for d in node["children"]]
+        assert names == ["DISK_A", "DISK_B"]
+        assert self._count(node["children"]) == 5
+        assert any(d.get("truncated") for d in node["children"])
+
+    def test_workspace_files_outside_the_mount_are_untouched(self, drives: Path) -> None:
+        """The budget applies to the mount only."""
+        tree = server._tree_node(server.WORKSPACE_ROOT, 0)["children"]
+        assert any(n["name"] == "notes.txt" and n["size"] == 2 for n in tree)
+
+    def test_mount_point_cannot_be_deleted_or_moved(self, drives: Path) -> None:
+        """Deleting the drives folder would empty every plugged-in drive."""
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        resp = client.delete("/api/files", params={"path": "external_drives"})
+        assert resp.status_code == 400
+        resp = client.post("/api/files/rename", json={"path": "external_drives", "new_path": "x"})
+        assert resp.status_code == 400
+        assert (drives / "DISK_A" / "series0" / "img0.dcm").exists()
+
+    def test_folder_holding_a_mount_cannot_be_deleted(
+        self, drives: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Deleting a parent would empty the drive below it before failing."""
+        nested = server.WORKSPACE_ROOT / "study" / "usb"
+        nested.mkdir(parents=True)
+        (nested / "scan.nii").write_bytes(b"x")
+        monkeypatch.setattr(server, "_mount_points", lambda: {Path("/"), drives, nested})
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        assert client.delete("/api/files", params={"path": "study"}).status_code == 400
+        assert (nested / "scan.nii").exists()
+
+    def test_mount_table_is_read(self) -> None:
+        """The real mount table parses and includes the root filesystem."""
+        assert Path("/") in server._mount_points()
+
+    def test_files_on_a_drive_can_still_be_deleted(self, drives: Path) -> None:
+        """Only the mount point itself is protected."""
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        resp = client.delete("/api/files", params={"path": "external_drives/DISK_A/series0"})
+        assert resp.status_code == 200
+        assert not (drives / "DISK_A" / "series0").exists()
+
+
 class TestResolveInputPath:
     """Replay inputs arrive workspace-relative; the stack tools need absolute paths.
 

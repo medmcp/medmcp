@@ -4,6 +4,16 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Added
+
+- External drives: set `MEDMCP_EXTERNAL_DRIVES` to the host folder removable drives mount under (e.g. `/media/$USER`) and plugged-in drives appear in the workspace under `external_drives/`, live, for the explorer, the viewer and every tool stack. The explorer lists a mounted drive breadth-first up to 5000 entries so a large archive cannot stall it, and a mounted drive cannot be deleted or moved from the explorer.
+
+### Fixed
+
+- A wrong docker socket path now fails `compose up` with "bind source path does not exist" instead of docker silently creating an empty directory there, which left every stack failing discovery with "Connection closed" (seen on rootful hosts started without `XDG_RUNTIME_DIR=/var/run`).
+
 ## 0.4.2 — 2026-10-13
 
 ### Added

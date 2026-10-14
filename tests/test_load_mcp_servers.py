@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 from medmcp import settings
@@ -493,3 +493,61 @@ class TestStacksDDiscovery:
             servers = load_mcp_servers()
 
         assert servers == []
+
+
+class TestExternalDrives:
+    """MEDMCP_EXTERNAL_DRIVES adds the drive mount to every container stack."""
+
+    _BODY = (
+        'name = "medmcp-dicom"\ncommand = "docker"\n'
+        'args = ["run", "--rm", "-i", "-v", "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}", "img"]\n'
+    )
+
+    def setup_method(self) -> None:
+        """Clear the lru_cache before each test so patches take effect."""
+        _clear_cache()
+
+    def _load(self, tmp_path: Path, env: dict[str, str]) -> list[str]:
+        stacks = tmp_path / "stacks.d"
+        _make_manifest(stacks, "medmcp-dicom", self._BODY)
+        with (
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.STACKS_D_PATH", stacks),
+            patch.dict(os.environ, {"MEDMCP_WORKSPACE": "/srv/data", **env}),
+        ):
+            return cast("list[str]", load_mcp_servers()[0]["args"])
+
+    def test_drive_mount_lands_inside_the_workspace(self, tmp_path: Path) -> None:
+        """The drive dir is mounted at <workspace>/external_drives, rslave, before the image."""
+        args = self._load(tmp_path, {"MEDMCP_EXTERNAL_DRIVES": "/media/op"})
+        mount = "/media/op:/srv/data/external_drives:rslave"
+        assert mount in args
+        assert args.index(mount) < args.index("img")
+        assert args[0] == "run"
+
+    def test_off_by_default(self, tmp_path: Path) -> None:
+        """Unset or blank, no extra mount is added."""
+        args = self._load(tmp_path, {"MEDMCP_EXTERNAL_DRIVES": "  "})
+        assert not any("external_drives" in a for a in args)
+
+    def test_not_duplicated_when_the_manifest_already_mounts_it(self, tmp_path: Path) -> None:
+        """A manifest that already mounts the target is left alone."""
+        stacks = tmp_path / "stacks.d"
+        _make_manifest(
+            stacks,
+            "medmcp-dicom",
+            'name = "medmcp-dicom"\ncommand = "docker"\n'
+            'args = ["run", "-v", "/mnt/x:/srv/data/external_drives", "img"]\n',
+        )
+        with (
+            patch("medmcp.settings.get_uv_tool_dir", return_value=None),
+            patch("medmcp.settings.VIBE_HOME", tmp_path),
+            patch("medmcp.settings.STACKS_D_PATH", stacks),
+            patch.dict(
+                os.environ,
+                {"MEDMCP_WORKSPACE": "/srv/data", "MEDMCP_EXTERNAL_DRIVES": "/media/op"},
+            ),
+        ):
+            args = cast("list[str]", load_mcp_servers()[0]["args"])
+        assert sum("external_drives" in a for a in args) == 1

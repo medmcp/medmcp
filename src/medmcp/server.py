@@ -109,6 +109,12 @@ _SKIP_DIRS: frozenset[str] = frozenset(
 )
 _TREE_MAX_DEPTH: int = 12
 _TREE_MAX_ENTRIES_PER_DIR: int = 500
+# Nodes listed below a mount point inside the workspace (an external drive, a
+# network share). The tree is walked in full on every refresh, which is fine for
+# a working folder and hopeless for a multi-terabyte archive, so a mounted
+# subtree is walked breadth-first until this many entries are listed. The
+# agent's tools still reach every file; only the explorer stops listing.
+_TREE_MAX_MOUNT_NODES: int = 5000
 
 # ── Persistent stack pool + broker (Layer 1; MEDMCP_STACK_POOL) ───────────────
 # Created at startup only when the pool is enabled; None otherwise (the legacy
@@ -302,25 +308,92 @@ def _safe_path(rel: str) -> Path:
     return resolved
 
 
-def _tree_node(path: Path, depth: int) -> JsonDict:
-    """Build one explorer-tree node (recursing into directories)."""
-    rel = str(path.relative_to(WORKSPACE_ROOT))
-    node: JsonDict = {"id": rel, "name": path.name}
+def _mount_points() -> set[Path]:
+    """Every mount point this process sees.
+
+    Read from the mount table rather than :func:`os.path.ismount`, which compares
+    device numbers and so misses a bind mount from the same filesystem -- exactly
+    how the external-drives folder is mounted (``/media/<user>`` sits on the root
+    filesystem). Falls back to an empty set where there is no ``/proc``; callers
+    also consult ``os.path.ismount``.
+    """
+    try:
+        lines = Path("/proc/self/mountinfo").read_text().splitlines()
+    except OSError:
+        return set()
+    points: set[Path] = set()
+    for line in lines:
+        fields = line.split(" ")
+        if len(fields) > 4:
+            # Octal escapes (\040 for a space) as the kernel writes them.
+            points.add(Path(fields[4].encode().decode("unicode_escape")))
+    return points
+
+
+def _is_mount(path: Path, mounts: set[Path]) -> bool:
+    """Whether *path* is a mount point (bind mounts included)."""
+    return path in mounts or os.path.ismount(path)
+
+
+def _tree_entries(path: Path) -> list[Path]:
+    """List a directory for the explorer: dirs first, capped, skip-list removed."""
+    try:
+        entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+    except OSError:
+        return []
+    return [c for c in entries[:_TREE_MAX_ENTRIES_PER_DIR] if c.name not in _SKIP_DIRS]
+
+
+def _leaf_node(path: Path) -> JsonDict:
+    """Build the explorer node for one file or an unexpanded directory."""
+    node: JsonDict = {"id": str(path.relative_to(WORKSPACE_ROOT)), "name": path.name}
     if path.is_dir():
-        children: list[JsonDict] = []
-        if depth < _TREE_MAX_DEPTH:
-            try:
-                entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
-            except PermissionError:
-                entries = []
-            for child in entries[:_TREE_MAX_ENTRIES_PER_DIR]:
-                if child.name in _SKIP_DIRS:
-                    continue
-                children.append(_tree_node(child, depth + 1))
-        node["children"] = children
+        node["children"] = []
     else:
         with contextlib.suppress(OSError):
             node["size"] = path.stat().st_size
+    return node
+
+
+def _mounted_tree_node(path: Path, depth: int) -> JsonDict:
+    """Build the subtree under a mount point, breadth-first, within the node budget.
+
+    Breadth-first so a budget that runs out leaves every drive and top-level
+    folder visible rather than one fully expanded branch. Directories left
+    unexpanded are flagged ``truncated``.
+    """
+    root = _leaf_node(path)
+    budget = _TREE_MAX_MOUNT_NODES
+    queue: list[tuple[Path, JsonDict, int]] = [(path, root, depth)]
+    while queue:
+        current, node, level = queue.pop(0)
+        if level >= _TREE_MAX_DEPTH:
+            continue
+        if budget <= 0:
+            node["truncated"] = True
+            continue
+        children: list[JsonDict] = node["children"]
+        for child in _tree_entries(current):
+            if budget <= 0:
+                node["truncated"] = True
+                break
+            budget -= 1
+            child_node = _leaf_node(child)
+            children.append(child_node)
+            if "children" in child_node:
+                queue.append((child, child_node, level + 1))
+    return root
+
+
+def _tree_node(path: Path, depth: int, mounts: set[Path] | None = None) -> JsonDict:
+    """Build one explorer-tree node (recursing into directories)."""
+    if mounts is None:
+        mounts = _mount_points()
+    if depth > 0 and path.is_dir() and _is_mount(path, mounts):
+        return _mounted_tree_node(path, depth)
+    node = _leaf_node(path)
+    if "children" in node and depth < _TREE_MAX_DEPTH:
+        node["children"] = [_tree_node(child, depth + 1, mounts) for child in _tree_entries(path)]
     return node
 
 
@@ -346,6 +419,20 @@ async def get_raw(rel_path: str) -> FileResponse:
     if not path.is_file():
         raise HTTPException(status_code=404, detail="file not found")
     return FileResponse(path)
+
+
+def _refuse_mount_point(path: Path) -> None:
+    """Reject moving or deleting a mount point, or a folder holding one.
+
+    Deleting one would empty the whole drive behind it -- or every plugged-in
+    drive at once, for the external-drives folder -- before failing on the mount
+    point itself. Files and folders *on* a drive are handled like any others.
+    """
+    if os.path.ismount(path) or any(m.is_relative_to(path) for m in _mount_points()):
+        raise HTTPException(
+            status_code=400,
+            detail="this is or holds a mounted drive; it cannot be moved or deleted",
+        )
 
 
 class MkdirPayload(BaseModel):
@@ -374,6 +461,7 @@ async def post_rename(payload: RenamePayload) -> JsonDict:
     """Rename or move a file/directory inside the workspace."""
     src = _safe_path(payload.path)
     dst = _safe_path(payload.new_path)
+    _refuse_mount_point(src)
     if not src.exists():
         raise HTTPException(status_code=404, detail="source not found")
     if dst.exists():
@@ -389,6 +477,7 @@ async def delete_file(path: str) -> JsonDict:
     target = _safe_path(path)
     if target == WORKSPACE_ROOT:
         raise HTTPException(status_code=400, detail="refusing to delete the workspace root")
+    _refuse_mount_point(target)
     if not target.exists():
         raise HTTPException(status_code=404, detail="not found")
     if target.is_dir():

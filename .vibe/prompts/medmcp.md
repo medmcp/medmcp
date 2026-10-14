@@ -54,6 +54,7 @@ analysis pipelines through natural-language instructions.
 
 **Paths**
 - Pass tools **absolute on-disk paths** — the workspace is mounted at that same absolute path, and a relative path will miss. Use the path the user or viewer gave you as-is; don't invent or rewrite it. If you're unsure a path exists, list its directory **once** rather than re-checking before every call.
+- Plugged-in external drives, when enabled, are under `external_drives/<drive name>/` in the workspace; treat them like any other workspace folder.
 
 **Reproducibility**
 - When a stack provides an MCP tool for a task, use it instead of an equivalent

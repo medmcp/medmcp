@@ -388,6 +388,42 @@ def _harden_stack_run_args(args: list[str]) -> list[str]:
     return [args[0], *missing, *args[1:]] if missing else args
 
 
+# Workspace subfolder where the host's removable-media directory appears when
+# MEDMCP_EXTERNAL_DRIVES is set. The compose file mounts it there in the core;
+# _with_external_drives mounts it at the same path in every stack (path parity).
+EXTERNAL_DRIVES_DIRNAME = "external_drives"
+
+
+def external_drives_source() -> str | None:
+    """Host directory removable drives are auto-mounted under, if enabled.
+
+    Set ``MEDMCP_EXTERNAL_DRIVES`` to the directory the desktop mounts drives
+    under (``/media/<user>`` on Ubuntu, ``/run/media/<user>`` on Fedora). The
+    drives then appear in the workspace at :data:`EXTERNAL_DRIVES_DIRNAME` and
+    are visible to every stack.
+    """
+    return os.environ.get("MEDMCP_EXTERNAL_DRIVES", "").strip() or None
+
+
+def _with_external_drives(args: list[str]) -> list[str]:
+    """Add the external-drives mount to a ``docker run`` argument list.
+
+    A stack's workspace bind does not carry the core's nested drive mount (a bind
+    copies no submounts), so each stack gets the drive directory itself, at the
+    same in-workspace path the core sees. ``rslave`` makes a drive plugged in
+    while the stack runs appear inside it too. Applied at load time, never
+    written to a manifest, so turning the option off leaves nothing behind.
+    """
+    source = external_drives_source()
+    workspace = os.environ.get("MEDMCP_WORKSPACE", "").strip()
+    if not source or not workspace or not args or args[0] != "run":
+        return args
+    target = f"{workspace.rstrip('/')}/{EXTERNAL_DRIVES_DIRNAME}"
+    if any(a.split(":")[1:2] == [target] for a in args):
+        return args
+    return [args[0], "-v", f"{source}:{target}:rslave", *args[1:]]
+
+
 def _load_stack_manifests() -> list[JsonDict]:
     """Read container-stack manifests from :data:`STACKS_D_PATH`.
 
@@ -419,7 +455,7 @@ def _load_stack_manifests() -> list[JsonDict]:
         args = [os.path.expandvars(str(a)) for a in cast("list[Any]", raw.get("args", []))]
         expanded_command = os.path.expandvars(command)
         if Path(expanded_command).name == "docker":
-            args = _harden_stack_run_args(args)
+            args = _with_external_drives(_harden_stack_run_args(args))
         entry: JsonDict = {
             "name": name,
             "command": expanded_command,

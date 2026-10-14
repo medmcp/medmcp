@@ -32,6 +32,8 @@ Then open **http://localhost:8100**.
 - **Stop:** `docker compose -f oci://ghcr.io/medmcp/compose:latest down`
 - **Update:** click *Update now* when the workspace announces a new release, or re-run the start command with `--pull always`.
 - **Pin a version:** replace `latest` with a release tag such as `v0.3.0`. Release tags are never moved.
+- **External drives:** add `MEDMCP_EXTERNAL_DRIVES=/media/$USER` (the folder your desktop mounts USB drives under; `/run/media/$USER` on Fedora) and plug a drive in: it appears in the workspace under `external_drives/`, readable by every tool, without a restart. Drives must be mounted by the desktop (or `udisksctl mount`) first.
+- **Rootful Docker:** the command assumes rootless Docker; on a host running the system daemon add `XDG_RUNTIME_DIR=/var/run`.
 
 To build from source or run without Docker, see **[CONTRIBUTING.md](CONTRIBUTING.md)**. For a quick impression, watch the **[launch trailer](https://www.youtube.com/watch?v=wvc-MAnzHVA)**.
 

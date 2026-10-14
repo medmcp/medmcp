@@ -11,7 +11,7 @@
 #
 # From a checkout you can equivalently point at this file (`just compose-up-ghcr`).
 # Pin a release with MEDMCP_TAG=<git-sha> (default :main). GPU uses CDI (rootless);
-# rootful hosts set the docker socket path to /var/run.
+# rootful hosts set XDG_RUNTIME_DIR=/var/run. External drives: MEDMCP_EXTERNAL_DRIVES.
 name: medmcp
 
 services:
@@ -140,6 +140,11 @@ services:
       # where to read the newest release from (a mirror serving the same JSON).
       MEDMCP_UPDATE_CHECK: "${MEDMCP_UPDATE_CHECK:-}"
       MEDMCP_UPDATE_URL: "${MEDMCP_UPDATE_URL:-}"
+      # External drives (opt-in): the host directory removable drives auto-mount
+      # under — /media/<user> on Ubuntu, /run/media/<user> on Fedora. Plugged-in
+      # drives then appear in the workspace as external_drives/<drive> and every
+      # stack can read them. Empty = off.
+      MEDMCP_EXTERNAL_DRIVES: "${MEDMCP_EXTERNAL_DRIVES:-}"
     healthcheck:
       test:
         - CMD
@@ -153,10 +158,22 @@ services:
     ports:
       - "127.0.0.1:8100:8100"
     volumes:
-      # Rootless docker socket → core spawns sibling stack containers.
-      - "${XDG_RUNTIME_DIR}/docker.sock:/var/run/docker.sock"
+      # Docker socket → core spawns sibling stack containers. Rootless by
+      # default; rootful hosts set XDG_RUNTIME_DIR=/var/run. Long form so a wrong
+      # path fails `up` instead of docker creating an empty directory there,
+      # which leaves the core unable to start any stack ("Connection closed").
+      - type: bind
+        source: "${XDG_RUNTIME_DIR}/docker.sock"
+        target: /var/run/docker.sock
+        bind:
+          create_host_path: false
       # Workspace at an identical absolute path (path parity for nested run -v).
       - "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}"
+      # External drives at <workspace>/external_drives when MEDMCP_EXTERNAL_DRIVES
+      # is set. rslave: a drive plugged in after startup shows up without a
+      # restart. Unset, the workspace itself lands at an unused /external_drives
+      # (a mount cannot be made conditional, and a named volume refuses rslave).
+      - "${MEDMCP_EXTERNAL_DRIVES:-${MEDMCP_WORKSPACE}}:${MEDMCP_EXTERNAL_DRIVES:+${MEDMCP_WORKSPACE}}/external_drives:rslave"
       # Persist installed stack manifests + extracted skills across recreates.
       - "stacks-d:/app/stacks.d"
       # Persist user state across recreates: personal workflows, provenance, and

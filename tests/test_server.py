@@ -792,6 +792,14 @@ class TestReadOnlySessionApproval:
         visible = server._visible_permission_options(self._bash_options(*rules))
         assert [o["optionId"] for o in visible] == ["allow_once", "reject_once"]
 
+    def test_withholds_session_approval_for_a_redirect(self) -> None:
+        """``ls > out.txt`` reaches us as ``ls <redirect>`` with session pattern ``ls *``."""
+        options = self._bash_options(("command_pattern", "ls *"))
+        meta = cast("dict[str, list[dict[str, str]]]", options[1]["_meta"])
+        meta["required_permissions"][0]["invocation_pattern"] = "ls -la <redirect>"
+        visible = server._visible_permission_options(options)
+        assert [o["optionId"] for o in visible] == ["allow_once", "reject_once"]
+
     def test_withholds_tool_wide_session_approval(self) -> None:
         """No rules means vibe would approve the whole tool for the session — never offered."""
         options: list[dict[str, object]] = [

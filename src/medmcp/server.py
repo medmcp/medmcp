@@ -2067,10 +2067,13 @@ READ_ONLY_APPROVAL_ENV_VAR = "MEDMCP_READ_ONLY_APPROVAL"
 
 # Session patterns (as vibe's bash tool builds them) for commands that only read.
 # Each is ``<command> *``: vibe splits a compound command into its parts and asks
-# for each part separately, a redirect is its own ``<redirect>`` part, and
-# ``find -exec``/``-delete`` get an exact (non-wildcard) pattern — so none of
-# those can ride on an approval granted here. Interpreters and anything that can
-# write (``sed -i``, ``tee``, ``cp``) are deliberately absent.
+# for each part separately, and ``find -exec``/``-delete`` get an exact
+# (non-wildcard) pattern. A redirect is folded into its command as a
+# ``<redirect>`` token, which a bare ``ls *`` rule would still match: a call with
+# one is never offered this approval, and the image's vibe is patched so an
+# approved rule never covers one either (``ls > out.txt`` always asks).
+# Interpreters and anything that can write (``sed -i``, ``tee``, ``cp``) are
+# deliberately absent.
 _READ_ONLY_SESSION_PATTERNS = frozenset(
     f"{cmd} *"
     for cmd in (
@@ -2121,6 +2124,10 @@ def _read_only_session_label(option: JsonDict) -> str | None:
         rule_dict = cast("JsonDict", rule)
         pattern = rule_dict.get("session_pattern")
         if rule_dict.get("scope") != "command_pattern":
+            return None
+        # vibe folds a redirect into the command as a ``<redirect>`` token and still
+        # derives ``ls *`` from it, so ``ls > scan.nii.gz`` would look read-only.
+        if "<redirect>" in str(rule_dict.get("invocation_pattern", "")):
             return None
         if pattern not in _READ_ONLY_SESSION_PATTERNS:
             return None

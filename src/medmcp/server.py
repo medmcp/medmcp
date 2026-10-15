@@ -2273,6 +2273,12 @@ def _workspace_note(viewed_path: str) -> str:
     return build_workspace_note(_resolve_input_path(viewed_path))
 
 
+# How long to wait for vibe-acp to end a cancelled turn before the next prompt
+# goes out anyway, and for it to confirm a session/close.
+TURN_CANCEL_TIMEOUT: float = 15.0
+SESSION_CLOSE_TIMEOUT: float = 10.0
+
+
 class _ChatConnection:
     """State for one browser websocket: one vibe-acp session, one prompt at a time."""
 
@@ -2318,6 +2324,10 @@ class _ChatConnection:
         self._idle_pump: asyncio.Task[None] | None = None
         self._pending_perms: dict[int, asyncio.Future[str | None]] = {}
         self._prompt_task: asyncio.Task[None] | None = None
+        # The session/prompt RPC of the current turn. It outlives a cancelled
+        # prompt task: vibe-acp ends the turn only after it handles session/cancel,
+        # and a prompt sent before then is refused ("A turn is already running").
+        self._prompt_rpc: asyncio.Task[JsonDict] | None = None
         # Tool-call state accumulated across frames, keyed by toolCallId; feeds
         # the permission dialog backfill and the provenance run log.
         self._tool_calls: dict[str, JsonDict] = {}
@@ -2379,6 +2389,14 @@ class _ChatConnection:
         await self._cancel_prompt()
         for task in [*self._explain_tasks, *self._title_tasks]:
             task.cancel()
+        # Release vibe-acp's lease on the session. Without session/close it stays
+        # "open" in vibe-acp until a restart, so coming back to this chat fails
+        # session/load and silently lands in a new, empty chat instead.
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(
+                _client.request("session/close", {"sessionId": self.session_id}),
+                timeout=SESSION_CLOSE_TIMEOUT,
+            )
         _client.unregister_session(self.session_id)
         if not self._prompted and not self._resumed:
             with contextlib.suppress(Exception):
@@ -2398,7 +2416,26 @@ class _ChatConnection:
                 await task
             with contextlib.suppress(Exception):
                 await _client.notify("session/cancel", {"session_id": self.session_id})
+            await self._await_turn_end()
             await self._drain_stale_frames()
+
+    async def _await_turn_end(self) -> None:
+        """Wait (bounded) for vibe-acp to answer the cancelled turn's session/prompt.
+
+        session/cancel is a notification that vibe-acp handles asynchronously; the
+        turn is over only when the original session/prompt returns. Sending the
+        next prompt before that gets "A turn is already running", and the chat
+        ends up with the UI and vibe-acp disagreeing about whether a turn is live.
+        """
+        rpc = self._prompt_rpc
+        self._prompt_rpc = None
+        if rpc is None or rpc.done():
+            return
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(asyncio.shield(rpc), timeout=TURN_CANCEL_TIMEOUT)
+        if not rpc.done():
+            log.warning("vibe-acp did not end a cancelled turn within %ss", TURN_CANCEL_TIMEOUT)
+            rpc.cancel()
 
     async def _drain_stale_frames(self) -> None:
         """Discard queued frames left over from a cancelled turn.
@@ -2525,6 +2562,7 @@ class _ChatConnection:
                 }
             }
         prompt_fut = asyncio.create_task(_client.request("session/prompt", params))
+        self._prompt_rpc = prompt_fut
         self._thoughts.reset()  # start each turn with a clean reasoning-strip state
         turn_ok = False
         try:
@@ -2562,9 +2600,9 @@ class _ChatConnection:
             # Deliberately no `done` frame: when a new prompt superseded this
             # one, a stale done would reset the client's busy/permission state
             # for the wrong turn. An intentional Stop gets its done from the
-            # `cancel` branch in run().
-            if not prompt_fut.done():
-                prompt_fut.cancel()
+            # `cancel` branch in run(). The RPC itself is left running:
+            # _cancel_prompt awaits it so the next prompt only goes out once
+            # vibe-acp has really ended this turn.
             raise
         except Exception as exc:  # surface engine errors instead of a silent hang
             if not prompt_fut.done():
@@ -3293,10 +3331,18 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
                 lambda: provenance.vibe_chain_tip(resume, stop_ids=_chain_stop_ids(resume))
             )
             queue = _client.register_session(tip)
-            load = await _client.request(
-                "session/load",
-                {"cwd": str(WORKSPACE_ROOT), "mcpServers": [], "sessionId": tip},
-            )
+            load_params: JsonDict = {"cwd": str(WORKSPACE_ROOT), "mcpServers": [], "sessionId": tip}
+            load = await _client.request("session/load", load_params)
+            if "error" in load and not any(c.session_id == tip for c in _connections):
+                # vibe-acp still holds the session though no socket uses it (a
+                # disconnect that predates session/close on close, or one cut
+                # short): close it and load again rather than open a new chat.
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        _client.request("session/close", {"sessionId": tip}),
+                        timeout=SESSION_CLOSE_TIMEOUT,
+                    )
+                load = await _client.request("session/load", load_params)
             if "error" in load:
                 _client.unregister_session(tip)
                 queue = None

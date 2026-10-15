@@ -727,6 +727,90 @@ class TestVisiblePermissionOptions:
         assert server._visible_permission_options(options) == options
 
 
+class TestReadOnlySessionApproval:
+    """Read-only shell commands can be approved for the rest of the chat."""
+
+    @staticmethod
+    def _bash_options(*rules: tuple[str, str]) -> list[dict[str, object]]:
+        """Options vibe sends for a bash call whose session approval adds *rules*."""
+        meta = {
+            "required_permissions": [
+                {
+                    "scope": scope,
+                    "invocation_pattern": pattern,
+                    "session_pattern": pattern,
+                    "label": pattern,
+                }
+                for scope, pattern in rules
+            ]
+        }
+        return [
+            {"optionId": "allow_once", "name": "Allow once"},
+            {
+                "optionId": "allow_always",
+                "name": "Allow for remainder of this session",
+                "_meta": meta,
+            },
+            {"optionId": "allow_always_permanent", "name": "Always allow", "_meta": meta},
+            {"optionId": "reject_once", "name": "Deny"},
+        ]
+
+    @pytest.fixture(autouse=True)
+    def _default_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(server.READ_ONLY_APPROVAL_ENV_VAR, raising=False)
+
+    def test_offers_session_approval_for_read_only_command(self) -> None:
+        """``ls -la`` gets a third button naming the command; "Always allow" stays hidden."""
+        visible = server._visible_permission_options(
+            self._bash_options(("command_pattern", "ls *"))
+        )
+        assert [o["optionId"] for o in visible] == ["allow_once", "allow_always", "reject_once"]
+        assert visible[1]["name"] == "Allow ls for this chat"
+
+    def test_names_every_command_of_a_compound(self) -> None:
+        """``ls; wc -l x`` needs two rules; both are read-only, so both are named."""
+        options = self._bash_options(("command_pattern", "ls *"), ("command_pattern", "wc *"))
+        visible = server._visible_permission_options(options)
+        assert visible[1]["name"] == "Allow ls, wc for this chat"
+
+    @pytest.mark.parametrize(
+        "rules",
+        [
+            (("command_pattern", "rm *"),),
+            (("command_pattern", "ls *"), ("command_pattern", "rm *")),
+            (("command_pattern", "ls *"), ("command_pattern", "<redirect> *")),
+            (("command_pattern", "find . -delete"),),
+            (("command_pattern", "python *"),),
+            (("outside_directory", "/etc/*"),),
+            (("command_pattern", "ls *"), ("outside_directory", "/etc/*")),
+        ],
+    )
+    def test_withholds_session_approval_unless_every_rule_is_read_only(
+        self, rules: tuple[tuple[str, str], ...]
+    ) -> None:
+        """A writing command, redirect, exact pattern or outside path disqualifies."""
+        visible = server._visible_permission_options(self._bash_options(*rules))
+        assert [o["optionId"] for o in visible] == ["allow_once", "reject_once"]
+
+    def test_withholds_tool_wide_session_approval(self) -> None:
+        """No rules means vibe would approve the whole tool for the session — never offered."""
+        options: list[dict[str, object]] = [
+            {"optionId": "allow_always", "name": "x", "_meta": {"required_permissions": []}}
+        ]
+        assert server._visible_permission_options(options) == []
+
+    @pytest.mark.parametrize("value", ["0", "false", "off"])
+    def test_kill_switch_restores_per_call_approval(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        """``MEDMCP_READ_ONLY_APPROVAL=0`` drops the session option again."""
+        monkeypatch.setenv(server.READ_ONLY_APPROVAL_ENV_VAR, value)
+        visible = server._visible_permission_options(
+            self._bash_options(("command_pattern", "ls *"))
+        )
+        assert [o["optionId"] for o in visible] == ["allow_once", "reject_once"]
+
+
 def _prov_dir_in(tmp_path: Path) -> Callable[[str], Path]:
     """Return a provenance_dir substitute rooted at *tmp_path*."""
 

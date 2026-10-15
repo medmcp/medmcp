@@ -2052,27 +2052,110 @@ def _is_pathguard_denial(output: str) -> bool:
 # later call of that tool in the session, and ``allow_always_permanent``
 # ("Always allow") persists the approval into ``.vibe/config.toml`` so it
 # outlives the session entirely. Both are auto-approval paths, which medmcp
-# does not offer — every tool call is gated on its own.
+# does not offer — every tool call is gated on its own — with one exception:
+# see :data:`_SESSION_APPROVE_OPTION`.
 _AUTO_APPROVE_OPTIONS = frozenset({"allow_always", "allow_always_permanent"})
+
+# The session-scoped "always" option, offered back to the user only for read-only
+# shell commands. vibe records it as a rule on the command pattern it derived
+# (``ls *``), never on the bash tool as a whole, and the rule dies with the chat.
+# The permanent variant stays hidden: nothing is ever written to config.toml.
+_SESSION_APPROVE_OPTION = "allow_always"
+
+# Kill switch: ``MEDMCP_READ_ONLY_APPROVAL=0`` restores strict per-call approval.
+READ_ONLY_APPROVAL_ENV_VAR = "MEDMCP_READ_ONLY_APPROVAL"
+
+# Session patterns (as vibe's bash tool builds them) for commands that only read.
+# Each is ``<command> *``: vibe splits a compound command into its parts and asks
+# for each part separately, a redirect is its own ``<redirect>`` part, and
+# ``find -exec``/``-delete`` get an exact (non-wildcard) pattern — so none of
+# those can ride on an approval granted here. Interpreters and anything that can
+# write (``sed -i``, ``tee``, ``cp``) are deliberately absent.
+_READ_ONLY_SESSION_PATTERNS = frozenset(
+    f"{cmd} *"
+    for cmd in (
+        "ls",
+        "pwd",
+        "cat",
+        "head",
+        "tail",
+        "wc",
+        "du",
+        "df",
+        "stat",
+        "file",
+        "tree",
+        "find",
+        "grep",
+        "md5sum",
+        "sha256sum",
+    )
+)
+
+
+def _read_only_approval_enabled() -> bool:
+    """Whether read-only shell commands may be approved for the rest of a chat (default on)."""
+    value = os.environ.get(READ_ONLY_APPROVAL_ENV_VAR, "").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _read_only_session_label(option: JsonDict) -> str | None:
+    """Label for a session approval of *option*, or None if it is not read-only.
+
+    vibe attaches the rules a session approval would add as
+    ``_meta.required_permissions``. The option qualifies only when there is at
+    least one rule and every rule is a command pattern from
+    :data:`_READ_ONLY_SESSION_PATTERNS` — an outside-the-workspace rule, an exact
+    pattern, or a tool-wide approval (no rules) all disqualify it.
+    """
+    meta = option.get("_meta") or option.get("meta")
+    if not isinstance(meta, dict):
+        return None
+    rules = cast("JsonDict", meta).get("required_permissions")
+    if not isinstance(rules, list) or not rules:
+        return None
+    patterns: list[str] = []
+    for rule in cast("list[Any]", rules):
+        if not isinstance(rule, dict):
+            return None
+        rule_dict = cast("JsonDict", rule)
+        pattern = rule_dict.get("session_pattern")
+        if rule_dict.get("scope") != "command_pattern":
+            return None
+        if pattern not in _READ_ONLY_SESSION_PATTERNS:
+            return None
+        patterns.append(str(pattern))
+    commands = ", ".join(p.removesuffix(" *") for p in patterns)
+    return f"Allow {commands} for this chat"
 
 
 def _visible_permission_options(options: list[JsonDict]) -> list[JsonDict]:
-    """Reduce vibe's permission options to a per-call allow/deny pair.
+    """Reduce vibe's permission options to allow/deny, plus a read-only session approval.
 
     Every option that would auto-approve anything beyond the call in hand is
     dropped (see :data:`_AUTO_APPROVE_OPTIONS`), leaving ``allow_once`` and
-    ``reject_once``. With no "always" variant left to contrast against,
-    "Allow once" is relabelled to plain **"Allow"** — the scope is no longer a
-    choice the user makes, so naming it only invites the question.
+    ``reject_once``. The exception is the session-scoped option for read-only
+    shell commands (see :func:`_read_only_session_label`), kept and relabelled
+    with the commands it covers unless :data:`READ_ONLY_APPROVAL_ENV_VAR` turns
+    it off. With no "always" variant to contrast against, "Allow once" is
+    relabelled to plain **"Allow"** — the scope is no longer a choice the user
+    makes, so naming it only invites the question.
 
     Renaming here rather than in the browser keeps one source for the label:
     the frontend renders whatever ``name`` the frame carries.
     """
+    session_ok = _read_only_approval_enabled()
     visible: list[JsonDict] = []
     for option in options:
-        if option.get("optionId") in _AUTO_APPROVE_OPTIONS:
+        option_id = option.get("optionId")
+        if option_id == _SESSION_APPROVE_OPTION and session_ok:
+            label = _read_only_session_label(option)
+            if label is not None:
+                visible.append({**option, "name": label})
             continue
-        if option.get("optionId") == "allow_once":
+        if option_id in _AUTO_APPROVE_OPTIONS:
+            continue
+        if option_id == "allow_once":
             option = {**option, "name": "Allow"}
         visible.append(option)
     return visible
@@ -2699,6 +2782,14 @@ class _ChatConnection:
         finally:
             self._pending_perms.pop(req_id_raw, None)
 
+        # Only an option that was actually shown can be chosen: a client sending
+        # "allow_always_permanent" (or a session approval withheld above) is
+        # treated as no decision, never relayed to vibe.
+        if option_id is not None and option_id not in {o.get("optionId") for o in options}:
+            _audit.warning(
+                "permission decision %r was not offered; cancelling: %s", option_id, title
+            )
+            option_id = None
         await self._resolve_permission(req_id_raw, title, cached, option_id)
 
     async def _explain_permission(self, req_id: int, tool_call: JsonDict, cached: JsonDict) -> None:

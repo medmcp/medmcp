@@ -58,7 +58,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -66,6 +66,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from medmcp import (
     __version__,
     batchplan,
+    chat_export,
     distill,
     explain,
     localmodels,
@@ -3246,6 +3247,25 @@ async def archive_session(session_id: str, payload: ArchiveSessionPayload) -> Js
     """Archive a session (hide it from the default list) or restore it."""
     await asyncio.to_thread(sessions.set_archived, session_id, payload.archived)
     return {"ok": True}
+
+
+@app.get("/api/sessions/{session_id}/export", response_class=HTMLResponse)
+async def export_session(session_id: str) -> HTMLResponse:
+    """A chat as a standalone printable page (the browser saves it as PDF)."""
+    if not chat_export.is_session_id(session_id):
+        raise HTTPException(status_code=404, detail="chat not found")
+
+    def _render() -> str | None:
+        return chat_export.render_chat_html(
+            session_id,
+            title=sessions.chat_title(session_id),
+            stop_ids=_chain_stop_ids(session_id),
+        )
+
+    page = await asyncio.to_thread(_render)
+    if page is None:
+        raise HTTPException(status_code=404, detail="chat not found")
+    return HTMLResponse(page)
 
 
 @app.delete("/api/sessions/{session_id}")

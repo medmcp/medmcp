@@ -745,6 +745,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "markdown-it-py" },
     { name = "mcp" },
     { name = "mistral-vibe" },
     { name = "python-multipart" },
@@ -780,6 +781,7 @@ test = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "markdown-it-py", specifier = ">=3" },
     { name = "mcp", specifier = ">=1.28" },
     { name = "mistral-vibe", specifier = ">=2.24.5,<3" },
     { name = "python-multipart", specifier = ">=0.0.18" },

@@ -324,6 +324,14 @@ button:hover {
   border-bottom: 1px solid rgba(210, 34, 41, 0.25);
 }
 
+.panel-status {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── File explorer ── */
 
 .tree-row {

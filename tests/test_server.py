@@ -9,6 +9,8 @@ exercisable without a live vibe-acp subprocess.
 from __future__ import annotations
 
 import asyncio
+import io
+import zipfile
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, cast
@@ -1226,3 +1228,88 @@ def test_clip_output_cuts_on_whitespace() -> None:
     assert server._clip_output("short") == "short"
     # No whitespace anywhere near the limit: fall back to a hard cut.
     assert len(server._clip_output("y" * 5000)) == 2000 + 2
+
+
+class TestFolderTransfer:
+    """Whole folders can be uploaded file by file and downloaded as a zip."""
+
+    @pytest.fixture
+    def root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Point the server's workspace root at a temp dir."""
+        resolved = (tmp_path / "ws").resolve()
+        resolved.mkdir()
+        monkeypatch.setattr(server, "WORKSPACE_ROOT", resolved)
+        return resolved
+
+    @pytest.fixture
+    def client(self, root: Path) -> TestClient:
+        """A same-origin client for the real routes."""
+        del root
+        return TestClient(server.app, base_url="http://127.0.0.1:8100")
+
+    def test_upload_recreates_nested_folders(self, root: Path, client: TestClient) -> None:
+        """A folder upload sends each file with its relative folder as ``dir``."""
+        resp = client.post(
+            "/api/files/upload",
+            params={"dir": "case1/series2"},
+            files={"file": ("IM0001.dcm", b"dicom-bytes")},
+        )
+        assert resp.status_code == 200
+        assert (root / "case1" / "series2" / "IM0001.dcm").read_bytes() == b"dicom-bytes"
+
+    def test_upload_rejects_dot_names(self, client: TestClient) -> None:
+        """A file named ``..`` cannot land beside the target folder."""
+        resp = client.post("/api/files/upload", params={"dir": "a"}, files={"file": ("..", b"x")})
+        assert resp.status_code == 400
+
+    def test_upload_rejects_escaping_dir(self, client: TestClient) -> None:
+        """The target folder goes through the workspace path guard."""
+        resp = client.post(
+            "/api/files/upload", params={"dir": "../out"}, files={"file": ("a.txt", b"x")}
+        )
+        assert resp.status_code == 400
+
+    def test_download_file_is_an_attachment(self, root: Path, client: TestClient) -> None:
+        """A single file comes back as itself, named for saving."""
+        (root / "t1.nii.gz").write_bytes(b"nifti")
+        resp = client.get("/api/files/download", params={"path": "t1.nii.gz"})
+        assert resp.status_code == 200
+        assert resp.content == b"nifti"
+        assert "attachment" in resp.headers["content-disposition"]
+
+    def test_download_folder_is_a_zip_of_its_tree(self, root: Path, client: TestClient) -> None:
+        """Nested files keep their paths under the folder's own name."""
+        (root / "sub-01" / "anat").mkdir(parents=True)
+        (root / "sub-01" / "anat" / "T1w.nii.gz").write_bytes(b"t1")
+        (root / "sub-01" / "notes.txt").write_text("hello")
+        resp = client.get("/api/files/download", params={"path": "sub-01"})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/zip"
+        assert "sub-01.zip" in resp.headers["content-disposition"]
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            assert sorted(zf.namelist()) == ["sub-01/anat/T1w.nii.gz", "sub-01/notes.txt"]
+            assert zf.read("sub-01/anat/T1w.nii.gz") == b"t1"
+            assert zf.testzip() is None
+
+    def test_download_folder_skips_symlinks_and_skip_dirs(
+        self, root: Path, tmp_path: Path, client: TestClient
+    ) -> None:
+        """A link pointing outside the workspace, or ``.git``, never enters the archive."""
+        outside = tmp_path / "secret.txt"
+        outside.write_text("host file")
+        (root / "d" / ".git").mkdir(parents=True)
+        (root / "d" / ".git" / "HEAD").write_text("ref")
+        (root / "d" / "kept.txt").write_text("ok")
+        (root / "d" / "link.txt").symlink_to(outside)
+        (root / "d" / "linkdir").symlink_to(tmp_path, target_is_directory=True)
+        resp = client.get("/api/files/download", params={"path": "d"})
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            assert zf.namelist() == ["d/kept.txt"]
+
+    def test_download_rejects_escaping_path(self, client: TestClient) -> None:
+        """The download goes through the workspace path guard."""
+        assert client.get("/api/files/download", params={"path": "../"}).status_code == 400
+
+    def test_download_missing_path_is_404(self, client: TestClient) -> None:
+        """Nothing there, nothing to send."""
+        assert client.get("/api/files/download", params={"path": "nope"}).status_code == 404

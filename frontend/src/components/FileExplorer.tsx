@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { Tree } from 'react-arborist'
 import type { NodeApi, NodeRendererProps, TreeApi } from 'react-arborist'
-import { deletePath, fetchTree, mkdir, renamePath, uploadFile } from '../api'
+import { deletePath, downloadPath, fetchTree, mkdir, renamePath, uploadFiles } from '../api'
 import { setDraggedFilePath } from '../dragState'
 import { classify } from '../fileKinds'
 import { DRAG_PATH_MIME, type TreeNode } from '../types'
@@ -14,6 +14,7 @@ import {
   FolderIcon,
   FolderOpenIcon,
   FolderPlusIcon,
+  FolderUploadIcon,
   ImageIcon,
   LayersIcon,
   TableIcon,
@@ -162,7 +163,7 @@ function insertIntoTree(nodes: TreeNode[], parentId: string, node: TreeNode): Tr
 /** The row a new folder is named in before it exists; never a real path. */
 const NEW_FOLDER_ID = '\u0000new-folder'
 
-/** Workspace file tree with open/rename/move/delete/upload. */
+/** Workspace file tree with open/rename/move/delete, file and folder upload/download. */
 // Memoized so a separator drag — which re-renders the panel content every frame
 // via react-resizable-panels — doesn't re-run react-arborist's tree on each
 // frame. Props from App are stable refs (refreshSignal changes only on fs
@@ -183,6 +184,14 @@ export const FileExplorer = memo(function FileExplorer({
   const fileInputRef = useRef<HTMLInputElement>(null)
   const treeRef = useRef<TreeApi<TreeNode> | null>(null)
   const newFolderParent = useRef('')
+  const folderInputRef = useRef<HTMLInputElement>(null)
+  // Folder the next file/folder pick uploads into ("" = workspace root).
+  const uploadDirRef = useRef('')
+  const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null)
+  // `webkitdirectory` is not in React's input typings; set it on the element.
+  useEffect(() => {
+    folderInputRef.current?.setAttribute('webkitdirectory', '')
+  }, [])
   // Read inside the mount-once observer effect without re-subscribing.
   const isResizingRef = useRef(isResizing)
   useEffect(() => {
@@ -255,6 +264,26 @@ export const FileExplorer = memo(function FileExplorer({
       setError(String(e))
       reload()
     })
+  }
+
+  const pickUpload = (kind: 'files' | 'folder', dir: string) => {
+    uploadDirRef.current = dir
+    ;(kind === 'files' ? fileInputRef : folderInputRef).current?.click()
+  }
+
+  const startUpload = (list: FileList | null) => {
+    const files = list ? Array.from(list) : []
+    if (files.length === 0) return
+    setError(null)
+    setUploading({ done: 0, total: files.length })
+    void uploadFiles(files, uploadDirRef.current, (done, total) => setUploading({ done, total }))
+      .then((failed) => {
+        if (failed > 0) setError(`failed to upload ${failed} of ${files.length} file(s)`)
+      })
+      .finally(() => {
+        setUploading(null)
+        reload()
+      })
   }
 
   // Delete one or more paths: drop them from the tree immediately so they vanish
@@ -343,8 +372,21 @@ export const FileExplorer = memo(function FileExplorer({
           >
             <FolderPlusIcon />
           </button>
-          <button className="btn-icon" aria-label="Upload file" onClick={() => fileInputRef.current?.click()}>
+          <button
+            className="btn-icon"
+            aria-label="Upload files"
+            title="Upload files"
+            onClick={() => pickUpload('files', '')}
+          >
             <UploadIcon />
+          </button>
+          <button
+            className="btn-icon"
+            aria-label="Upload folder"
+            title="Upload folder"
+            onClick={() => pickUpload('folder', '')}
+          >
+            <FolderUploadIcon />
           </button>
           <button className="btn-icon" aria-label="Refresh" onClick={reload}>
             <RefreshIcon />
@@ -353,14 +395,28 @@ export const FileExplorer = memo(function FileExplorer({
         <input
           ref={fileInputRef}
           type="file"
+          multiple
           hidden
           onChange={(e) => {
-            const file = e.target.files?.[0]
-            if (file) run(uploadFile(file, ''))
+            startUpload(e.target.files)
+            e.target.value = ''
+          }}
+        />
+        <input
+          ref={folderInputRef}
+          type="file"
+          hidden
+          onChange={(e) => {
+            startUpload(e.target.files)
             e.target.value = ''
           }}
         />
       </div>
+      {uploading && (
+        <div className="panel-status" role="status">
+          Uploading {uploading.done} of {uploading.total} file(s)…
+        </div>
+      )}
       {error && <div className="panel-error">{error}</div>}
       <div className="panel-body" ref={containerRef}>
         {/* Every other panel says what to do when it is empty; this one showed
@@ -413,21 +469,47 @@ export const FileExplorer = memo(function FileExplorer({
               className="ctx-menu"
               style={{
                 left: Math.min(menu.x, window.innerWidth - 170),
-                top: Math.min(menu.y, window.innerHeight - 150),
+                top: Math.min(menu.y, window.innerHeight - 240),
               }}
               onContextMenu={(e) => e.preventDefault()}
             >
             {menu.node.isLeaf ? (
-              <button onClick={menuAction(() => onOpenFile(menu.node.data.id))}>Open</button>
+              <>
+                <button onClick={menuAction(() => onOpenFile(menu.node.data.id))}>Open</button>
+                <button onClick={menuAction(() => downloadPath(menu.node.data.id))}>
+                  Download
+                </button>
+              </>
             ) : (
-              <button
-                onClick={() => {
-                  setMenu(null)
-                  startNewFolder(menu.node.data.id)
-                }}
-              >
-                New folder inside
-              </button>
+              <>
+                <button
+                  onClick={() => {
+                    setMenu(null)
+                    startNewFolder(menu.node.data.id)
+                  }}
+                >
+                  New folder inside
+                </button>
+                <button
+                  onClick={() => {
+                    setMenu(null)
+                    pickUpload('files', menu.node.data.id)
+                  }}
+                >
+                  Upload files here
+                </button>
+                <button
+                  onClick={() => {
+                    setMenu(null)
+                    pickUpload('folder', menu.node.data.id)
+                  }}
+                >
+                  Upload folder here
+                </button>
+                <button onClick={menuAction(() => downloadPath(menu.node.data.id))}>
+                  Download as .zip
+                </button>
+              </>
             )}
             <button onClick={menuAction(() => void menu.node.edit())}>Rename</button>
             {(() => {

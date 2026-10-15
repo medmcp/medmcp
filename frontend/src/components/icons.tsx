@@ -101,6 +101,16 @@ export function DownloadIcon(props: IconProps) {
   )
 }
 
+export function FolderUploadIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      <polyline points="9 13 12 10 15 13" />
+      <line x1="12" y1="10" x2="12" y2="16" />
+    </Icon>
+  )
+}
+
 export function RefreshIcon(props: IconProps) {
   return (
     <Icon {...props}>

@@ -36,15 +36,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import logging
 import os
 import re
 import shutil
 import time
-from collections.abc import AsyncGenerator, Coroutine
+import zipfile
+from collections.abc import AsyncGenerator, Coroutine, Iterator
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, cast
+from urllib.parse import quote
 
 import uvicorn
 from fastapi import (
@@ -55,7 +58,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -410,6 +413,92 @@ def _refuse_mount_point(path: Path) -> None:
         )
 
 
+class _ZipSink(io.RawIOBase):
+    """Unseekable write target that hands out what the zip writer produced so far.
+
+    Being unseekable is the point: :mod:`zipfile` then writes each member's sizes
+    in a trailing data descriptor instead of seeking back, so the archive can be
+    streamed while it is built rather than staged on disk first.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing buffered."""
+        super().__init__()
+        self._buf = bytearray()
+
+    def writable(self) -> bool:
+        """Accept writes (``io.RawIOBase`` defaults to read-only)."""
+        return True
+
+    def write(self, b: Any) -> int:  # noqa: ANN401 - io's buffer protocol type
+        """Buffer *b* until the next :meth:`take`."""
+        data = bytes(b)
+        self._buf += data
+        return len(data)
+
+    def take(self) -> bytes:
+        """Return and clear everything written since the last call."""
+        out = bytes(self._buf)
+        self._buf.clear()
+        return out
+
+
+def _zip_members(root: Path) -> Iterator[tuple[Path, str]]:
+    """Yield ``(file, archive name)`` for every regular file under *root*.
+
+    Symlinks are skipped, never followed — a link inside the workspace can point
+    anywhere on the host, and the archive must not carry what it points at. The
+    explorer's skip list (``.git``, virtualenvs, ...) applies here too.
+    """
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        here = Path(dirpath)
+        dirnames[:] = sorted(
+            d for d in dirnames if d not in _SKIP_DIRS and not (here / d).is_symlink()
+        )
+        for name in sorted(filenames):
+            path = here / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            yield path, str(Path(root.name) / path.relative_to(root))
+
+
+def _zip_stream(root: Path) -> Iterator[bytes]:
+    """Stream *root* as a zip archive, one megabyte of input at a time.
+
+    Members are stored, not deflated: imaging data is mostly compressed already
+    (``.nii.gz``), and storing keeps a multi-gigabyte download I/O-bound.
+    """
+    sink = _ZipSink()
+    with zipfile.ZipFile(sink, "w", compression=zipfile.ZIP_STORED) as zf:
+        for path, arcname in _zip_members(root):
+            info = zipfile.ZipInfo.from_file(path, arcname)
+            try:
+                with path.open("rb") as src, zf.open(info, "w", force_zip64=True) as dst:
+                    while chunk := src.read(1024 * 1024):
+                        dst.write(chunk)
+                        yield sink.take()
+            except OSError:
+                log.warning("skipping unreadable file in zip download: %s", path)
+            yield sink.take()
+    yield sink.take()
+
+
+@app.get("/api/files/download")
+async def get_download(path: str) -> Response:
+    """Download a file, or a directory as a streamed ``.zip``."""
+    target = _safe_path(path)
+    if target.is_file():
+        return FileResponse(target, filename=target.name)
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail="not found")
+    name = target.name or WORKSPACE_ROOT.name or "workspace"
+    return StreamingResponse(
+        _zip_stream(target),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}.zip"},
+    )
+
+
 class MkdirPayload(BaseModel):
     """Request body for directory creation."""
 
@@ -468,6 +557,8 @@ async def post_upload(file: UploadFile, dir: str = "") -> JsonDict:
     target_dir = _safe_path(dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     name = Path(file.filename or "upload.bin").name
+    if name in {"", ".", ".."}:
+        raise HTTPException(status_code=400, detail="invalid file name")
     target = target_dir / name
     with target.open("wb") as fh:
         while chunk := await file.read(1024 * 1024):

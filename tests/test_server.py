@@ -1313,3 +1313,114 @@ class TestFolderTransfer:
     def test_download_missing_path_is_404(self, client: TestClient) -> None:
         """Nothing there, nothing to send."""
         assert client.get("/api/files/download", params={"path": "nope"}).status_code == 404
+
+
+class _FakeAcpClient:
+    """Records the JSON-RPC traffic a _ChatConnection sends to vibe-acp.
+
+    ``session/prompt`` stays pending until ``session/cancel`` arrives (after
+    ``cancel_delay``), like vibe-acp ending a turn asynchronously; ``hang`` keeps
+    it pending for good.
+    """
+
+    def __init__(self, *, cancel_delay: float = 0.05, hang: bool = False) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.cancel_delay = cancel_delay
+        self.hang = hang
+        self._turn: asyncio.Future[dict[str, object]] | None = None
+
+    async def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+        del params
+        self.calls.append(("request", method))
+        if method == "session/prompt":
+            self._turn = asyncio.get_running_loop().create_future()
+            result = await self._turn
+            self.calls.append(("turn-ended", method))
+            return result
+        return {"result": {}}
+
+    async def notify(self, method: str, params: dict[str, object]) -> None:
+        del params
+        self.calls.append(("notify", method))
+        if method == "session/cancel" and not self.hang:
+            turn = self._turn
+            loop = asyncio.get_running_loop()
+            loop.call_later(
+                self.cancel_delay,
+                lambda: (
+                    turn is not None
+                    and not turn.done()
+                    and turn.set_result({"result": {"stopReason": "cancelled"}})
+                ),
+            )
+
+    async def respond(self, req_id: int, result: dict[str, object]) -> None:
+        del req_id, result
+
+    def unregister_session(self, session_id: str) -> None:
+        del session_id
+        self.calls.append(("unregister", ""))
+
+
+class TestChatSessionLifecycle:
+    """Cancelled turns really end, and a closed chat can be reopened."""
+
+    @pytest.fixture
+    def fake(self, monkeypatch: pytest.MonkeyPatch) -> _FakeAcpClient:
+        """Swap vibe-acp for the recorder; keep provenance writes out of the way."""
+        client = _FakeAcpClient()
+        monkeypatch.setattr(server, "_client", client)
+        monkeypatch.setattr(server.settings, "load_provenance_enabled", lambda: False)
+        return client
+
+    @staticmethod
+    def _conn() -> server._ChatConnection:
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        return server._ChatConnection(cast("Any", _StubWs()), "sid", cast("Any", queue), [])
+
+    @pytest.mark.asyncio
+    async def test_cancel_waits_until_vibe_ends_the_turn(self, fake: _FakeAcpClient) -> None:
+        """The next prompt may only go out after the old session/prompt returned."""
+        conn = self._conn()
+        conn._prompt_task = asyncio.create_task(conn._run_prompt("first"))
+        await asyncio.sleep(0.01)
+        await conn._cancel_prompt()
+        assert fake.calls.index(("notify", "session/cancel")) < fake.calls.index(
+            ("turn-ended", "session/prompt")
+        )
+        assert fake.calls[-1] == ("turn-ended", "session/prompt")
+
+    @pytest.mark.asyncio
+    async def test_cancel_gives_up_on_a_turn_that_never_ends(
+        self, fake: _FakeAcpClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A wedged vibe-acp delays the next prompt by the timeout, not forever."""
+        fake.hang = True
+        monkeypatch.setattr(server, "TURN_CANCEL_TIMEOUT", 0.05)
+        conn = self._conn()
+        conn._prompt_task = asyncio.create_task(conn._run_prompt("first"))
+        await asyncio.sleep(0.01)
+        await asyncio.wait_for(conn._cancel_prompt(), timeout=1.0)
+        assert conn._prompt_rpc is None
+
+    @pytest.mark.asyncio
+    async def test_close_releases_the_session_in_vibe(self, fake: _FakeAcpClient) -> None:
+        """Leaving a chat sends session/close, so coming back can load it again."""
+        conn = self._conn()
+        await conn.close()
+        assert ("request", "session/close") in fake.calls
+        assert fake.calls.index(("request", "session/close")) < fake.calls.index(("unregister", ""))
+
+    @pytest.mark.asyncio
+    async def test_close_mid_turn_ends_the_turn_before_closing(self, fake: _FakeAcpClient) -> None:
+        """A disconnect during a reply cancels it, waits for the end, then closes."""
+        conn = self._conn()
+        conn._prompt_task = asyncio.create_task(conn._run_prompt("first"))
+        await asyncio.sleep(0.01)
+        await conn.close()
+        order = [c for c in fake.calls if c[0] != "unregister"]
+        assert order[-3:] == [
+            ("notify", "session/cancel"),
+            ("turn-ended", "session/prompt"),
+            ("request", "session/close"),
+        ]

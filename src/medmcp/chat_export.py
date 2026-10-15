@@ -45,6 +45,16 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _md = MarkdownIt("commonmark", {"html": False, "linkify": False}).enable("table")
 
 
+def _utc_label(stamp: object) -> str:
+    """``2026-10-15T20:14:28+00:00`` as ``2026-10-15 20:14 UTC`` ("" if unknown)."""
+    if not isinstance(stamp, str):
+        return ""
+    try:
+        return datetime.fromisoformat(stamp).astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        return ""
+
+
 def is_session_id(value: str) -> bool:
     """Whether *value* has the shape of a vibe session id."""
     return _SESSION_ID_RE.fullmatch(value) is not None
@@ -164,8 +174,8 @@ def render_chat_html(
 
     heading = title or "MedMCP chat"
     meta_rows = [
-        ("Exported", datetime.now(UTC).astimezone().strftime("%Y-%m-%d %H:%M")),
-        ("Chat started", str(manifest.get("created_at") or "")[:16].replace("T", " ")),
+        ("Exported", datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")),
+        ("Chat started", _utc_label(manifest.get("created_at"))),
         ("Model", str(model.get("name") or "")),
         ("Chat ID", session_id),
     ]

@@ -10,62 +10,27 @@ no chat taken down because a key is missing.
 from __future__ import annotations
 
 import json
-import tomllib
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
 
-# pyright: reportPrivateUsage=false
 from medmcp import provenance, server, settings
+
+from .conftest import BASE_CONFIG, synced_config
 
 JsonDict = dict[str, Any]
 
 _KEY = "sk-test-s3cret-value"
 
-_BASE_CONFIG = """\
-active_model = "local"
-system_prompt_id = "medmcp"
-
-[[providers]]
-name = "ollama"
-api_base = "http://localhost:11434/v1"
-api_key_env_var = ""
-api_style = "openai"
-backend = "generic"
-
-[[models]]
-name = "muse-medmcp"
-provider = "ollama"
-alias = "local"
-temperature = 0.3
-"""
-
 
 @pytest.fixture(autouse=True)
 def _isolate(  # pyright: ignore[reportUnusedFunction]  # autouse fixture, invoked by pytest
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    vibe_home: Path,
 ) -> None:
     """Point every piece of on-disk state at a tmp dir, with a local-only config."""
-    prompts = tmp_path / "prompts"
-    prompts.mkdir()
-    (prompts / "medmcp.md").write_text(
-        f"You are MedMCP.\n\n**Operational rules**\n{settings.ONPREM_RULE}\n- Other rule.\n"
-    )
-    (tmp_path / "config.toml").write_text(_BASE_CONFIG)
-    monkeypatch.setattr(settings, "VIBE_HOME", tmp_path)
-    monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
-    monkeypatch.setattr(settings, "CLOUD_MODEL_PATH", tmp_path / "cloud_model.json")
-    monkeypatch.setattr(settings, "CLOUD_MODEL_SECRET_PATH", tmp_path / "cloud_model_secret.json")
-    monkeypatch.setattr(settings, "EXTERNAL_MCP_PATH", tmp_path / "external_mcp.json")
-    monkeypatch.setattr(settings, "EXTERNAL_SECRETS_PATH", tmp_path / "external_secrets.json")
-    monkeypatch.setattr(settings, "ACTIVE_STACKS_PATH", tmp_path / "active_stacks.json")
-    monkeypatch.setattr(settings, "STACKS_D_PATH", tmp_path / "absent-stacks.d")
-    monkeypatch.setattr(settings, "get_uv_tool_dir", lambda: None)
-    monkeypatch.delenv("MEDMCP_STACK_POOL", raising=False)
-    monkeypatch.delenv(settings.CLOUD_MODEL_KEY_ENV, raising=False)
-    settings.load_mcp_servers.cache_clear()
+    (vibe_home / "config.toml").write_text(BASE_CONFIG)
 
 
 def _configure(**overrides: object) -> JsonDict:
@@ -77,17 +42,6 @@ def _configure(**overrides: object) -> JsonDict:
 def _enable() -> None:
     settings.acknowledge_cloud_model()
     settings.set_cloud_model_enabled(True)
-
-
-def _sync(tmp_path: Path) -> JsonDict:
-    settings.load_mcp_servers.cache_clear()
-    settings.sync_servers_to_vibe_config(settings.active_servers())
-    with (tmp_path / "config.toml").open("rb") as fh:
-        return tomllib.load(fh)
-
-
-def _client() -> TestClient:
-    return TestClient(server.app, base_url="http://127.0.0.1:8100")
 
 
 # ── the double gate ──────────────────────────────────────────────────────────
@@ -122,7 +76,7 @@ def test_enable_without_a_model_is_refused() -> None:
 def test_configuring_alone_changes_nothing(tmp_path: Path) -> None:
     """A stored configuration is inert until the feature is switched on."""
     _configure()
-    cfg = _sync(tmp_path)
+    cfg = synced_config(tmp_path)
     assert cfg["active_model"] == "local"
     assert [p["name"] for p in cfg["providers"]] == ["ollama"]
     assert settings.agent_secret_env() == {}
@@ -155,7 +109,7 @@ def test_enabled_flag_alone_does_not_open_the_gate(tmp_path: Path) -> None:
         json.dumps({"enabled": True, "acknowledged_at": None, "model": entry})
     )
     assert settings.active_cloud_model() is None
-    assert _sync(tmp_path)["active_model"] == "local"
+    assert synced_config(tmp_path)["active_model"] == "local"
 
 
 # ── validation ───────────────────────────────────────────────────────────────
@@ -229,7 +183,7 @@ def test_a_gateway_may_need_no_key(tmp_path: Path) -> None:
         api_key="",
     )
     _enable()
-    cfg = _sync(tmp_path)
+    cfg = synced_config(tmp_path)
     cloud = next(p for p in cfg["providers"] if p["name"] == "cloud")
     assert cloud["api_base"] == "https://gw.example/v1"
     assert cloud["api_key_env_var"] == ""
@@ -242,7 +196,7 @@ def test_sync_selects_the_cloud_model(tmp_path: Path) -> None:
     """In force: a cloud provider and model after the local ones, and selected."""
     _configure()
     _enable()
-    cfg = _sync(tmp_path)
+    cfg = synced_config(tmp_path)
 
     assert cfg["active_model"] == "cloud"
     assert [p["name"] for p in cfg["providers"]] == ["ollama", "cloud"]
@@ -286,7 +240,7 @@ def test_generated_entries_validate_against_vibes_own_models(
 
     _configure(provider=provider_id, model="some-model", api_base="https://gw.example/v1")
     _enable()
-    cfg = _sync(tmp_path)
+    cfg = synced_config(tmp_path)
 
     provider = ProviderConfig.model_validate(cfg["providers"][-1])
     model = ModelConfig.model_validate(cfg["models"][-1])
@@ -299,9 +253,9 @@ def test_disabling_restores_the_local_model(tmp_path: Path) -> None:
     """Switching off removes both entries and moves ``active_model`` back."""
     _configure()
     _enable()
-    _sync(tmp_path)
+    synced_config(tmp_path)
     settings.set_cloud_model_enabled(False)
-    cfg = _sync(tmp_path)
+    cfg = synced_config(tmp_path)
 
     assert cfg["active_model"] == "local"
     assert [p["name"] for p in cfg["providers"]] == ["ollama"]
@@ -321,11 +275,11 @@ def test_a_missing_key_falls_back_to_the_local_model(
     _enable()
     monkeypatch.delenv("SITE_LLM_KEY", raising=False)
     assert settings.active_cloud_model() is None
-    assert _sync(tmp_path)["active_model"] == "local"
+    assert synced_config(tmp_path)["active_model"] == "local"
 
     monkeypatch.setenv("SITE_LLM_KEY", "from-the-deployment")
     assert settings.active_cloud_model() is not None
-    cfg = _sync(tmp_path)
+    cfg = synced_config(tmp_path)
     assert cfg["active_model"] == "cloud"
     assert cfg["providers"][-1]["api_key_env_var"] == "SITE_LLM_KEY"
     # A variable the deployment owns is inherited, not injected by this process.
@@ -339,7 +293,7 @@ def test_the_key_is_never_written_to_config_or_state(tmp_path: Path) -> None:
     """Only the variable's name reaches config.toml; the state file holds no key."""
     _configure()
     _enable()
-    _sync(tmp_path)
+    synced_config(tmp_path)
     assert _KEY not in (tmp_path / "config.toml").read_text()
     assert _KEY not in settings.CLOUD_MODEL_PATH.read_text()
     for prompt in (tmp_path / "prompts").iterdir():
@@ -417,7 +371,7 @@ def test_prompt_follows_the_posture(tmp_path: Path) -> None:
     """A cloud model is never told it runs on-premise, with or without external MCP."""
     _configure()
     _enable()
-    assert _sync(tmp_path)["system_prompt_id"] == settings.CLOUD_SYSTEM_PROMPT_ID
+    assert synced_config(tmp_path)["system_prompt_id"] == settings.CLOUD_SYSTEM_PROMPT_ID
     variant = (tmp_path / "prompts" / f"{settings.CLOUD_SYSTEM_PROMPT_ID}.md").read_text()
     assert settings.ONPREM_RULE not in variant
     assert settings.CLOUD_RULE in variant
@@ -426,24 +380,24 @@ def test_prompt_follows_the_posture(tmp_path: Path) -> None:
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
     settings.add_external_server("pubmed", "streamable-http", "https://example.org/mcp")
-    assert _sync(tmp_path)["system_prompt_id"] == settings.CLOUD_EXTERNAL_SYSTEM_PROMPT_ID
+    assert synced_config(tmp_path)["system_prompt_id"] == settings.CLOUD_EXTERNAL_SYSTEM_PROMPT_ID
     both = (tmp_path / "prompts" / f"{settings.CLOUD_EXTERNAL_SYSTEM_PROMPT_ID}.md").read_text()
     assert settings.CLOUD_EXTERNAL_RULE in both
 
     settings.set_cloud_model_enabled(False)
-    assert _sync(tmp_path)["system_prompt_id"] == settings.EXTERNAL_SYSTEM_PROMPT_ID
+    assert synced_config(tmp_path)["system_prompt_id"] == settings.EXTERNAL_SYSTEM_PROMPT_ID
     settings.set_external_mcp_enabled(False)
-    assert _sync(tmp_path)["system_prompt_id"] == settings.BASE_SYSTEM_PROMPT_ID
+    assert synced_config(tmp_path)["system_prompt_id"] == settings.BASE_SYSTEM_PROMPT_ID
 
 
 def test_custom_prompt_id_is_left_alone(tmp_path: Path) -> None:
     """A hand-set prompt id is not replaced by a variant this module owns."""
     (tmp_path / "config.toml").write_text(
-        _BASE_CONFIG.replace('system_prompt_id = "medmcp"', 'system_prompt_id = "mine"')
+        BASE_CONFIG.replace('system_prompt_id = "medmcp"', 'system_prompt_id = "mine"')
     )
     _configure()
     _enable()
-    assert _sync(tmp_path)["system_prompt_id"] == "mine"
+    assert synced_config(tmp_path)["system_prompt_id"] == "mine"
 
 
 # ── provenance + API ─────────────────────────────────────────────────────────
@@ -453,7 +407,7 @@ def test_the_manifest_records_where_the_model_ran(tmp_path: Path) -> None:
     """A session's record names the model and the endpoint it was sent to."""
     _configure()
     _enable()
-    _sync(tmp_path)
+    synced_config(tmp_path)
     model = provenance.build_manifest("s1", servers=[], model_name=settings.active_model_name())[
         "model"
     ]
@@ -461,10 +415,11 @@ def test_the_manifest_records_where_the_model_ran(tmp_path: Path) -> None:
     assert model["endpoint"] == "https://api.anthropic.com"
 
 
-def test_the_key_never_appears_in_a_response(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_key_never_appears_in_a_response(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
     """Neither the configure response nor the state listing carries the value."""
     monkeypatch.setattr(server, "_apply_stack_change", lambda: None)
-    client = _client()
     saved = client.put(
         "/api/cloud-model/config",
         json={"provider": "anthropic", "model": "claude-opus-5-5", "api_key": _KEY},
@@ -481,16 +436,16 @@ def test_the_key_never_appears_in_a_response(monkeypatch: pytest.MonkeyPatch) ->
     assert {p["id"] for p in body["providers"]} == set(settings.CLOUD_PROVIDERS)
 
 
-def test_api_refuses_enabling_without_consent() -> None:
+def test_api_refuses_enabling_without_consent(client: TestClient) -> None:
     """The dialog is the explanation; the endpoint is the enforcement."""
     _configure()
-    resp = _client().put("/api/cloud-model", json={"enabled": True})
+    resp = client.put("/api/cloud-model", json={"enabled": True})
     assert resp.status_code == 400
     assert settings.active_cloud_model() is None
 
 
 def test_the_agent_restarts_only_when_the_model_in_force_changes(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
     """Saving a configuration while off leaves open chats alone; switching does not."""
     calls: list[str] = []
@@ -500,7 +455,6 @@ def test_the_agent_restarts_only_when_the_model_in_force_changes(
         calls.append("restart")
 
     monkeypatch.setattr(server, "_restart_vibe", _restart)
-    client = _client()
 
     saved = client.put(
         "/api/cloud-model/config",

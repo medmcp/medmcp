@@ -10,9 +10,10 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-# pyright: reportPrivateUsage=false
 from medmcp import distill, provenance, workflow
 from medmcp.workflow import Recipe, RecipeStep, StackRequirement
+
+from .conftest import make_vibe_session
 
 JsonDict = dict[str, Any]
 
@@ -307,19 +308,9 @@ class TestRequirements:
         assert distill.build_requirements(recipe, None) == [StackRequirement(stack="medmcp-x")]
 
 
-def _write_fake_session(root: Path) -> None:
-    """Create a minimal vibe session log dir under *root* (a VIBE_HOME)."""
-    sess = root / "logs" / "session" / "session_20260101_000000_abcd1234"
-    sess.mkdir(parents=True)
-    (sess / "meta.json").write_text(json.dumps({"session_id": SESSION_ID}))
-    with (sess / "messages.jsonl").open("w") as f:
-        for msg in _MESSAGES:
-            f.write(json.dumps(msg) + "\n")
-
-
 def test_distill_session_end_to_end(tmp_path: Path) -> None:
     """distill_session writes one recipe.yaml, named from the opening request."""
-    _write_fake_session(tmp_path)
+    make_vibe_session(tmp_path, SESSION_ID, messages=_MESSAGES)
     workflows_root = tmp_path / "workflows"
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         target = distill.distill_session(SESSION_ID, workflows_root=workflows_root)
@@ -335,7 +326,7 @@ def test_distill_session_end_to_end(tmp_path: Path) -> None:
 
 def test_distill_names_the_workflow_after_the_chat(tmp_path: Path) -> None:
     """A chat title names the workflow; the opening request stays the description."""
-    _write_fake_session(tmp_path)
+    make_vibe_session(tmp_path, SESSION_ID, messages=_MESSAGES)
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         target = distill.distill_session(
             SESSION_ID,
@@ -348,7 +339,7 @@ def test_distill_names_the_workflow_after_the_chat(tmp_path: Path) -> None:
 
 def test_distill_never_replaces_an_existing_workflow(tmp_path: Path) -> None:
     """Two chats with the same title give two workflows, not one overwriting the other."""
-    _write_fake_session(tmp_path)
+    make_vibe_session(tmp_path, SESSION_ID, messages=_MESSAGES)
     root = tmp_path / "workflows"
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         first = distill.distill_session(SESSION_ID, name_hint="Strip", workflows_root=root)
@@ -371,13 +362,7 @@ def test_distill_session_spans_compaction_chain(tmp_path: Path) -> None:
     meta.json backlinks the original via parent_session_id; distillation must
     read the whole chain, not just the pre-compaction prefix.
     """
-    _write_fake_session(tmp_path)
-    cont_id = "ef567890-9999-8888-7777-666655554444"
-    cont = tmp_path / "logs" / "session" / f"session_20260101_010000_{cont_id[:8]}"
-    cont.mkdir(parents=True)
-    (cont / "meta.json").write_text(
-        json.dumps({"session_id": cont_id, "parent_session_id": SESSION_ID})
-    )
+    make_vibe_session(tmp_path, SESSION_ID, messages=_MESSAGES)
     post_compaction: list[JsonDict] = [
         _assistant_call(
             "c9",
@@ -388,9 +373,13 @@ def test_distill_session_spans_compaction_chain(tmp_path: Path) -> None:
             "c9", "ok: True\nstructured: {'coregistered_path': 'data/x/flair_reg.nii.gz'}"
         ),
     ]
-    with (cont / "messages.jsonl").open("w") as f:
-        for msg in post_compaction:
-            f.write(json.dumps(msg) + "\n")
+    make_vibe_session(
+        tmp_path,
+        "ef567890-9999-8888-7777-666655554444",
+        parent_id=SESSION_ID,
+        timestamp="20260101_010000",
+        messages=post_compaction,
+    )
 
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         target = distill.distill_session(SESSION_ID, workflows_root=tmp_path / "workflows")
@@ -408,7 +397,7 @@ def test_distill_session_spans_compaction_chain(tmp_path: Path) -> None:
 
 def _make_workflow(tmp_path: Path) -> tuple[Path, Path]:
     """Distill a real workflow; return (workflows_root, workflow_dir)."""
-    _write_fake_session(tmp_path)
+    make_vibe_session(tmp_path, SESSION_ID, messages=_MESSAGES)
     workflows_root = tmp_path / "workflows"
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         target = distill.distill_session(SESSION_ID, workflows_root=workflows_root)

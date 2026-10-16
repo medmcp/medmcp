@@ -7,7 +7,6 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import httpx
-import pytest
 
 from medmcp.explain import (
     RISK_CATEGORIES,
@@ -102,7 +101,6 @@ def _mock_ollama_response(body: str) -> httpx.Response:
 class TestGenerateExplanation:
     """Verify generate_explanation calls Ollama and parses the structured response."""
 
-    @pytest.mark.asyncio
     async def test_returns_explanation_and_risks(self) -> None:
         """A successful Ollama JSON response yields (explanation, risks)."""
         body = json.dumps({"explanation": "Lists all files in the folder.", "risks": ["file_read"]})
@@ -120,7 +118,6 @@ class TestGenerateExplanation:
         assert explanation == "Lists all files in the folder."
         assert risks == ["file_read"]
 
-    @pytest.mark.asyncio
     async def test_correct_model_and_temperature(self) -> None:
         """The request must use the configured model and temperature via options."""
         body = json.dumps({"explanation": "Does something.", "risks": []})
@@ -139,7 +136,6 @@ class TestGenerateExplanation:
         assert call_kwargs["json"]["think"] is False
         assert call_kwargs["json"]["stream"] is False
 
-    @pytest.mark.asyncio
     async def test_prompt_contains_physician_language(self) -> None:
         """The prompt must explicitly mention the physician audience."""
         body = json.dumps({"explanation": "x", "risks": []})
@@ -156,7 +152,6 @@ class TestGenerateExplanation:
         prompt: str = call_kwargs["json"]["messages"][0]["content"]
         assert "physician" in prompt.lower()
 
-    @pytest.mark.asyncio
     async def test_prompt_lists_all_risk_keys(self) -> None:
         """Every key in RISK_CATEGORIES must appear in the prompt."""
         body = json.dumps({"explanation": "x", "risks": []})
@@ -174,7 +169,6 @@ class TestGenerateExplanation:
         for key in RISK_CATEGORIES:
             assert key in prompt, f"Risk key '{key}' missing from prompt"
 
-    @pytest.mark.asyncio
     async def test_dict_raw_input_serialized_in_prompt(self) -> None:
         """Dict rawInput should be JSON-serialized in the prompt, not repr'd."""
         body = json.dumps({"explanation": "Writes a file.", "risks": ["file_write"]})
@@ -193,7 +187,6 @@ class TestGenerateExplanation:
         prompt: str = call_kwargs["json"]["messages"][0]["content"]
         assert '"path"' in prompt
 
-    @pytest.mark.asyncio
     async def test_long_raw_input_truncated(self) -> None:
         """RawInput longer than 400 chars should be truncated in the prompt."""
         body = json.dumps({"explanation": "Does something.", "risks": []})
@@ -213,7 +206,6 @@ class TestGenerateExplanation:
         # The full 600-char string must not appear verbatim
         assert long_input not in prompt
 
-    @pytest.mark.asyncio
     async def test_returns_none_on_missing_message(self) -> None:
         """A response with no 'message' key should return None."""
         response = httpx.Response(
@@ -232,7 +224,6 @@ class TestGenerateExplanation:
 
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_returns_none_on_network_error(self) -> None:
         """Network failures should return None, not raise."""
         with patch("medmcp.explain.httpx.AsyncClient") as mock_cls:
@@ -246,7 +237,6 @@ class TestGenerateExplanation:
 
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_returns_none_on_invalid_json_response(self) -> None:
         """A non-JSON response body should return None, not raise."""
         with patch("medmcp.explain.httpx.AsyncClient") as mock_cls:

@@ -11,40 +11,15 @@ from typing import Any
 import pytest
 
 from medmcp import replay, runs
-from medmcp.workflow import Recipe, RecipeStep, WorkflowInput
 
-# pyright: reportPrivateUsage=false
+from ._recipes import McpCallerFactory, neuro_servers, two_step_recipe
 
 JsonDict = dict[str, Any]
 
 
-def _recipe() -> Recipe:
-    return Recipe(
-        name="strip-register",
-        description="",
-        inputs=[WorkflowInput(name="in_1", example="/data/t1.nii.gz")],
-        steps=[
-            RecipeStep(
-                server="medmcp-neuro",
-                tool="skull_strip",
-                arguments={"input_path": "{{in_1}}"},
-                produces={"brain_path": "step1.brain_path"},
-            ),
-            RecipeStep(
-                server="medmcp-neuro",
-                tool="register_to_template",
-                arguments={"input_path": "{{step1.brain_path}}"},
-                produces={"registered_path": "step2.registered_path"},
-            ),
-        ],
-    )
-
-
-def _servers() -> list[JsonDict]:
-    return [{"name": "medmcp-neuro", "command": "x", "args": []}]
-
-
-def _fake_caller(calls: list[tuple[str, str, JsonDict]], outputs: dict[str, str]):  # noqa: ANN202
+def _fake_caller(
+    calls: list[tuple[str, str, JsonDict]], outputs: dict[str, str]
+) -> McpCallerFactory:
     @contextlib.asynccontextmanager
     async def _cm(*_args: object, **_kwargs: object) -> AsyncGenerator[replay.ToolCaller]:
         async def _call(
@@ -154,9 +129,6 @@ def test_reconcile_marks_orphaned_running_records_failed(tmp_path: Path) -> None
 
 
 # ── the run manager ───────────────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
 async def test_manager_runs_detached_and_records_every_step(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -168,9 +140,9 @@ async def test_manager_runs_detached_and_records_every_step(
     manager = runs.RunManager(root=tmp_path)
 
     record = manager.start(
-        recipe=_recipe(),
+        recipe=two_step_recipe(),
         runs=[{"in_1": "/a"}, {"in_1": "/b"}],
-        servers=_servers(),
+        servers=neuro_servers(),
         cwd=None,
     )
     assert manager.is_live(record.id)
@@ -210,7 +182,6 @@ async def test_manager_runs_detached_and_records_every_step(
     ]
 
 
-@pytest.mark.asyncio
 async def test_manager_cancel_stops_the_run_and_marks_the_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -230,7 +201,9 @@ async def test_manager_cancel_stops_the_run_and_marks_the_record(
 
     monkeypatch.setattr(replay, "mcp_caller", slow_caller)
     manager = runs.RunManager(root=tmp_path)
-    record = manager.start(recipe=_recipe(), runs=[{"in_1": "/a"}], servers=_servers(), cwd=None)
+    record = manager.start(
+        recipe=two_step_recipe(), runs=[{"in_1": "/a"}], servers=neuro_servers(), cwd=None
+    )
     attached = manager.attach(record.id)
     assert attached is not None
     _past, queue = attached

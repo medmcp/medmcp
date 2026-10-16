@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-# pyright: reportPrivateUsage=false
 import httpx
 import pytest
 
@@ -268,7 +267,6 @@ async def _collect(relay: str, responses: list[bytes], attempts: int = 3) -> str
     return b"".join(chunks).decode()
 
 
-@pytest.mark.asyncio
 async def test_tool_call_truncation_is_retried_invisibly_in_live_relay() -> None:
     """The common failure strikes at the tool call, which live relay still withholds."""
     truncated = _sse([_call()], done=False)  # no finish_reason: Ollama's parser failure
@@ -281,7 +279,6 @@ async def test_tool_call_truncation_is_retried_invisibly_in_live_relay() -> None
     assert "medmcp-shim-error" not in out
 
 
-@pytest.mark.asyncio
 async def test_truncation_after_visible_text_ends_the_stream_as_incomplete() -> None:
     """Text already shown cannot be retried: no [DONE], no finish_reason, no shim message."""
     truncated = _sse([_text("Hello, "), _text("wor")], done=False)
@@ -294,7 +291,6 @@ async def test_truncation_after_visible_text_ends_the_stream_as_incomplete() -> 
     assert out.count("Hello") == 1  # the healthy second attempt was never requested
 
 
-@pytest.mark.asyncio
 async def test_buffered_relay_retries_text_truncation_invisibly() -> None:
     """The original mode: the person only ever sees the healthy attempt."""
     truncated = _sse([_text("Hello, "), _text("wor")], done=False)
@@ -305,7 +301,6 @@ async def test_buffered_relay_retries_text_truncation_invisibly() -> None:
     assert out.endswith("data: [DONE]\n\n")
 
 
-@pytest.mark.asyncio
 async def test_live_relay_reports_failure_after_every_attempt_truncates_invisibly() -> None:
     """Tool-call turns that never complete still end in the labelled shim message."""
     truncated = _sse([_call()], done=False)

@@ -14,7 +14,6 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-# pyright: reportPrivateUsage=false
 from medmcp import origincheck, server
 
 

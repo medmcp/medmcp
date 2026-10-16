@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 from medmcp import provenance
 
+from .conftest import make_vibe_session
+
 SESSION_ID = "abcd1234-1111-2222-3333-444455556666"
 
 
@@ -176,9 +178,7 @@ def test_log_permission_appends_lines(tmp_path: Path) -> None:
 
 def test_find_vibe_session_dir(tmp_path: Path) -> None:
     """The session dir is located by id prefix and confirmed via meta.json."""
-    sess_dir = tmp_path / "logs" / "session" / "session_20260101_000000_abcd1234"
-    sess_dir.mkdir(parents=True)
-    (sess_dir / "meta.json").write_text(json.dumps({"session_id": SESSION_ID}))
+    sess_dir = make_vibe_session(tmp_path, SESSION_ID)
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         found = provenance.find_vibe_session_dir(SESSION_ID)
     assert found == sess_dir
@@ -193,9 +193,7 @@ def test_find_vibe_session_dir_missing(tmp_path: Path) -> None:
 
 def test_purge_session_removes_provenance_and_vibe_logs(tmp_path: Path) -> None:
     """purge_session deletes both the provenance dir and the vibe transcript dir."""
-    vibe_dir = tmp_path / "logs" / "session" / "session_20260101_000000_abcd1234"
-    vibe_dir.mkdir(parents=True)
-    (vibe_dir / "meta.json").write_text(json.dumps({"session_id": SESSION_ID}))
+    vibe_dir = make_vibe_session(tmp_path, SESSION_ID)
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         provenance.append_run_event(SESSION_ID, {"tool": "a"})
         prov_dir = provenance.provenance_dir(SESSION_ID)
@@ -220,33 +218,19 @@ CONT_ID = "ef567890-9999-8888-7777-666655554444"
 CONT2_ID = "01234567-aaaa-bbbb-cccc-ddddeeeeffff"
 
 
-def _make_vibe_session(
-    root: Path, timestamp: str, session_id: str, parent_id: str | None = None
-) -> Path:
-    """Create a vibe-style transcript dir with a meta.json (and empty log)."""
-    d = root / "logs" / "session" / f"session_{timestamp}_{session_id[:8]}"
-    d.mkdir(parents=True)
-    meta: dict[str, object] = {"session_id": session_id}
-    if parent_id is not None:
-        meta["parent_session_id"] = parent_id
-    (d / "meta.json").write_text(json.dumps(meta))
-    (d / "messages.jsonl").write_text("")
-    return d
-
-
 def test_find_vibe_session_dirs_follows_compaction_chain(tmp_path: Path) -> None:
     """The chain lists the original dir first, then continuations in order."""
-    original = _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)
-    cont = _make_vibe_session(tmp_path, "20260101_010000", CONT_ID, parent_id=SESSION_ID)
-    cont2 = _make_vibe_session(tmp_path, "20260101_020000", CONT2_ID, parent_id=CONT_ID)
-    _make_vibe_session(tmp_path, "20260101_030000", "99999999-0000-0000-0000-000000000000")
+    original = make_vibe_session(tmp_path, SESSION_ID)
+    cont = make_vibe_session(tmp_path, CONT_ID, parent_id=SESSION_ID, timestamp="20260101_010000")
+    cont2 = make_vibe_session(tmp_path, CONT2_ID, parent_id=CONT_ID, timestamp="20260101_020000")
+    make_vibe_session(tmp_path, "99999999-0000-0000-0000-000000000000", timestamp="20260101_030000")
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         assert provenance.find_vibe_session_dirs(SESSION_ID) == [original, cont, cont2]
 
 
 def test_find_vibe_session_dirs_without_continuations(tmp_path: Path) -> None:
     """A session that never compacted yields just its own dir."""
-    original = _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)
+    original = make_vibe_session(tmp_path, SESSION_ID)
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         assert provenance.find_vibe_session_dirs(SESSION_ID) == [original]
 
@@ -260,25 +244,25 @@ def test_find_vibe_session_dirs_unknown_session(tmp_path: Path) -> None:
 
 def test_vibe_session_parents_maps_backlinks(tmp_path: Path) -> None:
     """Only sessions with a parent_session_id appear, mapped child -> parent."""
-    _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)
-    _make_vibe_session(tmp_path, "20260101_010000", CONT_ID, parent_id=SESSION_ID)
-    _make_vibe_session(tmp_path, "20260101_020000", CONT2_ID, parent_id=CONT_ID)
+    make_vibe_session(tmp_path, SESSION_ID)
+    make_vibe_session(tmp_path, CONT_ID, parent_id=SESSION_ID, timestamp="20260101_010000")
+    make_vibe_session(tmp_path, CONT2_ID, parent_id=CONT_ID, timestamp="20260101_020000")
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         assert provenance.vibe_session_parents() == {CONT_ID: SESSION_ID, CONT2_ID: CONT_ID}
 
 
 def test_vibe_chain_tip_follows_to_newest_link(tmp_path: Path) -> None:
     """The tip of a compaction chain is the newest continuation's id."""
-    _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)
-    _make_vibe_session(tmp_path, "20260101_010000", CONT_ID, parent_id=SESSION_ID)
-    _make_vibe_session(tmp_path, "20260101_020000", CONT2_ID, parent_id=CONT_ID)
+    make_vibe_session(tmp_path, SESSION_ID)
+    make_vibe_session(tmp_path, CONT_ID, parent_id=SESSION_ID, timestamp="20260101_010000")
+    make_vibe_session(tmp_path, CONT2_ID, parent_id=CONT_ID, timestamp="20260101_020000")
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         assert provenance.vibe_chain_tip(SESSION_ID) == CONT2_ID
 
 
 def test_vibe_chain_tip_without_chain_is_identity(tmp_path: Path) -> None:
     """A session with no continuation (or unknown) maps to itself."""
-    _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)
+    make_vibe_session(tmp_path, SESSION_ID)
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         assert provenance.vibe_chain_tip(SESSION_ID) == SESSION_ID
         assert provenance.vibe_chain_tip("99999999-x") == "99999999-x"
@@ -291,8 +275,8 @@ def test_chain_walk_stops_at_forks(tmp_path: Path) -> None:
     continuations; without the stop set, resuming the source would land in
     the fork and purging the source would delete it.
     """
-    original = _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)
-    fork = _make_vibe_session(tmp_path, "20260101_010000", CONT_ID, parent_id=SESSION_ID)
+    original = make_vibe_session(tmp_path, SESSION_ID)
+    fork = make_vibe_session(tmp_path, CONT_ID, parent_id=SESSION_ID, timestamp="20260101_010000")
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         assert provenance.find_vibe_session_dirs(SESSION_ID, stop_ids={CONT_ID}) == [original]
         assert provenance.vibe_chain_tip(SESSION_ID, stop_ids={CONT_ID}) == SESSION_ID
@@ -307,10 +291,10 @@ def test_chain_walk_stops_at_forks(tmp_path: Path) -> None:
 
 def test_chain_walk_stops_only_at_fork_boundary(tmp_path: Path) -> None:
     """A compaction continuation *behind* a fork boundary is still excluded."""
-    _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)
-    _make_vibe_session(tmp_path, "20260101_010000", CONT_ID, parent_id=SESSION_ID)
+    make_vibe_session(tmp_path, SESSION_ID)
+    make_vibe_session(tmp_path, CONT_ID, parent_id=SESSION_ID, timestamp="20260101_010000")
     # CONT2 continues the fork (e.g. the fork later compacted) — not ours.
-    _make_vibe_session(tmp_path, "20260101_020000", CONT2_ID, parent_id=CONT_ID)
+    make_vibe_session(tmp_path, CONT2_ID, parent_id=CONT_ID, timestamp="20260101_020000")
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         dirs = provenance.find_vibe_session_dirs(SESSION_ID, stop_ids={CONT_ID})
         assert [d.name.split("_")[-1] for d in dirs] == [SESSION_ID[:8]]
@@ -318,10 +302,10 @@ def test_chain_walk_stops_only_at_fork_boundary(tmp_path: Path) -> None:
 
 def test_purge_session_removes_compaction_continuations(tmp_path: Path) -> None:
     """Purging a chat also deletes the transcript dirs compaction rolled over to."""
-    original = _make_vibe_session(tmp_path, "20260101_000000", SESSION_ID)
-    cont = _make_vibe_session(tmp_path, "20260101_010000", CONT_ID, parent_id=SESSION_ID)
-    unrelated = _make_vibe_session(
-        tmp_path, "20260101_020000", "99999999-0000-0000-0000-000000000000"
+    original = make_vibe_session(tmp_path, SESSION_ID)
+    cont = make_vibe_session(tmp_path, CONT_ID, parent_id=SESSION_ID, timestamp="20260101_010000")
+    unrelated = make_vibe_session(
+        tmp_path, "99999999-0000-0000-0000-000000000000", timestamp="20260101_020000"
     )
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         provenance.append_run_event(SESSION_ID, {"tool": "a"})
@@ -380,9 +364,7 @@ class TestReport:
 def test_vibe_manual_session_title_only_for_user_set_titles(tmp_path: Path) -> None:
     """Only a title vibe marks ``manual`` counts as the user's; auto/absent → None."""
     sid = "abcd1234-1111-2222-3333-444455556666"
-    sess = tmp_path / "logs" / "session" / f"session_20260902_{sid[:8]}"
-    sess.mkdir(parents=True)
-    meta = sess / "meta.json"
+    meta = make_vibe_session(tmp_path, sid, timestamp="20260902") / "meta.json"
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         meta.write_text(json.dumps({"session_id": sid, "title": "Auto", "title_source": "auto"}))
         assert provenance.vibe_manual_session_title(sid) is None

@@ -1,7 +1,5 @@
 """Tests for the pre_tool path guard (`medmcp.pathguard`)."""
 
-# pyright: reportPrivateUsage=false
-
 import json
 import subprocess
 import sys

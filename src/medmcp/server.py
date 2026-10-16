@@ -2159,8 +2159,11 @@ READ_ONLY_APPROVAL_ENV_VAR = "MEDMCP_READ_ONLY_APPROVAL"
 
 # Session patterns (as vibe's bash tool builds them) for commands that only read.
 # Each is ``<command> *``: vibe splits a compound command into its parts and asks
-# for each part separately, and ``find -exec``/``-delete`` get an exact
-# (non-wildcard) pattern. A redirect is folded into its command as a
+# for each part separately. An approved ``<command> *`` covers *every* later call
+# of that command, whatever its flags, so a command belongs here only if no flag
+# makes it write: ``find`` is out (``-delete``, and ``-fprint`` writes a file;
+# vibe guards only the ``-exec`` family), as are ``tree`` (``-o`` writes a file)
+# and ``file`` (``-C`` compiles a magic file). A redirect is folded into its command as a
 # ``<redirect>`` token, which a bare ``ls *`` rule would still match: a call with
 # one is never offered this approval, and the image's vibe is patched so an
 # approved rule never covers one either (``ls > out.txt`` always asks).
@@ -2178,9 +2181,6 @@ _READ_ONLY_SESSION_PATTERNS = frozenset(
         "du",
         "df",
         "stat",
-        "file",
-        "tree",
-        "find",
         "grep",
         "md5sum",
         "sha256sum",

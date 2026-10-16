@@ -3,7 +3,7 @@
 #   llm       — bundled Ollama, GPU via CDI, serves muse-medmcp.
 #   llm-init  — one-shot: ensures the custom model exists (idempotent).
 #   medmcp    — core workspace server; launches stack containers over the
-#               mounted (rootless) docker socket.
+#               mounted docker socket (rootless by default).
 #
 # Required: MEDMCP_WORKSPACE = an ABSOLUTE host path (bind-mounted at the same
 # path inside the core so nested `docker run -v` stays valid — path parity).
@@ -140,9 +140,15 @@ services:
     ports:
       - "127.0.0.1:8100:8100"
     volumes:
-      # Rootless docker socket → core spawns sibling stack containers.
-      # Rootful hosts: override XDG_RUNTIME_DIR or set the path to /var/run.
-      - "${XDG_RUNTIME_DIR}/docker.sock:/var/run/docker.sock"
+      # Docker socket → core spawns sibling stack containers. Rootless by
+      # default; rootful hosts set XDG_RUNTIME_DIR=/var/run. Long form so a wrong
+      # path fails `up` instead of docker creating an empty directory there,
+      # which leaves the core unable to start any stack ("Connection closed").
+      - type: bind
+        source: "${XDG_RUNTIME_DIR}/docker.sock"
+        target: /var/run/docker.sock
+        bind:
+          create_host_path: false
       # Workspace at an identical absolute path (path parity for nested run -v).
       - "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}"
       # Container-stack manifests (read-write so UI install/uninstall can persist).

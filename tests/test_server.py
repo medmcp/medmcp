@@ -18,8 +18,18 @@ import yaml
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-# pyright: reportPrivateUsage=false
 from medmcp import provenance, server, sessions, settings
+
+from .conftest import WS_HEADERS
+
+
+@pytest.fixture
+def workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the server's workspace root at a temp dir (resolved, no symlinks)."""
+    resolved = tmp_path.resolve()
+    monkeypatch.setattr(server, "WORKSPACE_ROOT", resolved)
+    return resolved
+
 
 # ── _safe_path: the workspace traversal guard ────────────────────────────────
 
@@ -27,67 +37,105 @@ from medmcp import provenance, server, sessions, settings
 class TestSafePath:
     """``_safe_path`` resolves inside the workspace and rejects everything else."""
 
-    @pytest.fixture
-    def root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        """Point the server's workspace root at a temp dir (resolved, no symlinks)."""
-        resolved = tmp_path.resolve()
-        monkeypatch.setattr(server, "WORKSPACE_ROOT", resolved)
-        return resolved
-
-    def test_allows_nested_relative_path(self, root: Path) -> None:
+    def test_allows_nested_relative_path(self, workspace_root: Path) -> None:
         """A normal relative path resolves to its location under the root."""
-        assert server._safe_path("sub/dir/scan.nii.gz") == root / "sub" / "dir" / "scan.nii.gz"
+        assert (
+            server._safe_path("sub/dir/scan.nii.gz")
+            == workspace_root / "sub" / "dir" / "scan.nii.gz"
+        )
 
-    def test_allows_root_itself(self, root: Path) -> None:
+    def test_allows_root_itself(self, workspace_root: Path) -> None:
         """An empty path (and ``.``) resolve to the workspace root, not an escape."""
-        assert server._safe_path("") == root
-        assert server._safe_path(".") == root
+        assert server._safe_path("") == workspace_root
+        assert server._safe_path(".") == workspace_root
 
-    def test_inner_dotdot_that_stays_inside_is_allowed(self, root: Path) -> None:
+    def test_inner_dotdot_that_stays_inside_is_allowed(self, workspace_root: Path) -> None:
         """``..`` segments are fine as long as the result stays in the workspace."""
-        assert server._safe_path("a/../b.txt") == root / "b.txt"
+        assert server._safe_path("a/../b.txt") == workspace_root / "b.txt"
 
-    def test_rejects_parent_traversal(self, root: Path) -> None:
+    def test_rejects_parent_traversal(self, workspace_root: Path) -> None:
         """A leading ``..`` that escapes the root is refused with 400."""
         with pytest.raises(HTTPException) as exc:
             server._safe_path("../secret.txt")
         assert exc.value.status_code == 400
         assert "escapes" in str(exc.value.detail)
 
-    def test_rejects_deep_traversal(self, root: Path) -> None:
+    def test_rejects_deep_traversal(self, workspace_root: Path) -> None:
         """A path that climbs out via many ``..`` is refused."""
         with pytest.raises(HTTPException) as exc:
             server._safe_path("a/b/../../../../etc/passwd")
         assert exc.value.status_code == 400
 
-    def test_rejects_absolute_path(self, root: Path) -> None:
+    def test_rejects_absolute_path(self, workspace_root: Path) -> None:
         """An absolute path is rejected before any resolution."""
         with pytest.raises(HTTPException) as exc:
             server._safe_path("/etc/passwd")
         assert exc.value.status_code == 400
         assert "absolute" in str(exc.value.detail)
 
-    def test_rejects_sibling_with_shared_prefix(self, root: Path) -> None:
+    def test_rejects_sibling_with_shared_prefix(self, workspace_root: Path) -> None:
         """A sibling dir whose name merely starts with the root's name is outside.
 
         Guards against a string-prefix check; ``is_relative_to`` compares path
         components, so ``<root>_evil`` must not be treated as inside ``<root>``.
         """
-        sibling = root.parent / (root.name + "_evil")
+        sibling = workspace_root.parent / (workspace_root.name + "_evil")
         sibling.mkdir()
         with pytest.raises(HTTPException) as exc:
             server._safe_path(f"../{sibling.name}/loot.txt")
         assert exc.value.status_code == 400
 
-    def test_rejects_symlink_escape(self, root: Path) -> None:
+    def test_rejects_symlink_escape(self, workspace_root: Path) -> None:
         """A symlink inside the workspace pointing out is followed and rejected."""
-        outside = root.parent / "outside"
+        outside = workspace_root.parent / "outside"
         outside.mkdir()
-        (root / "link").symlink_to(outside)
+        (workspace_root / "link").symlink_to(outside)
         with pytest.raises(HTTPException) as exc:
             server._safe_path("link/secret.txt")
         assert exc.value.status_code == 400
         assert "escapes" in str(exc.value.detail)
+
+
+class TestMountPointGuard:
+    """A mounted drive inside the workspace, or a folder holding one, cannot be removed."""
+
+    @pytest.fixture
+    def drive(self, workspace_root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """A workspace whose ``usb`` folder counts as a bind mount (invisible to ismount)."""
+        drive = workspace_root / "study" / "usb"
+        (drive / "series0").mkdir(parents=True)
+        (drive / "series0" / "img0.dcm").write_bytes(b"x")
+        monkeypatch.setattr(server, "_mount_points", lambda: {Path("/"), drive})
+        return drive
+
+    def test_mount_point_cannot_be_deleted_or_moved(self, drive: Path, client: TestClient) -> None:
+        """Deleting the mount point would empty the drive behind it."""
+        assert client.delete("/api/files", params={"path": "study/usb"}).status_code == 400
+        resp = client.post("/api/files/rename", json={"path": "study/usb", "new_path": "x"})
+        assert resp.status_code == 400
+        assert (drive / "series0" / "img0.dcm").exists()
+
+    def test_folder_holding_a_mount_cannot_be_deleted(
+        self, drive: Path, client: TestClient
+    ) -> None:
+        """Deleting a parent would empty the drive below it before failing."""
+        assert client.delete("/api/files", params={"path": "study"}).status_code == 400
+        assert (drive / "series0" / "img0.dcm").exists()
+
+    def test_files_on_the_drive_can_still_be_deleted(self, drive: Path, client: TestClient) -> None:
+        """Only the mount point itself is protected."""
+        assert client.delete("/api/files", params={"path": "study/usb/series0"}).status_code == 200
+        assert not (drive / "series0").exists()
+
+    def test_mount_table_is_read(self) -> None:
+        """The real mount table parses and includes the root filesystem."""
+        assert Path("/") in server._mount_points()
+
+    def test_mount_paths_are_decoded_as_bytes(self) -> None:
+        """Octal escapes become the bytes they stand for; non-ASCII bytes stay as written."""
+        assert server._unescape_mount_path(rb"/media/u/My\040Disk") == Path("/media/u/My Disk")
+        assert server._unescape_mount_path(b"/media/u/K\xc3\xbcche") == Path("/media/u/Küche")
+        assert server._unescape_mount_path(rb"/media/u/a\134b") == Path("/media/u/a\\b")
 
 
 # ── _resolve_input_path: workspace-relative replay inputs → absolute ──────────
@@ -103,51 +151,44 @@ class TestResolveInputPath:
     so non-path inputs pass through and a missing scan still yields a clear error.
     """
 
-    @pytest.fixture
-    def root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        """Point the server's workspace root at a temp dir (resolved, no symlinks)."""
-        resolved = tmp_path.resolve()
-        monkeypatch.setattr(server, "WORKSPACE_ROOT", resolved)
-        return resolved
-
-    def test_relative_existing_file_becomes_absolute(self, root: Path) -> None:
+    def test_relative_existing_file_becomes_absolute(self, workspace_root: Path) -> None:
         """A relative path naming an existing file resolves to its absolute path."""
-        scan = root / "patient_01" / "visit_02" / "t1n_3d.nii.gz"
+        scan = workspace_root / "patient_01" / "visit_02" / "t1n_3d.nii.gz"
         scan.parent.mkdir(parents=True)
         scan.touch()
         assert server._resolve_input_path("patient_01/visit_02/t1n_3d.nii.gz") == str(scan)
 
-    def test_relative_existing_dir_becomes_absolute(self, root: Path) -> None:
+    def test_relative_existing_dir_becomes_absolute(self, workspace_root: Path) -> None:
         """Directory inputs resolve too (some tools take a folder)."""
-        visit = root / "patient_01" / "visit_02"
+        visit = workspace_root / "patient_01" / "visit_02"
         visit.mkdir(parents=True)
         assert server._resolve_input_path("patient_01/visit_02") == str(visit)
 
-    def test_absolute_path_is_left_unchanged(self, root: Path) -> None:
+    def test_absolute_path_is_left_unchanged(self, workspace_root: Path) -> None:
         """An already-absolute path (the recorded example) passes through verbatim."""
-        scan = root / "patient_01" / "visit_01" / "t1n_3d.nii.gz"
+        scan = workspace_root / "patient_01" / "visit_01" / "t1n_3d.nii.gz"
         scan.parent.mkdir(parents=True)
         scan.touch()
         assert server._resolve_input_path(str(scan)) == str(scan)
 
-    def test_non_path_argument_is_left_unchanged(self, root: Path) -> None:
+    def test_non_path_argument_is_left_unchanged(self, workspace_root: Path) -> None:
         """A non-path argument like a device string is not mistaken for a file."""
         assert server._resolve_input_path("cuda") == "cuda"
 
-    def test_missing_relative_path_is_left_unchanged(self, root: Path) -> None:
+    def test_missing_relative_path_is_left_unchanged(self, workspace_root: Path) -> None:
         """A relative path that doesn't exist is left as-is for a clear tool error."""
         assert (
             server._resolve_input_path("patient_01/visit_09/missing.nii.gz")
             == "patient_01/visit_09/missing.nii.gz"
         )
 
-    def test_empty_value_is_left_unchanged(self, root: Path) -> None:
+    def test_empty_value_is_left_unchanged(self, workspace_root: Path) -> None:
         """An empty value is returned untouched (not joined to the root)."""
         assert server._resolve_input_path("") == ""
 
-    def test_confined_input_paths_maps_every_value(self, root: Path) -> None:
+    def test_confined_input_paths_maps_every_value(self, workspace_root: Path) -> None:
         """The dict helper resolves each binding value independently."""
-        scan = root / "patient_01" / "visit_02" / "t1n_3d.nii.gz"
+        scan = workspace_root / "patient_01" / "visit_02" / "t1n_3d.nii.gz"
         scan.parent.mkdir(parents=True)
         scan.touch()
         resolved = server._confined_input_paths(
@@ -166,38 +207,31 @@ class TestConfinedInputPath:
     stack runs as the operator — so the confinement belongs in the server.
     """
 
-    @pytest.fixture
-    def root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        """Point the server's workspace root at a temp dir (resolved, no symlinks)."""
-        resolved = tmp_path.resolve()
-        monkeypatch.setattr(server, "WORKSPACE_ROOT", resolved)
-        return resolved
-
-    def test_absolute_path_inside_is_kept(self, root: Path) -> None:
+    def test_absolute_path_inside_is_kept(self, workspace_root: Path) -> None:
         """Path parity means an absolute workspace path is the normal case."""
-        scan = root / "patient_01" / "scan.nii.gz"
+        scan = workspace_root / "patient_01" / "scan.nii.gz"
         scan.parent.mkdir(parents=True)
         scan.touch()
         assert server._confined_input_path(str(scan)) == str(scan)
 
-    def test_absolute_path_outside_is_refused(self, root: Path) -> None:
+    def test_absolute_path_outside_is_refused(self, workspace_root: Path) -> None:
         """The case that mattered: a tool pointed at the operator's own files."""
         with pytest.raises(ValueError, match="outside the workspace"):
             server._confined_input_path("/etc/passwd")
 
-    def test_relative_escape_is_refused(self, root: Path) -> None:
+    def test_relative_escape_is_refused(self, workspace_root: Path) -> None:
         """`..` is not a way around the same rule."""
         with pytest.raises(ValueError, match="escapes the workspace"):
             server._confined_input_path("../../etc/passwd")
 
-    def test_symlink_out_of_the_workspace_is_refused(self, root: Path) -> None:
+    def test_symlink_out_of_the_workspace_is_refused(self, workspace_root: Path) -> None:
         """Resolution happens before the check, so a link inside is not a loophole."""
-        link = root / "escape"
+        link = workspace_root / "escape"
         link.symlink_to("/etc")
         with pytest.raises(ValueError, match="workspace"):
             server._confined_input_path("escape/passwd")
 
-    def test_non_path_and_missing_values_pass_through(self, root: Path) -> None:
+    def test_non_path_and_missing_values_pass_through(self, workspace_root: Path) -> None:
         """Device strings and not-yet-created outputs are not paths to refuse."""
         assert server._confined_input_path("cuda") == "cuda"
         assert server._confined_input_path("out/derivatives") == "out/derivatives"
@@ -216,25 +250,18 @@ class TestWorkspaceNote:
     filesystem search. The note must also still be strippable from transcripts.
     """
 
-    @pytest.fixture
-    def root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        """Point the server's workspace root at a temp dir (resolved, no symlinks)."""
-        resolved = tmp_path.resolve()
-        monkeypatch.setattr(server, "WORKSPACE_ROOT", resolved)
-        return resolved
-
-    def test_note_carries_absolute_path(self, root: Path) -> None:
+    def test_note_carries_absolute_path(self, workspace_root: Path) -> None:
         """A relative viewer path is rendered as its absolute location in the note."""
-        scan = root / "patient_01" / "visit_01" / "t1n_3d.nii.gz"
+        scan = workspace_root / "patient_01" / "visit_01" / "t1n_3d.nii.gz"
         scan.parent.mkdir(parents=True)
         scan.touch()
         note = server._workspace_note("patient_01/visit_01/t1n_3d.nii.gz")
         assert str(scan) in note
         assert "patient_01/visit_01/t1n_3d.nii.gz" not in note.replace(str(scan), "")
 
-    def test_note_is_strippable(self, root: Path) -> None:
+    def test_note_is_strippable(self, workspace_root: Path) -> None:
         """The note appends cleanly and `_strip_workspace_note` removes it again."""
-        scan = root / "patient_01" / "visit_01" / "t1n_3d.nii.gz"
+        scan = workspace_root / "patient_01" / "visit_01" / "t1n_3d.nii.gz"
         scan.parent.mkdir(parents=True)
         scan.touch()
         prompt = "skull strip this image" + server._workspace_note(
@@ -302,17 +329,19 @@ class TestSettingsMerge:
         assert resp.status_code == 200
         return resp.json()
 
-    def test_preserves_entry_unknown_to_the_drawer(self, harness: dict[str, set[str]]) -> None:
+    def test_preserves_entry_unknown_to_the_drawer(
+        self, harness: dict[str, set[str]], client: TestClient
+    ) -> None:
         """A stack the drawer never listed stays active after a save."""
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         result = self._put(client, stacks=[{"name": "alpha", "active": True}])
         # "beta" was unknown to this drawer payload, so it is kept; nothing changed.
         assert harness["stacks"] == {"alpha", "beta"}
         assert result["restarted"] is False
 
-    def test_deactivates_a_known_entry(self, harness: dict[str, set[str]]) -> None:
+    def test_deactivates_a_known_entry(
+        self, harness: dict[str, set[str]], client: TestClient
+    ) -> None:
         """Turning a listed stack off removes it and triggers a restart."""
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         result = self._put(
             client,
             stacks=[{"name": "alpha", "active": False}, {"name": "beta", "active": True}],
@@ -320,9 +349,10 @@ class TestSettingsMerge:
         assert harness["stacks"] == {"beta"}
         assert result["restarted"] is True
 
-    def test_no_restart_when_nothing_changes(self, harness: dict[str, set[str]]) -> None:
+    def test_no_restart_when_nothing_changes(
+        self, harness: dict[str, set[str]], client: TestClient
+    ) -> None:
         """Re-submitting the current state is a no-op restart-wise."""
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         result = self._put(
             client,
             stacks=[{"name": "alpha", "active": True}, {"name": "beta", "active": True}],
@@ -339,8 +369,7 @@ class TestWorkflowShareEndpoints:
 
     @pytest.fixture
     def vibe_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        """Point both the server and provenance/share VIBE_HOME at a temp dir."""
-        monkeypatch.setattr(server, "VIBE_HOME", tmp_path)
+        """Point the workflow root (resolved via provenance.VIBE_HOME) at a temp dir."""
         monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
         return tmp_path
 
@@ -361,9 +390,8 @@ class TestWorkflowShareEndpoints:
             }
         )
 
-    def test_import_then_export_round_trip(self, vibe_home: Path) -> None:
+    def test_import_then_export_round_trip(self, vibe_home: Path, client: TestClient) -> None:
         """A valid envelope imports as a draft and exports back as a YAML download."""
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.post("/api/workflows/import", json={"content": self._envelope()})
         assert resp.status_code == 200
         assert resp.json()["name"] == "demo-flow"
@@ -373,20 +401,17 @@ class TestWorkflowShareEndpoints:
         assert "medmcp_workflow" in exp.text
         assert exp.headers["content-disposition"].endswith('demo-flow.workflow.yaml"')
 
-    def test_import_malformed_returns_400(self, vibe_home: Path) -> None:
+    def test_import_malformed_returns_400(self, vibe_home: Path, client: TestClient) -> None:
         """A payload that isn't a workflow envelope maps to HTTP 400."""
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.post("/api/workflows/import", json={"content": "- not a mapping"})
         assert resp.status_code == 400
 
-    def test_export_missing_returns_404(self, vibe_home: Path) -> None:
+    def test_export_missing_returns_404(self, vibe_home: Path, client: TestClient) -> None:
         """Exporting an unknown workflow maps to HTTP 404."""
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         assert client.get("/api/workflows/nope/export").status_code == 404
 
-    def test_rename_onto_a_taken_name_is_409(self, vibe_home: Path) -> None:
+    def test_rename_onto_a_taken_name_is_409(self, vibe_home: Path, client: TestClient) -> None:
         """A rename never replaces another workflow."""
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         first = client.post("/api/workflows/import", json={"content": self._envelope()})
         assert first.status_code == 200
         other = yaml.safe_load(self._envelope())
@@ -490,14 +515,19 @@ class _StubWs:
         self.sent.append(msg)
 
 
+def _connection() -> tuple[server._ChatConnection, asyncio.Queue[dict[str, object]]]:
+    """A chat connection over a stub socket, with the vibe frame queue it drains."""
+    queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    conn = server._ChatConnection(cast("Any", _StubWs()), "sid", cast("Any", queue), [])
+    return conn, queue
+
+
 class TestIdlePump:
     """Unsolicited vibe frames (e.g. MCP failure notices) reach the browser."""
 
-    @pytest.mark.asyncio
     async def test_pump_relays_queued_notice(self) -> None:
         """A warm-up agent message queued before any prompt is forwarded."""
-        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-        conn = server._ChatConnection(cast("Any", _StubWs()), "sid", cast("Any", queue), [])
+        conn, queue = _connection()
         await queue.put(
             {
                 "method": "session/update",
@@ -520,11 +550,9 @@ class TestIdlePump:
             m.get("type") == "chunk" and "failed to connect" in str(m.get("text")) for m in ws.sent
         )
 
-    @pytest.mark.asyncio
     async def test_stop_is_idempotent_and_halts_relay(self) -> None:
         """After stopping, queued frames stay queued (drained by the turn loop)."""
-        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-        conn = server._ChatConnection(cast("Any", _StubWs()), "sid", cast("Any", queue), [])
+        conn, queue = _connection()
         conn.start_idle_pump()
         await conn._stop_idle_pump()
         await conn._stop_idle_pump()  # no error
@@ -549,11 +577,9 @@ class TestToolCallRawInput:
     def _update(payload: dict[str, object]) -> dict[str, object]:
         return {"method": "session/update", "params": {"update": payload}}
 
-    @pytest.mark.asyncio
     async def test_late_arguments_overwrite_the_partial_placeholder(self) -> None:
         """The completed rawInput replaces the empty one from the opening frame."""
-        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-        conn = server._ChatConnection(cast("Any", _StubWs()), "sid", cast("Any", queue), [])
+        conn, queue = _connection()
         await queue.put(
             self._update(
                 {
@@ -584,7 +610,6 @@ class TestToolCallRawInput:
         update_frame = next(m for m in sent if m.get("type") == "tool_call_update")
         assert update_frame["rawInput"] == {"image": "/data/T1.nii.gz"}
 
-    @pytest.mark.asyncio
     async def test_replayed_settled_call_carries_its_output(self) -> None:
         """A finished call replayed on resume keeps its output.
 
@@ -592,8 +617,7 @@ class TestToolCallRawInput:
         and no ``tool_call_update`` after it; the browser needs that output to show
         the result and its file chips.
         """
-        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-        conn = server._ChatConnection(cast("Any", _StubWs()), "sid", cast("Any", queue), [])
+        conn, queue = _connection()
         await queue.put(
             self._update(
                 {
@@ -619,11 +643,9 @@ class TestToolCallRawInput:
         assert frame["output"] == "Seg labels: /data/T1_dseg.mgz"
         assert frame["pathGuardRetry"] is False
 
-    @pytest.mark.asyncio
     async def test_update_without_arguments_keeps_the_known_ones(self) -> None:
         """A status-only update (vibe sends rawInput only when detail changed)."""
-        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-        conn = server._ChatConnection(cast("Any", _StubWs()), "sid", cast("Any", queue), [])
+        conn, queue = _connection()
         await queue.put(
             self._update(
                 {
@@ -729,7 +751,9 @@ class TestSessionsApi:
         monkeypatch.setattr(server._client, "ensure_started", _ensure)
         monkeypatch.setattr(server._client, "request", _request)
 
-    def test_maps_and_drops_idless_entries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_maps_and_drops_idless_entries(
+        self, monkeypatch: pytest.MonkeyPatch, client: TestClient
+    ) -> None:
         """Each session is reshaped to {id,title,updatedAt}; idless rows are dropped."""
         self._stub_client(
             monkeypatch,
@@ -752,7 +776,6 @@ class TestSessionsApi:
                 }
             },
         )
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.get("/api/sessions")
         assert resp.status_code == 200
         sessions = resp.json()["sessions"]
@@ -762,15 +785,16 @@ class TestSessionsApi:
         # The leaked viewer-context note is stripped from the title, even truncated.
         assert sessions[2]["title"] == "Hi"
 
-    def test_vibe_error_maps_to_502(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_vibe_error_maps_to_502(
+        self, monkeypatch: pytest.MonkeyPatch, client: TestClient
+    ) -> None:
         """A vibe-acp error surfaces as a 502, not a 500."""
         self._stub_client(monkeypatch, {"error": {"message": "boom"}})
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.get("/api/sessions")
         assert resp.status_code == 502
 
     def test_overlays_registry_metadata(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client: TestClient
     ) -> None:
         """Title overrides, the archived flag, and provenance presence are merged in."""
         self._stub_client(
@@ -796,7 +820,6 @@ class TestSessionsApi:
         monkeypatch.setattr(sessions, "load_registry", _registry)
         monkeypatch.setattr(provenance, "provenance_dir", _prov_dir)
 
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         rows = {s["id"]: s for s in client.get("/api/sessions").json()["sessions"]}
         assert rows["s1"]["title"] == "My name"  # override wins over vibe's title
         assert rows["s1"]["archived"] is False
@@ -806,7 +829,7 @@ class TestSessionsApi:
         assert rows["s2"]["hasProvenance"] is False
 
     def test_folds_compaction_continuations(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client: TestClient
     ) -> None:
         """A continuation is hidden; its root carries the chain's newest updatedAt."""
         self._stub_client(
@@ -824,14 +847,13 @@ class TestSessionsApi:
         monkeypatch.setattr(sessions, "load_registry", dict)
         monkeypatch.setattr(provenance, "vibe_session_parents", lambda: {"cont": "root"})
         monkeypatch.setattr(provenance, "provenance_dir", _prov_dir_in(tmp_path))
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         rows = client.get("/api/sessions").json()["sessions"]
         assert [s["id"] for s in rows] == ["root", "other"]
         assert rows[0]["updatedAt"] == "t9"
         assert rows[1]["updatedAt"] == "t2"
 
     def test_multi_hop_chain_folds_to_root(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client: TestClient
     ) -> None:
         """Several compactions still collapse into the one root entry."""
         self._stub_client(
@@ -849,13 +871,12 @@ class TestSessionsApi:
         monkeypatch.setattr(sessions, "load_registry", dict)
         monkeypatch.setattr(provenance, "vibe_session_parents", lambda: {"c1": "root", "c2": "c1"})
         monkeypatch.setattr(provenance, "provenance_dir", _prov_dir_in(tmp_path))
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         rows = client.get("/api/sessions").json()["sessions"]
         assert [s["id"] for s in rows] == ["root"]
         assert rows[0]["updatedAt"] == "t9"
 
     def test_registry_entry_is_never_folded(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client: TestClient
     ) -> None:
         """A child the user can see (registry record — e.g. a fork) stays listed."""
         self._stub_client(
@@ -872,14 +893,13 @@ class TestSessionsApi:
         monkeypatch.setattr(sessions, "load_registry", lambda: {"fork": {"title": "My branch"}})
         monkeypatch.setattr(provenance, "vibe_session_parents", lambda: {"fork": "root"})
         monkeypatch.setattr(provenance, "provenance_dir", _prov_dir_in(tmp_path))
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         rows = client.get("/api/sessions").json()["sessions"]
         assert [s["id"] for s in rows] == ["root", "fork"]
         assert rows[0]["updatedAt"] == "t1"  # nothing folded into the root
         assert rows[1]["title"] == "My branch"
 
     def test_child_of_unlisted_parent_stays(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client: TestClient
     ) -> None:
         """A backlink to a session outside this workspace's list does not hide it."""
         self._stub_client(
@@ -889,11 +909,10 @@ class TestSessionsApi:
         monkeypatch.setattr(sessions, "load_registry", dict)
         monkeypatch.setattr(provenance, "vibe_session_parents", lambda: {"c1": "elsewhere"})
         monkeypatch.setattr(provenance, "provenance_dir", _prov_dir_in(tmp_path))
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         rows = client.get("/api/sessions").json()["sessions"]
         assert [s["id"] for s in rows] == ["c1"]
 
-    def test_rename_sets_title(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_rename_sets_title(self, monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
         """POST …/rename forwards to the registry's set_title."""
         captured: dict[str, tuple[str, str]] = {}
 
@@ -901,12 +920,11 @@ class TestSessionsApi:
             captured["rename"] = (session_id, title)
 
         monkeypatch.setattr(sessions, "set_title", _set_title)
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.post("/api/sessions/abc/rename", json={"title": "New name"})
         assert resp.status_code == 200
         assert captured["rename"] == ("abc", "New name")
 
-    def test_archive_sets_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_archive_sets_flag(self, monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
         """POST …/archive forwards to the registry's set_archived."""
         captured: dict[str, tuple[str, bool]] = {}
 
@@ -914,12 +932,13 @@ class TestSessionsApi:
             captured["archive"] = (session_id, archived)
 
         monkeypatch.setattr(sessions, "set_archived", _set_archived)
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.post("/api/sessions/abc/archive", json={"archived": True})
         assert resp.status_code == 200
         assert captured["archive"] == ("abc", True)
 
-    def test_delete_purges_then_forgets(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_delete_purges_then_forgets(
+        self, monkeypatch: pytest.MonkeyPatch, client: TestClient
+    ) -> None:
         """DELETE …/{id} purges the transcript/provenance and drops the registry entry."""
         calls: list[tuple[str, str]] = []
 
@@ -932,7 +951,6 @@ class TestSessionsApi:
 
         monkeypatch.setattr(provenance, "purge_session", _purge)
         monkeypatch.setattr(sessions, "remove", _remove)
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.delete("/api/sessions/abc")
         assert resp.status_code == 200
         assert calls == [("purge", "abc"), ("remove", "abc")]
@@ -1003,18 +1021,14 @@ class TestPathGuardDenialTagging:
 # ── Replay runs: pre-flight preview, detached runs over the socket ───────────
 
 
-_WS_HEADERS = {"host": "127.0.0.1:8100", "origin": "http://127.0.0.1:8100"}
-
-
 class TestReplayRuns:
     """The run screen's preview pre-flights every item; runs outlive the socket."""
 
     @pytest.fixture
-    def env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    def env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client: TestClient) -> Path:
         """A temp VIBE_HOME with one imported workflow, a temp workspace, temp runs."""
         from medmcp import replay, runs
 
-        monkeypatch.setattr(server, "VIBE_HOME", tmp_path)
         monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
         monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
         workspace = (tmp_path / "ws").resolve()
@@ -1039,7 +1053,6 @@ class TestReplayRuns:
                 ],
             }
         )
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         assert client.post("/api/workflows/import", json={"content": envelope}).status_code == 200
 
         # The engine never spawns a real stack here.
@@ -1058,9 +1071,8 @@ class TestReplayRuns:
         monkeypatch.setattr(replay, "mcp_caller", fake_caller)
         return workspace
 
-    def test_preview_flags_a_missing_input_per_item(self, env: Path) -> None:
+    def test_preview_flags_a_missing_input_per_item(self, env: Path, client: TestClient) -> None:
         """A row pointing at a file that is not there is reported before anything runs."""
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         resp = client.post(
             "/api/workflows/strip/replay-preview",
             json={"runs": [{"in_1": "t1.nii.gz"}, {"in_1": "typo.nii.gz"}]},
@@ -1074,16 +1086,17 @@ class TestReplayRuns:
         assert items[1]["findings"][0]["role"] == "input"  # named after the tool's argument
         assert body["steps"][0]["arguments"]["input_path"] == str(env / "t1.nii.gz")
 
-    def test_run_survives_disconnect_and_can_be_reattached(self, env: Path) -> None:
+    def test_run_survives_disconnect_and_can_be_reattached(
+        self, env: Path, client: TestClient
+    ) -> None:
         """Closing the socket detaches; the run finishes and a later attach replays it."""
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
-        with client.websocket_connect("/ws/replay", headers=_WS_HEADERS) as ws:
+        with client.websocket_connect("/ws/replay", headers=WS_HEADERS) as ws:
             ws.send_json({"name": "strip", "runs": [{"in_1": "t1.nii.gz"}]})
             started = ws.receive_json()
             assert started["type"] == "started"
             run_id = started["run_id"]
         # Detached — the run keeps going. Attach again and read the whole story.
-        with client.websocket_connect("/ws/replay", headers=_WS_HEADERS) as ws:
+        with client.websocket_connect("/ws/replay", headers=WS_HEADERS) as ws:
             ws.send_json({"attach": run_id})
             frames: list[dict[str, Any]] = []
             while True:
@@ -1105,10 +1118,9 @@ class TestReplayRuns:
         assert client.delete(f"/api/runs/{run_id}").status_code == 200
         assert client.get(f"/api/runs/{run_id}").status_code == 404
 
-    def test_bad_first_message_is_refused(self, env: Path) -> None:
+    def test_bad_first_message_is_refused(self, env: Path, client: TestClient) -> None:
         """Neither a start nor an attach: the socket answers with an error and closes."""
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
-        with client.websocket_connect("/ws/replay", headers=_WS_HEADERS) as ws:
+        with client.websocket_connect("/ws/replay", headers=WS_HEADERS) as ws:
             ws.send_json({"attach": "nope"})
             assert ws.receive_json()["ok"] is False
 

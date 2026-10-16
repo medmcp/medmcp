@@ -59,10 +59,11 @@ def test_config_names_only_real_tools(rel: str) -> None:
     Both configs have carried such keys (`read`, `search_replace`) after vibe
     renames, and stayed correct only because the defaults happened to agree.
     """
-    tools_dir = ROOT / ".venv/lib/python3.12/site-packages/vibe/core/tools/builtins"
-    builtins = {p.stem for p in tools_dir.glob("*.py")}
-    if not builtins:  # not installed (e.g. a docs-only checkout)
+    try:
+        import vibe.core.tools.builtins as builtins_pkg  # pyright: ignore[reportMissingTypeStubs]  # vibe ships no stubs
+    except ImportError:  # not installed (e.g. a docs-only checkout)
         pytest.skip("vibe not installed")
+    builtins = {p.stem for p in Path(builtins_pkg.__path__[0]).glob("*.py")}
     for name in _load(rel).get("tools", {}):
         assert name in builtins, f"{rel}: [tools.{name}] is not a vibe tool"
 

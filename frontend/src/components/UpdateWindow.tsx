@@ -123,6 +123,13 @@ export function UpdateWindow({ open, onClose, state, onDismiss }: UpdateWindowPr
       setError('The connection to the workspace dropped before the update started.')
       setMode('failed')
     }
+    ws.onclose = () => {
+      // Closed without a final frame (onmessage clears the ref before closing).
+      if (socketRef.current !== ws) return
+      socketRef.current = null
+      setError('The connection to the workspace closed before the update finished.')
+      setMode('failed')
+    }
   }
 
   const close = () => {

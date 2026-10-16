@@ -64,9 +64,9 @@ function versionHint(u: UpdateState | null, checking: boolean): string {
 }
 
 /**
- * Right-side drawer with the chat control panels: feature toggles, MCP stack
- * switches, and the stack GPU. Every change is saved immediately; stack and GPU
- * changes restart the agent (the chat reconnects into a fresh session).
+ * Right-side drawer with the feature toggles and the stack GPU (per-stack
+ * switches live in the Tool stacks window). Every change is saved immediately;
+ * a GPU change restarts the agent (the chat reconnects into a fresh session).
  */
 export function SettingsDrawer({
   open,
@@ -135,6 +135,7 @@ export function SettingsDrawer({
   }, [open, cloudVersion])
 
   const apply = (next: SettingsState) => {
+    const before = state
     setState(next)
     setSaving(true)
     saveSettings(next)
@@ -142,7 +143,10 @@ export function SettingsDrawer({
         setError(null)
         setNotice(restarted ? 'Agent restarted.' : null)
       })
-      .catch((e: unknown) => setError(String(e)))
+      .catch((e: unknown) => {
+        setError(String(e))
+        setState(before) // the switch must not show a state the server refused
+      })
       .finally(() => setSaving(false))
   }
 

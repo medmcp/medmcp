@@ -16,12 +16,12 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-# pyright: reportPrivateUsage=false
 from medmcp import server, update
+
+from .conftest import WS_HEADERS
 
 JsonDict = dict[str, Any]
 
-_WS_HEADERS = {"host": "127.0.0.1:8100", "origin": "http://127.0.0.1:8100"}
 CACHE_DIR = "/home/op/.cache/docker-compose/cd9c97c4"
 COMPOSE_TEXT = """
 services:
@@ -156,7 +156,6 @@ class TestVersions:
 
     def test_release_link_is_https_or_nothing(self) -> None:
         """The page link is the one thing the browser is pointed at from the document."""
-        assert update.parse_release({"tag_name": "v1.0.0", "html_url": "javascript:x"})
         info = update.parse_release({"tag_name": "v1.0.0", "html_url": "javascript:x"})
         assert info is not None and info.url == ""
         info = update.parse_release({"tag_name": "v1.0.0", "html_url": "http://mirror/r"})
@@ -171,7 +170,6 @@ class TestVersions:
 class TestCheck:
     """Fetching, persisting and gating the release check."""
 
-    @pytest.mark.asyncio
     async def test_fetch_uses_the_release_endpoint(self) -> None:
         """Fetch uses the release endpoint."""
         seen: dict[str, str] = {}
@@ -188,7 +186,6 @@ class TestCheck:
         assert seen["ua"] == "medmcp"
         assert info.version == "0.3.0"
 
-    @pytest.mark.asyncio
     async def test_fetch_reads_a_local_mirror_file(self, tmp_path: Path) -> None:
         """An air-gapped mirror (or a test) can supply the release document as a file."""
         doc = tmp_path / "latest.json"
@@ -196,7 +193,6 @@ class TestCheck:
         info = await update.fetch_latest_release(str(doc))
         assert info.tag == "v9.9.9"
 
-    @pytest.mark.asyncio
     async def test_run_check_records_the_release(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -210,7 +206,6 @@ class TestCheck:
         assert state["checked_at"]
         assert update.check_due(state) is False
 
-    @pytest.mark.asyncio
     async def test_failed_check_keeps_the_last_release(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -221,7 +216,6 @@ class TestCheck:
         assert cast("JsonDict", state["latest"])["version"] == "0.3.0"
         assert state["error"]
 
-    @pytest.mark.asyncio
     async def test_disabled_check_touches_nothing(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -232,7 +226,6 @@ class TestCheck:
         assert state["checked_at"] is None
         assert not update.UPDATE_STATE_PATH.exists()
 
-    @pytest.mark.asyncio
     async def test_manual_check_is_rate_limited(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -246,7 +239,6 @@ class TestCheck:
         assert second["checked_at"] == first["checked_at"]
         assert cast("JsonDict", second["latest"])["version"] == "0.3.0"
 
-    @pytest.mark.asyncio
     async def test_auto_check_off_stops_the_daily_check_but_not_a_manual_one(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -263,7 +255,6 @@ class TestCheck:
         assert cast("JsonDict", state["latest"])["version"] == "0.3.0"
         assert state["auto_check"] is False
 
-    @pytest.mark.asyncio
     async def test_env_off_forbids_manual_checks_too(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -473,14 +464,13 @@ class TestStatus:
         assert out["available"] is False
         assert out["host_commands"] is None
 
-    def test_endpoints(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_endpoints(self, monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
         """Endpoints."""
         monkeypatch.setattr(server, "__version__", "0.2.3")
         monkeypatch.setattr(update, "plan_error", lambda: update.PlanError("not here"))
         update.save_state(
             {**update.load_state(), "latest": {"version": "0.3.0", "tag": "v0.3.0", "notes": "x"}}
         )
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         body = client.get("/api/update").json()
         assert body["available"] is True
         assert body["dismissed"] is False
@@ -492,26 +482,26 @@ class TestStatus:
         assert body["enabled"] is True
 
     def test_auto_check_endpoint_refuses_when_env_forbids(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, client: TestClient
     ) -> None:
         """With the deployment's switch off there is nothing for the UI to turn on."""
         monkeypatch.setenv("MEDMCP_UPDATE_CHECK", "0")
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         assert client.post("/api/update/auto-check", json={"enabled": True}).status_code == 400
 
     def test_ws_update_refuses_a_version_not_on_record(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, client: TestClient
     ) -> None:
         """The image pulled is always the one the check found, never a client-chosen one."""
         monkeypatch.setattr(server, "__version__", "0.2.3")
         update.save_state({**update.load_state(), "latest": {"version": "0.3.0", "tag": "v0.3.0"}})
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
-        with client.websocket_connect("/ws/update", headers=_WS_HEADERS) as ws:
+        with client.websocket_connect("/ws/update", headers=WS_HEADERS) as ws:
             ws.send_json({"version": "0.4.0"})
             frame = ws.receive_json()
         assert frame["type"] == "error"
 
-    def test_ws_update_relays_the_plan_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_ws_update_relays_the_plan_reason(
+        self, monkeypatch: pytest.MonkeyPatch, client: TestClient
+    ) -> None:
         """Ws update relays the plan reason."""
         monkeypatch.setattr(server, "__version__", "0.2.3")
 
@@ -520,8 +510,7 @@ class TestStatus:
 
         monkeypatch.setattr(update, "current_plan", _refuse)
         update.save_state({**update.load_state(), "latest": {"version": "0.3.0", "tag": "v0.3.0"}})
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
-        with client.websocket_connect("/ws/update", headers=_WS_HEADERS) as ws:
+        with client.websocket_connect("/ws/update", headers=WS_HEADERS) as ws:
             ws.send_json({"version": "0.3.0"})
             frame = ws.receive_json()
         assert frame == {"type": "error", "message": "run it on the host"}
@@ -557,7 +546,6 @@ class TestRehearsal:
         assert out["rehearsal"] is False
         assert out["available"] is False
 
-    @pytest.mark.asyncio
     async def test_run_rehearsal_records_and_flips(self) -> None:
         """Progress is played, the outcome recorded, the key cleared, the version flipped."""
         update.save_state({**update.load_state(), "simulate": "0.9.0"})
@@ -576,12 +564,13 @@ class TestRehearsal:
         assert out["current"]["version"] == "0.9.0"
         assert out["available"] is False
 
-    def test_ws_update_plays_the_rehearsal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_ws_update_plays_the_rehearsal(
+        self, monkeypatch: pytest.MonkeyPatch, client: TestClient
+    ) -> None:
         """The socket streams the scripted download and ends with ``restarting``."""
         monkeypatch.setattr(update, "_REHEARSAL_LINES", ("{tag}: one", "{tag}: two"))
         update.save_state({**update.load_state(), "simulate": "0.9.0"})
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
-        with client.websocket_connect("/ws/update", headers=_WS_HEADERS) as ws:
+        with client.websocket_connect("/ws/update", headers=WS_HEADERS) as ws:
             ws.send_json({"version": "0.9.0"})
             frames = [ws.receive_json() for _ in range(3)]
         assert [f["type"] for f in frames] == ["progress", "progress", "restarting"]

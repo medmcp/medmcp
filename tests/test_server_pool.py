@@ -3,41 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import sys
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from medmcp import server, settings
-from medmcp.backend_pool import BackendPool, BackendSpec
+from medmcp.backend_pool import BackendPool
 
-# pyright: reportPrivateUsage=false
+from ._pool import fake_spec, resolver
 
 JsonDict = dict[str, Any]
-
-_FAKE_SERVER: Path = Path(__file__).parent / "fake_stack_server.py"
-
-
-def _spec(name: str) -> BackendSpec:
-    return BackendSpec(
-        name=name,
-        command=sys.executable,
-        args=[str(_FAKE_SERVER)],
-        env={},
-        gpu=False,
-        idle_ttl_sec=300.0,
-        startup_timeout_sec=30.0,
-        tool_timeout_sec=30.0,
-    )
-
-
-def _resolver(specs: dict[str, BackendSpec]) -> Callable[[str], BackendSpec | None]:
-    def resolve(name: str) -> BackendSpec | None:
-        return specs.get(name)
-
-    return resolve
 
 
 def test_resolve_backend_spec_maps_active_registry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,7 +35,6 @@ def test_resolve_backend_spec_maps_active_registry(monkeypatch: pytest.MonkeyPat
     assert server._resolve_backend_spec("ghost") is None
 
 
-@pytest.mark.asyncio
 async def test_lifespan_disabled_creates_no_pool(monkeypatch: pytest.MonkeyPatch) -> None:
     """With the flag off, the lifespan leaves the pool/broker unset."""
     monkeypatch.delenv("MEDMCP_STACK_POOL", raising=False)
@@ -70,7 +45,6 @@ async def test_lifespan_disabled_creates_no_pool(monkeypatch: pytest.MonkeyPatch
         assert server._broker is None
 
 
-@pytest.mark.asyncio
 async def test_lifespan_enabled_starts_and_stops_broker(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -96,10 +70,9 @@ async def test_lifespan_enabled_starts_and_stops_broker(
     settings.load_mcp_servers.cache_clear()
 
 
-@pytest.mark.asyncio
 async def test_apply_pool_changes_prewarms_and_evicts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Activation pre-warms newly-active stacks and evicts deactivated ones."""
-    pool = BackendPool(resolve_spec=_resolver({"fake": _spec("fake")}))
+    pool = BackendPool(resolve_spec=resolver({"fake": fake_spec("fake")}))
     monkeypatch.setattr(server, "_pool", pool)
     try:
         before = set(server._background_tasks)

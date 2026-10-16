@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import cast
 
 from medmcp.acp import PROJECT_ROOT, JsonDict
+from medmcp.statefile import read_json
 
 log: logging.Logger = logging.getLogger("medmcp.signing")
 
@@ -103,10 +104,9 @@ def split_reference(image: str) -> tuple[str, str | None, str | None]:
 def load_policies(path: Path | None = None) -> dict[str, Policy]:
     """The bundled policy file as ``{repo: Policy}``; empty if absent or unreadable."""
     target = path or POLICY_PATH
-    try:
-        doc = cast("JsonDict", json.loads(target.read_text(encoding="utf-8")))
-    except (OSError, json.JSONDecodeError) as exc:
-        log.warning("no usable signing policy at %s: %s", target, exc)
+    doc = read_json(target)
+    if doc is None:
+        log.warning("no usable signing policy at %s", target)
         return {}
     issuer = str(doc.get("issuer") or "")
     out: dict[str, Policy] = {}
@@ -256,17 +256,3 @@ def verify_image(
 def describe(verified: Verified) -> str:
     """One line for a progress log."""
     return f"Signature verified: {verified.ref}"
-
-
-__all__: list[str] = [
-    "Policy",
-    "SignatureError",
-    "Verified",
-    "cosign_path",
-    "describe",
-    "image_digest",
-    "load_policies",
-    "policy_for",
-    "split_reference",
-    "verify_image",
-]

@@ -16,7 +16,6 @@ from typing import Any
 
 import pytest
 
-# pyright: reportPrivateUsage=false
 from medmcp import settings, signing, update
 
 DIGEST = "sha256:" + "ab" * 32

@@ -18,7 +18,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 import medmcp
-from medmcp import server
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -48,9 +47,8 @@ class TestVersion:
         """`__version__` is read back from the distribution, so it cannot drift."""
         assert medmcp.__version__ == _declared_version()
 
-    def test_healthz_reports_version_and_build(self) -> None:
+    def test_healthz_reports_version_and_build(self, client: TestClient) -> None:
         """An installed instance can say what it is — the first question a bug report asks."""
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
         payload = cast(dict[str, str], client.get("/healthz").json())
         assert payload["status"] == "ok"
         assert payload["version"] == medmcp.__version__

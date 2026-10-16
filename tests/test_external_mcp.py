@@ -9,44 +9,25 @@ shadowing a local stack, and no relaxed system prompt unless one is actually in 
 from __future__ import annotations
 
 import json
-import tomllib
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
 
-# pyright: reportPrivateUsage=false
 from medmcp import server, settings
+
+from .conftest import entries_by_name, synced_config
 
 JsonDict = dict[str, Any]
 
 
 @pytest.fixture(autouse=True)
 def _isolate(  # pyright: ignore[reportUnusedFunction]  # autouse fixture, invoked by pytest
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    vibe_home: Path,
 ) -> None:
     """Point every piece of on-disk state at a tmp dir."""
-    prompts = tmp_path / "prompts"
-    prompts.mkdir()
-    (prompts / "medmcp.md").write_text(
-        f"You are MedMCP.\n\n**Operational rules**\n{settings.ONPREM_RULE}\n- Other rule.\n"
-    )
-    monkeypatch.setattr(settings, "VIBE_HOME", tmp_path)
-    monkeypatch.setattr(settings, "EXTERNAL_MCP_PATH", tmp_path / "external_mcp.json")
-    monkeypatch.setattr(settings, "EXTERNAL_SECRETS_PATH", tmp_path / "external_secrets.json")
-    monkeypatch.setattr(settings, "ACTIVE_STACKS_PATH", tmp_path / "active_stacks.json")
-    monkeypatch.setattr(settings, "STACKS_D_PATH", tmp_path / "absent-stacks.d")
-    # Source #1 too, or the machine's real uv-tool stacks turn up in discovery.
-    monkeypatch.setattr(settings, "get_uv_tool_dir", lambda: None)
-    monkeypatch.delenv("MEDMCP_STACK_POOL", raising=False)
-    settings.load_mcp_servers.cache_clear()
-
-
-def _entries(tmp_path: Path) -> dict[str, JsonDict]:
-    with (tmp_path / "config.toml").open("rb") as fh:
-        cfg = tomllib.load(fh)
-    return {str(e["name"]): e for e in cast("list[JsonDict]", cfg["mcp_servers"])}
+    del vibe_home
 
 
 def _add(
@@ -109,7 +90,6 @@ def test_disabling_clears_the_acknowledgement() -> None:
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
     settings.set_external_mcp_enabled(False)
-    assert settings.external_mcp_acknowledged() is False
     assert settings.load_external_mcp()["acknowledged_at"] is None
 
 
@@ -201,10 +181,8 @@ def test_sync_writes_http_entry_without_command(tmp_path: Path) -> None:
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
     _add(api_key_env="PUBMED_TOKEN")
-    settings.load_mcp_servers.cache_clear()
-
-    settings.sync_servers_to_vibe_config(settings.active_servers())
-    entry = _entries(tmp_path)["pubmed"]
+    cfg = synced_config(tmp_path)
+    entry = entries_by_name(cfg)["pubmed"]
     assert entry["transport"] == "streamable-http"
     assert entry["url"] == "https://example.org/mcp"
     assert "command" not in entry
@@ -230,10 +208,9 @@ def test_generated_entry_validates_against_vibes_own_model(
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
     _add(api_key_env=env_var)
-    settings.load_mcp_servers.cache_clear()
-    settings.sync_servers_to_vibe_config(settings.active_servers())
+    cfg = synced_config(tmp_path)
 
-    parsed = MCPStreamableHttp.model_validate(_entries(tmp_path)["pubmed"])
+    parsed = MCPStreamableHttp.model_validate(entries_by_name(cfg)["pubmed"])
     assert parsed.url == "https://example.org/mcp"
 
     # And the token actually reaches the wire, read from the environment at
@@ -256,11 +233,10 @@ def test_custom_header_and_format_reach_the_wire(
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
     _add(api_key_env="SVC_KEY", api_key_header="X-API-Key", api_key_format="{token}")
-    settings.load_mcp_servers.cache_clear()
-    settings.sync_servers_to_vibe_config(settings.active_servers())
+    cfg = synced_config(tmp_path)
 
     monkeypatch.setenv("SVC_KEY", "abc123")
-    parsed = MCPStreamableHttp.model_validate(_entries(tmp_path)["pubmed"])
+    parsed = MCPStreamableHttp.model_validate(entries_by_name(cfg)["pubmed"])
     assert parsed.http_headers() == {"X-API-Key": "abc123"}
 
 
@@ -269,9 +245,8 @@ def test_default_scheme_writes_no_override_keys(tmp_path: Path) -> None:
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
     _add(api_key_env="TOK")
-    settings.load_mcp_servers.cache_clear()
-    settings.sync_servers_to_vibe_config(settings.active_servers())
-    assert _entries(tmp_path)["pubmed"]["auth"] == {"type": "static", "api_key_env": "TOK"}
+    cfg = synced_config(tmp_path)
+    assert entries_by_name(cfg)["pubmed"]["auth"] == {"type": "static", "api_key_env": "TOK"}
 
 
 @pytest.mark.parametrize(
@@ -316,8 +291,7 @@ def test_no_token_is_ever_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
     _add(api_key_env="PUBMED_TOKEN")
-    settings.load_mcp_servers.cache_clear()
-    settings.sync_servers_to_vibe_config(settings.active_servers())
+    synced_config(tmp_path)
 
     for path in (tmp_path / "external_mcp.json", tmp_path / "config.toml"):
         text = path.read_text()
@@ -330,14 +304,12 @@ def test_disabling_removes_the_entries(tmp_path: Path) -> None:
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
     _add()
-    settings.load_mcp_servers.cache_clear()
-    settings.sync_servers_to_vibe_config(settings.active_servers())
-    assert "pubmed" in _entries(tmp_path)
+    cfg = synced_config(tmp_path)
+    assert "pubmed" in entries_by_name(cfg)
 
     settings.set_external_mcp_enabled(False)
-    settings.load_mcp_servers.cache_clear()
-    settings.sync_servers_to_vibe_config(settings.active_servers())
-    assert "pubmed" not in _entries(tmp_path)
+    cfg = synced_config(tmp_path)
+    assert "pubmed" not in entries_by_name(cfg)
 
 
 def test_nothing_remote_survives_in_the_config(tmp_path: Path) -> None:
@@ -352,15 +324,13 @@ def test_nothing_remote_survives_in_the_config(tmp_path: Path) -> None:
     settings.set_external_mcp_enabled(True)
     _add("pubmed", url="https://example.org/mcp")
     _add("vendor", url="https://vendor.example/mcp")
-    settings.load_mcp_servers.cache_clear()
-    settings.sync_servers_to_vibe_config(settings.active_servers())
-    assert len(_entries(tmp_path)) == 2
+    cfg = synced_config(tmp_path)
+    assert len(entries_by_name(cfg)) == 2
 
     settings.set_external_mcp_enabled(False)
-    settings.load_mcp_servers.cache_clear()
-    settings.sync_servers_to_vibe_config(settings.active_servers())
+    cfg = synced_config(tmp_path)
 
-    for name, entry in _entries(tmp_path).items():
+    for name, entry in entries_by_name(cfg).items():
         assert "url" not in entry, name
         assert "auth" not in entry, name
         assert str(entry.get("transport", "")) not in settings.EXTERNAL_MCP_TRANSPORTS, name
@@ -378,13 +348,14 @@ def test_both_active_and_inactive_servers_are_dropped(tmp_path: Path) -> None:
     settings.set_external_server_active("vendor", False)
 
     settings.set_external_mcp_enabled(False)
-    settings.load_mcp_servers.cache_clear()
-    settings.sync_servers_to_vibe_config(settings.active_servers())
-    assert _entries(tmp_path) == {}
+    cfg = synced_config(tmp_path)
+    assert entries_by_name(cfg) == {}
     assert settings.external_servers() == []
 
 
-def test_the_off_switch_reaches_the_running_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_off_switch_reaches_the_running_agent(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
     """Disabling re-syncs the config *and* restarts vibe-acp.
 
     Dropping the entries from config.toml is only half of it — the agent process
@@ -401,30 +372,32 @@ def test_the_off_switch_reaches_the_running_agent(monkeypatch: pytest.MonkeyPatc
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
 
-    resp = TestClient(server.app, base_url="http://127.0.0.1:8100").put(
-        "/api/external-mcp", json={"enabled": False}
-    )
+    resp = client.put("/api/external-mcp", json={"enabled": False})
 
     assert resp.status_code == 200
     assert calls == ["sync", "restart"]
     assert settings.external_mcp_enabled() is False
 
 
-def test_token_presence_is_reported_without_the_value(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_token_presence_is_reported_without_the_value(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
     """The API says whether the named variable holds a token — never what it holds."""
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
     _add("pubmed", api_key_env="PUBMED_TOKEN")
     monkeypatch.setenv("PUBMED_TOKEN", "s3cret-value")
 
-    body = TestClient(server.app, base_url="http://127.0.0.1:8100").get("/api/external-mcp").json()
+    body = client.get("/api/external-mcp").json()
 
     server_entry = cast("list[JsonDict]", body["servers"])[0]
     assert server_entry["token_present"] is True
     assert "s3cret-value" not in json.dumps(body)
 
 
-def test_missing_token_variable_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_token_variable_is_reported(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
     """A named variable that does not exist is flagged, so the UI can say so.
 
     Without this the only symptom is the remote service's 401 — vibe attaches the
@@ -436,7 +409,7 @@ def test_missing_token_variable_is_reported(monkeypatch: pytest.MonkeyPatch) -> 
     _add("pubmed", api_key_env="PUBMED_TOKEN")
     monkeypatch.delenv("PUBMED_TOKEN", raising=False)
 
-    body = TestClient(server.app, base_url="http://127.0.0.1:8100").get("/api/external-mcp").json()
+    body = client.get("/api/external-mcp").json()
     assert cast("list[JsonDict]", body["servers"])[0]["token_present"] is False
 
 
@@ -455,21 +428,19 @@ def test_stored_token_never_reaches_the_config(tmp_path: Path) -> None:
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
     _add_with_token("pubmed", "s3cret-value")
-    settings.load_mcp_servers.cache_clear()
-    settings.sync_servers_to_vibe_config(settings.active_servers())
+    cfg = synced_config(tmp_path)
 
     raw = (tmp_path / "config.toml").read_text()
     assert "s3cret-value" not in raw
     assert "MEDMCP_EXT_PUBMED" in raw
-    entry = _entries(tmp_path)["pubmed"]
+    entry = entries_by_name(cfg)["pubmed"]
     assert cast("JsonDict", entry["auth"])["api_key_env"] == "MEDMCP_EXT_PUBMED"
 
 
-def test_stored_token_never_appears_in_a_response() -> None:
+def test_stored_token_never_appears_in_a_response(client: TestClient) -> None:
     """Neither the add response nor the state listing carries the value."""
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
-    client = TestClient(server.app, base_url="http://127.0.0.1:8100")
 
     added = client.post(
         "/api/external-mcp/servers",
@@ -560,8 +531,7 @@ def test_synced_entry_is_not_readopted_as_a_stdio_stack(tmp_path: Path) -> None:
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
     _add()
-    settings.load_mcp_servers.cache_clear()
-    settings.sync_servers_to_vibe_config(settings.active_servers())
+    synced_config(tmp_path)
 
     settings.set_external_mcp_enabled(False)
     settings.load_mcp_servers.cache_clear()
@@ -589,55 +559,44 @@ def test_remove_unknown_server_raises() -> None:
 
 def test_prompt_switches_only_while_external_is_in_use(tmp_path: Path) -> None:
     """The relaxed prompt applies when an external server is active, and not otherwise."""
-    settings.sync_servers_to_vibe_config([])
-    with (tmp_path / "config.toml").open("rb") as fh:
-        assert tomllib.load(fh)["system_prompt_id"] == settings.BASE_SYSTEM_PROMPT_ID
+    assert synced_config(tmp_path, [])["system_prompt_id"] == settings.BASE_SYSTEM_PROMPT_ID
 
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
     _add()
-    settings.load_mcp_servers.cache_clear()
-    settings.sync_servers_to_vibe_config(settings.active_servers())
-
-    with (tmp_path / "config.toml").open("rb") as fh:
-        assert tomllib.load(fh)["system_prompt_id"] == settings.EXTERNAL_SYSTEM_PROMPT_ID
+    assert synced_config(tmp_path)["system_prompt_id"] == settings.EXTERNAL_SYSTEM_PROMPT_ID
     variant = (tmp_path / "prompts" / f"{settings.EXTERNAL_SYSTEM_PROMPT_ID}.md").read_text()
     assert settings.ONPREM_RULE not in variant
     assert settings.EXTERNAL_RULE in variant
 
     settings.set_external_mcp_enabled(False)
-    settings.load_mcp_servers.cache_clear()
-    settings.sync_servers_to_vibe_config(settings.active_servers())
-    with (tmp_path / "config.toml").open("rb") as fh:
-        assert tomllib.load(fh)["system_prompt_id"] == settings.BASE_SYSTEM_PROMPT_ID
+    assert synced_config(tmp_path)["system_prompt_id"] == settings.BASE_SYSTEM_PROMPT_ID
 
 
 def test_custom_prompt_id_is_left_alone(tmp_path: Path) -> None:
     """Only a prompt id this sync owns is rewritten."""
     (tmp_path / "config.toml").write_text('system_prompt_id = "my-own"\n')
-    settings.sync_servers_to_vibe_config([])
-    with (tmp_path / "config.toml").open("rb") as fh:
-        assert tomllib.load(fh)["system_prompt_id"] == "my-own"
+    assert synced_config(tmp_path, [])["system_prompt_id"] == "my-own"
 
 
 def test_missing_anchor_keeps_the_base_prompt(tmp_path: Path) -> None:
     """A prompt edit that drops the rule must not silently yield a no-op variant."""
     (tmp_path / "prompts" / "medmcp.md").write_text("You are MedMCP.\n")
-    assert settings.write_external_prompt_variant() is False
+    assert (
+        settings.write_prompt_variant(settings.EXTERNAL_SYSTEM_PROMPT_ID, settings.EXTERNAL_RULE)
+        is False
+    )
 
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
     _add()
-    settings.load_mcp_servers.cache_clear()
-    settings.sync_servers_to_vibe_config(settings.active_servers())
-    with (tmp_path / "config.toml").open("rb") as fh:
-        assert tomllib.load(fh)["system_prompt_id"] == settings.BASE_SYSTEM_PROMPT_ID
+    assert synced_config(tmp_path)["system_prompt_id"] == settings.BASE_SYSTEM_PROMPT_ID
 
 
 def test_shipped_prompt_still_contains_the_anchor() -> None:
     """Guards the real prompt against drift.
 
-    ``write_external_prompt_variant`` degrades to "keep the base prompt" when the
+    ``write_prompt_variant`` degrades to "keep the base prompt" when the
     rule it rewrites is gone, which is the safe direction but also a silent one —
     the feature would just stop relaxing the prompt. This fails loudly instead.
     """

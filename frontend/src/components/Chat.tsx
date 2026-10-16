@@ -38,6 +38,9 @@ function formatToolInput(raw: unknown): string {
 
 // vibe's planning tool. Its calls each carry the whole list, so the UI treats
 // them as one evolving plan rather than a series of independent calls.
+let itemSeq = 0
+const nextItemId = () => ++itemSeq
+
 const TODO_TOOL = 'todo'
 
 const TODO_MARK: Record<string, string> = {
@@ -91,8 +94,6 @@ const PlanCard = memo(function PlanCard({ items }: { items: TodoItem[] }) {
   )
 })
 
-// Memoized so a streaming update to the newest message doesn't re-render
-// (and re-parse the markdown of) every earlier row in the transcript.
 /** Files a finished tool call named, offered straight into the viewer. The
  *  agent writes a segmentation and says where; without this the person has to
  *  find it in the explorer by hand. Volumes can also be laid over the open one. */
@@ -130,6 +131,8 @@ function ResultFiles({
   )
 }
 
+// Memoized so a streaming update to the newest message doesn't re-render
+// (and re-parse the markdown of) every earlier row in the transcript.
 const ToolCard = memo(function ToolCard({
   tc,
   workspaceRoot,
@@ -554,9 +557,9 @@ export const Chat = memo(function Chat({
       setItems((prev) => {
         const last = prev[prev.length - 1]
         if (last && last.kind === 'assistant') {
-          return [...prev.slice(0, -1), { kind: 'assistant', text: last.text + text }]
+          return [...prev.slice(0, -1), { ...last, text: last.text + text }]
         }
-        return [...prev, { kind: 'assistant', text }]
+        return [...prev, { id: nextItemId(), kind: 'assistant', text }]
       })
     }
     const onFrame = (frame: ServerFrame) => {
@@ -588,7 +591,7 @@ export const Chat = memo(function Chat({
                 const kept = isPlan
                   ? items.filter((i) => !(i.kind === 'tool' && planIds.has(i.toolCallId)))
                   : items
-                return [...kept, { kind: 'tool', toolCallId: frame.toolCallId }]
+                return [...kept, { id: nextItemId(), kind: 'tool', toolCallId: frame.toolCallId }]
               })
           }
           setToolCalls((prev) => ({
@@ -635,6 +638,7 @@ export const Chat = memo(function Chat({
             explanation: frame.explanation,
             explaining: frame.explaining,
             risks: frame.risks,
+            paths: frame.paths,
           })
           break
         case 'permission_update':
@@ -654,10 +658,10 @@ export const Chat = memo(function Chat({
           break
         case 'error':
           setRetrying(null)
-          setItems((prev) => [...prev, { kind: 'error', text: frame.message }])
+          setItems((prev) => [...prev, { id: nextItemId(), kind: 'error', text: frame.message }])
           break
         case 'notice':
-          setItems((prev) => [...prev, { kind: 'notice', text: frame.text }])
+          setItems((prev) => [...prev, { id: nextItemId(), kind: 'notice', text: frame.text }])
           break
         case 'title':
           setTitle(frame.title)
@@ -682,7 +686,10 @@ export const Chat = memo(function Chat({
               }
               break // newest user turn differs — a genuine replayed frame
             }
-            return [...prev, { kind: 'user', text: frame.text, messageId: frame.messageId }]
+            return [
+              ...prev,
+              { id: nextItemId(), kind: 'user', text: frame.text, messageId: frame.messageId },
+            ]
           })
           break
         case 'ready':
@@ -734,10 +741,10 @@ export const Chat = memo(function Chat({
   }, [items, permission, busy])
 
   // Stable so the memoized ChatInput doesn't re-render on every streaming flush;
-  // the trim/empty + open-socket guards live in ChatInput now.
+  // the trim/empty + open-socket guards live in ChatInput.
   const send = useCallback(
     (text: string) => {
-      setItems((prev) => [...prev, { kind: 'user', text }])
+      setItems((prev) => [...prev, { id: nextItemId(), kind: 'user', text }])
       setBusy(true)
       socketRef.current?.sendPrompt(text, viewedPath)
       if (sessionIdRef.current) onPromptedSession?.(sessionIdRef.current)
@@ -763,7 +770,7 @@ export const Chat = memo(function Chat({
     } catch (e) {
       setItems((prev) => [
         ...prev,
-        { kind: 'error', text: `Rewind preview failed: ${(e as Error).message}` },
+        { id: nextItemId(), kind: 'error', text: `Rewind preview failed: ${(e as Error).message}` },
       ])
     }
   }
@@ -781,7 +788,7 @@ export const Chat = memo(function Chat({
       setRewind(null)
       setItems((prev) => [
         ...prev,
-        { kind: 'error', text: `Rewind failed: ${(e as Error).message}` },
+        { id: nextItemId(), kind: 'error', text: `Rewind failed: ${(e as Error).message}` },
       ])
     }
   }
@@ -847,7 +854,7 @@ export const Chat = memo(function Chat({
             const tc = toolCalls[item.toolCallId]
             return tc ? (
               <ToolCard
-                key={i}
+                key={item.id}
                 tc={tc}
                 workspaceRoot={workspaceRoot}
                 onOpenFile={onOpenFile}
@@ -858,7 +865,7 @@ export const Chat = memo(function Chat({
           if (item.kind === 'user') {
             const mid = item.messageId
             return (
-              <div key={i} className="user-turn">
+              <div key={item.id} className="user-turn">
                 <div className="msg msg-user">
                   {mid && !busy && (
                     <button
@@ -911,14 +918,14 @@ export const Chat = memo(function Chat({
           }
           if (item.kind === 'error') {
             return (
-              <div key={i} className="msg-error">
+              <div key={item.id} className="msg-error">
                 {item.text}
               </div>
             )
           }
           if (item.kind === 'notice') {
             return (
-              <div key={i} className="msg-notice">
+              <div key={item.id} className="msg-notice">
                 {item.text}
               </div>
             )
@@ -926,7 +933,7 @@ export const Chat = memo(function Chat({
           // The actively-streaming message is the last item while busy; it
           // renders block-split. Everything else renders as a settled document.
           return (
-            <AssistantMessage key={i} text={item.text} streaming={busy && i === items.length - 1} />
+            <AssistantMessage key={item.id} text={item.text} streaming={busy && i === items.length - 1} />
           )
         })}
         {permission && <PermissionCard perm={permission} onDecide={decide} />}

@@ -9,7 +9,6 @@ model is usable, and only one model is left in memory.
 from __future__ import annotations
 
 import json
-import tomllib
 from pathlib import Path
 from typing import Any, cast
 
@@ -17,31 +16,11 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-# pyright: reportPrivateUsage=false
 from medmcp import localmodels, server, settings
 
+from .conftest import BASE_CONFIG, WS_HEADERS, synced_config
+
 JsonDict = dict[str, Any]
-
-_WS_HEADERS = {"host": "127.0.0.1:8100", "origin": "http://127.0.0.1:8100"}
-
-_BASE_CONFIG = """\
-active_model = "local"
-system_prompt_id = "medmcp"
-
-[[providers]]
-name = "ollama"
-api_base = "http://localhost:11434/v1"
-api_key_env_var = ""
-api_style = "openai"
-backend = "generic"
-
-[[models]]
-name = "muse-medmcp"
-provider = "ollama"
-alias = "local"
-temperature = 0.3
-thinking = "medium"
-"""
 
 
 def _info(
@@ -120,7 +99,7 @@ class FakeOllama:
 
 
 @pytest.fixture
-def ollama(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeOllama:
+def ollama(monkeypatch: pytest.MonkeyPatch, vibe_home: Path) -> FakeOllama:
     """A fake Ollama wired into ``localmodels``, with all on-disk state in a tmp dir."""
     fake = FakeOllama()
 
@@ -129,25 +108,9 @@ def ollama(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeOllama:
         return httpx.AsyncClient(transport=httpx.MockTransport(fake.handler), base_url="http://o")
 
     monkeypatch.setattr(localmodels, "_client", _client)
-    prompts = tmp_path / "prompts"
-    prompts.mkdir()
-    (prompts / "medmcp.md").write_text(f"You are MedMCP.\n{settings.ONPREM_RULE}\n")
-    (tmp_path / "config.toml").write_text(_BASE_CONFIG)
-    monkeypatch.setattr(settings, "VIBE_HOME", tmp_path)
+    (vibe_home / "config.toml").write_text(BASE_CONFIG + 'thinking = "medium"\n')
     monkeypatch.setattr(settings, "OLLAMA_MODEL", "muse-medmcp")
-    monkeypatch.setattr(settings, "EXTERNAL_MCP_PATH", tmp_path / "external_mcp.json")
-    monkeypatch.setattr(settings, "ACTIVE_STACKS_PATH", tmp_path / "active_stacks.json")
-    monkeypatch.setattr(settings, "get_uv_tool_dir", lambda: None)
-    monkeypatch.delenv("MEDMCP_STACK_POOL", raising=False)
-    settings.load_mcp_servers.cache_clear()
     return fake
-
-
-def _sync(tmp_path: Path) -> JsonDict:
-    settings.load_mcp_servers.cache_clear()
-    settings.sync_servers_to_vibe_config(settings.active_servers())
-    with (tmp_path / "config.toml").open("rb") as fh:
-        return tomllib.load(fh)
 
 
 def _row(listing: JsonDict, model_id: str) -> JsonDict:
@@ -155,9 +118,6 @@ def _row(listing: JsonDict, model_id: str) -> JsonDict:
 
 
 # ── catalog state ────────────────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
 async def test_a_fresh_install_runs_the_default(ollama: FakeOllama) -> None:
     """Nothing selected: Muse Glimmer is in use, the rest are offered for download."""
     del ollama
@@ -177,7 +137,6 @@ async def test_a_fresh_install_runs_the_default(ollama: FakeOllama) -> None:
     assert settings.local_model_name() == "muse-medmcp"
 
 
-@pytest.mark.asyncio
 async def test_an_unreachable_ollama_is_reported_not_raised(ollama: FakeOllama) -> None:
     """The window still opens and says what is selected."""
     ollama.down = True
@@ -187,9 +146,6 @@ async def test_an_unreachable_ollama_is_reported_not_raised(ollama: FakeOllama) 
 
 
 # ── switching ────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
 async def test_selecting_downloads_prepares_and_records(ollama: FakeOllama) -> None:
     """A model that is not there yet is pulled, given its context, then recorded."""
     ollama.library["gemma4:31b"] = _info(
@@ -221,7 +177,6 @@ async def test_selecting_downloads_prepares_and_records(ollama: FakeOllama) -> N
     assert (await localmodels.list_models())["active"] == "gemma4"
 
 
-@pytest.mark.asyncio
 async def test_a_downloaded_model_is_not_pulled_again(ollama: FakeOllama) -> None:
     """Switching back to a model already on disk makes no download request."""
     ollama.installed["qwen3.8:27b"] = _info()
@@ -229,7 +184,6 @@ async def test_a_downloaded_model_is_not_pulled_again(ollama: FakeOllama) -> Non
     assert not any(c.startswith("POST /api/pull") for c in ollama.calls)
 
 
-@pytest.mark.asyncio
 async def test_settings_are_read_from_the_model(ollama: FakeOllama) -> None:
     """A smaller context is kept.
 
@@ -243,7 +197,6 @@ async def test_settings_are_read_from_the_model(ollama: FakeOllama) -> None:
     assert entry["thinking"] == "off"
 
 
-@pytest.mark.asyncio
 async def test_only_the_selected_model_stays_loaded(ollama: FakeOllama) -> None:
     """The previous model is unloaded: Ollama never does that on its own here."""
     await localmodels.select("granite4.2")
@@ -253,7 +206,6 @@ async def test_only_the_selected_model_stays_loaded(ollama: FakeOllama) -> None:
     assert ollama.loaded == ["medmcp-granite4.2:latest"]
 
 
-@pytest.mark.asyncio
 async def test_returning_to_the_default_clears_the_selection(ollama: FakeOllama) -> None:
     """Muse Glimmer is the absence of a choice, not another derived model."""
     await localmodels.select("granite4.2")
@@ -265,7 +217,6 @@ async def test_returning_to_the_default_clears_the_selection(ollama: FakeOllama)
     assert "muse-medmcp" not in ollama.created
 
 
-@pytest.mark.asyncio
 async def test_a_model_without_tool_calling_is_refused(ollama: FakeOllama) -> None:
     """The agent could do nothing with it, so it never becomes the selection."""
     ollama.library["qwen3.8:27b"] = _info(capabilities=("completion",))
@@ -275,7 +226,6 @@ async def test_a_model_without_tool_calling_is_refused(ollama: FakeOllama) -> No
     assert "medmcp-qwen3.8" not in ollama.created
 
 
-@pytest.mark.asyncio
 async def test_a_context_too_small_for_the_agent_is_refused(ollama: FakeOllama) -> None:
     """The system prompt and tool list alone would fill it."""
     ollama.library["qwen3.8:27b"] = _info(context=8_192)
@@ -284,7 +234,6 @@ async def test_a_context_too_small_for_the_agent_is_refused(ollama: FakeOllama) 
     assert settings.load_local_model() is None
 
 
-@pytest.mark.asyncio
 async def test_licence_is_asked_before_anything_is_downloaded(ollama: FakeOllama) -> None:
     """A model that is not Apache-2.0 makes no request at all until accepted."""
     with pytest.raises(localmodels.LicenseConsentRequiredError) as raised:
@@ -296,7 +245,6 @@ async def test_licence_is_asked_before_anything_is_downloaded(ollama: FakeOllama
     assert entry["model"] == "medmcp-nemotron-3.5-lightning"
 
 
-@pytest.mark.asyncio
 async def test_a_failed_download_leaves_the_previous_model_selected(ollama: FakeOllama) -> None:
     """An error mid-switch changes nothing the agent reads."""
     await localmodels.select("granite4.2")
@@ -306,7 +254,6 @@ async def test_a_failed_download_leaves_the_previous_model_selected(ollama: Fake
     assert settings.local_model_name() == "medmcp-granite4.2"
 
 
-@pytest.mark.asyncio
 async def test_an_unreachable_ollama_fails_the_switch_cleanly(ollama: FakeOllama) -> None:
     """A connection error becomes a message for the operator, not a traceback."""
     ollama.down = True
@@ -315,7 +262,6 @@ async def test_an_unreachable_ollama_fails_the_switch_cleanly(ollama: FakeOllama
     assert settings.load_local_model() is None
 
 
-@pytest.mark.asyncio
 async def test_unknown_model_is_not_found(ollama: FakeOllama) -> None:
     """Only catalog entries can be selected — never an arbitrary tag from a request."""
     with pytest.raises(FileNotFoundError):
@@ -324,9 +270,6 @@ async def test_unknown_model_is_not_found(ollama: FakeOllama) -> None:
 
 
 # ── deleting ─────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
 async def test_delete_removes_the_model_and_its_derived_model(ollama: FakeOllama) -> None:
     """Both names go, so the disk space actually comes back."""
     await localmodels.select("gemma4")
@@ -339,7 +282,6 @@ async def test_delete_removes_the_model_and_its_derived_model(ollama: FakeOllama
     assert _row(await localmodels.list_models(), "gemma4")["downloaded"] is False
 
 
-@pytest.mark.asyncio
 async def test_the_model_in_use_and_the_default_cannot_be_deleted(ollama: FakeOllama) -> None:
     """Neither would leave the workspace with a model to answer."""
     await localmodels.select("gemma4")
@@ -351,7 +293,6 @@ async def test_the_model_in_use_and_the_default_cannot_be_deleted(ollama: FakeOl
     assert "muse-medmcp:latest" in ollama.installed
 
 
-@pytest.mark.asyncio
 async def test_deleting_a_model_that_is_not_downloaded(ollama: FakeOllama) -> None:
     """Reported as not found rather than as a success."""
     del ollama
@@ -360,9 +301,6 @@ async def test_deleting_a_model_that_is_not_downloaded(ollama: FakeOllama) -> No
 
 
 # ── what the agent's config gets ─────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
 async def test_sync_adds_the_selection_and_leaves_the_default_entry_alone(
     ollama: FakeOllama, tmp_path: Path
 ) -> None:
@@ -373,7 +311,7 @@ async def test_sync_adds_the_selection_and_leaves_the_default_entry_alone(
 
     del ollama
     await localmodels.select("mistral-small3.2")
-    cfg = _sync(tmp_path)
+    cfg = synced_config(tmp_path)
 
     assert cfg["active_model"] == settings.LOCAL_SELECTED_ALIAS
     assert [m["alias"] for m in cfg["models"]] == ["local", settings.LOCAL_SELECTED_ALIAS]
@@ -392,21 +330,19 @@ async def test_sync_adds_the_selection_and_leaves_the_default_entry_alone(
     assert [p["name"] for p in cfg["providers"]] == ["ollama"]
 
 
-@pytest.mark.asyncio
 async def test_returning_to_the_default_restores_the_config(
     ollama: FakeOllama, tmp_path: Path
 ) -> None:
     """The owned entry is removed and ``active_model`` moves back."""
     del ollama
     await localmodels.select("mistral-small3.2")
-    _sync(tmp_path)
+    synced_config(tmp_path)
     await localmodels.select(localmodels.DEFAULT_MODEL_ID)
-    cfg = _sync(tmp_path)
+    cfg = synced_config(tmp_path)
     assert cfg["active_model"] == "local"
     assert [m["alias"] for m in cfg["models"]] == ["local"]
 
 
-@pytest.mark.asyncio
 async def test_a_cloud_model_wins_over_the_local_selection(
     ollama: FakeOllama, tmp_path: Path
 ) -> None:
@@ -420,27 +356,27 @@ async def test_a_cloud_model_wins_over_the_local_selection(
     settings.acknowledge_cloud_model()
     settings.set_cloud_model_enabled(True)
 
-    cfg = _sync(tmp_path)
+    cfg = synced_config(tmp_path)
     assert cfg["active_model"] == settings.CLOUD_MODEL_ALIAS
     assert [m["alias"] for m in cfg["models"]] == ["local", "local-selected", "cloud"]
     assert settings.active_model_name() == "claude-opus-5-5"
     assert settings.local_model_name() == "medmcp-mistral-small3.2"
 
     settings.set_cloud_model_enabled(False)
-    assert _sync(tmp_path)["active_model"] == settings.LOCAL_SELECTED_ALIAS
+    assert synced_config(tmp_path)["active_model"] == settings.LOCAL_SELECTED_ALIAS
 
 
-@pytest.mark.asyncio
 async def test_helper_passes_follow_the_selection(ollama: FakeOllama) -> None:
     """Explanations and titles use the one model that is loaded."""
-    assert settings.local_helper_request() == {"model": "muse-medmcp", "think": False}
+    assert settings.local_helper_request(think=True) == {"model": "muse-medmcp", "think": True}
+    assert settings.local_helper_request(think=False) == {"model": "muse-medmcp", "think": False}
 
     await localmodels.select("mistral-small3.2")
-    assert settings.local_helper_request() == {"model": "medmcp-mistral-small3.2"}
+    assert settings.local_helper_request(think=True) == {"model": "medmcp-mistral-small3.2"}
 
     ollama.library["gemma4:31b"] = _info(capabilities=("completion", "tools", "thinking"))
     await localmodels.select("gemma4")
-    assert settings.local_helper_request() == {"model": "medmcp-gemma4", "think": False}
+    assert settings.local_helper_request(think=True) == {"model": "medmcp-gemma4", "think": True}
 
 
 def test_a_malformed_selection_falls_back_to_the_default(tmp_path: Path) -> None:
@@ -472,14 +408,13 @@ def _patch_restart(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 def test_switch_socket_streams_progress_then_restarts_the_agent(
-    ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch
+    ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
     """The browser sees the download, then one ``done``; the agent restarts on the new model."""
     del ollama
     calls = _patch_restart(monkeypatch)
-    client = TestClient(server.app, base_url="http://127.0.0.1:8100")
     frames: list[JsonDict] = []
-    with client.websocket_connect("/ws/models/select", headers=_WS_HEADERS) as ws:
+    with client.websocket_connect("/ws/models/select", headers=WS_HEADERS) as ws:
         ws.send_json({"id": "gemma4"})
         while True:
             frame = cast("JsonDict", ws.receive_json())
@@ -497,12 +432,11 @@ def test_switch_socket_streams_progress_then_restarts_the_agent(
 
 
 def test_switch_socket_asks_for_the_licence(
-    ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch
+    ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
     """The dialog is the explanation; the refusal to download is the enforcement."""
     calls = _patch_restart(monkeypatch)
-    client = TestClient(server.app, base_url="http://127.0.0.1:8100")
-    with client.websocket_connect("/ws/models/select", headers=_WS_HEADERS) as ws:
+    with client.websocket_connect("/ws/models/select", headers=WS_HEADERS) as ws:
         ws.send_json({"id": "nemotron-3.5-lightning"})
         frame = cast("JsonDict", ws.receive_json())
     assert frame == {
@@ -515,10 +449,9 @@ def test_switch_socket_asks_for_the_licence(
     assert calls == []
 
 
-def test_delete_endpoint_maps_errors(ollama: FakeOllama) -> None:
+def test_delete_endpoint_maps_errors(ollama: FakeOllama, client: TestClient) -> None:
     """Unknown or absent is 404; the default or the model in use is 400."""
     del ollama
-    client = TestClient(server.app, base_url="http://127.0.0.1:8100")
     assert client.delete("/api/models/nope").status_code == 404
     assert client.delete("/api/models/qwen3.8").status_code == 404
     assert client.delete("/api/models/muse-glimmer").status_code == 400

@@ -10,42 +10,17 @@ from __future__ import annotations
 import json
 import os
 import sys
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import mcp.types as mcp_types
-import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from medmcp import replay
-from medmcp.backend_broker import BackendBroker
-from medmcp.backend_pool import BackendPool, BackendSpec
 
-# pyright: reportPrivateUsage=false
-
-_FAKE_SERVER: Path = Path(__file__).parent / "fake_stack_server.py"
-
-
-def _spec(name: str) -> BackendSpec:
-    return BackendSpec(
-        name=name,
-        command=sys.executable,
-        args=[str(_FAKE_SERVER)],
-        env={},
-        gpu=False,
-        idle_ttl_sec=300.0,
-        startup_timeout_sec=30.0,
-        tool_timeout_sec=30.0,
-    )
-
-
-def _resolver(specs: dict[str, BackendSpec]) -> Callable[[str], BackendSpec | None]:
-    def resolve(name: str) -> BackendSpec | None:
-        return specs.get(name)
-
-    return resolve
+from ._pool import FAKE_STACK_SERVER, broker
 
 
 @asynccontextmanager
@@ -76,30 +51,24 @@ def test_hidden_tools_cover_warmup_convention() -> None:
     assert WARMUP_TOOL in _HIDDEN_TOOLS
 
 
-@pytest.mark.asyncio
 async def test_proxy_forwards_to_broker(tmp_path: Path) -> None:
     """With a live broker, the proxy forwards list_tools and call_tool."""
-    pool = BackendPool(resolve_spec=_resolver({"fake": _spec("fake")}))
-    broker = BackendBroker(pool, tmp_path / "broker.sock")
-    await broker.start()
-    try:
-        async with _proxy_client({"MEDMCP_BROKER_SOCK": str(broker.socket_path)}) as session:
-            names = {t.name for t in (await session.list_tools()).tools}
-            assert {"echo", "crash"} <= names
-            # ``warmup`` is pool machinery, not a model-facing tool: hidden from the
-            # list, but still callable (the pool invokes it on activation).
-            assert "warmup" not in names
-            result = await session.call_tool("echo", {"text": "hi"})
-            assert replay.extract_structured(result) == {"text": "hi"}
-            assert result.isError is False
-            warmup = await session.call_tool("warmup", {})
-            assert warmup.isError is False
-    finally:
-        await broker.aclose()
-        await pool.aclose()
+    async with (
+        broker(tmp_path) as sock,
+        _proxy_client({"MEDMCP_BROKER_SOCK": str(sock)}) as session,
+    ):
+        names = {t.name for t in (await session.list_tools()).tools}
+        assert {"echo", "crash"} <= names
+        # ``warmup`` is pool machinery, not a model-facing tool: hidden from the
+        # list, but still callable (the pool invokes it on activation).
+        assert "warmup" not in names
+        result = await session.call_tool("echo", {"text": "hi"})
+        assert replay.extract_structured(result) == {"text": "hi"}
+        assert result.isError is False
+        warmup = await session.call_tool("warmup", {})
+        assert warmup.isError is False
 
 
-@pytest.mark.asyncio
 async def test_proxy_falls_back_to_direct_spawn(tmp_path: Path) -> None:
     """With no reachable broker, the proxy spawns the stack from the registry."""
     backends = tmp_path / "backends.json"
@@ -108,7 +77,7 @@ async def test_proxy_falls_back_to_direct_spawn(tmp_path: Path) -> None:
             {
                 "fake": {
                     "command": sys.executable,
-                    "args": [str(_FAKE_SERVER)],
+                    "args": [str(FAKE_STACK_SERVER)],
                     "env": {},
                     "startup_timeout_sec": 30.0,
                     "tool_timeout_sec": 30.0,
@@ -130,18 +99,13 @@ async def test_proxy_falls_back_to_direct_spawn(tmp_path: Path) -> None:
         assert replay.extract_structured(result) == {"text": "via-fallback"}
 
 
-@pytest.mark.asyncio
 async def test_proxy_reports_broker_error_as_tool_error(tmp_path: Path) -> None:
     """An uninstalled stack comes back as an error result, not a crash."""
-    pool = BackendPool(resolve_spec=_resolver({}))  # nothing installed
-    broker = BackendBroker(pool, tmp_path / "broker.sock")
-    await broker.start()
-    try:
-        async with _proxy_client({"MEDMCP_BROKER_SOCK": str(broker.socket_path)}) as session:
-            result = await session.call_tool("echo", {"text": "x"})
-            assert result.isError is True
-            text = "".join(b.text for b in result.content if isinstance(b, mcp_types.TextContent))
-            assert "not installed" in text
-    finally:
-        await broker.aclose()
-        await pool.aclose()
+    async with (
+        broker(tmp_path, specs={}) as sock,  # nothing installed
+        _proxy_client({"MEDMCP_BROKER_SOCK": str(sock)}) as session,
+    ):
+        result = await session.call_tool("echo", {"text": "x"})
+        assert result.isError is True
+        text = "".join(b.text for b in result.content if isinstance(b, mcp_types.TextContent))
+        assert "not installed" in text

@@ -9,7 +9,7 @@ did when it was recorded.
 
 This module has no UI/vibe-acp dependency: callers pass in the resolved
 MCP server launch configs (``command``/``args``/``env`` as produced by
-``app._load_mcp_servers``), so it can be driven from the UI or a CLI alike.
+``settings.load_mcp_servers``), so it can be driven from the UI or a CLI alike.
 
 Replaying runs real tools with real side effects (file writes, etc.). It is
 deliberately separate from the chat permission flow: callers are expected to
@@ -21,7 +21,6 @@ silently skipping a step the pipeline depends on.
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import re
@@ -36,6 +35,7 @@ import mcp.types as mcp_types
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from medmcp.toolresult import looks_failed, parse_structured_blob
 from medmcp.workflow import Recipe
 
 JsonDict = dict[str, Any]
@@ -190,32 +190,15 @@ def extract_structured(result: mcp_types.CallToolResult) -> JsonDict:
         if isinstance(parsed_json, dict):
             return cast("JsonDict", parsed_json)
 
-    match = re.search(r"structured:\s*(\{.*\})", text, re.DOTALL)
-    if match is not None:
-        try:
-            parsed = ast.literal_eval(match.group(1))
-        except (ValueError, SyntaxError):
-            return {}
-        if isinstance(parsed, dict):
-            return cast("JsonDict", parsed)
-    return {}
+    return parse_structured_blob(text)
 
 
 def _result_failed(result: mcp_types.CallToolResult) -> bool:
     """Detect a failed tool call (protocol error flag or known failure markers)."""
-    if result.isError:
-        return True
     # Defense-in-depth for stacks that report a failure as a non-error result
-    # (text only). FastMCP wraps a raised exception as "Error executing tool …";
-    # "(exit N)" catches an embedded non-zero subprocess code. Mirrors
-    # ``distill._is_failed_result`` so a recipe and its replay agree on failure.
-    text = _result_text(result)
-    return (
-        "ok: False" in text
-        or "returncode: 1" in text
-        or "Error executing tool" in text
-        or re.search(r"\(exit ([1-9]\d*)\)", text) is not None
-    )
+    # (text only); the markers are shared with distillation so a recipe and its
+    # replay agree on failure.
+    return result.isError or looks_failed(_result_text(result))
 
 
 # ── MCP transport ─────────────────────────────────────────────────────────────

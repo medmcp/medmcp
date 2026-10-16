@@ -15,7 +15,6 @@ from typing import Any
 
 import pytest
 
-# pyright: reportPrivateUsage=false
 from medmcp import updater
 
 COMPOSE_TEXT = """

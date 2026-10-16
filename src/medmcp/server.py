@@ -1,15 +1,17 @@
 """Workspace UI server for MedMCP.
 
-Serves the three-panel workspace frontend (file explorer, image viewer, chat)
-and exposes:
+Serves the four-panel workspace frontend (file explorer, image viewer, workflow
+manager, chat) and exposes, in this order below:
 
-- a small filesystem API rooted at ``WORKSPACE_ROOT`` (tree listing, raw file
-  content for the viewer, rename/delete/mkdir/upload),
-- a settings API (``/api/settings``) for the stack/workflow/feature toggles
-  (persisted via ``medmcp.settings``),
-- a WebSocket chat endpoint that relays the vibe-acp agent loop to the browser
-  (text chunks, tool calls, usage updates, and interactive permission
-  requests, optionally enriched with LLM explanations and risk tags).
+- a filesystem API rooted at ``WORKSPACE_ROOT`` (tree listing, raw file content
+  for the viewer, rename/delete/mkdir/upload),
+- settings, stacks (install/uninstall/catalog), GPUs and the update check,
+- external MCP servers, the local and the cloud model,
+- workflows: distill, replay (preview + streamed batch run), runs,
+- the WebSocket chat endpoint that relays the vibe-acp agent loop to the
+  browser (text chunks, tool calls, usage updates, interactive permission
+  requests enriched with LLM explanations, risk tags and path checks),
+- the sessions API behind the Chats menu (list/rename/archive/delete/fork/rewind).
 
 Run with:  medmcp-workspace  (or ``just workspace``)
 
@@ -36,15 +38,23 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import shutil
 import time
 from collections.abc import AsyncGenerator, Coroutine
 from functools import partial
 from pathlib import Path
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -70,7 +80,7 @@ from medmcp import (
     update,
     workflow,
 )
-from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict, VibeAcpClient
+from medmcp.acp import PROJECT_ROOT, JsonDict, VibeAcpClient
 from medmcp.backend_broker import BackendBroker
 from medmcp.backend_pool import BackendPool, BackendSpec
 from medmcp.reasoning import ThoughtStripper
@@ -289,6 +299,13 @@ _connections: set[_ChatConnection] = set()
 _background_tasks: set[asyncio.Task[Any]] = set()
 
 
+def _spawn_background(coro: Coroutine[Any, Any, object]) -> None:
+    """Run *coro* detached, holding a reference until it finishes."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
 # ── Filesystem API ─────────────────────────────────────────
 
 
@@ -297,7 +314,7 @@ def _safe_path(rel: str) -> Path:
     if Path(rel).is_absolute():
         raise HTTPException(status_code=400, detail="absolute paths are not allowed")
     resolved = (WORKSPACE_ROOT / rel).resolve()
-    if resolved != WORKSPACE_ROOT and not resolved.is_relative_to(WORKSPACE_ROOT):
+    if not resolved.is_relative_to(WORKSPACE_ROOT):
         raise HTTPException(status_code=400, detail="path escapes the workspace")
     return resolved
 
@@ -313,9 +330,8 @@ def _tree_node(path: Path, depth: int) -> JsonDict:
                 entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
             except PermissionError:
                 entries = []
-            for child in entries[:_TREE_MAX_ENTRIES_PER_DIR]:
-                if child.name in _SKIP_DIRS:
-                    continue
+            shown = [e for e in entries if e.name not in _SKIP_DIRS]
+            for child in shown[:_TREE_MAX_ENTRIES_PER_DIR]:
                 children.append(_tree_node(child, depth + 1))
         node["children"] = children
     else:
@@ -348,6 +364,52 @@ async def get_raw(rel_path: str) -> FileResponse:
     return FileResponse(path)
 
 
+# The kernel writes a mount path's space, tab, newline and backslash as octal
+# escapes (\040, \011, \012, \134); every other byte, non-ASCII included, raw.
+_MOUNTINFO_ESCAPE = re.compile(rb"\\([0-7]{3})")
+
+
+def _unescape_mount_path(raw: bytes) -> Path:
+    """A ``/proc/self/mountinfo`` path field as a :class:`Path`."""
+    unescaped = _MOUNTINFO_ESCAPE.sub(lambda m: bytes([int(m.group(1), 8)]), raw)
+    return Path(os.fsdecode(unescaped))
+
+
+def _mount_points() -> set[Path]:
+    """Every mount point this process sees.
+
+    Read from the mount table rather than :func:`os.path.ismount`, which compares
+    device numbers and so misses a bind mount from the same filesystem — how a
+    drive bind-mounted into the workspace on the host usually lands. Parsed as
+    bytes: the table is not text, and decoding it as such mangles a non-ASCII
+    path. Empty where there is no ``/proc``; callers also ask ``os.path.ismount``.
+    """
+    try:
+        table = Path("/proc/self/mountinfo").read_bytes()
+    except OSError:
+        return set()
+    points: set[Path] = set()
+    for line in table.splitlines():
+        fields = line.split(b" ")
+        if len(fields) > 4:
+            points.add(_unescape_mount_path(fields[4]))
+    return points
+
+
+def _refuse_mount_point(path: Path) -> None:
+    """Reject moving or deleting a mount point, or a folder holding one.
+
+    Deleting one would empty the whole drive behind it before failing on the
+    mount point itself. Files and folders *on* the drive are handled like any
+    others.
+    """
+    if os.path.ismount(path) or any(m.is_relative_to(path) for m in _mount_points()):
+        raise HTTPException(
+            status_code=400,
+            detail="this is or holds a mounted drive; it cannot be moved or deleted",
+        )
+
+
 class MkdirPayload(BaseModel):
     """Request body for directory creation."""
 
@@ -374,6 +436,7 @@ async def post_rename(payload: RenamePayload) -> JsonDict:
     """Rename or move a file/directory inside the workspace."""
     src = _safe_path(payload.path)
     dst = _safe_path(payload.new_path)
+    _refuse_mount_point(src)
     if not src.exists():
         raise HTTPException(status_code=404, detail="source not found")
     if dst.exists():
@@ -389,6 +452,7 @@ async def delete_file(path: str) -> JsonDict:
     target = _safe_path(path)
     if target == WORKSPACE_ROOT:
         raise HTTPException(status_code=400, detail="refusing to delete the workspace root")
+    _refuse_mount_point(target)
     if not target.exists():
         raise HTTPException(status_code=404, detail="not found")
     if target.is_dir():
@@ -506,9 +570,7 @@ async def _apply_pool_changes(newly_active: set[str], newly_inactive: set[str]) 
     if newly_active:
         # Pre-warm in the background so the settings response stays snappy; the
         # heavy spawn/import/CUDA cost is then paid before the first real call.
-        task = asyncio.create_task(_pool.prewarm(newly_active))
-        _background_tasks.add(task)
-        task.add_done_callback(_background_tasks.discard)
+        _spawn_background(_pool.prewarm(newly_active))
 
 
 async def _restart_vibe() -> None:
@@ -772,6 +834,7 @@ async def post_stack_install(payload: StackInstallPayload) -> JsonDict:
     await asyncio.to_thread(_apply_stack_change)
     _audit.info("stack installed: %s (%s)", name, payload.image)
     await _restart_vibe()
+    await _apply_pool_changes({name}, set())
     return {"name": name, "restarted": True}
 
 
@@ -787,6 +850,7 @@ async def post_stack_uninstall(payload: StackUninstallPayload) -> JsonDict:
     await asyncio.to_thread(_apply_stack_change)
     _audit.info("stack uninstalled: %s", payload.name)
     await _restart_vibe()
+    await _apply_pool_changes(set(), {payload.name})
     return {"ok": True, "restarted": True}
 
 
@@ -828,6 +892,7 @@ async def ws_stack_install(ws: WebSocket) -> None:
             await asyncio.to_thread(_apply_stack_change)
             _audit.info("stack installed: %s (%s)", name, image)
             await _restart_vibe()
+            await _apply_pool_changes({name}, set())
             await queue.put({"type": "done", "name": name})
         except settings.NetworkConsentRequiredError as exc:
             await queue.put({"type": "needs_network_consent", "name": exc.name, "image": exc.image})
@@ -854,11 +919,6 @@ async def ws_stack_install(ws: WebSocket) -> None:
 # Drives the provenance→distill→replay pipeline (Tier 2/3) from the workspace
 # UI: save the current chat as a workflow, rename/share it, and replay its
 # recipe deterministically (no LLM) on new inputs.
-
-
-def _workflow_dir(name: str) -> Path | None:
-    """Return the on-disk dir for workflow *name*, or ``None``."""
-    return workflow.workflow_dir(VIBE_HOME / "workflows", name)
 
 
 def _requirement_statuses(recipe: workflow.Recipe, servers: list[JsonDict]) -> list[JsonDict]:
@@ -889,10 +949,7 @@ def _requirement_statuses(recipe: workflow.Recipe, servers: list[JsonDict]) -> l
 
 def _workflow_detail(name: str) -> JsonDict:
     """Load a workflow's recipe and replayability state (blocking; run in a thread)."""
-    d = _workflow_dir(name)
-    if d is None:
-        raise FileNotFoundError(f"no workflow named {name!r}")
-    recipe = distill.load_recipe(d)
+    recipe = workflow.load_workflow(name)
     examples = {i.name: i.example for i in recipe.inputs}
     servers = settings.active_servers()
     replay_error = replay.validate(recipe, examples, servers)
@@ -1069,13 +1126,6 @@ async def delete_external_server(name: str) -> JsonDict:
 # Which model on this machine chats run on. A switch downloads the model if
 # needed (the one outbound request here, made by the Ollama server and started
 # by a person), re-syncs the vibe config and restarts the agent.
-
-
-def _spawn_background(coro: Coroutine[Any, Any, None]) -> None:
-    """Run *coro* detached, holding a reference until it finishes."""
-    task = asyncio.create_task(coro)
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
 
 
 @app.get("/api/models")
@@ -1341,20 +1391,45 @@ async def get_workflows() -> JsonDict:
 
 
 class DistillPayload(BaseModel):
-    """Request body for distilling a chat session into a draft workflow."""
+    """Request body for distilling a chat session into a workflow."""
 
     session_id: str
+
+
+async def _chat_title_for_distill(sid: str) -> str:
+    """The chat's name for the workflow distilled from it, generated now if it has none.
+
+    A workflow should be named after what the chat did, not after its opening
+    words. A title made here is stored and pushed like a scheduled one, so the
+    chat gets the same name; with no usable answer the caller falls back to the
+    opening request.
+    """
+    title = await asyncio.to_thread(sessions.chat_title, sid)
+    if title or not titles.enabled():
+        return title or ""
+    messages = await asyncio.to_thread(
+        lambda: titles.load_session_messages(sid, stop_ids=_chain_stop_ids(sid))
+    )
+    generated = await titles.generate_title(messages)
+    if not generated:
+        return ""
+    await asyncio.to_thread(sessions.set_auto_title, sid, generated)
+    for conn in list(_connections):
+        if conn.canonical_id == sid:
+            await conn.send_title(generated)
+    return generated
 
 
 @app.post("/api/workflows/distill")
 async def post_distill(payload: DistillPayload) -> JsonDict:
     """Distill a chat session into a workflow, named after the chat, and return its detail."""
     sid = payload.session_id
+    name_hint = await _chat_title_for_distill(sid)
     try:
         target = await asyncio.to_thread(
             lambda: distill.distill_session(
                 sid,
-                name_hint=sessions.chat_title(sid) or "",
+                name_hint=name_hint,
                 chain_stop_ids=_chain_stop_ids(sid),
             )
         )
@@ -1383,7 +1458,7 @@ class WorkflowRenamePayload(BaseModel):
 async def post_rename_workflow(name: str, payload: WorkflowRenamePayload) -> JsonDict:
     """Rename a workflow; returns the new (slugified) name. 409 if that name is taken."""
     try:
-        new_dir = await asyncio.to_thread(distill.rename_workflow, name, payload.new_name)
+        new_dir = await asyncio.to_thread(workflow.rename_workflow, name, payload.new_name)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except FileExistsError as exc:
@@ -1395,7 +1470,7 @@ async def post_rename_workflow(name: str, payload: WorkflowRenamePayload) -> Jso
 async def delete_workflow(name: str) -> JsonDict:
     """Delete a personal workflow. The UI confirms first."""
     try:
-        await asyncio.to_thread(distill.delete_workflow, name)
+        await asyncio.to_thread(workflow.delete_workflow, name)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     _audit.info("workflow deleted: %s", name)
@@ -1496,12 +1571,10 @@ def _confined_input_paths(inputs: dict[str, str]) -> dict[str, str]:
 class ReplayPreviewPayload(BaseModel):
     """Request body for previewing a replay's resolved steps.
 
-    ``runs`` carries every item's input binding (the batch); ``inputs`` is the
-    older single-item form and is treated as a one-item batch.
+    ``runs`` carries every item's input binding (the batch).
     """
 
-    inputs: dict[str, str] | None = None
-    runs: list[dict[str, str]] | None = None
+    runs: list[dict[str, str]]
 
 
 def _input_argument_names(recipe: workflow.Recipe) -> dict[str, str]:
@@ -1562,12 +1635,8 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
     """
 
     def _preview() -> JsonDict:
-        d = _workflow_dir(name)
-        if d is None:
-            raise FileNotFoundError(f"no workflow named {name!r}")
-        recipe = distill.load_recipe(d)
-        raw_runs = payload.runs if payload.runs is not None else [payload.inputs or {}]
-        bindings_list = [_confined_input_paths(dict(r)) for r in raw_runs]
+        recipe = workflow.load_workflow(name)
+        bindings_list = [_confined_input_paths(dict(r)) for r in payload.runs]
         servers = settings.active_servers()
         arg_names = _input_argument_names(recipe)
         items = [
@@ -1624,10 +1693,7 @@ async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> Json
     """
 
     def _build() -> JsonDict:
-        d = _workflow_dir(name)
-        if d is None:
-            raise FileNotFoundError(f"no workflow named {name!r}")
-        recipe = distill.load_recipe(d)
+        recipe = workflow.load_workflow(name)
         try:
             rows = batchplan.read_manifest(_confined_input_path(payload.plan_csv))
         except OSError as exc:
@@ -1712,12 +1778,14 @@ async def ws_replay(ws: WebSocket) -> None:
                 _audit.warning("replay refused: %s", exc)
                 await ws.send_json({"type": "result", "ok": False, "error": str(exc)})
                 return
-            d = _workflow_dir(first.name)
-            if d is None or not bindings:
-                error = f"no workflow named {first.name!r}" if d is None else "no inputs to run"
-                await ws.send_json({"type": "result", "ok": False, "error": error})
+            if not bindings:
+                await ws.send_json({"type": "result", "ok": False, "error": "no inputs to run"})
                 return
-            recipe = await asyncio.to_thread(distill.load_recipe, d)
+            try:
+                recipe = await asyncio.to_thread(workflow.load_workflow, first.name)
+            except FileNotFoundError as exc:
+                await ws.send_json({"type": "result", "ok": False, "error": str(exc)})
+                return
             servers = await asyncio.to_thread(settings.active_servers)
             record = _runs.start(
                 recipe=recipe,
@@ -1788,13 +1856,15 @@ async def ws_replay(ws: WebSocket) -> None:
 
 
 @app.get("/api/runs")
-async def get_runs(workflow: str | None = None, limit: int = 20) -> JsonDict:
+async def get_runs(
+    workflow_name: Annotated[str | None, Query(alias="workflow")] = None, limit: int = 20
+) -> JsonDict:
     """Recent replay runs (newest first), optionally for one workflow.
 
     ``live`` lists the ids in flight in this process, so a page can reattach to
     a run it started before a reload.
     """
-    records = await asyncio.to_thread(runs.list_runs, workflow=workflow, limit=max(1, limit))
+    records = await asyncio.to_thread(runs.list_runs, workflow=workflow_name, limit=max(1, limit))
     return {"runs": [r.summary() for r in records], "live": _runs.live_ids()}
 
 
@@ -2286,7 +2356,7 @@ class _ChatConnection:
                     await self._forward_frame(get_task.result())
                     continue
                 get_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, BaseException):
+                with contextlib.suppress(asyncio.CancelledError):
                     await get_task
                 while not self.queue.empty():
                     with contextlib.suppress(asyncio.QueueEmpty):
@@ -2339,6 +2409,14 @@ class _ChatConnection:
         self._title_tasks.add(task)
         task.add_done_callback(self._title_tasks.discard)
 
+    async def send_title(self, title: str) -> None:
+        """Push a generated title to the browser and write it through to vibe (best-effort)."""
+        await self._send({"type": "title", "title": title})
+        with contextlib.suppress(Exception):
+            await _client.request(
+                "_session/set_title", {"sessionId": self.session_id, "title": title}
+            )
+
     async def _refresh_title(self, ticket: titles.TitleTicket) -> None:
         """Generate a title from the transcript and push it if it changed.
 
@@ -2377,11 +2455,7 @@ class _ChatConnection:
             changed = await asyncio.to_thread(sessions.set_auto_title, cid, title)
             if not changed:
                 return
-            await self._send({"type": "title", "title": title})
-            with contextlib.suppress(Exception):
-                await _client.request(
-                    "_session/set_title", {"sessionId": self.session_id, "title": title}
-                )
+            await self.send_title(title)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -3010,9 +3084,7 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
             _spawn_background(localmodels.unload_others(str(local["model"])))
         # Warm the context-window cache off the frame path; usage frames read
         # the cached value only (the badge corrects itself once this lands).
-        prefetch = asyncio.create_task(settings.fetch_context_window())
-        _background_tasks.add(prefetch)
-        prefetch.add_done_callback(_background_tasks.discard)
+        _spawn_background(settings.fetch_context_window())
         await _client.ensure_started()
 
         # Resume: register the queue under the known id *before* session/load so
@@ -3111,6 +3183,12 @@ def main() -> None:
     so the published port is reachable — the no-auth posture is preserved by
     publishing the port only to the host's loopback (``127.0.0.1:8100:8100``).
     """
+    # The medmcp.* loggers (title and explanation outcomes, settings warnings)
+    # are otherwise dropped at the root logger's default WARNING level; uvicorn
+    # keeps its own handlers, and the audit logger does not propagate.
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s", force=True
+    )
     WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
     host = os.environ.get("MEDMCP_WORKSPACE_HOST", "127.0.0.1")
     port = int(os.environ.get("MEDMCP_WORKSPACE_PORT", str(DEFAULT_PORT)))

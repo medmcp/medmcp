@@ -5,23 +5,20 @@ store is the workspace's own view of a session — a user-set title and whether
 the user archived it. That lives here, in ``.vibe/ui_sessions.json``, keyed by
 vibe's session id.
 
-Writes are atomic (mkstemp + ``os.replace``) so a second server instance or the
-CLI can't corrupt the file. An entry that carries no metadata is dropped, so the
+Writes are atomic (``statefile``) so a second server instance or the CLI can't
+corrupt the file. An entry that carries no metadata is dropped, so the
 file stays small and "no entry" and "default entry" mean the same thing.
 """
 
 from __future__ import annotations
 
-import contextlib
-import json
-import os
-import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
 from medmcp import provenance
 from medmcp.acp import VIBE_HOME
+from medmcp.statefile import atomic_write_json, read_json
 
 JsonDict = dict[str, Any]
 
@@ -31,33 +28,12 @@ REGISTRY_PATH: Path = VIBE_HOME / "ui_sessions.json"
 
 def load_registry() -> dict[str, JsonDict]:
     """Load the session-metadata map (empty if the file is absent or corrupt)."""
-    if not REGISTRY_PATH.exists():
-        return {}
-    try:
-        data = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return {
-        str(k): cast("JsonDict", v)
-        for k, v in cast("JsonDict", data).items()
-        if isinstance(v, dict)
-    }
+    data = read_json(REGISTRY_PATH) or {}
+    return {str(k): cast("JsonDict", v) for k, v in data.items() if isinstance(v, dict)}
 
 
 def _save_registry(registry: dict[str, JsonDict]) -> None:
-    """Write the registry atomically (unique temp + ``os.replace``)."""
-    REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=REGISTRY_PATH.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(registry, fh)
-        os.replace(tmp_name, REGISTRY_PATH)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    atomic_write_json(REGISTRY_PATH, registry)
 
 
 def get_entry(session_id: str) -> JsonDict:

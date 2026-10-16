@@ -1,19 +1,21 @@
-"""Shared MedMCP configuration: stack discovery, user toggles, vibe config sync.
+"""Shared MedMCP configuration state and the vibe config sync.
 
 Everything here is UI-agnostic (no FastAPI dependency) so the workspace
-server (``server.py``) and the ``medmcp`` CLI can both drive the
-same state:
+server (``server.py``) and the ``medmcp`` CLI can both drive the same state.
+All of it is persisted under ``.vibe/`` and written atomically:
 
-- **Stack discovery** (:func:`load_mcp_servers`) — uv tool environments with a
-  ``[medmcp.stacks]`` entry point, plus manual ``[[mcp_servers]]`` entries in
-  ``.vibe/config.toml``.
-- **Active sets** — which stacks are enabled, persisted as JSON under
-  ``.vibe/`` (all active when the file is absent).
-- **Feature toggles** — provenance capture and tool-call explanations; each
-  defaults to on.
-- **Config sync** (:func:`sync_servers_to_vibe_config`) — writes the resolved
-  server list and the stacks' skill paths into ``.vibe/config.toml`` before
-  each session, because vibe-acp reads that file directly.
+- **Stack discovery** (:func:`load_mcp_servers`) — uv tool environments,
+  ``stacks.d`` container manifests, manual ``[[mcp_servers]]`` entries and,
+  when consented to, external HTTP servers; plus the **active set**.
+- **Stack install** (:func:`install_stack_image`) — pulls, verifies and
+  registers a container stack from the catalog.
+- **External MCP servers** and the **cloud model** — each behind a double gate
+  (toggle plus recorded acknowledgement) with its secret held outside the config.
+- **Local model choice**, the **GPU selection** and the **feature toggles**
+  (provenance capture, tool-call explanations).
+- **Config sync** (:func:`sync_servers_to_vibe_config`) — writes all of the
+  above into ``.vibe/config.toml`` before each session, because vibe-acp reads
+  that file directly.
 """
 
 from __future__ import annotations
@@ -27,7 +29,6 @@ import platform
 import re
 import shutil
 import subprocess
-import tempfile
 import threading
 import tomllib
 from collections.abc import Callable
@@ -40,16 +41,16 @@ from typing import Any, cast
 from urllib.parse import urlparse
 
 import httpx
-import tomli_w
 
 from medmcp import signing
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict
+from medmcp.statefile import atomic_write_json, atomic_write_toml, read_json
 from medmcp.workflow import list_workflows
 
 log: logging.Logger = logging.getLogger(__name__)
 
 # Ollama endpoint + model, used for the agent's auxiliary LLM calls
-# (tool-call explanations, distillation prose) and the provenance manifest.
+# (tool-call explanations, chat titles) and the provenance manifest.
 OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "muse-medmcp")
 
@@ -61,15 +62,9 @@ OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "muse-medmcp")
 os.environ.setdefault("MEDMCP_GPU", "all")
 LLM_GPU: str = os.environ["MEDMCP_GPU"]
 GPU_SELECTION_PATH: Path = VIBE_HOME / "gpu_selection.json"
-if GPU_SELECTION_PATH.exists():
-    try:
-        _gpu_sel = str(
-            cast("dict[str, Any]", json.loads(GPU_SELECTION_PATH.read_text())).get("gpu", "")
-        ).strip()
-    except (json.JSONDecodeError, OSError):
-        _gpu_sel = ""
-    if _gpu_sel:
-        os.environ["MEDMCP_GPU"] = _gpu_sel
+_gpu_sel = str((read_json(GPU_SELECTION_PATH) or {}).get("gpu", "")).strip()
+if _gpu_sel:
+    os.environ["MEDMCP_GPU"] = _gpu_sel
 
 # Context window size used when Ollama hasn't been queried (yet) — the value
 # set in Modelfile.muse.
@@ -215,7 +210,7 @@ def build_backend_registry(servers: list[JsonDict]) -> dict[str, JsonDict]:
 
 def _write_backend_registry(servers: list[JsonDict]) -> None:
     """Atomically write backends.json from the real (un-proxied) server specs."""
-    _atomic_write_json(backends_registry_path(), build_backend_registry(servers))
+    atomic_write_json(backends_registry_path(), build_backend_registry(servers))
 
 
 def _proxied_entry(entry: JsonDict, ws_root: str | None) -> JsonDict:
@@ -442,7 +437,7 @@ def _load_stack_manifests() -> list[JsonDict]:
 def load_mcp_servers() -> list[JsonDict]:
     """Discover MCP servers from uv tool environments and ``.vibe/config.toml``.
 
-    Server configs are collected from two sources:
+    Server configs are collected from four sources, earlier ones winning a name:
 
     1. **Installed uv tools** (authoritative) — any package installed via
        ``uv tool install`` that registers a ``[medmcp.stacks]`` entry point in
@@ -459,6 +454,10 @@ def load_mcp_servers() -> list[JsonDict]:
        entries whose ``name`` is *not* already registered by a uv tool or a
        manifest are accepted.  This covers stacks that have not yet been installed
        via ``just install-stack``.
+
+    4. **External HTTP servers** (:func:`external_servers`) — only while the
+       external-MCP feature is enabled *and* acknowledged; never shadowing a
+       local name.
 
     Returns a list of server-config dicts ready for ``sync_servers_to_vibe_config``.
     """
@@ -617,42 +616,15 @@ def load_active_server_names() -> set[str]:
     all-servers-always-on model.
     """
     all_names = {s["name"] for s in load_mcp_servers()}
-    if not ACTIVE_STACKS_PATH.exists():
+    data = read_json(ACTIVE_STACKS_PATH)
+    if data is None:
         return all_names
-    try:
-        data = cast("dict[str, Any]", json.loads(ACTIVE_STACKS_PATH.read_text()))
-        return set(cast("list[str]", data.get("active", list(all_names))))
-    except (json.JSONDecodeError, OSError):
-        return all_names
-
-
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Write a small JSON state file atomically, safe across processes.
-
-    A unique temp name (not a fixed ``.tmp`` path) so a concurrent writer in
-    another process (a second server instance, the CLI) can never consume or
-    interleave into this writer's temp file; ``os.replace`` makes the
-    last-complete-writer win.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh)
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
-
-
-# Public name for modules outside settings that keep small state files of their own.
-atomic_write_json = _atomic_write_json
+    return set(cast("list[str]", data.get("active", list(all_names))))
 
 
 def save_active_server_names(names: set[str]) -> None:
     """Persist the active server set to ``.vibe/active_stacks.json``."""
-    _atomic_write_json(ACTIVE_STACKS_PATH, {"active": sorted(names)})
+    atomic_write_json(ACTIVE_STACKS_PATH, {"active": sorted(names)})
 
 
 def active_servers() -> list[JsonDict]:
@@ -693,12 +665,8 @@ def _default_external_state() -> JsonDict:
 
 def load_external_mcp() -> JsonDict:
     """Return the external-MCP state (``enabled``/``acknowledged_at``/``servers``)."""
-    if not EXTERNAL_MCP_PATH.exists():
-        return _default_external_state()
-    try:
-        data = cast("JsonDict", json.loads(EXTERNAL_MCP_PATH.read_text()))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("could not read %s; treating as disabled: %s", EXTERNAL_MCP_PATH, exc)
+    data = read_json(EXTERNAL_MCP_PATH)
+    if data is None:
         return _default_external_state()
     state = _default_external_state()
     state["enabled"] = bool(data.get("enabled"))
@@ -710,7 +678,7 @@ def load_external_mcp() -> JsonDict:
 
 
 def _save_external_mcp(state: JsonDict) -> None:
-    _atomic_write_json(EXTERNAL_MCP_PATH, state)
+    atomic_write_json(EXTERNAL_MCP_PATH, state)
 
 
 EXTERNAL_SECRETS_PATH: Path = VIBE_STATE_DIR / "external_secrets.json"
@@ -731,13 +699,7 @@ def load_external_secrets() -> dict[str, str]:
     ``config.toml`` (rewritten on every sync), so a token cannot reach a response
     body or the agent's config by accident. Written 0600 by the atomic writer.
     """
-    if not EXTERNAL_SECRETS_PATH.exists():
-        return {}
-    try:
-        data = cast("JsonDict", json.loads(EXTERNAL_SECRETS_PATH.read_text()))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("could not read %s; treating as empty: %s", EXTERNAL_SECRETS_PATH, exc)
-        return {}
+    data = read_json(EXTERNAL_SECRETS_PATH) or {}
     return {str(k): str(v) for k, v in data.items() if isinstance(v, str) and v}
 
 
@@ -745,7 +707,7 @@ def set_external_secret(server_name: str, token: str) -> None:
     """Store *token* for *server_name*, replacing any previous one."""
     secrets = load_external_secrets()
     secrets[server_name] = token
-    _atomic_write_json(EXTERNAL_SECRETS_PATH, cast("JsonDict", secrets))
+    atomic_write_json(EXTERNAL_SECRETS_PATH, cast("JsonDict", secrets))
 
 
 def delete_external_secret(server_name: str) -> None:
@@ -753,7 +715,7 @@ def delete_external_secret(server_name: str) -> None:
     secrets = load_external_secrets()
     if secrets.pop(server_name, None) is None:
         return
-    _atomic_write_json(EXTERNAL_SECRETS_PATH, cast("JsonDict", secrets))
+    atomic_write_json(EXTERNAL_SECRETS_PATH, cast("JsonDict", secrets))
 
 
 def external_secret_env() -> dict[str, str]:
@@ -787,11 +749,6 @@ def external_token_present(api_key_env: str) -> bool:
     environment, so what is visible here is what it will see.
     """
     return bool(api_key_env) and bool(os.environ.get(api_key_env))
-
-
-def external_mcp_acknowledged() -> bool:
-    """Whether the operator has accepted responsibility for external services."""
-    return bool(load_external_mcp()["acknowledged_at"])
 
 
 def external_mcp_enabled() -> bool:
@@ -1119,12 +1076,8 @@ def _default_cloud_state() -> JsonDict:
 
 def load_cloud_model() -> JsonDict:
     """Return the cloud-model state (``enabled``/``acknowledged_at``/``model``)."""
-    if not CLOUD_MODEL_PATH.exists():
-        return _default_cloud_state()
-    try:
-        data = cast("JsonDict", json.loads(CLOUD_MODEL_PATH.read_text()))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("could not read %s; treating as disabled: %s", CLOUD_MODEL_PATH, exc)
+    data = read_json(CLOUD_MODEL_PATH)
+    if data is None:
         return _default_cloud_state()
     state = _default_cloud_state()
     state["enabled"] = bool(data.get("enabled"))
@@ -1136,7 +1089,7 @@ def load_cloud_model() -> JsonDict:
 
 
 def _save_cloud_model(state: JsonDict) -> None:
-    _atomic_write_json(CLOUD_MODEL_PATH, state)
+    atomic_write_json(CLOUD_MODEL_PATH, state)
 
 
 def load_cloud_model_key() -> str:
@@ -1146,19 +1099,12 @@ def load_cloud_model_key() -> str:
     ``config.toml`` (rewritten on every sync) for the reason an external token
     is: so it cannot reach a response body or the agent's config by accident.
     """
-    if not CLOUD_MODEL_SECRET_PATH.exists():
-        return ""
-    try:
-        data = cast("JsonDict", json.loads(CLOUD_MODEL_SECRET_PATH.read_text()))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("could not read %s; treating as empty: %s", CLOUD_MODEL_SECRET_PATH, exc)
-        return ""
-    key = data.get("api_key")
+    key = (read_json(CLOUD_MODEL_SECRET_PATH) or {}).get("api_key")
     return key if isinstance(key, str) else ""
 
 
 def _set_cloud_model_key(api_key: str) -> None:
-    _atomic_write_json(CLOUD_MODEL_SECRET_PATH, {"api_key": api_key})
+    atomic_write_json(CLOUD_MODEL_SECRET_PATH, {"api_key": api_key})
 
 
 def _delete_cloud_model_key() -> None:
@@ -1393,14 +1339,7 @@ def load_local_model() -> JsonDict | None:
     presence means "ready to use". A malformed one is ignored rather than
     trusted: the default model is always there to fall back to.
     """
-    if not LOCAL_MODEL_PATH.exists():
-        return None
-    try:
-        data = cast("JsonDict", json.loads(LOCAL_MODEL_PATH.read_text()))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("could not read %s; using the default model: %s", LOCAL_MODEL_PATH, exc)
-        return None
-    entry = data.get("selected")
+    entry = (read_json(LOCAL_MODEL_PATH) or {}).get("selected")
     if not isinstance(entry, dict):
         return None
     selected = cast("JsonDict", entry)
@@ -1422,7 +1361,7 @@ def load_local_model() -> JsonDict | None:
 
 def save_local_model(entry: JsonDict | None) -> None:
     """Record the selected local model; ``None`` returns to the default."""
-    _atomic_write_json(LOCAL_MODEL_PATH, {"selected": entry})
+    atomic_write_json(LOCAL_MODEL_PATH, {"selected": entry})
 
 
 def local_model_name() -> str:
@@ -1436,20 +1375,26 @@ def local_model_name() -> str:
     return str(selected["model"]) if selected else OLLAMA_MODEL
 
 
-def local_helper_request() -> JsonDict:
+def local_helper_request(*, think: bool) -> JsonDict:
     """The ``model`` and ``think`` fields of a native ``/api/chat`` helper call.
 
-    The helper passes want a direct answer, so thinking is switched off — but
-    only for a model that has it: the field is left out for one that does not,
-    since there is nothing to switch off and no reason to find out how each
-    Ollama version treats the request.
+    Each helper chooses *think* for its own prompt, because Muse Glimmer behaves
+    differently per prompt shape (measured live, 2026-10-16): a chat title off a
+    26-message transcript needs thinking **on** — forced off, the model reasons
+    at length anyway, Ollama discards that text and it still counts against
+    ``num_predict`` (768 tokens gone, empty content, ``done_reason: length``),
+    while with it on the answer costs 350 tokens; a tool-call explanation (short
+    prompt, one JSON object) is the reverse — 242 tokens in 6 s with thinking
+    off, 969 tokens in 21 s with it on. The field is omitted for a model without
+    thinking (Ollama rejects ``think`` for such a model). The helpers read
+    ``message.content`` only.
     """
     selected = load_local_model()
     if selected is None:
-        return {"model": OLLAMA_MODEL, "think": False}
+        return {"model": OLLAMA_MODEL, "think": think}
     if selected["thinking"] == "off":
         return {"model": selected["model"]}
-    return {"model": selected["model"], "think": False}
+    return {"model": selected["model"], "think": think}
 
 
 def active_model_name() -> str:
@@ -1612,11 +1557,6 @@ def write_prompt_variant(prompt_id: str, rule: str) -> bool:
     return True
 
 
-def write_external_prompt_variant() -> bool:
-    """Derive the external-enabled system prompt next to the base one."""
-    return write_prompt_variant(EXTERNAL_SYSTEM_PROMPT_ID, EXTERNAL_RULE)
-
-
 # ── Container-stack install / uninstall (UI-driven) ──────────────────────────
 # An installed container stack is just a stacks.d/<name>.toml manifest plus its
 # extracted skills. Metadata comes from the image's OCI label (read via
@@ -1740,7 +1680,7 @@ def resolve_image_digest(image: str) -> str | None:
         return None
     if not isinstance(repo_digests, list):
         return None
-    repo = image.split("@", 1)[0].rsplit(":", 1)[0]
+    repo = signing.split_reference(image)[0]
     digests = [
         rd for rd in cast("list[Any]", repo_digests) if isinstance(rd, str) and "@sha256:" in rd
     ]
@@ -1822,17 +1762,7 @@ def pull_image(image: str, on_progress: ProgressFn | None = None) -> None:
 
 def _write_stack_manifest(name: str, entry: JsonDict) -> None:
     """Atomically write ``stacks.d/<name>.toml``."""
-    STACKS_D_PATH.mkdir(parents=True, exist_ok=True)
-    path = STACKS_D_PATH / f"{name}.toml"
-    fd, tmp_name = tempfile.mkstemp(dir=STACKS_D_PATH, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            tomli_w.dump(entry, fh)
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    atomic_write_toml(STACKS_D_PATH / f"{name}.toml", entry)
 
 
 def install_stack_image(
@@ -2027,18 +1957,12 @@ def discover_workflows() -> list[JsonDict]:
 
 def _load_flag(path: Path) -> bool:
     """Read an ``{"enabled": bool}`` preference file (default ``True`` when unset)."""
-    if not path.exists():
-        return True
-    try:
-        data = cast("dict[str, Any]", json.loads(path.read_text()))
-        return bool(data.get("enabled", True))
-    except (json.JSONDecodeError, OSError):
-        return True
+    return bool((read_json(path) or {}).get("enabled", True))
 
 
 def _save_flag(path: Path, enabled: bool) -> None:
     """Persist an ``{"enabled": bool}`` preference file atomically."""
-    _atomic_write_json(path, {"enabled": enabled})
+    atomic_write_json(path, {"enabled": enabled})
 
 
 def load_provenance_enabled() -> bool:
@@ -2075,7 +1999,7 @@ def save_gpu_selection(gpu: str) -> None:
     its GPU is fixed at container creation (see :data:`LLM_GPU`).
     """
     value = gpu.strip() or "all"
-    _atomic_write_json(GPU_SELECTION_PATH, {"gpu": value})
+    atomic_write_json(GPU_SELECTION_PATH, {"gpu": value})
     os.environ["MEDMCP_GPU"] = value
     load_mcp_servers.cache_clear()
 
@@ -2186,7 +2110,7 @@ def _ensure_pathguard_hook(vibe_home: Path) -> None:
             with path.open("rb") as fh:
                 raw = cast("list[JsonDict]", tomllib.load(fh).get("hooks", []))
             others = [h for h in raw if h.get("name") != PATHGUARD_HOOK_NAME]
-        except (OSError, tomllib.TOMLDecodeError, AttributeError):
+        except (OSError, tomllib.TOMLDecodeError):
             log.warning("could not read %s; rewriting it", path)
     entry: JsonDict = {
         "name": PATHGUARD_HOOK_NAME,
@@ -2199,32 +2123,29 @@ def _ensure_pathguard_hook(vibe_home: Path) -> None:
             "reason back to the model so it can correct them."
         ),
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            tomli_w.dump({"hooks": [*others, entry]}, fh)
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    atomic_write_toml(path, {"hooks": [*others, entry]})
 
 
 def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
-    """Overwrite the ``[[mcp_servers]]`` section of ``.vibe/config.toml``.
+    """Write the resolved agent configuration into ``.vibe/config.toml``.
 
-    This is the mechanism that makes entry-point discovery actually take effect:
-    vibe-acp reads its server list directly from the TOML file and ignores the
-    ``mcpServers`` field in JSON-RPC calls, so we must write the desired set
-    here before each ``session/new`` or ``session/load``.
+    vibe-acp reads its configuration from the TOML file and ignores the
+    ``mcpServers`` field in JSON-RPC calls, so this runs before each
+    ``session/new`` or ``session/load``. The keys it owns:
 
-    Only the ``mcp_servers`` array is replaced.  All other keys (model config,
-    tool permissions, etc.) are left untouched.  For servers already present in
-    the file, vibe-acp-specific fields such as ``startup_timeout_sec`` are
-    preserved; only ``command`` and ``args`` are updated from the discovery
-    result. An entry carrying no ``startup_timeout_sec`` at all is given one —
-    vibe's own 10s default is too tight for a stack that cold-starts a container.
+    - ``mcp_servers`` — rebuilt from *servers*. For entries already in the file,
+      vibe-specific fields such as ``startup_timeout_sec`` are preserved and only
+      ``command``/``args`` are updated; an entry with no ``startup_timeout_sec``
+      is given one (vibe's 10 s default is too tight for a container cold start).
+      With the backend pool on, stdio stacks are rewritten through the proxy.
+    - ``providers``/``models``/``active_model`` — the chosen local or cloud model.
+    - ``system_prompt_id`` — the base prompt or a derived variant, unless a
+      hand-set custom id is in place.
+    - ``skill_paths`` — the active stacks' skills; ``disabled_skills`` keeps every
+      non-workflow entry.
+    - ``<vibe_home>/hooks.toml`` — the pathguard ``pre_tool`` hook.
+
+    Tool permissions and everything else in the file are left untouched.
     """
     with _config_write_lock:
         _sync_servers_to_vibe_config_locked(servers)
@@ -2366,16 +2287,4 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
     # Hooks live in their own file next to the config, not inside it.
     _ensure_pathguard_hook(VIBE_HOME)
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    # A unique temp name (not a fixed .tmp path) so a concurrent writer in
-    # another process can never interleave into the same file; os.replace
-    # then makes last-complete-writer win.
-    fd, tmp_name = tempfile.mkstemp(dir=config_path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            tomli_w.dump(cfg, fh)
-        os.replace(tmp_name, config_path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    atomic_write_toml(config_path, cfg)

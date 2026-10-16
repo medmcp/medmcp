@@ -13,7 +13,7 @@ that already has the `mcp` library::
     docker run --rm -d --name mcp-authtest --network medmcp_default \\
         --entrypoint python \\
         -e EXPECTED_TOKEN=hunter2 -e MCP_TEST_PORT=9000 \\
-        -v "$PWD/tests/fake_external_server.py:/srv.py:ro" \\
+        -v "$PWD/scripts/fake_external_server.py:/srv.py:ro" \\
         medmcp-core:dev /srv.py
 
 ``--entrypoint python`` matters: the image's own entrypoint ignores the command

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import mcp.types as mcp_types
@@ -12,7 +12,7 @@ import pytest
 from medmcp import replay
 from medmcp.workflow import Recipe, RecipeStep, StackRequirement, WorkflowInput
 
-# pyright: reportPrivateUsage=false
+from ._recipes import McpCallerFactory, neuro_servers, two_step_recipe
 
 JsonDict = dict[str, Any]
 
@@ -127,8 +127,6 @@ class TestResultFailed:
 
 # ── validation ────────────────────────────────────────────────────────────────
 
-_SERVERS: list[JsonDict] = [{"name": "medmcp-neuro", "command": "neuro", "args": []}]
-
 
 def _recipe(steps: list[RecipeStep], inputs: list[WorkflowInput] | None = None) -> Recipe:
     return Recipe(name="wf", description="d", inputs=inputs or [], steps=steps)
@@ -143,7 +141,7 @@ class TestValidate:
             [RecipeStep(server="medmcp-neuro", tool="skull_strip", arguments={"p": "{{in_1}}"})],
             inputs=[WorkflowInput(name="in_1", example="/x.nii")],
         )
-        assert replay.validate(recipe, {"in_1": "/y.nii"}, _SERVERS) is None
+        assert replay.validate(recipe, {"in_1": "/y.nii"}, neuro_servers()) is None
 
     def test_missing_input(self) -> None:
         """A declared input with no supplied value is reported."""
@@ -151,19 +149,19 @@ class TestValidate:
             [RecipeStep(server="medmcp-neuro", tool="t", arguments={})],
             inputs=[WorkflowInput(name="in_1", example="/x")],
         )
-        msg = replay.validate(recipe, {}, _SERVERS)
+        msg = replay.validate(recipe, {}, neuro_servers())
         assert msg is not None and "in_1" in msg
 
     def test_builtin_step_rejected(self) -> None:
         """A builtin (non-MCP) step makes the recipe non-replayable."""
         recipe = _recipe([RecipeStep(server="builtin", tool="bash", arguments={})])
-        msg = replay.validate(recipe, {}, _SERVERS)
+        msg = replay.validate(recipe, {}, neuro_servers())
         assert msg is not None and "built-in" in msg
 
     def test_missing_stack(self) -> None:
         """A step needing an uninstalled stack is reported."""
         recipe = _recipe([RecipeStep(server="medmcp-cardiac", tool="t", arguments={})])
-        msg = replay.validate(recipe, {}, _SERVERS)
+        msg = replay.validate(recipe, {}, neuro_servers())
         assert msg is not None and "medmcp-cardiac" in msg
 
     def test_missing_stack_message_names_the_pin(self) -> None:
@@ -177,40 +175,17 @@ class TestValidate:
                 StackRequirement(stack="medmcp-cardiac", image="ghcr.io/medmcp/cardiac:main")
             ],
         )
-        msg = replay.validate(recipe, {}, _SERVERS)
+        msg = replay.validate(recipe, {}, neuro_servers())
         assert msg is not None
         assert "medmcp-cardiac" in msg and "ghcr.io/medmcp/cardiac:main" in msg
 
     def test_no_steps(self) -> None:
         """A recipe with no steps has nothing to replay."""
-        msg = replay.validate(_recipe([]), {}, _SERVERS)
+        msg = replay.validate(_recipe([]), {}, neuro_servers())
         assert msg is not None and "no replayable steps" in msg
 
 
 # ── execution / chaining ──────────────────────────────────────────────────────
-
-
-def _two_step_recipe() -> Recipe:
-    return _recipe(
-        [
-            RecipeStep(
-                server="medmcp-neuro",
-                tool="skull_strip",
-                arguments={"input_path": "{{in_1}}", "device": "cuda"},
-                produces={"brain_path": "step1.brain_path"},
-            ),
-            RecipeStep(
-                server="medmcp-neuro",
-                tool="register_to_template",
-                arguments={"input_path": "{{step1.brain_path}}"},
-                produces={"registered_path": "step2.registered_path"},
-            ),
-        ],
-        inputs=[WorkflowInput(name="in_1", example="/orig.nii")],
-    )
-
-
-@pytest.mark.asyncio
 async def test_replay_chains_outputs_to_later_steps() -> None:
     """A produced output is bound and substituted into a later step's argument."""
     calls: list[tuple[str, str, JsonDict]] = []
@@ -221,9 +196,7 @@ async def test_replay_chains_outputs_to_later_steps() -> None:
             return True, {"brain_path": "/new_brain.nii"}, None
         return True, {"registered_path": "/new_mni.nii"}, None
 
-    result = await replay.replay_with_caller(
-        _two_step_recipe(), {"in_1": "/new.nii"}, caller=caller
-    )
+    result = await replay.replay_with_caller(two_step_recipe(), {"in_1": "/new.nii"}, caller=caller)
 
     assert result.ok is True
     assert calls[0][2]["input_path"] == "/new.nii"  # in_1 bound
@@ -231,7 +204,6 @@ async def test_replay_chains_outputs_to_later_steps() -> None:
     assert result.steps[1].produced == {"step2.registered_path": "/new_mni.nii"}
 
 
-@pytest.mark.asyncio
 async def test_replay_aborts_on_failed_step() -> None:
     """A failed step stops the run; later steps never execute."""
     calls: list[str] = []
@@ -240,9 +212,7 @@ async def test_replay_aborts_on_failed_step() -> None:
         calls.append(tool)
         return False, {}, "boom"
 
-    result = await replay.replay_with_caller(
-        _two_step_recipe(), {"in_1": "/new.nii"}, caller=caller
-    )
+    result = await replay.replay_with_caller(two_step_recipe(), {"in_1": "/new.nii"}, caller=caller)
 
     assert result.ok is False
     assert calls == ["skull_strip"]  # second step never ran
@@ -250,7 +220,6 @@ async def test_replay_aborts_on_failed_step() -> None:
     assert "boom" in (result.error or "")
 
 
-@pytest.mark.asyncio
 async def test_replay_aborts_on_unresolved_placeholder() -> None:
     """A step whose output never arrived leaves a later ref unresolved → abort."""
 
@@ -258,16 +227,13 @@ async def test_replay_aborts_on_unresolved_placeholder() -> None:
         # skull_strip succeeds but produces nothing, so {{step1.brain_path}} stays unbound.
         return True, {}, None
 
-    result = await replay.replay_with_caller(
-        _two_step_recipe(), {"in_1": "/new.nii"}, caller=caller
-    )
+    result = await replay.replay_with_caller(two_step_recipe(), {"in_1": "/new.nii"}, caller=caller)
 
     assert result.ok is False
     assert result.steps[1].ok is False
     assert "unresolved" in (result.steps[1].error or "")
 
 
-@pytest.mark.asyncio
 async def test_on_step_callback_invoked_per_step() -> None:
     """on_step fires once per executed step."""
     seen: list[int] = []
@@ -279,7 +245,7 @@ async def test_on_step_callback_invoked_per_step() -> None:
         seen.append(sr.index)
 
     await replay.replay_with_caller(
-        _two_step_recipe(), {"in_1": "/x"}, caller=caller, on_step=on_step
+        two_step_recipe(), {"in_1": "/x"}, caller=caller, on_step=on_step
     )
     assert seen == [1, 2]
 
@@ -287,13 +253,7 @@ async def test_on_step_callback_invoked_per_step() -> None:
 # ── batch replay (run_batch) ──────────────────────────────────────────────────
 
 
-def _neuro_servers() -> list[JsonDict]:
-    return [{"name": "medmcp-neuro", "command": "x", "args": []}]
-
-
-def _fake_mcp_caller(
-    caller: replay.ToolCaller, spawns: list[int]
-) -> Callable[..., contextlib.AbstractAsyncContextManager[replay.ToolCaller]]:
+def _fake_mcp_caller(caller: replay.ToolCaller, spawns: list[int]) -> McpCallerFactory:
     """A drop-in for ``replay.mcp_caller`` that counts spawns and yields *caller*."""
 
     @contextlib.asynccontextmanager
@@ -304,7 +264,6 @@ def _fake_mcp_caller(
     return _cm
 
 
-@pytest.mark.asyncio
 async def test_run_batch_spawns_stacks_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """A batch reuses one mcp_caller — the stacks are spawned a single time."""
     spawns = [0]
@@ -315,13 +274,12 @@ async def test_run_batch_spawns_stacks_once(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(replay, "mcp_caller", _fake_mcp_caller(caller, spawns))
 
     runs = [{"in_1": f"/scan{i}.nii"} for i in range(3)]
-    results = await replay.run_batch(_two_step_recipe(), runs, servers=_neuro_servers())
+    results = await replay.run_batch(two_step_recipe(), runs, servers=neuro_servers())
 
     assert spawns[0] == 1
     assert [r.ok for r in results] == [True, True, True]
 
 
-@pytest.mark.asyncio
 async def test_run_batch_failed_item_does_not_stop_others(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -336,14 +294,13 @@ async def test_run_batch_failed_item_does_not_stop_others(
     monkeypatch.setattr(replay, "mcp_caller", _fake_mcp_caller(caller, spawns))
 
     runs = [{"in_1": "/scan0.nii"}, {"in_1": "/scan1.nii"}, {"in_1": "/scan2.nii"}]
-    results = await replay.run_batch(_two_step_recipe(), runs, servers=_neuro_servers())
+    results = await replay.run_batch(two_step_recipe(), runs, servers=neuro_servers())
 
     assert spawns[0] == 1  # still one shared spawn despite the mid-batch failure
     assert [r.ok for r in results] == [True, False, True]
     assert "boom" in (results[1].error or "")
 
 
-@pytest.mark.asyncio
 async def test_run_batch_isolates_validation_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """An item missing its inputs fails validation without running; others run."""
     spawns = [0]
@@ -354,14 +311,13 @@ async def test_run_batch_isolates_validation_failure(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(replay, "mcp_caller", _fake_mcp_caller(caller, spawns))
 
     runs = [{"in_1": "/a.nii"}, {}, {"in_1": "/c.nii"}]
-    results = await replay.run_batch(_two_step_recipe(), runs, servers=_neuro_servers())
+    results = await replay.run_batch(two_step_recipe(), runs, servers=neuro_servers())
 
     assert [r.ok for r in results] == [True, False, True]
     assert "missing" in (results[1].error or "")
     assert results[1].steps == []  # never ran a step
 
 
-@pytest.mark.asyncio
 async def test_run_batch_streams_item_indexed_callbacks(monkeypatch: pytest.MonkeyPatch) -> None:
     """on_step / on_item fire tagged with the item's index in runs."""
     spawns = [0]
@@ -382,14 +338,13 @@ async def test_run_batch_streams_item_indexed_callbacks(monkeypatch: pytest.Monk
 
     runs = [{"in_1": "/a.nii"}, {"in_1": "/b.nii"}]
     await replay.run_batch(
-        _two_step_recipe(), runs, servers=_neuro_servers(), on_step=on_step, on_item=on_item
+        two_step_recipe(), runs, servers=neuro_servers(), on_step=on_step, on_item=on_item
     )
 
     assert steps == [(0, 1), (0, 2), (1, 1), (1, 2)]
     assert items == [0, 1]
 
 
-@pytest.mark.asyncio
 async def test_mcp_caller_respawns_after_transport_crash(monkeypatch: pytest.MonkeyPatch) -> None:
     """A transport error evicts the dead session; the next call spawns a fresh one."""
     spawns = [0]
@@ -421,7 +376,7 @@ async def test_mcp_caller_respawns_after_transport_crash(monkeypatch: pytest.Mon
     monkeypatch.setattr(replay, "stdio_client", fake_stdio_client)
     monkeypatch.setattr(replay, "ClientSession", FakeSession)
 
-    async with replay.mcp_caller(_neuro_servers()) as call:
+    async with replay.mcp_caller(neuro_servers()) as call:
         with pytest.raises(ConnectionError):
             await call("medmcp-neuro", "skull_strip", {})  # crash → session evicted
         outcome = await call("medmcp-neuro", "skull_strip", {})  # fresh server, succeeds

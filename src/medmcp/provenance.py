@@ -20,7 +20,6 @@ the call site — provenance must never break a chat.
 
 from __future__ import annotations
 
-import ast
 import contextlib
 import json
 import platform
@@ -34,6 +33,9 @@ from collections.abc import Collection
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+
+from medmcp.statefile import read_jsonl
+from medmcp.toolresult import parse_structured_blob
 
 JsonDict = dict[str, Any]
 
@@ -247,19 +249,7 @@ def append_run_event(session_id: str, event: JsonDict) -> None:
 
 def read_run_events(session_id: str) -> list[JsonDict]:
     """Read all events from ``run.jsonl`` for *session_id* (skips bad lines)."""
-    path = provenance_dir(session_id) / "run.jsonl"
-    if not path.exists():
-        return []
-    events: list[JsonDict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            events.append(cast("JsonDict", json.loads(line)))
-        except json.JSONDecodeError:
-            continue
-    return events
+    return read_jsonl(provenance_dir(session_id) / "run.jsonl")
 
 
 def log_permission(session_id: str, *, title: str, decision: str) -> None:
@@ -478,23 +468,6 @@ def list_provenance_sessions() -> list[str]:
     return sorted(p.name for p in root.iterdir() if p.is_dir())
 
 
-def purge_orphans(referenced_ids: set[str]) -> list[str]:
-    """Delete provenance dirs whose session id is not in *referenced_ids*.
-
-    A garbage-collection sweep so chats deleted in the UI (or sessions that never
-    persisted a thread mapping) don't leak provenance. Returns the purged session
-    ids. Only the provenance directory is removed — vibe transcript dirs are left
-    untouched, because a compaction continuation is named with an id we don't
-    track and could still belong to a live chat.
-    """
-    purged: list[str] = []
-    for session_id in list_provenance_sessions():
-        if session_id not in referenced_ids:
-            shutil.rmtree(provenance_dir(session_id), ignore_errors=True)
-            purged.append(session_id)
-    return purged
-
-
 def purge_session(session_id: str, *, stop_ids: Collection[str] = ()) -> None:
     """Delete all on-disk logs for *session_id*.
 
@@ -523,14 +496,7 @@ def _structured_paths(output: object) -> list[str]:
     if isinstance(output, dict):
         candidate = cast("JsonDict", output)
     elif isinstance(output, str):
-        match = re.search(r"structured:\s*(\{.*\})", output, re.DOTALL)
-        if match:
-            try:
-                parsed = ast.literal_eval(match.group(1))
-                if isinstance(parsed, dict):
-                    candidate = cast("JsonDict", parsed)
-            except (ValueError, SyntaxError):
-                candidate = None
+        candidate = parse_structured_blob(output) or None
     if candidate is None:
         return paths
     for key, value in candidate.items():

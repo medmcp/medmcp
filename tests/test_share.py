@@ -83,7 +83,7 @@ class TestImport:
 
         target = share.import_workflow(text, workflows_root=tmp_path / "dst")
         assert target == tmp_path / "dst" / "skull-strip-register"
-        assert distill.load_recipe(target).to_dict() == original.to_dict()
+        assert workflow.read_recipe(target).to_dict() == original.to_dict()
         assert sorted(p.name for p in target.iterdir()) == ["recipe.yaml"]
 
     def test_import_ignores_the_blocks_older_exports_carried(self, tmp_path: Path) -> None:
@@ -92,7 +92,7 @@ class TestImport:
         env["documentation"] = "# Skull strip register workflow\n\n## Steps\n…"
         env["prose"] = {"name": "x", "steps_markdown": "1. …"}
         target = share.import_workflow(yaml.safe_dump(env), workflows_root=tmp_path)
-        assert distill.load_recipe(target).to_dict() == _sample_recipe().to_dict()
+        assert workflow.read_recipe(target).to_dict() == _sample_recipe().to_dict()
 
     def test_import_rejects_non_mapping(self, tmp_path: Path) -> None:
         """A payload that isn't a YAML mapping is rejected."""
@@ -152,5 +152,5 @@ def test_export_import_round_trips_a_derived_default(tmp_path: Path) -> None:
     assert "{{dir(in_1)}}" in envelope
 
     target = share.import_workflow(envelope, workflows_root=tmp_path / "dest")
-    loaded = distill.load_recipe(target)
+    loaded = workflow.read_recipe(target)
     assert [i.default for i in loaded.inputs] == ["", "{{dir(in_1)}}"]

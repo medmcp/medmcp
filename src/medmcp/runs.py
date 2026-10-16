@@ -25,12 +25,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
-import os
 import secrets
-import tempfile
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -39,6 +35,7 @@ from typing import Any, cast
 
 from medmcp import replay
 from medmcp.acp import VIBE_HOME
+from medmcp.statefile import atomic_write_json, read_json
 from medmcp.workflow import Recipe
 
 JsonDict = dict[str, Any]
@@ -54,18 +51,7 @@ OUTPUT_FILES_LIMIT: int = 24
 
 
 def _now_iso() -> str:
-    # Full precision: a step's finish time is compared against file mtimes, and a
-    # second-resolution stamp would call an input written in the same second
-    # "newer than the step" and throw away a perfectly good cache entry.
     return datetime.now(UTC).isoformat(timespec="microseconds")
-
-
-def _iso_to_ts(value: str) -> float:
-    """Epoch seconds for an ISO timestamp we wrote; 0 for anything unparsable."""
-    try:
-        return datetime.fromisoformat(value).timestamp()
-    except ValueError:
-        return 0.0
 
 
 def new_run_id() -> str:
@@ -344,27 +330,13 @@ def run_path(run_id: str, *, root: Path | None = None) -> Path:
 
 def save_run(record: RunRecord, *, root: Path | None = None) -> None:
     """Write the record atomically (a reader never sees a half-written file)."""
-    path = run_path(record.id, root=root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(record.to_dict(), fh)
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    atomic_write_json(run_path(record.id, root=root), record.to_dict())
 
 
 def load_run(run_id: str, *, root: Path | None = None) -> RunRecord | None:
     """Read one record; ``None`` when absent or unreadable."""
-    path = run_path(run_id, root=root)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return RunRecord.from_dict(cast("JsonDict", data)) if isinstance(data, dict) else None
+    data = read_json(run_path(run_id, root=root))
+    return RunRecord.from_dict(data) if data is not None else None
 
 
 def list_runs(
@@ -635,10 +607,3 @@ def _step_started_frame(item: int, index: int, server: str, tool: str, started_a
 def is_end(frame: Frame) -> bool:
     """Whether a queued frame is the end-of-run sentinel rather than a real frame."""
     return frame is _END
-
-
-def elapsed_seconds(record: RunRecord) -> float:
-    """Wall-clock seconds the run took (or has taken so far)."""
-    start = _iso_to_ts(record.started_at)
-    end = _iso_to_ts(record.finished_at) if record.finished_at else time.time()
-    return max(0.0, end - start) if start else 0.0

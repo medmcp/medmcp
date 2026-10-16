@@ -11,7 +11,7 @@
 #
 # From a checkout you can equivalently point at this file (`just compose-up-ghcr`).
 # Pin a release with MEDMCP_TAG=<git-sha> (default :main). GPU uses CDI (rootless);
-# rootful hosts set the docker socket path to /var/run.
+# rootful hosts set XDG_RUNTIME_DIR=/var/run.
 name: medmcp
 
 services:
@@ -153,8 +153,15 @@ services:
     ports:
       - "127.0.0.1:8100:8100"
     volumes:
-      # Rootless docker socket → core spawns sibling stack containers.
-      - "${XDG_RUNTIME_DIR}/docker.sock:/var/run/docker.sock"
+      # Docker socket → core spawns sibling stack containers. Rootless by
+      # default; rootful hosts set XDG_RUNTIME_DIR=/var/run. Long form so a wrong
+      # path fails `up` instead of docker creating an empty directory there,
+      # which leaves the core unable to start any stack ("Connection closed").
+      - type: bind
+        source: "${XDG_RUNTIME_DIR}/docker.sock"
+        target: /var/run/docker.sock
+        bind:
+          create_host_path: false
       # Workspace at an identical absolute path (path parity for nested run -v).
       - "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}"
       # Persist installed stack manifests + extracted skills across recreates.

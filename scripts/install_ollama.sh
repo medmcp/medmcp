@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-MIN_VERSION="0.20.7"
+MIN_VERSION="0.32.15"
 
 INSTALLED="$(ollama --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1)"
 if [ -n "$INSTALLED" ] && [ "$(printf '%s\n' "$MIN_VERSION" "$INSTALLED" | sort -V | head -1)" = "$MIN_VERSION" ]; then
@@ -21,17 +21,20 @@ TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 cd "$TMPDIR"
 
-wget -q --show-progress https://ollama.com/download/ollama-linux-amd64.tar.zst
+case "$(uname -m)" in
+    x86_64) ARCH="amd64" ;;
+    aarch64|arm64) ARCH="arm64" ;;
+    *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+wget -q --show-progress "https://ollama.com/download/ollama-linux-${ARCH}.tar.zst"
 mkdir -p "$HOME/ollama"
-tar --use-compress-program=unzstd -xf ollama-linux-amd64.tar.zst -C "$HOME/ollama"
+tar --use-compress-program=unzstd -xf "ollama-linux-${ARCH}.tar.zst" -C "$HOME/ollama"
 
 BASHRC="$HOME/.bashrc"
 LINE_PATH='export PATH="$HOME/ollama/bin:$PATH"'
-LINE_ENV='. "$HOME/.local/bin/env"'
 
 touch "$BASHRC"
 grep -qxF "$LINE_PATH" "$BASHRC" || echo "$LINE_PATH" >> "$BASHRC"
-grep -qxF "$LINE_ENV"  "$BASHRC" || echo "$LINE_ENV"  >> "$BASHRC"
 
 echo ""
 echo "Ollama installed to \$HOME/ollama/bin"

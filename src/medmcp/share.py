@@ -49,11 +49,11 @@ def export_workflow(name: str, *, workflows_root: Path | None = None) -> str:
 
     Raises ``FileNotFoundError`` if no workflow has that name.
     """
-    root = distill.resolve_root(workflows_root)
+    root = workflow.resolve_root(workflows_root)
     workflow_dir = workflow.workflow_dir(root, name)
     if workflow_dir is None:
         raise FileNotFoundError(f"no workflow named {name!r} in {root}")
-    recipe = distill.load_recipe(workflow_dir)
+    recipe = workflow.read_recipe(workflow_dir)
 
     # Tighten the pin: fill any missing digests now (the image may not have been
     # present when the workflow was distilled). Best-effort — never fails export.
@@ -96,9 +96,9 @@ def import_workflow(yaml_text: str, *, workflows_root: Path | None = None) -> Pa
     if not isinstance(env.get("steps"), list) or not env["steps"]:
         raise WorkflowShareError("workflow file has no steps")
 
-    root = distill.resolve_root(workflows_root)
+    root = workflow.resolve_root(workflows_root)
     recipe = workflow.Recipe.from_dict(env)
-    recipe.name = workflow.unique_name(root, distill.slugify(recipe.name), tag="imported")
+    recipe.name = workflow.unique_name(root, workflow.slugify(recipe.name), tag="imported")
     target = root / recipe.name
     workflow.write_recipe(target, recipe)
     return target

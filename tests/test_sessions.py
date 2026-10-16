@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-# pyright: reportPrivateUsage=false
 from medmcp import sessions
 
 

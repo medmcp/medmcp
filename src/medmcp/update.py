@@ -42,7 +42,8 @@ from typing import cast
 import httpx
 
 from medmcp.acp import JsonDict
-from medmcp.settings import VIBE_STATE_DIR, atomic_write_json
+from medmcp.settings import VIBE_STATE_DIR
+from medmcp.statefile import atomic_write_json, read_json
 
 log: logging.Logger = logging.getLogger("medmcp.update")
 
@@ -248,12 +249,8 @@ def _default_state() -> JsonDict:
 def load_state() -> JsonDict:
     """The persisted check state (defaults when absent or unreadable)."""
     state = _default_state()
-    if not UPDATE_STATE_PATH.exists():
-        return state
-    try:
-        data = cast("JsonDict", json.loads(UPDATE_STATE_PATH.read_text(encoding="utf-8")))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("could not read %s: %s", UPDATE_STATE_PATH, exc)
+    data = read_json(UPDATE_STATE_PATH)
+    if data is None:
         return state
     for key in state:
         if key in data:
@@ -343,12 +340,8 @@ def collect_updater_result() -> JsonDict | None:
     container itself is removed once its record is in, so ``docker ps -a``
     does not accumulate one per update.
     """
-    if not UPDATE_RESULT_PATH.exists():
-        return None
-    try:
-        result = cast("JsonDict", json.loads(UPDATE_RESULT_PATH.read_text(encoding="utf-8")))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("could not read %s: %s", UPDATE_RESULT_PATH, exc)
+    result = read_json(UPDATE_RESULT_PATH)
+    if result is None:
         return None
     state = load_state()
     state["last_result"] = result
@@ -872,39 +865,3 @@ def plan_error() -> PlanError | None:
         log.warning("update plan failed: %s", exc)
         return PlanError(f"Could not inspect this container: {exc}")
     return None
-
-
-__all__ = [
-    "ApplyPlan",
-    "PlanError",
-    "ReleaseInfo",
-    "UpdateNotApplicableError",
-    "ack_result",
-    "auto_check_enabled",
-    "check_due",
-    "check_enabled",
-    "collect_updater_result",
-    "compose_defaults",
-    "current_plan",
-    "dismiss",
-    "effective_version",
-    "fetch_latest_release",
-    "host_commands",
-    "is_newer",
-    "load_state",
-    "parse_release",
-    "parse_version",
-    "plan_apply",
-    "plan_error",
-    "rehearsal_release",
-    "rehearsal_target",
-    "run_check",
-    "run_rehearsal",
-    "save_state",
-    "set_auto_check",
-    "start_updater",
-    "status",
-    "updater_command",
-    "updater_pending",
-    "verify_pulled_image",
-]

@@ -10,9 +10,10 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-# pyright: reportPrivateUsage=false
 from medmcp import provenance, titles
 from medmcp.titles import TitleCadence, TitlePolicy, build_transcript, clean_title
+
+from .conftest import make_vibe_session
 
 JsonDict = dict[str, Any]
 
@@ -152,7 +153,6 @@ class TestGenerateTitle:
 
         return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
-    @pytest.mark.asyncio
     async def test_sends_transcript_and_returns_cleaned_title(self) -> None:
         """The request carries the transcript and the previous title; the answer is cleaned."""
         seen: list[JsonDict] = []
@@ -163,20 +163,18 @@ class TestGenerateTitle:
         assert title == "Skull-strip subject 12"
         assert len(seen) == 1
         request = seen[0]
-        assert request["stream"] is False and request["think"] is False
+        assert request["stream"] is False and request["think"] is True
         assert request["options"]["temperature"] == 0.0
         user = request["messages"][-1]["content"]
         assert user.startswith("Current title: Old name")
         assert "user: Skull strip subject 12's T1" in user
 
-    @pytest.mark.asyncio
     async def test_nothing_to_title_makes_no_request(self) -> None:
         """An empty transcript never reaches the model."""
         seen: list[JsonDict] = []
         assert await titles.generate_title([], client=self._client("x", seen)) is None
         assert seen == []
 
-    @pytest.mark.asyncio
     async def test_failures_are_swallowed(self) -> None:
         """A backend failure yields None — a title is a nicety, never an error."""
 
@@ -200,11 +198,9 @@ def test_enabled_env_switch(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_load_session_messages_reads_the_chain(tmp_path: Path) -> None:
     """Messages come from vibe's session dir (absent → empty, never an error)."""
-    logs = tmp_path / "logs" / "session"
-    sess = logs / f"session_20260901_{SESSION_ID[:8]}"
-    sess.mkdir(parents=True)
-    (sess / "meta.json").write_text(json.dumps({"session_id": SESSION_ID}))
-    (sess / "messages.jsonl").write_text(json.dumps({"role": "user", "content": "hi"}) + "\n")
+    make_vibe_session(
+        tmp_path, SESSION_ID, timestamp="20260901", messages=[{"role": "user", "content": "hi"}]
+    )
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         assert titles.load_session_messages(SESSION_ID) == [{"role": "user", "content": "hi"}]
         assert titles.load_session_messages("missing-id") == []

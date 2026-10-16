@@ -84,7 +84,7 @@ export interface SessionInfo {
   hasProvenance: boolean
 }
 
-/** One stack/workflow row plus the feature toggles, as served by /api/settings. */
+/** One installed stack, as served by /api/settings. */
 export interface StackInfo {
   name: string
   version?: string | null
@@ -271,7 +271,10 @@ export interface TodoItem {
 }
 
 /** Ordered chat transcript entries. Tool calls render as inline cards. */
-export type ChatItem =
+// `id` is the React key: rows are removed from the middle of the transcript
+// (a superseded plan card, a rewind), so an index key would remount — and
+// re-parse the markdown of — every row after the gap.
+export type ChatItem = { id: number } & (
   // messageId (replayed turns only) anchors per-turn actions like rewind.
   | { kind: 'user'; text: string; messageId?: string }
   | { kind: 'assistant'; text: string }
@@ -279,6 +282,7 @@ export type ChatItem =
   | { kind: 'error'; text: string }
   // A non-error note from the server (e.g. the turn stopped at the step limit).
   | { kind: 'notice'; text: string }
+)
 
 /** What a rewind would restore (preview) / did restore (perform). */
 export interface RewindResult {
@@ -332,6 +336,7 @@ export type ServerFrame =
       explanation?: string | null
       explaining?: boolean
       risks?: RiskTag[]
+      paths?: PathFinding[]
     }
   | {
       type: 'permission_update'

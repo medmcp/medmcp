@@ -8,6 +8,7 @@ import {
 } from '../api'
 import type { CatalogEntry, SettingsState } from '../types'
 import { XIcon } from './icons'
+import { Toggle } from './SettingsControls'
 
 interface StackMarketplaceProps {
   open: boolean
@@ -33,28 +34,6 @@ interface StackItem {
   /** Installed but absent from the catalog — a hand-installed image or a local
    *  uv-tool stack. Shown so the list is the whole truth, not just the catalogue. */
   offCatalog: boolean
-}
-
-function Toggle({
-  checked,
-  onChange,
-  disabled,
-}: {
-  checked: boolean
-  onChange: (value: boolean) => void
-  disabled?: boolean
-}) {
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      className={`toggle${checked ? ' on' : ''}`}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-    >
-      <span className="toggle-knob" />
-    </button>
-  )
 }
 
 /**
@@ -198,6 +177,14 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
     setProgress('Starting…')
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     const ws = new WebSocket(`${proto}://${location.host}/ws/stacks/install`)
+    let finished = false
+    const finish = () => {
+      finished = true
+      ws.close()
+      setBusy(false)
+      setInstallingImage(null)
+      setProgress(null)
+    }
     ws.onopen = () => ws.send(JSON.stringify({ image, accept_network: acceptNetwork }))
     ws.onmessage = (ev: MessageEvent<string>) => {
       const m = JSON.parse(ev.data) as {
@@ -211,10 +198,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
         setProgress(m.line ?? null)
         return
       }
-      ws.close()
-      setBusy(false)
-      setInstallingImage(null)
-      setProgress(null)
+      finish()
       if (m.type === 'needs_network_consent') {
         // The image asked for egress. Nothing is installed until the operator
         // has seen what that means and said yes.
@@ -231,10 +215,17 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
       }
     }
     ws.onerror = () => {
-      setBusy(false)
-      setInstallingImage(null)
-      setProgress(null)
+      if (finished) return
+      finish()
       setError('install connection failed')
+    }
+    ws.onclose = () => {
+      if (finished) return
+      // Closed without a final frame: the server went away mid-install. The
+      // install may still have completed there, so refetch rather than guess.
+      finish()
+      setError('The connection closed before the install finished.')
+      reload().catch(() => undefined)
     }
   }
 

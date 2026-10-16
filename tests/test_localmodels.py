@@ -368,14 +368,15 @@ async def test_a_cloud_model_wins_over_the_local_selection(
 
 async def test_helper_passes_follow_the_selection(ollama: FakeOllama) -> None:
     """Explanations and titles use the one model that is loaded."""
-    assert settings.local_helper_request() == {"model": "muse-medmcp", "think": False}
+    assert settings.local_helper_request(think=True) == {"model": "muse-medmcp", "think": True}
+    assert settings.local_helper_request(think=False) == {"model": "muse-medmcp", "think": False}
 
     await localmodels.select("mistral-small3.2")
-    assert settings.local_helper_request() == {"model": "medmcp-mistral-small3.2"}
+    assert settings.local_helper_request(think=True) == {"model": "medmcp-mistral-small3.2"}
 
     ollama.library["gemma4:31b"] = _info(capabilities=("completion", "tools", "thinking"))
     await localmodels.select("gemma4")
-    assert settings.local_helper_request() == {"model": "medmcp-gemma4", "think": False}
+    assert settings.local_helper_request(think=True) == {"model": "medmcp-gemma4", "think": True}
 
 
 def test_a_malformed_selection_falls_back_to_the_default(tmp_path: Path) -> None:

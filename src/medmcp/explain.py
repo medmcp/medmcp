@@ -107,13 +107,13 @@ async def generate_explanation(tc: JsonDict) -> tuple[str, list[str]] | None:
 
     try:
         async with httpx.AsyncClient(timeout=EXPLAIN_TIMEOUT) as client:
-            # Use the native Ollama /api/chat endpoint: the OpenAI-compatible
-            # endpoint ignores think:false, causing thinking models to emit output
-            # into "reasoning" only and leave "content" empty.
+            # Native Ollama /api/chat: it honours ``think`` and keeps any
+            # reasoning out of ``message.content``; the OpenAI-compatible
+            # endpoint does neither. Thinking off, see ``local_helper_request``.
             resp = await client.post(
                 f"{OLLAMA_BASE_URL}/api/chat",
                 json={
-                    **local_helper_request(),
+                    **local_helper_request(think=False),
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
                     "options": {"temperature": 0.2, "num_predict": 1024},

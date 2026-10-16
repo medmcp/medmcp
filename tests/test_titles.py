@@ -163,7 +163,7 @@ class TestGenerateTitle:
         assert title == "Skull-strip subject 12"
         assert len(seen) == 1
         request = seen[0]
-        assert request["stream"] is False and request["think"] is False
+        assert request["stream"] is False and request["think"] is True
         assert request["options"]["temperature"] == 0.0
         user = request["messages"][-1]["content"]
         assert user.startswith("Current title: Old name")

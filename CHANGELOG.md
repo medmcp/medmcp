@@ -18,6 +18,8 @@ Notable, user-visible changes to MedMCP. Format follows
 - Backend pool: a stack backend that stops answering pings is replaced, not handed back.
 - LLM shim: a 4xx from Ollama is passed through at once instead of being retried.
 - Workflow requirements: the installed-image digest is resolved correctly for a registry with a port (`localhost:5000/...`).
+- Chat titles: the title call leaves the model's thinking on. Forced off, Muse spent the whole token budget on discarded reasoning and answered nothing, so chats kept the first-prompt preview as their name.
+- Workflows: distilling a chat that has no title yet names the chat (and the workflow) first, instead of using the opening request.
 
 ## 0.4.2 — 2026-10-13
 

@@ -1375,20 +1375,26 @@ def local_model_name() -> str:
     return str(selected["model"]) if selected else OLLAMA_MODEL
 
 
-def local_helper_request() -> JsonDict:
+def local_helper_request(*, think: bool) -> JsonDict:
     """The ``model`` and ``think`` fields of a native ``/api/chat`` helper call.
 
-    The helper passes want a direct answer, so thinking is switched off — but
-    only for a model that has it: the field is left out for one that does not,
-    since there is nothing to switch off and no reason to find out how each
-    Ollama version treats the request.
+    Each helper chooses *think* for its own prompt, because Muse Glimmer behaves
+    differently per prompt shape (measured live, 2026-10-16): a chat title off a
+    26-message transcript needs thinking **on** — forced off, the model reasons
+    at length anyway, Ollama discards that text and it still counts against
+    ``num_predict`` (768 tokens gone, empty content, ``done_reason: length``),
+    while with it on the answer costs 350 tokens; a tool-call explanation (short
+    prompt, one JSON object) is the reverse — 242 tokens in 6 s with thinking
+    off, 969 tokens in 21 s with it on. The field is omitted for a model without
+    thinking (Ollama rejects ``think`` for such a model). The helpers read
+    ``message.content`` only.
     """
     selected = load_local_model()
     if selected is None:
-        return {"model": OLLAMA_MODEL, "think": False}
+        return {"model": OLLAMA_MODEL, "think": think}
     if selected["thinking"] == "off":
         return {"model": selected["model"]}
-    return {"model": selected["model"], "think": False}
+    return {"model": selected["model"], "think": think}
 
 
 def active_model_name() -> str:

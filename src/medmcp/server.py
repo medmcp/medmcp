@@ -1347,15 +1347,40 @@ class DistillPayload(BaseModel):
     session_id: str
 
 
+async def _chat_title_for_distill(sid: str) -> str:
+    """The chat's name for the workflow distilled from it, generated now if it has none.
+
+    A workflow should be named after what the chat did, not after its opening
+    words. A title made here is stored and pushed like a scheduled one, so the
+    chat gets the same name; with no usable answer the caller falls back to the
+    opening request.
+    """
+    title = await asyncio.to_thread(sessions.chat_title, sid)
+    if title or not titles.enabled():
+        return title or ""
+    messages = await asyncio.to_thread(
+        lambda: titles.load_session_messages(sid, stop_ids=_chain_stop_ids(sid))
+    )
+    generated = await titles.generate_title(messages)
+    if not generated:
+        return ""
+    await asyncio.to_thread(sessions.set_auto_title, sid, generated)
+    for conn in list(_connections):
+        if conn.canonical_id == sid:
+            await conn.send_title(generated)
+    return generated
+
+
 @app.post("/api/workflows/distill")
 async def post_distill(payload: DistillPayload) -> JsonDict:
     """Distill a chat session into a workflow, named after the chat, and return its detail."""
     sid = payload.session_id
+    name_hint = await _chat_title_for_distill(sid)
     try:
         target = await asyncio.to_thread(
             lambda: distill.distill_session(
                 sid,
-                name_hint=sessions.chat_title(sid) or "",
+                name_hint=name_hint,
                 chain_stop_ids=_chain_stop_ids(sid),
             )
         )
@@ -2335,6 +2360,14 @@ class _ChatConnection:
         self._title_tasks.add(task)
         task.add_done_callback(self._title_tasks.discard)
 
+    async def send_title(self, title: str) -> None:
+        """Push a generated title to the browser and write it through to vibe (best-effort)."""
+        await self._send({"type": "title", "title": title})
+        with contextlib.suppress(Exception):
+            await _client.request(
+                "_session/set_title", {"sessionId": self.session_id, "title": title}
+            )
+
     async def _refresh_title(self, ticket: titles.TitleTicket) -> None:
         """Generate a title from the transcript and push it if it changed.
 
@@ -2373,11 +2406,7 @@ class _ChatConnection:
             changed = await asyncio.to_thread(sessions.set_auto_title, cid, title)
             if not changed:
                 return
-            await self._send({"type": "title", "title": title})
-            with contextlib.suppress(Exception):
-                await _client.request(
-                    "_session/set_title", {"sessionId": self.session_id, "title": title}
-                )
+            await self.send_title(title)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -3105,6 +3134,12 @@ def main() -> None:
     so the published port is reachable — the no-auth posture is preserved by
     publishing the port only to the host's loopback (``127.0.0.1:8100:8100``).
     """
+    # The medmcp.* loggers (title and explanation outcomes, settings warnings)
+    # are otherwise dropped at the root logger's default WARNING level; uvicorn
+    # keeps its own handlers, and the audit logger does not propagate.
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s", force=True
+    )
     WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
     host = os.environ.get("MEDMCP_WORKSPACE_HOST", "127.0.0.1")
     port = int(os.environ.get("MEDMCP_WORKSPACE_PORT", str(DEFAULT_PORT)))

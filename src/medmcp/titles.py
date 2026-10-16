@@ -98,11 +98,9 @@ class TitlePolicy:
     max_message_chars: int = 2000
     max_tool_result_chars: int = 400
     # Request budget and generation cap for the background call. The cap
-    # covers the model's hidden reasoning too: with thinking off, Ollama drops
-    # the reasoning tokens Muse Glimmer emits before its answer, and a title
-    # measured live costs 110-430 of them (most when weighing a previous title
-    # against a changed subject) — a cap sized for the title alone returns
-    # empty content with done_reason "length". Only what is used is paid for.
+    # covers the model's reasoning too (see ``settings.local_helper_request``):
+    # with thinking on, a title off a real 26-message chat measured 350 tokens
+    # in total, so 768 leaves headroom. Only what is used is paid for.
     timeout_seconds: float = 30.0
     max_tokens: int = 768
     # Result shaping: hard length cap and answers treated as "nothing usable".
@@ -282,10 +280,10 @@ async def generate_title(
     if not transcript:
         return None
     payload: JsonDict = {
-        # Native /api/chat like explain.py: the OpenAI-compatible endpoint
-        # ignores think:false and a thinking model then answers in "reasoning"
-        # only. Deterministic — a title should not wander between refreshes.
-        **local_helper_request(),
+        # Native /api/chat like explain.py, which keeps the model's reasoning
+        # out of ``content``; thinking on, see ``local_helper_request``.
+        # Deterministic — a title should not wander between refreshes.
+        **local_helper_request(think=True),
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": _user_prompt(transcript, previous_title)},

@@ -317,16 +317,16 @@ class BackendPool:
         died while idle is transparently replaced. Concurrent ``ensure`` calls for
         the same name are serialized so the server is started only once.
         """
-        existing = self._backends.get(name)
-        if existing is not None and existing.alive and await existing.healthy():
-            return existing
+        probed = self._backends.get(name)
+        if probed is not None and probed.alive and await probed.healthy():
+            return probed
 
         async with self._name_lock(name):
-            existing = self._backends.get(name)
-            if existing is not None and existing.alive:
-                return existing
-            if existing is not None:
-                await self._drop(name)  # dead — make way for a fresh one
+            current = self._backends.get(name)
+            if current is not None and current.alive and current is not probed:
+                return current  # another ensure replaced it while we waited
+            if current is not None:
+                await self._drop(name)  # dead, or hung (failed its ping) — make way
 
             spec = self._resolve(name)
             if spec is None:

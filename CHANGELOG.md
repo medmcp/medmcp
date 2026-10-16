@@ -11,6 +11,13 @@ Notable, user-visible changes to MedMCP. Format follows
 - Approval dialog: the path checks (input exists / output folder exists / would overwrite) are shown again; the browser had been dropping them.
 - Explorer: Analyze `.hdr`/`.img` and `.v16` volumes get the volume icon, matching what the viewer opens.
 - `scripts/install_ollama.sh`: requires Ollama ≥ 0.32.15 (the version the model needs) and installs the arm64 build on arm64 hosts.
+- Tool stacks and Update windows: a connection that closes mid-install or mid-update now reports it instead of staying busy with a disabled Close button.
+- Settings: a change the server rejects snaps the switch back instead of showing the refused state with the error.
+- Explorer: New folder names the folder inline in the tree (no browser prompt).
+- Chat: removing a superseded plan card no longer re-renders every later message.
+- Backend pool: a stack backend that stops answering pings is replaced, not handed back.
+- LLM shim: a 4xx from Ollama is passed through at once instead of being retried.
+- Workflow requirements: the installed-image digest is resolved correctly for a registry with a port (`localhost:5000/...`).
 
 ## 0.4.2 — 2026-10-13
 

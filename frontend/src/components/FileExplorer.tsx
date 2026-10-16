@@ -3,7 +3,7 @@ import { useConfirm } from '../confirm'
 import { createPortal } from 'react-dom'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { Tree } from 'react-arborist'
-import type { NodeApi, NodeRendererProps } from 'react-arborist'
+import type { NodeApi, NodeRendererProps, TreeApi } from 'react-arborist'
 import { deletePath, fetchTree, mkdir, renamePath, uploadFile } from '../api'
 import { setDraggedFilePath } from '../dragState'
 import { classify } from '../fileKinds'
@@ -142,6 +142,20 @@ function removeFromTree(nodes: TreeNode[], ids: Set<string>): TreeNode[] {
     .map((n) => (n.children ? { ...n, children: removeFromTree(n.children, ids) } : n))
 }
 
+function insertIntoTree(nodes: TreeNode[], parentId: string, node: TreeNode): TreeNode[] {
+  if (!parentId) return [node, ...nodes]
+  return nodes.map((n) =>
+    n.id === parentId
+      ? { ...n, children: [node, ...(n.children ?? [])] }
+      : n.children
+        ? { ...n, children: insertIntoTree(n.children, parentId, node) }
+        : n,
+  )
+}
+
+/** The row a new folder is named in before it exists; never a real path. */
+const NEW_FOLDER_ID = '\u0000new-folder'
+
 /** Workspace file tree with open/rename/move/delete/upload. */
 // Memoized so a separator drag — which re-renders the panel content every frame
 // via react-resizable-panels — doesn't re-run react-arborist's tree on each
@@ -161,6 +175,8 @@ export const FileExplorer = memo(function FileExplorer({
   const containerRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const treeRef = useRef<TreeApi<TreeNode> | null>(null)
+  const newFolderParent = useRef('')
   // Read inside the mount-once observer effect without re-subscribing.
   const isResizingRef = useRef(isResizing)
   useEffect(() => {
@@ -238,6 +254,23 @@ export const FileExplorer = memo(function FileExplorer({
   // Delete one or more paths: drop them from the tree immediately so they vanish
   // without waiting on a full refetch, fire the deletes together, then reconcile
   // with a single reload (which also restores anything whose delete failed).
+  // A new folder is named inline, like a rename: a placeholder row goes into the
+  // tree and opens in edit mode; onRename creates the folder (or drops the row).
+  const startNewFolder = (parentId: string) => {
+    const placeholder: TreeNode = { id: NEW_FOLDER_ID, name: '', children: [] }
+    newFolderParent.current = parentId
+    setData((d) => insertIntoTree(removeFromTree(d, new Set([NEW_FOLDER_ID])), parentId, placeholder))
+    // The row exists only after the re-render; arborist's own create() defers the same way.
+    setTimeout(() => {
+      const tree = treeRef.current
+      if (!tree) return
+      if (parentId) tree.open(parentId)
+      void tree.edit(NEW_FOLDER_ID).then((res) => {
+        if (res.cancelled) setData((d) => removeFromTree(d, new Set([NEW_FOLDER_ID])))
+      })
+    })
+  }
+
   const deleteMany = (ids: string[]) => {
     if (ids.length === 0) return
     const idSet = new Set(ids)
@@ -300,10 +333,7 @@ export const FileExplorer = memo(function FileExplorer({
           <button
             className="btn-icon"
             aria-label="New folder"
-            onClick={() => {
-              const name = window.prompt('New folder name')
-              if (name) run(mkdir(name))
-            }}
+            onClick={() => startNewFolder('')}
           >
             <FolderPlusIcon />
           </button>
@@ -335,6 +365,7 @@ export const FileExplorer = memo(function FileExplorer({
           </div>
         )}
         <Tree<TreeNode>
+          ref={treeRef}
           data={data}
           width={size.width}
           height={size.height}
@@ -346,6 +377,11 @@ export const FileExplorer = memo(function FileExplorer({
             onSelectionChange?.(nodes.filter((n) => n.isLeaf).map((n) => n.data.id))
           }
           onRename={({ node, name }) => {
+            if (node.data.id === NEW_FOLDER_ID) {
+              setData((d) => removeFromTree(d, new Set([NEW_FOLDER_ID])))
+              if (name.trim()) run(mkdir(joinPath(newFolderParent.current, name.trim())))
+              return
+            }
             run(renamePath(node.data.id, joinPath(parentDir(node.data.id), name)))
           }}
           onMove={({ dragNodes, parentNode }) => {
@@ -379,10 +415,10 @@ export const FileExplorer = memo(function FileExplorer({
               <button onClick={menuAction(() => onOpenFile(menu.node.data.id))}>Open</button>
             ) : (
               <button
-                onClick={menuAction(() => {
-                  const name = window.prompt('New folder name')
-                  if (name) run(mkdir(joinPath(menu.node.data.id, name)))
-                })}
+                onClick={() => {
+                  setMenu(null)
+                  startNewFolder(menu.node.data.id)
+                }}
               >
                 New folder inside
               </button>

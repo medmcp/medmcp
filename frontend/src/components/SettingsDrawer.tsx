@@ -135,6 +135,7 @@ export function SettingsDrawer({
   }, [open, cloudVersion])
 
   const apply = (next: SettingsState) => {
+    const before = state
     setState(next)
     setSaving(true)
     saveSettings(next)
@@ -142,7 +143,10 @@ export function SettingsDrawer({
         setError(null)
         setNotice(restarted ? 'Agent restarted.' : null)
       })
-      .catch((e: unknown) => setError(String(e)))
+      .catch((e: unknown) => {
+        setError(String(e))
+        setState(before) // the switch must not show a state the server refused
+      })
       .finally(() => setSaving(false))
   }
 

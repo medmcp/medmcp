@@ -307,3 +307,47 @@ async def test_live_relay_reports_failure_after_every_attempt_truncates_invisibl
     out = await _collect("live", [truncated, truncated], attempts=2)
     assert "medmcp-shim-error" in out
     assert out.endswith("data: [DONE]\n\n")
+
+
+def _rejecting_client(status: int) -> tuple[httpx.AsyncClient, list[int]]:
+    """An upstream that answers every request with *status*; returns the request log."""
+    seen: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(status)
+        return httpx.Response(status, json={"error": {"message": "bad request"}})
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler)), seen
+
+
+async def test_client_error_is_passed_through_once() -> None:
+    """A 400 is the upstream rejecting the request: no retries, the body passed through."""
+    client, seen = _rejecting_client(400)
+    async with client:
+        resp = await llmshim._complete_with_retry(
+            "http://upstream/v1/chat/completions", {"model": "m"}, {}, 3, client=client
+        )
+    assert resp.status_code == 400
+    assert len(seen) == 1
+
+
+async def test_client_error_ends_a_stream_after_one_attempt() -> None:
+    """The streamed path cannot change its status code; it reports the 4xx in-band, once."""
+    client, seen = _rejecting_client(400)
+    async with client:
+        chunks = [
+            chunk
+            async for chunk in llmshim._stream_with_retry(
+                "http://upstream/v1/chat/completions",
+                {"model": "m", "stream": True},
+                {},
+                3,
+                "m",
+                relay="live",
+                client=client,
+            )
+        ]
+    out = b"".join(chunks).decode()
+    assert len(seen) == 1
+    assert "medmcp-shim-error" in out
+    assert "HTTP 400" in out

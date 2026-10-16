@@ -6,6 +6,7 @@ real images or daemon are needed.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import tomllib
 from collections.abc import Callable, Iterator
@@ -515,3 +516,21 @@ class TestImageArchitecture:
             patch("medmcp.settings._run_docker", self._fake_docker_arch("")),
         ):
             settings.check_image_arch("img:tag")  # must not raise
+
+
+def test_resolve_image_digest_matches_a_registry_with_a_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``localhost:5000/x`` has a port colon, not a tag colon; the repo must still match."""
+    want = "sha256:" + "b" * 64
+    digests = ["ghcr.io/other/x@sha256:" + "a" * 64, f"localhost:5000/medmcp-neuro@{want}"]
+
+    def inspect(args: list[str], *, timeout: float = 0) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, json.dumps(digests), "")
+
+    def present(_image: str) -> bool:
+        return True
+
+    monkeypatch.setattr(settings, "_image_present", present)
+    monkeypatch.setattr(settings, "_run_docker", inspect)
+    assert settings.resolve_image_digest("localhost:5000/medmcp-neuro") == want

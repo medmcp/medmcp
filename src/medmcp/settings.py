@@ -1674,7 +1674,7 @@ def resolve_image_digest(image: str) -> str | None:
         return None
     if not isinstance(repo_digests, list):
         return None
-    repo = image.split("@", 1)[0].rsplit(":", 1)[0]
+    repo = signing.split_reference(image)[0]
     digests = [
         rd for rd in cast("list[Any]", repo_digests) if isinstance(rd, str) and "@sha256:" in rd
     ]

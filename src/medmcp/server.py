@@ -785,6 +785,7 @@ async def post_stack_install(payload: StackInstallPayload) -> JsonDict:
     await asyncio.to_thread(_apply_stack_change)
     _audit.info("stack installed: %s (%s)", name, payload.image)
     await _restart_vibe()
+    await _apply_pool_changes({name}, set())
     return {"name": name, "restarted": True}
 
 
@@ -800,6 +801,7 @@ async def post_stack_uninstall(payload: StackUninstallPayload) -> JsonDict:
     await asyncio.to_thread(_apply_stack_change)
     _audit.info("stack uninstalled: %s", payload.name)
     await _restart_vibe()
+    await _apply_pool_changes(set(), {payload.name})
     return {"ok": True, "restarted": True}
 
 
@@ -841,6 +843,7 @@ async def ws_stack_install(ws: WebSocket) -> None:
             await asyncio.to_thread(_apply_stack_change)
             _audit.info("stack installed: %s (%s)", name, image)
             await _restart_vibe()
+            await _apply_pool_changes({name}, set())
             await queue.put({"type": "done", "name": name})
         except settings.NetworkConsentRequiredError as exc:
             await queue.put({"type": "needs_network_consent", "name": exc.name, "image": exc.image})

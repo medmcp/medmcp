@@ -136,3 +136,23 @@ async def test_ensure_unknown_stack_raises() -> None:
             await pool.ensure("nope")
     finally:
         await pool.aclose()
+
+
+async def test_ensure_replaces_a_backend_that_fails_its_ping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hung backend (process up, ping unanswered) is replaced like a dead one."""
+    pool = BackendPool(resolve_spec=resolver({"fake": fake_spec("fake")}))
+    try:
+        first = await pool.ensure("fake")
+
+        async def unanswered(self: Backend) -> bool:
+            return False
+
+        monkeypatch.setattr(Backend, "healthy", unanswered)
+        second = await pool.ensure("fake")
+        assert second is not first
+        assert not first.alive
+        assert second.alive
+    finally:
+        await pool.aclose()

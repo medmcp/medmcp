@@ -382,13 +382,34 @@ def create_app(
 
 
 async def _complete_with_retry(
-    url: str, payload: JsonDict, inverse: Mapping[str, str], attempts: int
+    url: str,
+    payload: JsonDict,
+    inverse: Mapping[str, str],
+    attempts: int,
+    *,
+    client: httpx.AsyncClient | None = None,
 ) -> Response:
-    """Run a non-streaming completion, retrying parse failures and empty turns."""
+    """Run a non-streaming completion, retrying parse failures and empty turns.
+
+    A 4xx is the upstream rejecting the request itself; it is passed through at
+    once, since re-sending the same request can only produce the same answer.
+    ``client`` lets tests inject a transport.
+    """
     detail = "unknown error"
-    async with httpx.AsyncClient(timeout=httpx.Timeout(900.0)) as client:
+    async with (
+        httpx.AsyncClient(timeout=httpx.Timeout(900.0))
+        if client is None
+        else contextlib.nullcontext(client)
+    ) as client:
         for attempt in range(1, attempts + 1):
             resp = await client.post(url, json=payload)
+            if 400 <= resp.status_code < 500:
+                log.warning("shim: upstream %s — a client error, not retried", resp.status_code)
+                return Response(
+                    content=resp.content,
+                    status_code=resp.status_code,
+                    media_type=resp.headers.get("content-type"),
+                )
             if resp.status_code != 200:
                 detail = resp.text[:200]
                 log.warning(
@@ -467,6 +488,9 @@ async def _stream_with_retry(
                     if resp.status_code != 200:
                         await resp.aread()
                         detail = f"HTTP {resp.status_code}"
+                        if 400 <= resp.status_code < 500:
+                            log.warning("shim: upstream %s — a client error, not retried", detail)
+                            break
                         log.warning(
                             "shim: upstream %s on stream attempt %d/%d",
                             resp.status_code,

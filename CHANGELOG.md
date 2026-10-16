@@ -4,6 +4,12 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Added
+
+- Viewer: CSV and TSV files open as a sortable table, XLSX spreadsheets with one tab per sheet, Markdown as a rendered document, JSON as a collapsible tree; other text files get line numbers, and a file of unknown type is shown as text when its bytes are text. Chat result chips offer View for these too.
+
 ## 0.4.3 — 2026-10-16
 
 ### Fixed

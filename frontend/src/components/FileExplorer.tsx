@@ -16,6 +16,7 @@ import {
   FolderPlusIcon,
   ImageIcon,
   LayersIcon,
+  TableIcon,
   RefreshIcon,
   UploadIcon,
 } from './icons'
@@ -44,7 +45,12 @@ function FileTypeIcon({ name }: { name: string }) {
     case 'volume':
     case 'dicom':
       return <LayersIcon />
+    case 'table':
+    case 'sheet':
+      return <TableIcon />
     case 'pdf':
+    case 'markdown':
+    case 'json':
     case 'text':
       return <FileTextIcon />
     case 'image':

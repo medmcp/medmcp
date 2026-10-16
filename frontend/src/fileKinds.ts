@@ -9,8 +9,24 @@ export const VOLUME_EXT = /\.(nii|nii\.gz|mgz|mgh|nrrd|nhdr|mha|mhd|hdr|img|v16)
 export const DICOM_EXT = /\.(dcm|dicom)$/
 export const IMAGE_EXT = /\.(png|jpe?g|gif|svg|webp|bmp)$/
 export const TEXT_EXT = /\.(md|txt|py|json|yaml|yml|toml|csv|tsv|log|sh|js|ts|html|css|xml)$/
+// Rendered as data rather than as text: a table, a spreadsheet, a document, a tree.
+const TABLE_EXT = /\.(csv|tsv)$/
+const SHEET_EXT = /\.xlsx$/
+const MARKDOWN_EXT = /\.(md|markdown)$/
+const JSON_EXT = /\.json$/
 
-export type FileKind = 'volume' | 'dicom' | 'pdf' | 'html' | 'image' | 'text' | 'other'
+export type FileKind =
+  | 'volume'
+  | 'dicom'
+  | 'pdf'
+  | 'html'
+  | 'image'
+  | 'table'
+  | 'sheet'
+  | 'markdown'
+  | 'json'
+  | 'text'
+  | 'other'
 
 export function classify(path: string): FileKind {
   const lower = path.toLowerCase()
@@ -20,6 +36,10 @@ export function classify(path: string): FileKind {
   // Render HTML (e.g. QC reports) rather than showing source — checked before
   // TEXT_EXT, which also matches .html.
   if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'html'
+  if (TABLE_EXT.test(lower)) return 'table'
+  if (SHEET_EXT.test(lower)) return 'sheet'
+  if (MARKDOWN_EXT.test(lower)) return 'markdown'
+  if (JSON_EXT.test(lower)) return 'json'
   if (IMAGE_EXT.test(lower)) return 'image'
   if (TEXT_EXT.test(lower)) return 'text'
   return 'other'
@@ -31,14 +51,15 @@ export function isVolumePath(path: string | null | undefined): path is string {
 
 /** Kinds the viewer renders with something better than a download link. */
 export function isViewable(kind: FileKind): boolean {
-  return kind === 'volume' || kind === 'image' || kind === 'pdf' || kind === 'html'
+  return kind !== 'dicom' && kind !== 'text' && kind !== 'other'
 }
 
 // Extensions offered as chips: the volume and image lists above (minus the
 // paired Analyze `.hdr`/`.img` and `.v16`, which a tool result rarely names and
-// which need their sibling file), plus pdf and html. Must end the token: a
-// following word or `.word` (`x.nii.gz.bak`) means it is not the extension.
-const VIEWABLE_EXT = String.raw`\.(?:nii(?:\.gz)?|mgz|mgh|nrrd|nhdr|mha|mhd|png|jpe?g|gif|svg|webp|bmp|pdf|html?)(?!\w|\.\w)`
+// which need their sibling file), plus pdf, html and the data files. Must end
+// the token: a following word or `.word` (`x.nii.gz.bak`) means it is not the
+// extension.
+const VIEWABLE_EXT = String.raw`\.(?:nii(?:\.gz)?|mgz|mgh|nrrd|nhdr|mha|mhd|png|jpe?g|gif|svg|webp|bmp|pdf|html?|csv|tsv|xlsx|md|json)(?!\w|\.\w)`
 
 // A path inside a JSON/quoted string: may contain spaces, ends at the quote.
 const QUOTED_PATH = new RegExp(String.raw`"([^"\n]*?${VIEWABLE_EXT})"`, 'giu')

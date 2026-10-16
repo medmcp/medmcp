@@ -40,6 +40,7 @@ import {
   type OverlayKind,
   type OverlayState,
 } from './viewerData'
+import { DataFileView } from './DataFileView'
 import { ViewerSettingsPanel } from './ViewerSettings'
 
 
@@ -1522,21 +1523,6 @@ function WindowPopover({
   )
 }
 
-function TextView({ url }: { url: string }) {
-  const [text, setText] = useState<string>('loading…')
-  useEffect(() => {
-    fetch(url)
-      .then((r) => {
-        // Without this, a 404's JSON body would render as the file's content.
-        if (!r.ok) throw new Error(`could not load file (HTTP ${r.status})`)
-        return r.text()
-      })
-      .then((t) => setText(t.length > 200_000 ? t.slice(0, 200_000) + '\n… (truncated)' : t))
-      .catch((e: unknown) => setText(String(e)))
-  }, [url])
-  return <pre className="text-view">{text}</pre>
-}
-
 /** Routes the selected file to the right renderer (volume / PDF / image / text). */
 // Memoized so a separator drag doesn't re-render the viewer (and its WebGL/React
 // subtree) every frame; props from App are stable except when the open file
@@ -1699,15 +1685,12 @@ export const Viewer = memo(function Viewer({
           <iframe className="html-frame" src={url} title={path} sandbox="allow-scripts" />
         )}
         {kind === 'image' && <img className="image-view" src={url} alt={path} />}
-        {kind === 'text' && <TextView key={url} url={url} />}
-        {kind === 'other' && (
-          <div className="viewer-message">
-            No viewer for this file type.{' '}
-            <a href={url} download>
-              Download {path}
-            </a>
-          </div>
-        )}
+        {(kind === 'table' ||
+          kind === 'sheet' ||
+          kind === 'markdown' ||
+          kind === 'json' ||
+          kind === 'text' ||
+          kind === 'other') && <DataFileView key={url} url={url} path={path} kind={kind} />}
       </div>
     </div>
   )

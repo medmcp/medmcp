@@ -159,7 +159,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | estree-util-is-identifier-name | 3.0.0 | MIT |
 | extend | 3.0.2 | MIT |
 | fast-deep-equal | 3.1.3 | MIT |
-| fflate | 0.8.3 | MIT |
+| fflate | 0.8.2 | MIT |
 | gl-matrix | 3.4.4 | MIT |
 | hast-util-from-dom | 5.0.1 | ISC |
 | hast-util-from-html | 2.0.3 | MIT |

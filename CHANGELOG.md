@@ -4,24 +4,22 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
-## Unreleased
+## 0.4.3 — 2026-10-16
 
 ### Fixed
 
-- Approval dialog: the path checks (input exists / output folder exists / would overwrite) are shown again; the browser had been dropping them.
-- Explorer: Analyze `.hdr`/`.img` and `.v16` volumes get the volume icon, matching what the viewer opens.
-- `scripts/install_ollama.sh`: requires Ollama ≥ 0.32.15 (the version the model needs) and installs the arm64 build on arm64 hosts.
-- Tool stacks and Update windows: a connection that closes mid-install or mid-update now reports it instead of staying busy with a disabled Close button.
-- Settings: a change the server rejects snaps the switch back instead of showing the refused state with the error.
-- Explorer: New folder names the folder inline in the tree (no browser prompt).
-- Chat: removing a superseded plan card no longer re-renders every later message.
-- Backend pool: a stack backend that stops answering pings is replaced, not handed back.
-- LLM shim: a 4xx from Ollama is passed through at once instead of being retried.
-- Workflow requirements: the installed-image digest is resolved correctly for a registry with a port (`localhost:5000/...`).
-- Chat titles: the title call leaves the model's thinking on. Forced off, Muse spent the whole token budget on discarded reasoning and answered nothing, so chats kept the first-prompt preview as their name.
-- Workflows: distilling a chat that has no title yet names the chat (and the workflow) first, instead of using the opening request.
-- Compose: a wrong docker socket path fails `up` instead of leaving an empty directory behind that stops every stack from starting.
-- Explorer: a drive mounted inside the workspace, or a folder holding one, can no longer be deleted or moved.
+- Chat: generated titles work again; chats no longer keep the first prompt as their name.
+- Workflows: distilling a chat without a title names it first, so the workflow is named after the task.
+- Approval dialog: the path checks (input exists, output folder exists, would overwrite) are shown again.
+- Tool stacks and Update windows: a connection dropped mid-install or mid-update is reported instead of leaving the window busy.
+- Settings: a change the server rejects snaps the switch back.
+- Explorer: New folder names the folder inline in the tree.
+- Explorer: Analyze `.hdr`/`.img` and `.v16` volumes get the volume icon.
+- Explorer: a drive mounted inside the workspace, or a folder holding one, cannot be deleted or moved.
+- Compose: a wrong docker socket path fails `up` instead of silently breaking every stack.
+- Workflow requirements: the installed-image digest resolves for a registry with a port.
+- LLM shim: a 4xx from Ollama is passed through instead of retried.
+- `scripts/install_ollama.sh`: requires Ollama ≥ 0.32.15 and supports arm64.
 
 ## 0.4.2 — 2026-10-13
 

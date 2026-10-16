@@ -96,6 +96,48 @@ class TestSafePath:
         assert "escapes" in str(exc.value.detail)
 
 
+class TestMountPointGuard:
+    """A mounted drive inside the workspace, or a folder holding one, cannot be removed."""
+
+    @pytest.fixture
+    def drive(self, workspace_root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """A workspace whose ``usb`` folder counts as a bind mount (invisible to ismount)."""
+        drive = workspace_root / "study" / "usb"
+        (drive / "series0").mkdir(parents=True)
+        (drive / "series0" / "img0.dcm").write_bytes(b"x")
+        monkeypatch.setattr(server, "_mount_points", lambda: {Path("/"), drive})
+        return drive
+
+    def test_mount_point_cannot_be_deleted_or_moved(self, drive: Path, client: TestClient) -> None:
+        """Deleting the mount point would empty the drive behind it."""
+        assert client.delete("/api/files", params={"path": "study/usb"}).status_code == 400
+        resp = client.post("/api/files/rename", json={"path": "study/usb", "new_path": "x"})
+        assert resp.status_code == 400
+        assert (drive / "series0" / "img0.dcm").exists()
+
+    def test_folder_holding_a_mount_cannot_be_deleted(
+        self, drive: Path, client: TestClient
+    ) -> None:
+        """Deleting a parent would empty the drive below it before failing."""
+        assert client.delete("/api/files", params={"path": "study"}).status_code == 400
+        assert (drive / "series0" / "img0.dcm").exists()
+
+    def test_files_on_the_drive_can_still_be_deleted(self, drive: Path, client: TestClient) -> None:
+        """Only the mount point itself is protected."""
+        assert client.delete("/api/files", params={"path": "study/usb/series0"}).status_code == 200
+        assert not (drive / "series0").exists()
+
+    def test_mount_table_is_read(self) -> None:
+        """The real mount table parses and includes the root filesystem."""
+        assert Path("/") in server._mount_points()
+
+    def test_mount_paths_are_decoded_as_bytes(self) -> None:
+        """Octal escapes become the bytes they stand for; non-ASCII bytes stay as written."""
+        assert server._unescape_mount_path(rb"/media/u/My\040Disk") == Path("/media/u/My Disk")
+        assert server._unescape_mount_path(b"/media/u/K\xc3\xbcche") == Path("/media/u/Küche")
+        assert server._unescape_mount_path(rb"/media/u/a\134b") == Path("/media/u/a\\b")
+
+
 # ── _resolve_input_path: workspace-relative replay inputs → absolute ──────────
 
 

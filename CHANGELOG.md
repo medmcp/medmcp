@@ -20,6 +20,8 @@ Notable, user-visible changes to MedMCP. Format follows
 - Workflow requirements: the installed-image digest is resolved correctly for a registry with a port (`localhost:5000/...`).
 - Chat titles: the title call leaves the model's thinking on. Forced off, Muse spent the whole token budget on discarded reasoning and answered nothing, so chats kept the first-prompt preview as their name.
 - Workflows: distilling a chat that has no title yet names the chat (and the workflow) first, instead of using the opening request.
+- Compose: a wrong docker socket path fails `up` instead of leaving an empty directory behind that stops every stack from starting.
+- Explorer: a drive mounted inside the workspace, or a folder holding one, can no longer be deleted or moved.
 
 ## 0.4.2 — 2026-10-13
 

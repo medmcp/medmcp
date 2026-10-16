@@ -32,6 +32,7 @@ Then open **http://localhost:8100**.
 - **Stop:** `docker compose -f oci://ghcr.io/medmcp/compose:latest down`
 - **Update:** click *Update now* when the workspace announces a new release, or re-run the start command with `--pull always`.
 - **Pin a version:** replace `latest` with a release tag such as `v0.3.0`. Release tags are never moved.
+- **Data on another drive:** bind-mount it into the workspace on the host (`sudo mount --bind /media/$USER/DISK "$MEDMCP_WORKSPACE/DISK"`). It then shows in the explorer and every tool can read it, and the workspace stays the one place provenance and replay record.
 
 To build from source or run without Docker, see **[CONTRIBUTING.md](CONTRIBUTING.md)**. For a quick impression, watch the **[launch trailer](https://www.youtube.com/watch?v=wvc-MAnzHVA)**.
 

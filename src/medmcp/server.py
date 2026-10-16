@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import shutil
 import time
 from collections.abc import AsyncGenerator, Coroutine
@@ -363,6 +364,52 @@ async def get_raw(rel_path: str) -> FileResponse:
     return FileResponse(path)
 
 
+# The kernel writes a mount path's space, tab, newline and backslash as octal
+# escapes (\040, \011, \012, \134); every other byte, non-ASCII included, raw.
+_MOUNTINFO_ESCAPE = re.compile(rb"\\([0-7]{3})")
+
+
+def _unescape_mount_path(raw: bytes) -> Path:
+    """A ``/proc/self/mountinfo`` path field as a :class:`Path`."""
+    unescaped = _MOUNTINFO_ESCAPE.sub(lambda m: bytes([int(m.group(1), 8)]), raw)
+    return Path(os.fsdecode(unescaped))
+
+
+def _mount_points() -> set[Path]:
+    """Every mount point this process sees.
+
+    Read from the mount table rather than :func:`os.path.ismount`, which compares
+    device numbers and so misses a bind mount from the same filesystem — how a
+    drive bind-mounted into the workspace on the host usually lands. Parsed as
+    bytes: the table is not text, and decoding it as such mangles a non-ASCII
+    path. Empty where there is no ``/proc``; callers also ask ``os.path.ismount``.
+    """
+    try:
+        table = Path("/proc/self/mountinfo").read_bytes()
+    except OSError:
+        return set()
+    points: set[Path] = set()
+    for line in table.splitlines():
+        fields = line.split(b" ")
+        if len(fields) > 4:
+            points.add(_unescape_mount_path(fields[4]))
+    return points
+
+
+def _refuse_mount_point(path: Path) -> None:
+    """Reject moving or deleting a mount point, or a folder holding one.
+
+    Deleting one would empty the whole drive behind it before failing on the
+    mount point itself. Files and folders *on* the drive are handled like any
+    others.
+    """
+    if os.path.ismount(path) or any(m.is_relative_to(path) for m in _mount_points()):
+        raise HTTPException(
+            status_code=400,
+            detail="this is or holds a mounted drive; it cannot be moved or deleted",
+        )
+
+
 class MkdirPayload(BaseModel):
     """Request body for directory creation."""
 
@@ -389,6 +436,7 @@ async def post_rename(payload: RenamePayload) -> JsonDict:
     """Rename or move a file/directory inside the workspace."""
     src = _safe_path(payload.path)
     dst = _safe_path(payload.new_path)
+    _refuse_mount_point(src)
     if not src.exists():
         raise HTTPException(status_code=404, detail="source not found")
     if dst.exists():
@@ -404,6 +452,7 @@ async def delete_file(path: str) -> JsonDict:
     target = _safe_path(path)
     if target == WORKSPACE_ROOT:
         raise HTTPException(status_code=400, detail="refusing to delete the workspace root")
+    _refuse_mount_point(target)
     if not target.exists():
         raise HTTPException(status_code=404, detail="not found")
     if target.is_dir():

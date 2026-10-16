@@ -41,6 +41,11 @@ COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
+# MedMCP's patches to the agent (stable scratchpad, no chat-long approval for
+# redirects); fails the build if the locked vibe no longer matches them.
+COPY docker/patch_vibe.py ./docker/patch_vibe.py
+RUN /app/.venv/bin/python docker/patch_vibe.py
+
 # App assets: built frontend, baked vibe config + system prompt + model def.
 COPY --from=frontend /app/frontend/dist ./frontend/dist
 COPY docker/config.toml ./.vibe/config.toml

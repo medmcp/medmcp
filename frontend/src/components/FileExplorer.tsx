@@ -6,6 +6,7 @@ import { Tree } from 'react-arborist'
 import type { NodeApi, NodeRendererProps } from 'react-arborist'
 import { deletePath, fetchTree, mkdir, renamePath, uploadFile } from '../api'
 import { setDraggedFilePath } from '../dragState'
+import { classify } from '../fileKinds'
 import { DRAG_PATH_MIME, type TreeNode } from '../types'
 import {
   FileIcon,
@@ -39,11 +40,18 @@ function joinPath(dir: string, name: string): string {
 }
 
 function FileTypeIcon({ name }: { name: string }) {
-  const lower = name.toLowerCase()
-  if (/\.(nii|nii\.gz|mgz|mgh|nrrd|nhdr|mha|mhd|dcm)$/.test(lower)) return <LayersIcon />
-  if (/\.(pdf|md|txt|log)$/.test(lower)) return <FileTextIcon />
-  if (/\.(png|jpe?g|gif|svg|webp|bmp)$/.test(lower)) return <ImageIcon />
-  return <FileIcon />
+  switch (classify(name)) {
+    case 'volume':
+    case 'dicom':
+      return <LayersIcon />
+    case 'pdf':
+    case 'text':
+      return <FileTextIcon />
+    case 'image':
+      return <ImageIcon />
+    default:
+      return <FileIcon />
+  }
 }
 
 function NodeRow({

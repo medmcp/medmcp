@@ -8,6 +8,7 @@ import {
 } from '../api'
 import type { CatalogEntry, SettingsState } from '../types'
 import { XIcon } from './icons'
+import { Toggle } from './SettingsControls'
 
 interface StackMarketplaceProps {
   open: boolean
@@ -33,28 +34,6 @@ interface StackItem {
   /** Installed but absent from the catalog — a hand-installed image or a local
    *  uv-tool stack. Shown so the list is the whole truth, not just the catalogue. */
   offCatalog: boolean
-}
-
-function Toggle({
-  checked,
-  onChange,
-  disabled,
-}: {
-  checked: boolean
-  onChange: (value: boolean) => void
-  disabled?: boolean
-}) {
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      className={`toggle${checked ? ' on' : ''}`}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-    >
-      <span className="toggle-knob" />
-    </button>
-  )
 }
 
 /**

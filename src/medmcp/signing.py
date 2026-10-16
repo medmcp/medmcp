@@ -256,17 +256,3 @@ def verify_image(
 def describe(verified: Verified) -> str:
     """One line for a progress log."""
     return f"Signature verified: {verified.ref}"
-
-
-__all__: list[str] = [
-    "Policy",
-    "SignatureError",
-    "Verified",
-    "cosign_path",
-    "describe",
-    "image_digest",
-    "load_policies",
-    "policy_for",
-    "split_reference",
-    "verify_image",
-]

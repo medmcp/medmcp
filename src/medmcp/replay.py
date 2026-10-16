@@ -9,7 +9,7 @@ did when it was recorded.
 
 This module has no UI/vibe-acp dependency: callers pass in the resolved
 MCP server launch configs (``command``/``args``/``env`` as produced by
-``app._load_mcp_servers``), so it can be driven from the UI or a CLI alike.
+``settings.load_mcp_servers``), so it can be driven from the UI or a CLI alike.
 
 Replaying runs real tools with real side effects (file writes, etc.). It is
 deliberately separate from the chat permission flow: callers are expected to

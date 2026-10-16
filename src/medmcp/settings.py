@@ -1,19 +1,21 @@
-"""Shared MedMCP configuration: stack discovery, user toggles, vibe config sync.
+"""Shared MedMCP configuration state and the vibe config sync.
 
 Everything here is UI-agnostic (no FastAPI dependency) so the workspace
-server (``server.py``) and the ``medmcp`` CLI can both drive the
-same state:
+server (``server.py``) and the ``medmcp`` CLI can both drive the same state.
+All of it is persisted under ``.vibe/`` and written atomically:
 
-- **Stack discovery** (:func:`load_mcp_servers`) — uv tool environments with a
-  ``[medmcp.stacks]`` entry point, plus manual ``[[mcp_servers]]`` entries in
-  ``.vibe/config.toml``.
-- **Active sets** — which stacks are enabled, persisted as JSON under
-  ``.vibe/`` (all active when the file is absent).
-- **Feature toggles** — provenance capture and tool-call explanations; each
-  defaults to on.
-- **Config sync** (:func:`sync_servers_to_vibe_config`) — writes the resolved
-  server list and the stacks' skill paths into ``.vibe/config.toml`` before
-  each session, because vibe-acp reads that file directly.
+- **Stack discovery** (:func:`load_mcp_servers`) — uv tool environments,
+  ``stacks.d`` container manifests, manual ``[[mcp_servers]]`` entries and,
+  when consented to, external HTTP servers; plus the **active set**.
+- **Stack install** (:func:`install_stack_image`) — pulls, verifies and
+  registers a container stack from the catalog.
+- **External MCP servers** and the **cloud model** — each behind a double gate
+  (toggle plus recorded acknowledgement) with its secret held outside the config.
+- **Local model choice**, the **GPU selection** and the **feature toggles**
+  (provenance capture, tool-call explanations).
+- **Config sync** (:func:`sync_servers_to_vibe_config`) — writes all of the
+  above into ``.vibe/config.toml`` before each session, because vibe-acp reads
+  that file directly.
 """
 
 from __future__ import annotations
@@ -49,7 +51,7 @@ from medmcp.workflow import list_workflows
 log: logging.Logger = logging.getLogger(__name__)
 
 # Ollama endpoint + model, used for the agent's auxiliary LLM calls
-# (tool-call explanations, distillation prose) and the provenance manifest.
+# (tool-call explanations, chat titles) and the provenance manifest.
 OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "muse-medmcp")
 
@@ -442,7 +444,7 @@ def _load_stack_manifests() -> list[JsonDict]:
 def load_mcp_servers() -> list[JsonDict]:
     """Discover MCP servers from uv tool environments and ``.vibe/config.toml``.
 
-    Server configs are collected from two sources:
+    Server configs are collected from four sources, earlier ones winning a name:
 
     1. **Installed uv tools** (authoritative) — any package installed via
        ``uv tool install`` that registers a ``[medmcp.stacks]`` entry point in
@@ -459,6 +461,10 @@ def load_mcp_servers() -> list[JsonDict]:
        entries whose ``name`` is *not* already registered by a uv tool or a
        manifest are accepted.  This covers stacks that have not yet been installed
        via ``just install-stack``.
+
+    4. **External HTTP servers** (:func:`external_servers`) — only while the
+       external-MCP feature is enabled *and* acknowledged; never shadowing a
+       local name.
 
     Returns a list of server-config dicts ready for ``sync_servers_to_vibe_config``.
     """
@@ -787,11 +793,6 @@ def external_token_present(api_key_env: str) -> bool:
     environment, so what is visible here is what it will see.
     """
     return bool(api_key_env) and bool(os.environ.get(api_key_env))
-
-
-def external_mcp_acknowledged() -> bool:
-    """Whether the operator has accepted responsibility for external services."""
-    return bool(load_external_mcp()["acknowledged_at"])
 
 
 def external_mcp_enabled() -> bool:
@@ -1612,11 +1613,6 @@ def write_prompt_variant(prompt_id: str, rule: str) -> bool:
     return True
 
 
-def write_external_prompt_variant() -> bool:
-    """Derive the external-enabled system prompt next to the base one."""
-    return write_prompt_variant(EXTERNAL_SYSTEM_PROMPT_ID, EXTERNAL_RULE)
-
-
 # ── Container-stack install / uninstall (UI-driven) ──────────────────────────
 # An installed container stack is just a stacks.d/<name>.toml manifest plus its
 # extracted skills. Metadata comes from the image's OCI label (read via
@@ -2212,19 +2208,25 @@ def _ensure_pathguard_hook(vibe_home: Path) -> None:
 
 
 def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
-    """Overwrite the ``[[mcp_servers]]`` section of ``.vibe/config.toml``.
+    """Write the resolved agent configuration into ``.vibe/config.toml``.
 
-    This is the mechanism that makes entry-point discovery actually take effect:
-    vibe-acp reads its server list directly from the TOML file and ignores the
-    ``mcpServers`` field in JSON-RPC calls, so we must write the desired set
-    here before each ``session/new`` or ``session/load``.
+    vibe-acp reads its configuration from the TOML file and ignores the
+    ``mcpServers`` field in JSON-RPC calls, so this runs before each
+    ``session/new`` or ``session/load``. The keys it owns:
 
-    Only the ``mcp_servers`` array is replaced.  All other keys (model config,
-    tool permissions, etc.) are left untouched.  For servers already present in
-    the file, vibe-acp-specific fields such as ``startup_timeout_sec`` are
-    preserved; only ``command`` and ``args`` are updated from the discovery
-    result. An entry carrying no ``startup_timeout_sec`` at all is given one —
-    vibe's own 10s default is too tight for a stack that cold-starts a container.
+    - ``mcp_servers`` — rebuilt from *servers*. For entries already in the file,
+      vibe-specific fields such as ``startup_timeout_sec`` are preserved and only
+      ``command``/``args`` are updated; an entry with no ``startup_timeout_sec``
+      is given one (vibe's 10 s default is too tight for a container cold start).
+      With the backend pool on, stdio stacks are rewritten through the proxy.
+    - ``providers``/``models``/``active_model`` — the chosen local or cloud model.
+    - ``system_prompt_id`` — the base prompt or a derived variant, unless a
+      hand-set custom id is in place.
+    - ``skill_paths`` — the active stacks' skills; ``disabled_skills`` keeps every
+      non-workflow entry.
+    - ``<vibe_home>/hooks.toml`` — the pathguard ``pre_tool`` hook.
+
+    Tool permissions and everything else in the file are left untouched.
     """
     with _config_write_lock:
         _sync_servers_to_vibe_config_locked(servers)

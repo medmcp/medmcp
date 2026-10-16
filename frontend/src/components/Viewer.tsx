@@ -3,7 +3,7 @@ import { Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import type { NVImage, NiiVueLocation } from '@niivue/niivue'
 import { rawUrl } from '../api'
 import { getDraggedFilePath } from '../dragState'
-import { classify, isVolumePath, VOLUME_EXT } from '../fileKinds'
+import { classify, isVolumePath } from '../fileKinds'
 import { DRAG_PATH_MIME } from '../types'
 import {
   CameraIcon,
@@ -20,6 +20,7 @@ import {
   CONTINUOUS_COLORMAPS,
   CT_WINDOW_PRESETS,
   EMPTY_OVERLAY,
+  VOLUME_EXT_I,
   buildLabelColormap,
   classifyOverlayData,
   cssColor,
@@ -41,7 +42,6 @@ import {
 } from './viewerData'
 import { ViewerSettingsPanel } from './ViewerSettings'
 
-const VOLUME_EXT_I = new RegExp(VOLUME_EXT.source, 'i')
 
 // Niivue COLORMAP_TYPE.ZERO_TO_MAX_TRANSPARENT_BELOW_MIN — voxels below cal_min
 // are fully transparent. The enum isn't exported, so we use its numeric value.
@@ -206,8 +206,8 @@ export interface ViewerSettings {
   /** WebGL MSAA edge anti-aliasing (browser picks the sample count). */
   antialias: boolean
   /** Supersampling factor via forceDevicePixelRatio: 'native' matches the
-   *  display, '2x'/'3x' render larger then downsample (smoother edges, more
-   *  GPU), '1x' is the cheapest. Both antialias and renderScale are set at
+   *  display, '2x'/'4x' render larger then downsample (smoother edges, more
+   *  GPU). Both antialias and renderScale are set at
    *  canvas-attach time, so a change remounts the view rather than applying live. */
   renderScale: RenderScale
 }

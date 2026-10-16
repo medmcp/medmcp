@@ -156,7 +156,6 @@ class TestVersions:
 
     def test_release_link_is_https_or_nothing(self) -> None:
         """The page link is the one thing the browser is pointed at from the document."""
-        assert update.parse_release({"tag_name": "v1.0.0", "html_url": "javascript:x"})
         info = update.parse_release({"tag_name": "v1.0.0", "html_url": "javascript:x"})
         assert info is not None and info.url == ""
         info = update.parse_release({"tag_name": "v1.0.0", "html_url": "http://mirror/r"})

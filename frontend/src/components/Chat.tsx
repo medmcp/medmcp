@@ -91,8 +91,6 @@ const PlanCard = memo(function PlanCard({ items }: { items: TodoItem[] }) {
   )
 })
 
-// Memoized so a streaming update to the newest message doesn't re-render
-// (and re-parse the markdown of) every earlier row in the transcript.
 /** Files a finished tool call named, offered straight into the viewer. The
  *  agent writes a segmentation and says where; without this the person has to
  *  find it in the explorer by hand. Volumes can also be laid over the open one. */
@@ -130,6 +128,8 @@ function ResultFiles({
   )
 }
 
+// Memoized so a streaming update to the newest message doesn't re-render
+// (and re-parse the markdown of) every earlier row in the transcript.
 const ToolCard = memo(function ToolCard({
   tc,
   workspaceRoot,
@@ -635,6 +635,7 @@ export const Chat = memo(function Chat({
             explanation: frame.explanation,
             explaining: frame.explaining,
             risks: frame.risks,
+            paths: frame.paths,
           })
           break
         case 'permission_update':
@@ -734,7 +735,7 @@ export const Chat = memo(function Chat({
   }, [items, permission, busy])
 
   // Stable so the memoized ChatInput doesn't re-render on every streaming flush;
-  // the trim/empty + open-socket guards live in ChatInput now.
+  // the trim/empty + open-socket guards live in ChatInput.
   const send = useCallback(
     (text: string) => {
       setItems((prev) => [...prev, { kind: 'user', text }])

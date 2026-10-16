@@ -132,13 +132,6 @@ export async function fetchCatalog(): Promise<CatalogEntry[]> {
   return body.catalog
 }
 
-/** Install a stack from a container image; returns its name. Restarts the agent. */
-export async function installStack(image: string): Promise<string> {
-  const res = await postJson('/api/stacks/install', { image })
-  const body = (await res.json()) as { name: string }
-  return body.name
-}
-
 /** Uninstall a container stack by name. Restarts the agent. */
 export async function uninstallStack(name: string): Promise<void> {
   await postJson('/api/stacks/uninstall', { name })
@@ -258,10 +251,6 @@ export async function fetchRuns(
   if (workflow) q.set('workflow', workflow)
   const res = await check(await fetch(`/api/runs?${q.toString()}`))
   return (await res.json()) as { runs: RunSummary[]; live: string[] }
-}
-
-export async function deleteRun(id: string): Promise<void> {
-  await check(await fetch(`/api/runs/${encodeURIComponent(id)}`, { method: 'DELETE' }))
 }
 
 /** Turn a plan_batch manifest CSV into per-subject batch rows for this workflow. */

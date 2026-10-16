@@ -478,23 +478,6 @@ def list_provenance_sessions() -> list[str]:
     return sorted(p.name for p in root.iterdir() if p.is_dir())
 
 
-def purge_orphans(referenced_ids: set[str]) -> list[str]:
-    """Delete provenance dirs whose session id is not in *referenced_ids*.
-
-    A garbage-collection sweep so chats deleted in the UI (or sessions that never
-    persisted a thread mapping) don't leak provenance. Returns the purged session
-    ids. Only the provenance directory is removed — vibe transcript dirs are left
-    untouched, because a compaction continuation is named with an id we don't
-    track and could still belong to a live chat.
-    """
-    purged: list[str] = []
-    for session_id in list_provenance_sessions():
-        if session_id not in referenced_ids:
-            shutil.rmtree(provenance_dir(session_id), ignore_errors=True)
-            purged.append(session_id)
-    return purged
-
-
 def purge_session(session_id: str, *, stop_ids: Collection[str] = ()) -> None:
     """Delete all on-disk logs for *session_id*.
 

@@ -8,28 +8,23 @@ default:
 
 # Remove caches and build artifacts
 clean:
-    rm -rf .mypy_cache
     rm -rf .pytest_cache
     rm -rf .ruff_cache
-    rm -rf .tox
     rm -rf .venv
     rm -rf dist
     rm -rf build
-    rm -rf **/__pycache__
+    find . -name __pycache__ -type d -prune -exec rm -rf {} +
     rm -rf src/*.egg-info
     rm -f .coverage
     rm -f coverage.*
 
-# Promoted workflows under .vibe/workflows/active/ are preserved; use
-# clean-workflows to remove those too.
-
-# Remove local chat/session state under .vibe/ (logs, history, provenance, drafts)
+# Remove local chat/session state under .vibe/ (logs, history, provenance);
+# workflows are kept — use clean-workflows for those.
 clean-chats:
     rm -rf .vibe/logs
     rm -f .vibe/trusted_folders.toml
     rm -rf .vibe/vibehistory
     rm -rf .vibe/provenance
-    rm -rf .vibe/workflows/draft
 
 # Remove ALL distilled workflows
 clean-workflows:

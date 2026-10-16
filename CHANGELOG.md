@@ -4,6 +4,14 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Fixed
+
+- Approval dialog: the path checks (input exists / output folder exists / would overwrite) are shown again; the browser had been dropping them.
+- Explorer: Analyze `.hdr`/`.img` and `.v16` volumes get the volume icon, matching what the viewer opens.
+- `scripts/install_ollama.sh`: requires Ollama ≥ 0.32.15 (the version the model needs) and installs the arm64 build on arm64 hosts.
+
 ## 0.4.2 — 2026-10-13
 
 ### Added

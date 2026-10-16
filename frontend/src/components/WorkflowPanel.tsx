@@ -296,11 +296,11 @@ function PathCell({
 /** The stacks a workflow needs, pinned by image(+digest) or version. */
 const REQ_STATUS: Record<
   NonNullable<StackRequirement['status']>,
-  { icon: string; cls: string; title: string }
+  { icon: string; cls: string }
 > = {
-  ok: { icon: '✓', cls: 'ok', title: 'installed' },
-  missing: { icon: '✗', cls: 'missing', title: 'not installed' },
-  mismatch: { icon: '⚠', cls: 'mismatch', title: 'installed, but a different version' },
+  ok: { icon: '✓', cls: 'ok' },
+  missing: { icon: '✗', cls: 'missing' },
+  mismatch: { icon: '⚠', cls: 'mismatch' },
 }
 
 function Requirements({ requires }: { requires: StackRequirement[] }) {

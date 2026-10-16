@@ -24,6 +24,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from medmcp import provenance, workflow
+from medmcp.pathcheck import looks_like_path
 from medmcp.workflow import Recipe, RecipeStep, StackRequirement, WorkflowInput
 from medmcp.workspace_note import display_content_text, strip_workspace_note
 
@@ -73,9 +74,6 @@ def _is_exploratory_call(tool_name: str, arguments: JsonDict) -> bool:
     return False
 
 
-_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,8}(\.gz)?$")
-
-
 # ── Reading the raw log ──────────────────────────────────────────────────────
 
 
@@ -97,7 +95,7 @@ def _first_user_message(messages: list[JsonDict]) -> str:
     """Return the first non-injected user message, for context/naming.
 
     The workspace server sends a "[workspace context: …]" note with the prompt
-    so the agent can resolve "this image" (server.py:_workspace_note). That note
+    so the agent can resolve "this image" (``workspace_note.build_workspace_note``). That note
     is live-turn metadata, not part of the user's request — it would otherwise
     pollute the distilled workflow's name and description. vibe ≥2.23 persists
     the note-free text on the message (``user_display_content``), which is
@@ -117,18 +115,6 @@ def _first_user_message(messages: list[JsonDict]) -> str:
     return ""
 
 
-def _looks_like_path(value: str) -> bool:
-    """Heuristic: does *value* look like a file path or filename?
-
-    Excludes values containing whitespace so that shell command strings (e.g.
-    ``ls -R data/x``) aren't mistaken for paths; imaging paths in this domain do
-    not contain spaces.
-    """
-    if not value or any(c.isspace() for c in value):
-        return False
-    return "/" in value or bool(_EXT_RE.search(value))
-
-
 def _structured_output_paths(result_text: str) -> dict[str, str]:
     """Extract ``key → path`` pairs from a tool result's structured output."""
     import ast
@@ -144,7 +130,7 @@ def _structured_output_paths(result_text: str) -> dict[str, str]:
         return {}
     out: dict[str, str] = {}
     for key, value in cast("JsonDict", parsed).items():
-        if isinstance(value, str) and _looks_like_path(value):
+        if isinstance(value, str) and looks_like_path(value):
             out[str(key)] = value
     return out
 
@@ -234,9 +220,6 @@ def _manual_step_label(tool: str, arguments: JsonDict) -> str:
     return f"builtin:{tool}"
 
 
-_DIR_REF_RE = re.compile(r"dir\((.+)\)")
-
-
 def _derive_container_dir_defaults(inputs: dict[str, WorkflowInput]) -> None:
     """Give an input that was another input's folder a derived default.
 
@@ -295,7 +278,7 @@ def build_recipe(
             continue
         # Built-in (non-MCP) tools can't be replayed deterministically. Drop them
         # from the recipe so the workflow stays replayable, but record them as
-        # manual steps so the real work isn't silently lost (see render_skill_md).
+        # manual steps so the real work isn't silently lost.
         if server == "builtin":
             manual_steps.append(_manual_step_label(tool, args))
             continue
@@ -304,7 +287,7 @@ def build_recipe(
         # Parameterize input paths against earlier outputs / declared inputs.
         new_args: JsonDict = {}
         for key, value in args.items():
-            if isinstance(value, str) and _looks_like_path(value):
+            if isinstance(value, str) and looks_like_path(value):
                 if value in produced:
                     new_args[key] = produced[value]
                 elif value in inputs:

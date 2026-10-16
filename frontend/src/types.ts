@@ -84,7 +84,7 @@ export interface SessionInfo {
   hasProvenance: boolean
 }
 
-/** One stack/workflow row plus the feature toggles, as served by /api/settings. */
+/** One installed stack, as served by /api/settings. */
 export interface StackInfo {
   name: string
   version?: string | null
@@ -332,6 +332,7 @@ export type ServerFrame =
       explanation?: string | null
       explaining?: boolean
       risks?: RiskTag[]
+      paths?: PathFinding[]
     }
   | {
       type: 'permission_update'

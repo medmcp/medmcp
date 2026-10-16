@@ -30,7 +30,6 @@ import logging
 import os
 import secrets
 import tempfile
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -54,18 +53,7 @@ OUTPUT_FILES_LIMIT: int = 24
 
 
 def _now_iso() -> str:
-    # Full precision: a step's finish time is compared against file mtimes, and a
-    # second-resolution stamp would call an input written in the same second
-    # "newer than the step" and throw away a perfectly good cache entry.
     return datetime.now(UTC).isoformat(timespec="microseconds")
-
-
-def _iso_to_ts(value: str) -> float:
-    """Epoch seconds for an ISO timestamp we wrote; 0 for anything unparsable."""
-    try:
-        return datetime.fromisoformat(value).timestamp()
-    except ValueError:
-        return 0.0
 
 
 def new_run_id() -> str:
@@ -635,10 +623,3 @@ def _step_started_frame(item: int, index: int, server: str, tool: str, started_a
 def is_end(frame: Frame) -> bool:
     """Whether a queued frame is the end-of-run sentinel rather than a real frame."""
     return frame is _END
-
-
-def elapsed_seconds(record: RunRecord) -> float:
-    """Wall-clock seconds the run took (or has taken so far)."""
-    start = _iso_to_ts(record.started_at)
-    end = _iso_to_ts(record.finished_at) if record.finished_at else time.time()
-    return max(0.0, end - start) if start else 0.0

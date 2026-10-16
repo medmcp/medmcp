@@ -872,39 +872,3 @@ def plan_error() -> PlanError | None:
         log.warning("update plan failed: %s", exc)
         return PlanError(f"Could not inspect this container: {exc}")
     return None
-
-
-__all__ = [
-    "ApplyPlan",
-    "PlanError",
-    "ReleaseInfo",
-    "UpdateNotApplicableError",
-    "ack_result",
-    "auto_check_enabled",
-    "check_due",
-    "check_enabled",
-    "collect_updater_result",
-    "compose_defaults",
-    "current_plan",
-    "dismiss",
-    "effective_version",
-    "fetch_latest_release",
-    "host_commands",
-    "is_newer",
-    "load_state",
-    "parse_release",
-    "parse_version",
-    "plan_apply",
-    "plan_error",
-    "rehearsal_release",
-    "rehearsal_target",
-    "run_check",
-    "run_rehearsal",
-    "save_state",
-    "set_auto_check",
-    "start_updater",
-    "status",
-    "updater_command",
-    "updater_pending",
-    "verify_pulled_image",
-]

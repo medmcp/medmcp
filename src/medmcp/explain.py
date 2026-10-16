@@ -43,8 +43,6 @@ RISK_CATEGORIES: dict[str, tuple[str, str]] = {
     "skill_load": ("Loads external instructions into the agent context", "medium"),
 }
 
-SEVERITY_ICON: dict[str, str] = {"low": "🟢", "medium": "🟡", "high": "🔴"}
-
 
 def resolve_risks(risks: list[str]) -> list[JsonDict]:
     """Expand risk keys into ``{key, label, severity}`` dicts for structured UIs."""

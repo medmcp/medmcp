@@ -1,7 +1,7 @@
 import { VOLUME_EXT } from '../fileKinds'
 
 /** Case-insensitive form of the viewer's volume extensions, for stripping. */
-const VOLUME_EXT_I = new RegExp(VOLUME_EXT.source, 'i')
+export const VOLUME_EXT_I = new RegExp(VOLUME_EXT.source, 'i')
 
 /** Pure helpers behind the volume viewer: label palettes, overlay classification,
  *  label statistics, label-name files and intensity-window presets. No React, no

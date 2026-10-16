@@ -26,12 +26,11 @@ from medmcp import batchplan, distill, provenance, sessions, share, workflow
 
 def _list_sessions() -> int:
     """Print the session ids that have a provenance directory."""
-    root = provenance.VIBE_HOME / "provenance"
-    if not root.is_dir():
+    session_ids = provenance.list_provenance_sessions()
+    if not session_ids:
         print("No provenance records found.", file=sys.stderr)
         return 0
-    sessions = sorted(p.name for p in root.iterdir() if p.is_dir())
-    for session_id in sessions:
+    for session_id in session_ids:
         manifest = provenance.read_manifest(session_id)
         created = manifest.get("created_at", "?") if manifest else "?"
         n_events = len(provenance.read_run_events(session_id))

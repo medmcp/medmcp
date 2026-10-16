@@ -109,7 +109,6 @@ def test_disabling_clears_the_acknowledgement() -> None:
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
     settings.set_external_mcp_enabled(False)
-    assert settings.external_mcp_acknowledged() is False
     assert settings.load_external_mcp()["acknowledged_at"] is None
 
 
@@ -623,7 +622,10 @@ def test_custom_prompt_id_is_left_alone(tmp_path: Path) -> None:
 def test_missing_anchor_keeps_the_base_prompt(tmp_path: Path) -> None:
     """A prompt edit that drops the rule must not silently yield a no-op variant."""
     (tmp_path / "prompts" / "medmcp.md").write_text("You are MedMCP.\n")
-    assert settings.write_external_prompt_variant() is False
+    assert (
+        settings.write_prompt_variant(settings.EXTERNAL_SYSTEM_PROMPT_ID, settings.EXTERNAL_RULE)
+        is False
+    )
 
     settings.acknowledge_external_mcp()
     settings.set_external_mcp_enabled(True)
@@ -637,7 +639,7 @@ def test_missing_anchor_keeps_the_base_prompt(tmp_path: Path) -> None:
 def test_shipped_prompt_still_contains_the_anchor() -> None:
     """Guards the real prompt against drift.
 
-    ``write_external_prompt_variant`` degrades to "keep the base prompt" when the
+    ``write_prompt_variant`` degrades to "keep the base prompt" when the
     rule it rewrites is gone, which is the safe direction but also a silent one —
     the feature would just stop relaxing the prompt. This fails loudly instead.
     """

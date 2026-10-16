@@ -1,15 +1,17 @@
 """Workspace UI server for MedMCP.
 
-Serves the three-panel workspace frontend (file explorer, image viewer, chat)
-and exposes:
+Serves the four-panel workspace frontend (file explorer, image viewer, workflow
+manager, chat) and exposes, in this order below:
 
-- a small filesystem API rooted at ``WORKSPACE_ROOT`` (tree listing, raw file
-  content for the viewer, rename/delete/mkdir/upload),
-- a settings API (``/api/settings``) for the stack/workflow/feature toggles
-  (persisted via ``medmcp.settings``),
-- a WebSocket chat endpoint that relays the vibe-acp agent loop to the browser
-  (text chunks, tool calls, usage updates, and interactive permission
-  requests, optionally enriched with LLM explanations and risk tags).
+- a filesystem API rooted at ``WORKSPACE_ROOT`` (tree listing, raw file content
+  for the viewer, rename/delete/mkdir/upload),
+- settings, stacks (install/uninstall/catalog), GPUs and the update check,
+- external MCP servers, the local and the cloud model,
+- workflows: distill, replay (preview + streamed batch run), runs,
+- the WebSocket chat endpoint that relays the vibe-acp agent loop to the
+  browser (text chunks, tool calls, usage updates, interactive permission
+  requests enriched with LLM explanations, risk tags and path checks),
+- the sessions API behind the Chats menu (list/rename/archive/delete/fork/rewind).
 
 Run with:  medmcp-workspace  (or ``just workspace``)
 
@@ -41,10 +43,17 @@ import time
 from collections.abc import AsyncGenerator, Coroutine
 from functools import partial
 from pathlib import Path
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -289,6 +298,13 @@ _connections: set[_ChatConnection] = set()
 _background_tasks: set[asyncio.Task[Any]] = set()
 
 
+def _spawn_background(coro: Coroutine[Any, Any, object]) -> None:
+    """Run *coro* detached, holding a reference until it finishes."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
 # ── Filesystem API ─────────────────────────────────────────
 
 
@@ -297,7 +313,7 @@ def _safe_path(rel: str) -> Path:
     if Path(rel).is_absolute():
         raise HTTPException(status_code=400, detail="absolute paths are not allowed")
     resolved = (WORKSPACE_ROOT / rel).resolve()
-    if resolved != WORKSPACE_ROOT and not resolved.is_relative_to(WORKSPACE_ROOT):
+    if not resolved.is_relative_to(WORKSPACE_ROOT):
         raise HTTPException(status_code=400, detail="path escapes the workspace")
     return resolved
 
@@ -313,9 +329,8 @@ def _tree_node(path: Path, depth: int) -> JsonDict:
                 entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
             except PermissionError:
                 entries = []
-            for child in entries[:_TREE_MAX_ENTRIES_PER_DIR]:
-                if child.name in _SKIP_DIRS:
-                    continue
+            shown = [e for e in entries if e.name not in _SKIP_DIRS]
+            for child in shown[:_TREE_MAX_ENTRIES_PER_DIR]:
                 children.append(_tree_node(child, depth + 1))
         node["children"] = children
     else:
@@ -506,9 +521,7 @@ async def _apply_pool_changes(newly_active: set[str], newly_inactive: set[str]) 
     if newly_active:
         # Pre-warm in the background so the settings response stays snappy; the
         # heavy spawn/import/CUDA cost is then paid before the first real call.
-        task = asyncio.create_task(_pool.prewarm(newly_active))
-        _background_tasks.add(task)
-        task.add_done_callback(_background_tasks.discard)
+        _spawn_background(_pool.prewarm(newly_active))
 
 
 async def _restart_vibe() -> None:
@@ -1071,13 +1084,6 @@ async def delete_external_server(name: str) -> JsonDict:
 # by a person), re-syncs the vibe config and restarts the agent.
 
 
-def _spawn_background(coro: Coroutine[Any, Any, None]) -> None:
-    """Run *coro* detached, holding a reference until it finishes."""
-    task = asyncio.create_task(coro)
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-
-
 @app.get("/api/models")
 async def get_models() -> JsonDict:
     """Return the local model catalog with each model's state."""
@@ -1341,7 +1347,7 @@ async def get_workflows() -> JsonDict:
 
 
 class DistillPayload(BaseModel):
-    """Request body for distilling a chat session into a draft workflow."""
+    """Request body for distilling a chat session into a workflow."""
 
     session_id: str
 
@@ -1496,12 +1502,10 @@ def _confined_input_paths(inputs: dict[str, str]) -> dict[str, str]:
 class ReplayPreviewPayload(BaseModel):
     """Request body for previewing a replay's resolved steps.
 
-    ``runs`` carries every item's input binding (the batch); ``inputs`` is the
-    older single-item form and is treated as a one-item batch.
+    ``runs`` carries every item's input binding (the batch).
     """
 
-    inputs: dict[str, str] | None = None
-    runs: list[dict[str, str]] | None = None
+    runs: list[dict[str, str]]
 
 
 def _input_argument_names(recipe: workflow.Recipe) -> dict[str, str]:
@@ -1566,8 +1570,7 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
         if d is None:
             raise FileNotFoundError(f"no workflow named {name!r}")
         recipe = distill.load_recipe(d)
-        raw_runs = payload.runs if payload.runs is not None else [payload.inputs or {}]
-        bindings_list = [_confined_input_paths(dict(r)) for r in raw_runs]
+        bindings_list = [_confined_input_paths(dict(r)) for r in payload.runs]
         servers = settings.active_servers()
         arg_names = _input_argument_names(recipe)
         items = [
@@ -1788,13 +1791,15 @@ async def ws_replay(ws: WebSocket) -> None:
 
 
 @app.get("/api/runs")
-async def get_runs(workflow: str | None = None, limit: int = 20) -> JsonDict:
+async def get_runs(
+    workflow_name: Annotated[str | None, Query(alias="workflow")] = None, limit: int = 20
+) -> JsonDict:
     """Recent replay runs (newest first), optionally for one workflow.
 
     ``live`` lists the ids in flight in this process, so a page can reattach to
     a run it started before a reload.
     """
-    records = await asyncio.to_thread(runs.list_runs, workflow=workflow, limit=max(1, limit))
+    records = await asyncio.to_thread(runs.list_runs, workflow=workflow_name, limit=max(1, limit))
     return {"runs": [r.summary() for r in records], "live": _runs.live_ids()}
 
 
@@ -2286,7 +2291,7 @@ class _ChatConnection:
                     await self._forward_frame(get_task.result())
                     continue
                 get_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, BaseException):
+                with contextlib.suppress(asyncio.CancelledError):
                     await get_task
                 while not self.queue.empty():
                     with contextlib.suppress(asyncio.QueueEmpty):
@@ -3010,9 +3015,7 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
             _spawn_background(localmodels.unload_others(str(local["model"])))
         # Warm the context-window cache off the frame path; usage frames read
         # the cached value only (the badge corrects itself once this lands).
-        prefetch = asyncio.create_task(settings.fetch_context_window())
-        _background_tasks.add(prefetch)
-        prefetch.add_done_callback(_background_tasks.discard)
+        _spawn_background(settings.fetch_context_window())
         await _client.ensure_started()
 
         # Resume: register the queue under the known id *before* session/load so

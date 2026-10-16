@@ -115,6 +115,9 @@ Notable, user-visible changes to MedMCP. Format follows
 
 - Image build: the agent (mistral-vibe) is patched so every chat shares one scratchpad path (the model's cached prompt is reused) and a chat-long approval never covers a redirect; the build fails if a vibe update no longer matches.
 - Chats: consecutive calls of one tool share a single card, and shell commands no longer get View/Overlay chips.
+### Added
+
+- Tool stacks: `medmcp-stats` (statistical tests with effect sizes and a draft results sentence; publication figures restyled without re-running the analysis) and `medmcp-cohort` (clinical tables, biomarker merging, sub-cohorts, Table 1, regression, survival) in both install catalogs. The agent now sends statistics and plots to the stats tools, with a cohort exported to CSV first.
 
 ## 0.5.0 — 2026-10-16
 

@@ -9,6 +9,7 @@ exercisable without a live vibe-acp subprocess.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import io
 import zipfile
 from collections.abc import Callable, Iterable
@@ -781,7 +782,9 @@ class TestReadOnlySessionApproval:
             (("command_pattern", "rm *"),),
             (("command_pattern", "ls *"), ("command_pattern", "rm *")),
             (("command_pattern", "ls *"), ("command_pattern", "<redirect> *")),
-            (("command_pattern", "find . -delete"),),
+            (("command_pattern", "find *"),),
+            (("command_pattern", "tree *"),),
+            (("command_pattern", "file *"),),
             (("command_pattern", "python *"),),
             (("outside_directory", "/etc/*"),),
             (("command_pattern", "ls *"), ("outside_directory", "/etc/*")),
@@ -790,9 +793,22 @@ class TestReadOnlySessionApproval:
     def test_withholds_session_approval_unless_every_rule_is_read_only(
         self, rules: tuple[tuple[str, str], ...]
     ) -> None:
-        """A writing command, redirect, exact pattern or outside path disqualifies."""
+        """A command that can write (by any flag), a redirect or an outside path disqualifies."""
         visible = server._visible_permission_options(self._bash_options(*rules))
         assert [o["optionId"] for o in visible] == ["allow_once", "reject_once"]
+
+    def test_find_delete_would_ride_a_find_approval(self) -> None:
+        """Why ``find`` is excluded: vibe derives ``find *`` from ``find . -delete``.
+
+        Only the ``-exec`` family gets an exact pattern, so an approved ``find *``
+        rule would let ``find . -delete`` run without asking.
+        """
+        arity: Any = importlib.import_module("vibe.core.tools.arity")
+        permissions: Any = importlib.import_module("vibe.core.tools.permissions")
+
+        assert arity.build_session_pattern(["find", ".", "-delete"]) == "find *"
+        assert permissions.wildcard_match("find . -delete", "find *")
+        assert "find *" not in server._READ_ONLY_SESSION_PATTERNS
 
     def test_withholds_session_approval_for_a_redirect(self) -> None:
         """``ls > out.txt`` reaches us as ``ls <redirect>`` with session pattern ``ls *``."""

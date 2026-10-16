@@ -36,15 +36,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import logging
 import os
 import re
 import shutil
 import time
-from collections.abc import AsyncGenerator, Coroutine
+import zipfile
+from collections.abc import AsyncGenerator, Coroutine, Iterator
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, cast
+from urllib.parse import quote
 
 import uvicorn
 from fastapi import (
@@ -55,7 +58,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -63,6 +66,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from medmcp import (
     __version__,
     batchplan,
+    chat_export,
     distill,
     explain,
     localmodels,
@@ -410,6 +414,92 @@ def _refuse_mount_point(path: Path) -> None:
         )
 
 
+class _ZipSink(io.RawIOBase):
+    """Unseekable write target that hands out what the zip writer produced so far.
+
+    Being unseekable is the point: :mod:`zipfile` then writes each member's sizes
+    in a trailing data descriptor instead of seeking back, so the archive can be
+    streamed while it is built rather than staged on disk first.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing buffered."""
+        super().__init__()
+        self._buf = bytearray()
+
+    def writable(self) -> bool:
+        """Accept writes (``io.RawIOBase`` defaults to read-only)."""
+        return True
+
+    def write(self, b: Any) -> int:  # noqa: ANN401 - io's buffer protocol type
+        """Buffer *b* until the next :meth:`take`."""
+        data = bytes(b)
+        self._buf += data
+        return len(data)
+
+    def take(self) -> bytes:
+        """Return and clear everything written since the last call."""
+        out = bytes(self._buf)
+        self._buf.clear()
+        return out
+
+
+def _zip_members(root: Path) -> Iterator[tuple[Path, str]]:
+    """Yield ``(file, archive name)`` for every regular file under *root*.
+
+    Symlinks are skipped, never followed — a link inside the workspace can point
+    anywhere on the host, and the archive must not carry what it points at. The
+    explorer's skip list (``.git``, virtualenvs, ...) applies here too.
+    """
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        here = Path(dirpath)
+        dirnames[:] = sorted(
+            d for d in dirnames if d not in _SKIP_DIRS and not (here / d).is_symlink()
+        )
+        for name in sorted(filenames):
+            path = here / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            yield path, str(Path(root.name) / path.relative_to(root))
+
+
+def _zip_stream(root: Path) -> Iterator[bytes]:
+    """Stream *root* as a zip archive, one megabyte of input at a time.
+
+    Members are stored, not deflated: imaging data is mostly compressed already
+    (``.nii.gz``), and storing keeps a multi-gigabyte download I/O-bound.
+    """
+    sink = _ZipSink()
+    with zipfile.ZipFile(sink, "w", compression=zipfile.ZIP_STORED) as zf:
+        for path, arcname in _zip_members(root):
+            info = zipfile.ZipInfo.from_file(path, arcname)
+            try:
+                with path.open("rb") as src, zf.open(info, "w", force_zip64=True) as dst:
+                    while chunk := src.read(1024 * 1024):
+                        dst.write(chunk)
+                        yield sink.take()
+            except OSError:
+                log.warning("skipping unreadable file in zip download: %s", path)
+            yield sink.take()
+    yield sink.take()
+
+
+@app.get("/api/files/download")
+async def get_download(path: str) -> Response:
+    """Download a file, or a directory as a streamed ``.zip``."""
+    target = _safe_path(path)
+    if target.is_file():
+        return FileResponse(target, filename=target.name)
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail="not found")
+    name = target.name or WORKSPACE_ROOT.name or "workspace"
+    return StreamingResponse(
+        _zip_stream(target),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}.zip"},
+    )
+
+
 class MkdirPayload(BaseModel):
     """Request body for directory creation."""
 
@@ -468,6 +558,8 @@ async def post_upload(file: UploadFile, dir: str = "") -> JsonDict:
     target_dir = _safe_path(dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     name = Path(file.filename or "upload.bin").name
+    if name in {"", ".", ".."}:
+        raise HTTPException(status_code=400, detail="invalid file name")
     target = target_dir / name
     with target.open("wb") as fh:
         while chunk := await file.read(1024 * 1024):
@@ -2052,27 +2144,117 @@ def _is_pathguard_denial(output: str) -> bool:
 # later call of that tool in the session, and ``allow_always_permanent``
 # ("Always allow") persists the approval into ``.vibe/config.toml`` so it
 # outlives the session entirely. Both are auto-approval paths, which medmcp
-# does not offer — every tool call is gated on its own.
+# does not offer — every tool call is gated on its own — with one exception:
+# see :data:`_SESSION_APPROVE_OPTION`.
 _AUTO_APPROVE_OPTIONS = frozenset({"allow_always", "allow_always_permanent"})
+
+# The session-scoped "always" option, offered back to the user only for read-only
+# shell commands. vibe records it as a rule on the command pattern it derived
+# (``ls *``), never on the bash tool as a whole, and the rule dies with the chat.
+# The permanent variant stays hidden: nothing is ever written to config.toml.
+_SESSION_APPROVE_OPTION = "allow_always"
+
+# Kill switch: ``MEDMCP_READ_ONLY_APPROVAL=0`` restores strict per-call approval.
+READ_ONLY_APPROVAL_ENV_VAR = "MEDMCP_READ_ONLY_APPROVAL"
+
+# Session patterns (as vibe's bash tool builds them) for commands that only read.
+# Each is ``<command> *``: vibe splits a compound command into its parts and asks
+# for each part separately. An approved ``<command> *`` covers *every* later call
+# of that command, whatever its flags, so a command belongs here only if no flag
+# makes it write: ``find`` is out (``-delete``, and ``-fprint`` writes a file;
+# vibe guards only the ``-exec`` family), as are ``tree`` (``-o`` writes a file)
+# and ``file`` (``-C`` compiles a magic file). A redirect is folded into its command as a
+# ``<redirect>`` token, which a bare ``ls *`` rule would still match: a call with
+# one is never offered this approval, and the image's vibe is patched so an
+# approved rule never covers one either (``ls > out.txt`` always asks).
+# Interpreters and anything that can write (``sed -i``, ``tee``, ``cp``) are
+# deliberately absent.
+_READ_ONLY_SESSION_PATTERNS = frozenset(
+    f"{cmd} *"
+    for cmd in (
+        "ls",
+        "pwd",
+        "cat",
+        "head",
+        "tail",
+        "wc",
+        "du",
+        "df",
+        "stat",
+        "grep",
+        "md5sum",
+        "sha256sum",
+    )
+)
+
+
+def _read_only_approval_enabled() -> bool:
+    """Whether read-only shell commands may be approved for the rest of a chat (default on)."""
+    value = os.environ.get(READ_ONLY_APPROVAL_ENV_VAR, "").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _read_only_session_label(option: JsonDict) -> str | None:
+    """Label for a session approval of *option*, or None if it is not read-only.
+
+    vibe attaches the rules a session approval would add as
+    ``_meta.required_permissions``. The option qualifies only when there is at
+    least one rule and every rule is a command pattern from
+    :data:`_READ_ONLY_SESSION_PATTERNS` — an outside-the-workspace rule, an exact
+    pattern, or a tool-wide approval (no rules) all disqualify it.
+    """
+    meta = option.get("_meta") or option.get("meta")
+    if not isinstance(meta, dict):
+        return None
+    rules = cast("JsonDict", meta).get("required_permissions")
+    if not isinstance(rules, list) or not rules:
+        return None
+    patterns: list[str] = []
+    for rule in cast("list[Any]", rules):
+        if not isinstance(rule, dict):
+            return None
+        rule_dict = cast("JsonDict", rule)
+        pattern = rule_dict.get("session_pattern")
+        if rule_dict.get("scope") != "command_pattern":
+            return None
+        # vibe folds a redirect into the command as a ``<redirect>`` token and still
+        # derives ``ls *`` from it, so ``ls > scan.nii.gz`` would look read-only.
+        if "<redirect>" in str(rule_dict.get("invocation_pattern", "")):
+            return None
+        if pattern not in _READ_ONLY_SESSION_PATTERNS:
+            return None
+        patterns.append(str(pattern))
+    commands = ", ".join(p.removesuffix(" *") for p in patterns)
+    return f"Allow {commands} for this chat"
 
 
 def _visible_permission_options(options: list[JsonDict]) -> list[JsonDict]:
-    """Reduce vibe's permission options to a per-call allow/deny pair.
+    """Reduce vibe's permission options to allow/deny, plus a read-only session approval.
 
     Every option that would auto-approve anything beyond the call in hand is
     dropped (see :data:`_AUTO_APPROVE_OPTIONS`), leaving ``allow_once`` and
-    ``reject_once``. With no "always" variant left to contrast against,
-    "Allow once" is relabelled to plain **"Allow"** — the scope is no longer a
-    choice the user makes, so naming it only invites the question.
+    ``reject_once``. The exception is the session-scoped option for read-only
+    shell commands (see :func:`_read_only_session_label`), kept and relabelled
+    with the commands it covers unless :data:`READ_ONLY_APPROVAL_ENV_VAR` turns
+    it off. With no "always" variant to contrast against, "Allow once" is
+    relabelled to plain **"Allow"** — the scope is no longer a choice the user
+    makes, so naming it only invites the question.
 
     Renaming here rather than in the browser keeps one source for the label:
     the frontend renders whatever ``name`` the frame carries.
     """
+    session_ok = _read_only_approval_enabled()
     visible: list[JsonDict] = []
     for option in options:
-        if option.get("optionId") in _AUTO_APPROVE_OPTIONS:
+        option_id = option.get("optionId")
+        if option_id == _SESSION_APPROVE_OPTION and session_ok:
+            label = _read_only_session_label(option)
+            if label is not None:
+                visible.append({**option, "name": label})
             continue
-        if option.get("optionId") == "allow_once":
+        if option_id in _AUTO_APPROVE_OPTIONS:
+            continue
+        if option_id == "allow_once":
             option = {**option, "name": "Allow"}
         visible.append(option)
     return visible
@@ -2090,6 +2272,12 @@ def _workspace_note(viewed_path: str) -> str:
     the note's text format comes from :func:`build_workspace_note`.
     """
     return build_workspace_note(_resolve_input_path(viewed_path))
+
+
+# How long to wait for vibe-acp to end a cancelled turn before the next prompt
+# goes out anyway, and for it to confirm a session/close.
+TURN_CANCEL_TIMEOUT: float = 15.0
+SESSION_CLOSE_TIMEOUT: float = 10.0
 
 
 class _ChatConnection:
@@ -2137,6 +2325,10 @@ class _ChatConnection:
         self._idle_pump: asyncio.Task[None] | None = None
         self._pending_perms: dict[int, asyncio.Future[str | None]] = {}
         self._prompt_task: asyncio.Task[None] | None = None
+        # The session/prompt RPC of the current turn. It outlives a cancelled
+        # prompt task: vibe-acp ends the turn only after it handles session/cancel,
+        # and a prompt sent before then is refused ("A turn is already running").
+        self._prompt_rpc: asyncio.Task[JsonDict] | None = None
         # Tool-call state accumulated across frames, keyed by toolCallId; feeds
         # the permission dialog backfill and the provenance run log.
         self._tool_calls: dict[str, JsonDict] = {}
@@ -2198,6 +2390,14 @@ class _ChatConnection:
         await self._cancel_prompt()
         for task in [*self._explain_tasks, *self._title_tasks]:
             task.cancel()
+        # Release vibe-acp's lease on the session. Without session/close it stays
+        # "open" in vibe-acp until a restart, so coming back to this chat fails
+        # session/load and silently lands in a new, empty chat instead.
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(
+                _client.request("session/close", {"sessionId": self.session_id}),
+                timeout=SESSION_CLOSE_TIMEOUT,
+            )
         _client.unregister_session(self.session_id)
         if not self._prompted and not self._resumed:
             with contextlib.suppress(Exception):
@@ -2217,7 +2417,26 @@ class _ChatConnection:
                 await task
             with contextlib.suppress(Exception):
                 await _client.notify("session/cancel", {"session_id": self.session_id})
+            await self._await_turn_end()
             await self._drain_stale_frames()
+
+    async def _await_turn_end(self) -> None:
+        """Wait (bounded) for vibe-acp to answer the cancelled turn's session/prompt.
+
+        session/cancel is a notification that vibe-acp handles asynchronously; the
+        turn is over only when the original session/prompt returns. Sending the
+        next prompt before that gets "A turn is already running", and the chat
+        ends up with the UI and vibe-acp disagreeing about whether a turn is live.
+        """
+        rpc = self._prompt_rpc
+        self._prompt_rpc = None
+        if rpc is None or rpc.done():
+            return
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(asyncio.shield(rpc), timeout=TURN_CANCEL_TIMEOUT)
+        if not rpc.done():
+            log.warning("vibe-acp did not end a cancelled turn within %ss", TURN_CANCEL_TIMEOUT)
+            rpc.cancel()
 
     async def _drain_stale_frames(self) -> None:
         """Discard queued frames left over from a cancelled turn.
@@ -2344,6 +2563,7 @@ class _ChatConnection:
                 }
             }
         prompt_fut = asyncio.create_task(_client.request("session/prompt", params))
+        self._prompt_rpc = prompt_fut
         self._thoughts.reset()  # start each turn with a clean reasoning-strip state
         turn_ok = False
         try:
@@ -2381,9 +2601,9 @@ class _ChatConnection:
             # Deliberately no `done` frame: when a new prompt superseded this
             # one, a stale done would reset the client's busy/permission state
             # for the wrong turn. An intentional Stop gets its done from the
-            # `cancel` branch in run().
-            if not prompt_fut.done():
-                prompt_fut.cancel()
+            # `cancel` branch in run(). The RPC itself is left running:
+            # _cancel_prompt awaits it so the next prompt only goes out once
+            # vibe-acp has really ended this turn.
             raise
         except Exception as exc:  # surface engine errors instead of a silent hang
             if not prompt_fut.done():
@@ -2699,6 +2919,14 @@ class _ChatConnection:
         finally:
             self._pending_perms.pop(req_id_raw, None)
 
+        # Only an option that was actually shown can be chosen: a client sending
+        # "allow_always_permanent" (or a session approval withheld above) is
+        # treated as no decision, never relayed to vibe.
+        if option_id is not None and option_id not in {o.get("optionId") for o in options}:
+            _audit.warning(
+                "permission decision %r was not offered; cancelling: %s", option_id, title
+            )
+            option_id = None
         await self._resolve_permission(req_id_raw, title, cached, option_id)
 
     async def _explain_permission(self, req_id: int, tool_call: JsonDict, cached: JsonDict) -> None:
@@ -3021,6 +3249,25 @@ async def archive_session(session_id: str, payload: ArchiveSessionPayload) -> Js
     return {"ok": True}
 
 
+@app.get("/api/sessions/{session_id}/export", response_class=HTMLResponse)
+async def export_session(session_id: str) -> HTMLResponse:
+    """A chat as a standalone printable page (the browser saves it as PDF)."""
+    if not chat_export.is_session_id(session_id):
+        raise HTTPException(status_code=404, detail="chat not found")
+
+    def _render() -> str | None:
+        return chat_export.render_chat_html(
+            session_id,
+            title=sessions.chat_title(session_id),
+            stop_ids=_chain_stop_ids(session_id),
+        )
+
+    page = await asyncio.to_thread(_render)
+    if page is None:
+        raise HTTPException(status_code=404, detail="chat not found")
+    return HTMLResponse(page)
+
+
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str) -> JsonDict:
     """Delete a session for good: its transcript, provenance, and UI metadata."""
@@ -3104,10 +3351,18 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
                 lambda: provenance.vibe_chain_tip(resume, stop_ids=_chain_stop_ids(resume))
             )
             queue = _client.register_session(tip)
-            load = await _client.request(
-                "session/load",
-                {"cwd": str(WORKSPACE_ROOT), "mcpServers": [], "sessionId": tip},
-            )
+            load_params: JsonDict = {"cwd": str(WORKSPACE_ROOT), "mcpServers": [], "sessionId": tip}
+            load = await _client.request("session/load", load_params)
+            if "error" in load and not any(c.session_id == tip for c in _connections):
+                # vibe-acp still holds the session though no socket uses it (a
+                # disconnect that predates session/close on close, or one cut
+                # short): close it and load again rather than open a new chat.
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        _client.request("session/close", {"sessionId": tip}),
+                        timeout=SESSION_CLOSE_TIMEOUT,
+                    )
+                load = await _client.request("session/load", load_params)
             if "error" in load:
                 _client.unregister_session(tip)
                 queue = None

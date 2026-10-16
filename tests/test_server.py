@@ -9,6 +9,9 @@ exercisable without a live vibe-acp subprocess.
 from __future__ import annotations
 
 import asyncio
+import importlib
+import io
+import zipfile
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, cast
@@ -727,6 +730,113 @@ class TestVisiblePermissionOptions:
         assert server._visible_permission_options(options) == options
 
 
+class TestReadOnlySessionApproval:
+    """Read-only shell commands can be approved for the rest of the chat."""
+
+    @staticmethod
+    def _bash_options(*rules: tuple[str, str]) -> list[dict[str, object]]:
+        """Options vibe sends for a bash call whose session approval adds *rules*."""
+        meta = {
+            "required_permissions": [
+                {
+                    "scope": scope,
+                    "invocation_pattern": pattern,
+                    "session_pattern": pattern,
+                    "label": pattern,
+                }
+                for scope, pattern in rules
+            ]
+        }
+        return [
+            {"optionId": "allow_once", "name": "Allow once"},
+            {
+                "optionId": "allow_always",
+                "name": "Allow for remainder of this session",
+                "_meta": meta,
+            },
+            {"optionId": "allow_always_permanent", "name": "Always allow", "_meta": meta},
+            {"optionId": "reject_once", "name": "Deny"},
+        ]
+
+    @pytest.fixture(autouse=True)
+    def _default_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(server.READ_ONLY_APPROVAL_ENV_VAR, raising=False)
+
+    def test_offers_session_approval_for_read_only_command(self) -> None:
+        """``ls -la`` gets a third button naming the command; "Always allow" stays hidden."""
+        visible = server._visible_permission_options(
+            self._bash_options(("command_pattern", "ls *"))
+        )
+        assert [o["optionId"] for o in visible] == ["allow_once", "allow_always", "reject_once"]
+        assert visible[1]["name"] == "Allow ls for this chat"
+
+    def test_names_every_command_of_a_compound(self) -> None:
+        """``ls; wc -l x`` needs two rules; both are read-only, so both are named."""
+        options = self._bash_options(("command_pattern", "ls *"), ("command_pattern", "wc *"))
+        visible = server._visible_permission_options(options)
+        assert visible[1]["name"] == "Allow ls, wc for this chat"
+
+    @pytest.mark.parametrize(
+        "rules",
+        [
+            (("command_pattern", "rm *"),),
+            (("command_pattern", "ls *"), ("command_pattern", "rm *")),
+            (("command_pattern", "ls *"), ("command_pattern", "<redirect> *")),
+            (("command_pattern", "find *"),),
+            (("command_pattern", "tree *"),),
+            (("command_pattern", "file *"),),
+            (("command_pattern", "python *"),),
+            (("outside_directory", "/etc/*"),),
+            (("command_pattern", "ls *"), ("outside_directory", "/etc/*")),
+        ],
+    )
+    def test_withholds_session_approval_unless_every_rule_is_read_only(
+        self, rules: tuple[tuple[str, str], ...]
+    ) -> None:
+        """A command that can write (by any flag), a redirect or an outside path disqualifies."""
+        visible = server._visible_permission_options(self._bash_options(*rules))
+        assert [o["optionId"] for o in visible] == ["allow_once", "reject_once"]
+
+    def test_find_delete_would_ride_a_find_approval(self) -> None:
+        """Why ``find`` is excluded: vibe derives ``find *`` from ``find . -delete``.
+
+        Only the ``-exec`` family gets an exact pattern, so an approved ``find *``
+        rule would let ``find . -delete`` run without asking.
+        """
+        arity: Any = importlib.import_module("vibe.core.tools.arity")
+        permissions: Any = importlib.import_module("vibe.core.tools.permissions")
+
+        assert arity.build_session_pattern(["find", ".", "-delete"]) == "find *"
+        assert permissions.wildcard_match("find . -delete", "find *")
+        assert "find *" not in server._READ_ONLY_SESSION_PATTERNS
+
+    def test_withholds_session_approval_for_a_redirect(self) -> None:
+        """``ls > out.txt`` reaches us as ``ls <redirect>`` with session pattern ``ls *``."""
+        options = self._bash_options(("command_pattern", "ls *"))
+        meta = cast("dict[str, list[dict[str, str]]]", options[1]["_meta"])
+        meta["required_permissions"][0]["invocation_pattern"] = "ls -la <redirect>"
+        visible = server._visible_permission_options(options)
+        assert [o["optionId"] for o in visible] == ["allow_once", "reject_once"]
+
+    def test_withholds_tool_wide_session_approval(self) -> None:
+        """No rules means vibe would approve the whole tool for the session — never offered."""
+        options: list[dict[str, object]] = [
+            {"optionId": "allow_always", "name": "x", "_meta": {"required_permissions": []}}
+        ]
+        assert server._visible_permission_options(options) == []
+
+    @pytest.mark.parametrize("value", ["0", "false", "off"])
+    def test_kill_switch_restores_per_call_approval(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        """``MEDMCP_READ_ONLY_APPROVAL=0`` drops the session option again."""
+        monkeypatch.setenv(server.READ_ONLY_APPROVAL_ENV_VAR, value)
+        visible = server._visible_permission_options(
+            self._bash_options(("command_pattern", "ls *"))
+        )
+        assert [o["optionId"] for o in visible] == ["allow_once", "reject_once"]
+
+
 def _prov_dir_in(tmp_path: Path) -> Callable[[str], Path]:
     """Return a provenance_dir substitute rooted at *tmp_path*."""
 
@@ -1134,3 +1244,199 @@ def test_clip_output_cuts_on_whitespace() -> None:
     assert server._clip_output("short") == "short"
     # No whitespace anywhere near the limit: fall back to a hard cut.
     assert len(server._clip_output("y" * 5000)) == 2000 + 2
+
+
+class TestFolderTransfer:
+    """Whole folders can be uploaded file by file and downloaded as a zip."""
+
+    @pytest.fixture
+    def root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Point the server's workspace root at a temp dir."""
+        resolved = (tmp_path / "ws").resolve()
+        resolved.mkdir()
+        monkeypatch.setattr(server, "WORKSPACE_ROOT", resolved)
+        return resolved
+
+    @pytest.fixture
+    def client(self, root: Path) -> TestClient:
+        """A same-origin client for the real routes."""
+        del root
+        return TestClient(server.app, base_url="http://127.0.0.1:8100")
+
+    def test_upload_recreates_nested_folders(self, root: Path, client: TestClient) -> None:
+        """A folder upload sends each file with its relative folder as ``dir``."""
+        resp = client.post(
+            "/api/files/upload",
+            params={"dir": "case1/series2"},
+            files={"file": ("IM0001.dcm", b"dicom-bytes")},
+        )
+        assert resp.status_code == 200
+        assert (root / "case1" / "series2" / "IM0001.dcm").read_bytes() == b"dicom-bytes"
+
+    def test_upload_rejects_dot_names(self, client: TestClient) -> None:
+        """A file named ``..`` cannot land beside the target folder."""
+        resp = client.post("/api/files/upload", params={"dir": "a"}, files={"file": ("..", b"x")})
+        assert resp.status_code == 400
+
+    def test_upload_rejects_escaping_dir(self, client: TestClient) -> None:
+        """The target folder goes through the workspace path guard."""
+        resp = client.post(
+            "/api/files/upload", params={"dir": "../out"}, files={"file": ("a.txt", b"x")}
+        )
+        assert resp.status_code == 400
+
+    def test_download_file_is_an_attachment(self, root: Path, client: TestClient) -> None:
+        """A single file comes back as itself, named for saving."""
+        (root / "t1.nii.gz").write_bytes(b"nifti")
+        resp = client.get("/api/files/download", params={"path": "t1.nii.gz"})
+        assert resp.status_code == 200
+        assert resp.content == b"nifti"
+        assert "attachment" in resp.headers["content-disposition"]
+
+    def test_download_folder_is_a_zip_of_its_tree(self, root: Path, client: TestClient) -> None:
+        """Nested files keep their paths under the folder's own name."""
+        (root / "sub-01" / "anat").mkdir(parents=True)
+        (root / "sub-01" / "anat" / "T1w.nii.gz").write_bytes(b"t1")
+        (root / "sub-01" / "notes.txt").write_text("hello")
+        resp = client.get("/api/files/download", params={"path": "sub-01"})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/zip"
+        assert "sub-01.zip" in resp.headers["content-disposition"]
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            assert sorted(zf.namelist()) == ["sub-01/anat/T1w.nii.gz", "sub-01/notes.txt"]
+            assert zf.read("sub-01/anat/T1w.nii.gz") == b"t1"
+            assert zf.testzip() is None
+
+    def test_download_folder_skips_symlinks_and_skip_dirs(
+        self, root: Path, tmp_path: Path, client: TestClient
+    ) -> None:
+        """A link pointing outside the workspace, or ``.git``, never enters the archive."""
+        outside = tmp_path / "secret.txt"
+        outside.write_text("host file")
+        (root / "d" / ".git").mkdir(parents=True)
+        (root / "d" / ".git" / "HEAD").write_text("ref")
+        (root / "d" / "kept.txt").write_text("ok")
+        (root / "d" / "link.txt").symlink_to(outside)
+        (root / "d" / "linkdir").symlink_to(tmp_path, target_is_directory=True)
+        resp = client.get("/api/files/download", params={"path": "d"})
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            assert zf.namelist() == ["d/kept.txt"]
+
+    def test_download_rejects_escaping_path(self, client: TestClient) -> None:
+        """The download goes through the workspace path guard."""
+        assert client.get("/api/files/download", params={"path": "../"}).status_code == 400
+
+    def test_download_missing_path_is_404(self, client: TestClient) -> None:
+        """Nothing there, nothing to send."""
+        assert client.get("/api/files/download", params={"path": "nope"}).status_code == 404
+
+
+class _FakeAcpClient:
+    """Records the JSON-RPC traffic a _ChatConnection sends to vibe-acp.
+
+    ``session/prompt`` stays pending until ``session/cancel`` arrives (after
+    ``cancel_delay``), like vibe-acp ending a turn asynchronously; ``hang`` keeps
+    it pending for good.
+    """
+
+    def __init__(self, *, cancel_delay: float = 0.05, hang: bool = False) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.cancel_delay = cancel_delay
+        self.hang = hang
+        self._turn: asyncio.Future[dict[str, object]] | None = None
+
+    async def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+        del params
+        self.calls.append(("request", method))
+        if method == "session/prompt":
+            self._turn = asyncio.get_running_loop().create_future()
+            result = await self._turn
+            self.calls.append(("turn-ended", method))
+            return result
+        return {"result": {}}
+
+    async def notify(self, method: str, params: dict[str, object]) -> None:
+        del params
+        self.calls.append(("notify", method))
+        if method == "session/cancel" and not self.hang:
+            turn = self._turn
+            loop = asyncio.get_running_loop()
+            loop.call_later(
+                self.cancel_delay,
+                lambda: (
+                    turn is not None
+                    and not turn.done()
+                    and turn.set_result({"result": {"stopReason": "cancelled"}})
+                ),
+            )
+
+    async def respond(self, req_id: int, result: dict[str, object]) -> None:
+        del req_id, result
+
+    def unregister_session(self, session_id: str) -> None:
+        del session_id
+        self.calls.append(("unregister", ""))
+
+
+class TestChatSessionLifecycle:
+    """Cancelled turns really end, and a closed chat can be reopened."""
+
+    @pytest.fixture
+    def fake(self, monkeypatch: pytest.MonkeyPatch) -> _FakeAcpClient:
+        """Swap vibe-acp for the recorder; keep provenance writes out of the way."""
+        client = _FakeAcpClient()
+        monkeypatch.setattr(server, "_client", client)
+        monkeypatch.setattr(server.settings, "load_provenance_enabled", lambda: False)
+        return client
+
+    @staticmethod
+    def _conn() -> server._ChatConnection:
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        return server._ChatConnection(cast("Any", _StubWs()), "sid", cast("Any", queue), [])
+
+    @pytest.mark.asyncio
+    async def test_cancel_waits_until_vibe_ends_the_turn(self, fake: _FakeAcpClient) -> None:
+        """The next prompt may only go out after the old session/prompt returned."""
+        conn = self._conn()
+        conn._prompt_task = asyncio.create_task(conn._run_prompt("first"))
+        await asyncio.sleep(0.01)
+        await conn._cancel_prompt()
+        assert fake.calls.index(("notify", "session/cancel")) < fake.calls.index(
+            ("turn-ended", "session/prompt")
+        )
+        assert fake.calls[-1] == ("turn-ended", "session/prompt")
+
+    @pytest.mark.asyncio
+    async def test_cancel_gives_up_on_a_turn_that_never_ends(
+        self, fake: _FakeAcpClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A wedged vibe-acp delays the next prompt by the timeout, not forever."""
+        fake.hang = True
+        monkeypatch.setattr(server, "TURN_CANCEL_TIMEOUT", 0.05)
+        conn = self._conn()
+        conn._prompt_task = asyncio.create_task(conn._run_prompt("first"))
+        await asyncio.sleep(0.01)
+        await asyncio.wait_for(conn._cancel_prompt(), timeout=1.0)
+        assert conn._prompt_rpc is None
+
+    @pytest.mark.asyncio
+    async def test_close_releases_the_session_in_vibe(self, fake: _FakeAcpClient) -> None:
+        """Leaving a chat sends session/close, so coming back can load it again."""
+        conn = self._conn()
+        await conn.close()
+        assert ("request", "session/close") in fake.calls
+        assert fake.calls.index(("request", "session/close")) < fake.calls.index(("unregister", ""))
+
+    @pytest.mark.asyncio
+    async def test_close_mid_turn_ends_the_turn_before_closing(self, fake: _FakeAcpClient) -> None:
+        """A disconnect during a reply cancels it, waits for the end, then closes."""
+        conn = self._conn()
+        conn._prompt_task = asyncio.create_task(conn._run_prompt("first"))
+        await asyncio.sleep(0.01)
+        await conn.close()
+        order = [c for c in fake.calls if c[0] != "unregister"]
+        assert order[-3:] == [
+            ("notify", "session/cancel"),
+            ("turn-ended", "session/prompt"),
+            ("request", "session/close"),
+        ]

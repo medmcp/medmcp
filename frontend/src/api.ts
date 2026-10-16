@@ -90,6 +90,48 @@ export async function uploadFile(file: File, dir: string): Promise<void> {
   await check(res)
 }
 
+/**
+ * Upload files into `dir`, recreating each file's folder from a folder pick
+ * (`webkitRelativePath`, e.g. "case1/series2/IM0001.dcm"). A few requests run at
+ * once; `onProgress` reports files done so far. Resolves to the failure count.
+ */
+export async function uploadFiles(
+  files: File[],
+  dir: string,
+  onProgress: (done: number, total: number) => void,
+): Promise<number> {
+  const join = (a: string, b: string) => (a && b ? `${a}/${b}` : a || b)
+  let next = 0
+  let done = 0
+  let failed = 0
+  const worker = async () => {
+    while (next < files.length) {
+      const file = files[next++]
+      if (!file) continue
+      const rel = file.webkitRelativePath
+      const sub = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : ''
+      try {
+        await uploadFile(file, join(dir, sub))
+      } catch {
+        failed++
+      }
+      onProgress(++done, files.length)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(4, files.length) }, worker))
+  return failed
+}
+
+/** Start a browser download of a file, or of a folder as a .zip. */
+export function downloadPath(path: string): void {
+  const a = document.createElement('a')
+  a.href = `/api/files/download?path=${encodeURIComponent(path)}`
+  a.download = ''
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
 export async function fetchSettings(): Promise<SettingsState> {
   const res = await check(await fetch('/api/settings'))
   return (await res.json()) as SettingsState

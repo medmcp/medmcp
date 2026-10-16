@@ -17,14 +17,14 @@ to invoke it.
 from __future__ import annotations
 
 import json
-import re
-import shutil
 from collections.abc import Collection
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from medmcp import provenance, workflow
 from medmcp.pathcheck import looks_like_path
+from medmcp.statefile import read_jsonl
+from medmcp.toolresult import looks_failed, parse_structured_blob
 from medmcp.workflow import Recipe, RecipeStep, StackRequirement, WorkflowInput
 from medmcp.workspace_note import display_content_text, strip_workspace_note
 
@@ -77,20 +77,6 @@ def _is_exploratory_call(tool_name: str, arguments: JsonDict) -> bool:
 # ── Reading the raw log ──────────────────────────────────────────────────────
 
 
-def parse_messages_file(path: Path) -> list[JsonDict]:
-    """Parse a vibe-acp ``messages.jsonl`` file into a list of message dicts."""
-    messages: list[JsonDict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            messages.append(cast("JsonDict", json.loads(line)))
-        except json.JSONDecodeError:
-            continue
-    return messages
-
-
 def _first_user_message(messages: list[JsonDict]) -> str:
     """Return the first non-injected user message, for context/naming.
 
@@ -117,43 +103,11 @@ def _first_user_message(messages: list[JsonDict]) -> str:
 
 def _structured_output_paths(result_text: str) -> dict[str, str]:
     """Extract ``key → path`` pairs from a tool result's structured output."""
-    import ast
-
-    match = re.search(r"structured:\s*(\{.*\})", result_text, re.DOTALL)
-    if not match:
-        return {}
-    try:
-        parsed = ast.literal_eval(match.group(1))
-    except (ValueError, SyntaxError):
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    out: dict[str, str] = {}
-    for key, value in cast("JsonDict", parsed).items():
-        if isinstance(value, str) and looks_like_path(value):
-            out[str(key)] = value
-    return out
-
-
-# FastMCP wraps any exception a tool raises into a result whose text begins with
-# "Error executing tool <name>:" and sets the MCP ``isError`` flag. vibe-acp,
-# however, renders that result into ``messages.jsonl`` as ``ok: True`` (its
-# ``ok:`` tracks JSON-RPC success, not the tool's ``isError``), so by the time
-# distillation reads the transcript the wrapper text is the only failure signal
-# left. ``_NONZERO_EXIT_RE`` additionally catches "(exit N)" for tools that
-# embed a subprocess exit code in the message.
-_TOOL_ERROR_MARKER: str = "Error executing tool"
-_NONZERO_EXIT_RE = re.compile(r"\(exit ([1-9]\d*)\)")
-
-
-def _is_failed_result(result_text: str) -> bool:
-    """Detect a failed tool result so dead-ends are excluded from the recipe."""
-    return (
-        "ok: False" in result_text
-        or "returncode: 1" in result_text
-        or _TOOL_ERROR_MARKER in result_text
-        or _NONZERO_EXIT_RE.search(result_text) is not None
-    )
+    return {
+        str(key): value
+        for key, value in parse_structured_blob(result_text).items()
+        if isinstance(value, str) and looks_like_path(value)
+    }
 
 
 # Markers vibe-acp writes into a tool result when the user rejected/cancelled the
@@ -266,7 +220,7 @@ def build_recipe(
     for tool_name, args, result_text in _iter_tool_calls(messages):
         if (
             _is_exploratory_call(tool_name, args)
-            or _is_failed_result(result_text)
+            or looks_failed(result_text)
             or _is_rejected_result(result_text)
         ):
             continue
@@ -322,12 +276,6 @@ def build_recipe(
     return recipe
 
 
-def slugify(text: str) -> str:
-    """Turn arbitrary text into a filesystem/skill-safe slug."""
-    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return slug[:48] or "workflow"
-
-
 def resolve_digest(image: str) -> str:
     """Resolve *image*'s digest best-effort; never raise (distillation must not fail)."""
     try:
@@ -368,34 +316,6 @@ def build_requirements(recipe: Recipe, manifest: JsonDict | None) -> list[StackR
     return requires
 
 
-# ── Workflow directories ─────────────────────────────────────────────────────
-
-
-def resolve_root(override: Path | None = None) -> Path:
-    """Return the workflows root (``.vibe/workflows`` unless *override*), migrated.
-
-    Every function here that takes a ``workflows_root`` keyword goes through
-    this, so the old ``draft/``/``active/`` layout is folded in before any
-    lookup or write (see :func:`medmcp.workflow.migrate_layout`).
-    """
-    root = override if override is not None else provenance.VIBE_HOME / "workflows"
-    workflow.migrate_layout(root)
-    return root
-
-
-def load_recipe(directory: Path) -> Recipe:
-    """Reconstruct a :class:`Recipe` from a workflow directory's ``recipe.yaml``."""
-    return workflow.read_recipe(directory)
-
-
-def _require_dir(name: str, root: Path) -> Path:
-    """Return workflow *name*'s directory under *root* or raise ``FileNotFoundError``."""
-    d = workflow.workflow_dir(root, name)
-    if d is None:
-        raise FileNotFoundError(f"no workflow named {name!r} (looked in {root})")
-    return d
-
-
 # ── Top-level distillation ───────────────────────────────────────────────────
 
 
@@ -429,7 +349,7 @@ def distill_session(
     if not message_paths:
         raise FileNotFoundError(f"no messages.jsonl in {session_dirs[0]}")
 
-    messages = [m for path in message_paths for m in parse_messages_file(path)]
+    messages = [m for path in message_paths for m in read_jsonl(path)]
     manifest = provenance.read_manifest(session_id)
     server_names = (
         [str(s.get("name")) for s in cast("list[JsonDict]", manifest.get("stacks") or [])]
@@ -439,9 +359,9 @@ def distill_session(
 
     context = _first_user_message(messages)
     if name_hint.strip():
-        base = slugify(name_hint)
+        base = workflow.slugify(name_hint)
     elif context:
-        base = slugify(context)
+        base = workflow.slugify(context)
     else:
         base = f"workflow-{session_id[:8]}"
     recipe = build_recipe(
@@ -452,39 +372,8 @@ def distill_session(
     )
     recipe.requires = build_requirements(recipe, manifest)
 
-    root = resolve_root(workflows_root)
+    root = workflow.resolve_root(workflows_root)
     recipe.name = workflow.unique_name(root, base)
     target = root / recipe.name
     workflow.write_recipe(target, recipe)
     return target
-
-
-def delete_workflow(name: str, *, workflows_root: Path | None = None) -> Path:
-    """Delete workflow *name*; return the directory that was removed.
-
-    Raises ``FileNotFoundError`` if no workflow with that name exists.
-    """
-    target = _require_dir(name, resolve_root(workflows_root))
-    shutil.rmtree(target)
-    return target
-
-
-def rename_workflow(name: str, new_name: str, *, workflows_root: Path | None = None) -> Path:
-    """Rename a workflow (its name in the recipe and its directory); return the new dir.
-
-    Raises ``FileNotFoundError`` if *name* does not exist and ``FileExistsError``
-    if the slug of *new_name* already belongs to another workflow — a rename
-    never replaces one.
-    """
-    root = resolve_root(workflows_root)
-    src = _require_dir(name, root)
-    new_slug = slugify(new_name)
-    dst = root / new_slug
-    if dst != src and dst.exists():
-        raise FileExistsError(f"a workflow named {new_slug!r} already exists")
-    recipe = load_recipe(src)
-    recipe.name = new_slug
-    workflow.write_recipe(src, recipe)
-    if dst != src:
-        shutil.move(str(src), str(dst))
-    return dst

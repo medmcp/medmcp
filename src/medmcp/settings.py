@@ -29,7 +29,6 @@ import platform
 import re
 import shutil
 import subprocess
-import tempfile
 import threading
 import tomllib
 from collections.abc import Callable
@@ -42,10 +41,10 @@ from typing import Any, cast
 from urllib.parse import urlparse
 
 import httpx
-import tomli_w
 
 from medmcp import signing
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict
+from medmcp.statefile import atomic_write_json, atomic_write_toml, read_json
 from medmcp.workflow import list_workflows
 
 log: logging.Logger = logging.getLogger(__name__)
@@ -63,15 +62,9 @@ OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "muse-medmcp")
 os.environ.setdefault("MEDMCP_GPU", "all")
 LLM_GPU: str = os.environ["MEDMCP_GPU"]
 GPU_SELECTION_PATH: Path = VIBE_HOME / "gpu_selection.json"
-if GPU_SELECTION_PATH.exists():
-    try:
-        _gpu_sel = str(
-            cast("dict[str, Any]", json.loads(GPU_SELECTION_PATH.read_text())).get("gpu", "")
-        ).strip()
-    except (json.JSONDecodeError, OSError):
-        _gpu_sel = ""
-    if _gpu_sel:
-        os.environ["MEDMCP_GPU"] = _gpu_sel
+_gpu_sel = str((read_json(GPU_SELECTION_PATH) or {}).get("gpu", "")).strip()
+if _gpu_sel:
+    os.environ["MEDMCP_GPU"] = _gpu_sel
 
 # Context window size used when Ollama hasn't been queried (yet) — the value
 # set in Modelfile.muse.
@@ -217,7 +210,7 @@ def build_backend_registry(servers: list[JsonDict]) -> dict[str, JsonDict]:
 
 def _write_backend_registry(servers: list[JsonDict]) -> None:
     """Atomically write backends.json from the real (un-proxied) server specs."""
-    _atomic_write_json(backends_registry_path(), build_backend_registry(servers))
+    atomic_write_json(backends_registry_path(), build_backend_registry(servers))
 
 
 def _proxied_entry(entry: JsonDict, ws_root: str | None) -> JsonDict:
@@ -623,42 +616,15 @@ def load_active_server_names() -> set[str]:
     all-servers-always-on model.
     """
     all_names = {s["name"] for s in load_mcp_servers()}
-    if not ACTIVE_STACKS_PATH.exists():
+    data = read_json(ACTIVE_STACKS_PATH)
+    if data is None:
         return all_names
-    try:
-        data = cast("dict[str, Any]", json.loads(ACTIVE_STACKS_PATH.read_text()))
-        return set(cast("list[str]", data.get("active", list(all_names))))
-    except (json.JSONDecodeError, OSError):
-        return all_names
-
-
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Write a small JSON state file atomically, safe across processes.
-
-    A unique temp name (not a fixed ``.tmp`` path) so a concurrent writer in
-    another process (a second server instance, the CLI) can never consume or
-    interleave into this writer's temp file; ``os.replace`` makes the
-    last-complete-writer win.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh)
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
-
-
-# Public name for modules outside settings that keep small state files of their own.
-atomic_write_json = _atomic_write_json
+    return set(cast("list[str]", data.get("active", list(all_names))))
 
 
 def save_active_server_names(names: set[str]) -> None:
     """Persist the active server set to ``.vibe/active_stacks.json``."""
-    _atomic_write_json(ACTIVE_STACKS_PATH, {"active": sorted(names)})
+    atomic_write_json(ACTIVE_STACKS_PATH, {"active": sorted(names)})
 
 
 def active_servers() -> list[JsonDict]:
@@ -699,12 +665,8 @@ def _default_external_state() -> JsonDict:
 
 def load_external_mcp() -> JsonDict:
     """Return the external-MCP state (``enabled``/``acknowledged_at``/``servers``)."""
-    if not EXTERNAL_MCP_PATH.exists():
-        return _default_external_state()
-    try:
-        data = cast("JsonDict", json.loads(EXTERNAL_MCP_PATH.read_text()))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("could not read %s; treating as disabled: %s", EXTERNAL_MCP_PATH, exc)
+    data = read_json(EXTERNAL_MCP_PATH)
+    if data is None:
         return _default_external_state()
     state = _default_external_state()
     state["enabled"] = bool(data.get("enabled"))
@@ -716,7 +678,7 @@ def load_external_mcp() -> JsonDict:
 
 
 def _save_external_mcp(state: JsonDict) -> None:
-    _atomic_write_json(EXTERNAL_MCP_PATH, state)
+    atomic_write_json(EXTERNAL_MCP_PATH, state)
 
 
 EXTERNAL_SECRETS_PATH: Path = VIBE_STATE_DIR / "external_secrets.json"
@@ -737,13 +699,7 @@ def load_external_secrets() -> dict[str, str]:
     ``config.toml`` (rewritten on every sync), so a token cannot reach a response
     body or the agent's config by accident. Written 0600 by the atomic writer.
     """
-    if not EXTERNAL_SECRETS_PATH.exists():
-        return {}
-    try:
-        data = cast("JsonDict", json.loads(EXTERNAL_SECRETS_PATH.read_text()))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("could not read %s; treating as empty: %s", EXTERNAL_SECRETS_PATH, exc)
-        return {}
+    data = read_json(EXTERNAL_SECRETS_PATH) or {}
     return {str(k): str(v) for k, v in data.items() if isinstance(v, str) and v}
 
 
@@ -751,7 +707,7 @@ def set_external_secret(server_name: str, token: str) -> None:
     """Store *token* for *server_name*, replacing any previous one."""
     secrets = load_external_secrets()
     secrets[server_name] = token
-    _atomic_write_json(EXTERNAL_SECRETS_PATH, cast("JsonDict", secrets))
+    atomic_write_json(EXTERNAL_SECRETS_PATH, cast("JsonDict", secrets))
 
 
 def delete_external_secret(server_name: str) -> None:
@@ -759,7 +715,7 @@ def delete_external_secret(server_name: str) -> None:
     secrets = load_external_secrets()
     if secrets.pop(server_name, None) is None:
         return
-    _atomic_write_json(EXTERNAL_SECRETS_PATH, cast("JsonDict", secrets))
+    atomic_write_json(EXTERNAL_SECRETS_PATH, cast("JsonDict", secrets))
 
 
 def external_secret_env() -> dict[str, str]:
@@ -1120,12 +1076,8 @@ def _default_cloud_state() -> JsonDict:
 
 def load_cloud_model() -> JsonDict:
     """Return the cloud-model state (``enabled``/``acknowledged_at``/``model``)."""
-    if not CLOUD_MODEL_PATH.exists():
-        return _default_cloud_state()
-    try:
-        data = cast("JsonDict", json.loads(CLOUD_MODEL_PATH.read_text()))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("could not read %s; treating as disabled: %s", CLOUD_MODEL_PATH, exc)
+    data = read_json(CLOUD_MODEL_PATH)
+    if data is None:
         return _default_cloud_state()
     state = _default_cloud_state()
     state["enabled"] = bool(data.get("enabled"))
@@ -1137,7 +1089,7 @@ def load_cloud_model() -> JsonDict:
 
 
 def _save_cloud_model(state: JsonDict) -> None:
-    _atomic_write_json(CLOUD_MODEL_PATH, state)
+    atomic_write_json(CLOUD_MODEL_PATH, state)
 
 
 def load_cloud_model_key() -> str:
@@ -1147,19 +1099,12 @@ def load_cloud_model_key() -> str:
     ``config.toml`` (rewritten on every sync) for the reason an external token
     is: so it cannot reach a response body or the agent's config by accident.
     """
-    if not CLOUD_MODEL_SECRET_PATH.exists():
-        return ""
-    try:
-        data = cast("JsonDict", json.loads(CLOUD_MODEL_SECRET_PATH.read_text()))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("could not read %s; treating as empty: %s", CLOUD_MODEL_SECRET_PATH, exc)
-        return ""
-    key = data.get("api_key")
+    key = (read_json(CLOUD_MODEL_SECRET_PATH) or {}).get("api_key")
     return key if isinstance(key, str) else ""
 
 
 def _set_cloud_model_key(api_key: str) -> None:
-    _atomic_write_json(CLOUD_MODEL_SECRET_PATH, {"api_key": api_key})
+    atomic_write_json(CLOUD_MODEL_SECRET_PATH, {"api_key": api_key})
 
 
 def _delete_cloud_model_key() -> None:
@@ -1394,14 +1339,7 @@ def load_local_model() -> JsonDict | None:
     presence means "ready to use". A malformed one is ignored rather than
     trusted: the default model is always there to fall back to.
     """
-    if not LOCAL_MODEL_PATH.exists():
-        return None
-    try:
-        data = cast("JsonDict", json.loads(LOCAL_MODEL_PATH.read_text()))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("could not read %s; using the default model: %s", LOCAL_MODEL_PATH, exc)
-        return None
-    entry = data.get("selected")
+    entry = (read_json(LOCAL_MODEL_PATH) or {}).get("selected")
     if not isinstance(entry, dict):
         return None
     selected = cast("JsonDict", entry)
@@ -1423,7 +1361,7 @@ def load_local_model() -> JsonDict | None:
 
 def save_local_model(entry: JsonDict | None) -> None:
     """Record the selected local model; ``None`` returns to the default."""
-    _atomic_write_json(LOCAL_MODEL_PATH, {"selected": entry})
+    atomic_write_json(LOCAL_MODEL_PATH, {"selected": entry})
 
 
 def local_model_name() -> str:
@@ -1818,17 +1756,7 @@ def pull_image(image: str, on_progress: ProgressFn | None = None) -> None:
 
 def _write_stack_manifest(name: str, entry: JsonDict) -> None:
     """Atomically write ``stacks.d/<name>.toml``."""
-    STACKS_D_PATH.mkdir(parents=True, exist_ok=True)
-    path = STACKS_D_PATH / f"{name}.toml"
-    fd, tmp_name = tempfile.mkstemp(dir=STACKS_D_PATH, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            tomli_w.dump(entry, fh)
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    atomic_write_toml(STACKS_D_PATH / f"{name}.toml", entry)
 
 
 def install_stack_image(
@@ -2023,18 +1951,12 @@ def discover_workflows() -> list[JsonDict]:
 
 def _load_flag(path: Path) -> bool:
     """Read an ``{"enabled": bool}`` preference file (default ``True`` when unset)."""
-    if not path.exists():
-        return True
-    try:
-        data = cast("dict[str, Any]", json.loads(path.read_text()))
-        return bool(data.get("enabled", True))
-    except (json.JSONDecodeError, OSError):
-        return True
+    return bool((read_json(path) or {}).get("enabled", True))
 
 
 def _save_flag(path: Path, enabled: bool) -> None:
     """Persist an ``{"enabled": bool}`` preference file atomically."""
-    _atomic_write_json(path, {"enabled": enabled})
+    atomic_write_json(path, {"enabled": enabled})
 
 
 def load_provenance_enabled() -> bool:
@@ -2071,7 +1993,7 @@ def save_gpu_selection(gpu: str) -> None:
     its GPU is fixed at container creation (see :data:`LLM_GPU`).
     """
     value = gpu.strip() or "all"
-    _atomic_write_json(GPU_SELECTION_PATH, {"gpu": value})
+    atomic_write_json(GPU_SELECTION_PATH, {"gpu": value})
     os.environ["MEDMCP_GPU"] = value
     load_mcp_servers.cache_clear()
 
@@ -2182,7 +2104,7 @@ def _ensure_pathguard_hook(vibe_home: Path) -> None:
             with path.open("rb") as fh:
                 raw = cast("list[JsonDict]", tomllib.load(fh).get("hooks", []))
             others = [h for h in raw if h.get("name") != PATHGUARD_HOOK_NAME]
-        except (OSError, tomllib.TOMLDecodeError, AttributeError):
+        except (OSError, tomllib.TOMLDecodeError):
             log.warning("could not read %s; rewriting it", path)
     entry: JsonDict = {
         "name": PATHGUARD_HOOK_NAME,
@@ -2195,16 +2117,7 @@ def _ensure_pathguard_hook(vibe_home: Path) -> None:
             "reason back to the model so it can correct them."
         ),
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            tomli_w.dump({"hooks": [*others, entry]}, fh)
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    atomic_write_toml(path, {"hooks": [*others, entry]})
 
 
 def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
@@ -2368,16 +2281,4 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
     # Hooks live in their own file next to the config, not inside it.
     _ensure_pathguard_hook(VIBE_HOME)
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    # A unique temp name (not a fixed .tmp path) so a concurrent writer in
-    # another process can never interleave into the same file; os.replace
-    # then makes last-complete-writer win.
-    fd, tmp_name = tempfile.mkstemp(dir=config_path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            tomli_w.dump(cfg, fh)
-        os.replace(tmp_name, config_path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    atomic_write_toml(config_path, cfg)

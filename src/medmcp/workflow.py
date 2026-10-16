@@ -21,12 +21,15 @@ touched, so every accessor here calls it.
 
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
 import yaml
+
+from medmcp import provenance
 
 JsonDict = dict[str, Any]
 
@@ -202,6 +205,67 @@ class Recipe:
 
 
 # ── On-disk layout ───────────────────────────────────────────────────────────
+
+
+def slugify(text: str) -> str:
+    """Turn arbitrary text into a filesystem-safe workflow name."""
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug[:48] or "workflow"
+
+
+def resolve_root(override: Path | None = None) -> Path:
+    """The workflows root (``.vibe/workflows`` unless *override*), migrated.
+
+    Every by-name accessor here goes through this, so the old ``draft/``/``active/``
+    layout is folded in before any lookup or write (see :func:`migrate_layout`).
+    """
+    root = override if override is not None else provenance.VIBE_HOME / "workflows"
+    migrate_layout(root)
+    return root
+
+
+def require_dir(name: str, root: Path | None = None) -> Path:
+    """Workflow *name*'s directory, or ``FileNotFoundError``."""
+    d = workflow_dir(resolve_root(root), name)
+    if d is None:
+        raise FileNotFoundError(f"no workflow named {name!r}")
+    return d
+
+
+def load_workflow(name: str, root: Path | None = None) -> Recipe:
+    """The recipe of workflow *name*, or ``FileNotFoundError``."""
+    return read_recipe(require_dir(name, root))
+
+
+def delete_workflow(name: str, *, workflows_root: Path | None = None) -> Path:
+    """Delete workflow *name*; return the directory that was removed.
+
+    Raises ``FileNotFoundError`` if no workflow with that name exists.
+    """
+    target = require_dir(name, workflows_root)
+    shutil.rmtree(target)
+    return target
+
+
+def rename_workflow(name: str, new_name: str, *, workflows_root: Path | None = None) -> Path:
+    """Rename a workflow (its name in the recipe and its directory); return the new dir.
+
+    Raises ``FileNotFoundError`` if *name* does not exist and ``FileExistsError``
+    if the slug of *new_name* already belongs to another workflow — a rename
+    never replaces one.
+    """
+    root = resolve_root(workflows_root)
+    src = require_dir(name, root)
+    new_slug = slugify(new_name)
+    dst = root / new_slug
+    if dst != src and dst.exists():
+        raise FileExistsError(f"a workflow named {new_slug!r} already exists")
+    recipe = read_recipe(src)
+    recipe.name = new_slug
+    write_recipe(src, recipe)
+    if dst != src:
+        shutil.move(str(src), str(dst))
+    return dst
 
 
 def read_recipe(directory: Path) -> Recipe:

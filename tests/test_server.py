@@ -339,8 +339,7 @@ class TestWorkflowShareEndpoints:
 
     @pytest.fixture
     def vibe_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-        """Point both the server and provenance/share VIBE_HOME at a temp dir."""
-        monkeypatch.setattr(server, "VIBE_HOME", tmp_path)
+        """Point the workflow root (resolved via provenance.VIBE_HOME) at a temp dir."""
         monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
         return tmp_path
 
@@ -1014,7 +1013,6 @@ class TestReplayRuns:
         """A temp VIBE_HOME with one imported workflow, a temp workspace, temp runs."""
         from medmcp import replay, runs
 
-        monkeypatch.setattr(server, "VIBE_HOME", tmp_path)
         monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
         monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
         workspace = (tmp_path / "ws").resolve()

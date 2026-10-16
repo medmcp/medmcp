@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 # pyright: reportPrivateUsage=false
-from medmcp import distill, provenance
+from medmcp import distill, provenance, workflow
 from medmcp.workflow import Recipe, RecipeStep, StackRequirement
 
 JsonDict = dict[str, Any]
@@ -198,8 +198,8 @@ class TestBuildRecipe:
 
 def test_slugify() -> None:
     """Slugs are lowercased, hyphenated, and bounded."""
-    assert distill.slugify("Skull Strip & Register!") == "skull-strip-register"
-    assert distill.slugify("") == "workflow"
+    assert workflow.slugify("Skull Strip & Register!") == "skull-strip-register"
+    assert workflow.slugify("") == "workflow"
 
 
 class TestFirstUserMessage:
@@ -343,7 +343,7 @@ def test_distill_names_the_workflow_after_the_chat(tmp_path: Path) -> None:
             workflows_root=tmp_path / "workflows",
         )
     assert target.name == "brain-mri-strip-register"
-    assert distill.load_recipe(target).description == "Skull strip and register the T1"
+    assert workflow.read_recipe(target).description == "Skull strip and register the T1"
 
 
 def test_distill_never_replaces_an_existing_workflow(tmp_path: Path) -> None:
@@ -354,7 +354,7 @@ def test_distill_never_replaces_an_existing_workflow(tmp_path: Path) -> None:
         first = distill.distill_session(SESSION_ID, name_hint="Strip", workflows_root=root)
         second = distill.distill_session(SESSION_ID, name_hint="Strip", workflows_root=root)
     assert (first.name, second.name) == ("strip", "strip-2")
-    assert distill.load_recipe(second).name == "strip-2"
+    assert workflow.read_recipe(second).name == "strip-2"
 
 
 def test_distill_session_missing_log_raises(tmp_path: Path) -> None:
@@ -419,11 +419,13 @@ def test_rename_workflow_relocates_and_rewrites(tmp_path: Path) -> None:
     """Rename moves the directory and updates the name in recipe.yaml."""
     workflows_root, wf_dir = _make_workflow(tmp_path)
 
-    new_dir = distill.rename_workflow(wf_dir.name, "Fancy New Name!", workflows_root=workflows_root)
+    new_dir = workflow.rename_workflow(
+        wf_dir.name, "Fancy New Name!", workflows_root=workflows_root
+    )
 
     assert new_dir == workflows_root / "fancy-new-name"
     assert not wf_dir.exists()
-    recipe = distill.load_recipe(new_dir)
+    recipe = workflow.read_recipe(new_dir)
     assert recipe.name == "fancy-new-name"
     assert recipe.steps  # the pipeline is preserved across the rename
 
@@ -431,7 +433,7 @@ def test_rename_workflow_relocates_and_rewrites(tmp_path: Path) -> None:
 def test_rename_workflow_missing_raises(tmp_path: Path) -> None:
     """Renaming a workflow that doesn't exist raises FileNotFoundError."""
     with pytest.raises(FileNotFoundError):
-        distill.rename_workflow("nope", "x", workflows_root=tmp_path / "workflows")
+        workflow.rename_workflow("nope", "x", workflows_root=tmp_path / "workflows")
 
 
 def test_rename_workflow_never_replaces_another(tmp_path: Path) -> None:
@@ -442,16 +444,16 @@ def test_rename_workflow_never_replaces_another(tmp_path: Path) -> None:
     (other / "recipe.yaml").write_text("name: other\ndescription: keep me\n")
 
     with pytest.raises(FileExistsError):
-        distill.rename_workflow(wf_dir.name, "Other", workflows_root=workflows_root)
+        workflow.rename_workflow(wf_dir.name, "Other", workflows_root=workflows_root)
 
-    assert distill.load_recipe(other).description == "keep me"
+    assert workflow.read_recipe(other).description == "keep me"
     assert wf_dir.exists()
 
 
 def test_rename_workflow_to_its_own_name_keeps_it(tmp_path: Path) -> None:
     """A rename that slugifies to the current name changes nothing and does not raise."""
     workflows_root, wf_dir = _make_workflow(tmp_path)
-    renamed = distill.rename_workflow(wf_dir.name, wf_dir.name, workflows_root=workflows_root)
+    renamed = workflow.rename_workflow(wf_dir.name, wf_dir.name, workflows_root=workflows_root)
     assert renamed == wf_dir
     assert wf_dir.exists()
 
@@ -459,7 +461,7 @@ def test_rename_workflow_to_its_own_name_keeps_it(tmp_path: Path) -> None:
 def test_delete_workflow_removes_dir(tmp_path: Path) -> None:
     """delete_workflow removes the workflow's directory and returns it."""
     workflows_root, wf_dir = _make_workflow(tmp_path)
-    removed = distill.delete_workflow(wf_dir.name, workflows_root=workflows_root)
+    removed = workflow.delete_workflow(wf_dir.name, workflows_root=workflows_root)
     assert removed == wf_dir
     assert not wf_dir.exists()
 
@@ -467,7 +469,7 @@ def test_delete_workflow_removes_dir(tmp_path: Path) -> None:
 def test_delete_workflow_missing_raises(tmp_path: Path) -> None:
     """Deleting a non-existent workflow raises FileNotFoundError."""
     with pytest.raises(FileNotFoundError):
-        distill.delete_workflow("nope", workflows_root=tmp_path / "workflows")
+        workflow.delete_workflow("nope", workflows_root=tmp_path / "workflows")
 
 
 def test_legacy_layout_is_folded_in_before_any_lookup(tmp_path: Path) -> None:
@@ -478,7 +480,7 @@ def test_legacy_layout_is_folded_in_before_any_lookup(tmp_path: Path) -> None:
     (legacy / "recipe.yaml").write_text("name: strip\ndescription: d\n")
     (legacy / "SKILL.md").write_text("---\nname: strip\n---\n")
 
-    assert distill.delete_workflow("strip", workflows_root=root) == root / "strip"
+    assert workflow.delete_workflow("strip", workflows_root=root) == root / "strip"
     assert not (root / "draft").exists()
 
 
@@ -563,4 +565,4 @@ def test_default_survives_a_recipe_round_trip(tmp_path: Path) -> None:
     draft = tmp_path / "wf"
     draft.mkdir()
     (draft / "recipe.yaml").write_text(yaml.safe_dump(recipe.to_dict()), encoding="utf-8")
-    assert _defaults(distill.load_recipe(draft))["in_2"] == "{{dir(in_1)}}"
+    assert _defaults(workflow.read_recipe(draft))["in_2"] == "{{dir(in_1)}}"

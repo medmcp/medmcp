@@ -30,15 +30,16 @@ path here still prints ``{"decision": "allow"}``: a broken guard must never be
 able to block work.
 """
 
+import contextlib
 import hashlib
 import json
 import os
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, cast
 
 from medmcp.pathcheck import PathFinding, check_tool_call_paths
+from medmcp.statefile import atomic_write_json, read_json
 
 # Refusals of the same call before the hook gives up and lets a human look at it.
 _MAX_DENIALS = 2
@@ -60,28 +61,17 @@ def _ledger_path() -> Path:
 
 def _load_ledger(path: Path) -> dict[str, int]:
     """Read the denial counts, treating any problem as an empty ledger."""
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return {k: v for k, v in cast("dict[str, Any]", data).items() if isinstance(v, int)}
+    data = read_json(path) or {}
+    return {k: v for k, v in data.items() if isinstance(v, int)}
 
 
 def _save_ledger(path: Path, ledger: dict[str, int]) -> None:
     """Write the ledger atomically, best-effort."""
     if len(ledger) > _MAX_LEDGER:
         ledger = dict(list(ledger.items())[-_LEDGER_KEEP:])
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-        with os.fdopen(fd, "w") as fh:
-            json.dump(ledger, fh)
-        os.replace(tmp, path)
-    except OSError:
-        # A ledger we cannot persist only costs the retry cap, so carry on.
-        pass
+    # A ledger we cannot persist only costs the retry cap, so carry on.
+    with contextlib.suppress(OSError):
+        atomic_write_json(path, ledger)
 
 
 def call_signature(session_id: str, tool_name: str, findings: list[PathFinding]) -> str:

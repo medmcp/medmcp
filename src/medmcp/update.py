@@ -42,7 +42,8 @@ from typing import cast
 import httpx
 
 from medmcp.acp import JsonDict
-from medmcp.settings import VIBE_STATE_DIR, atomic_write_json
+from medmcp.settings import VIBE_STATE_DIR
+from medmcp.statefile import atomic_write_json, read_json
 
 log: logging.Logger = logging.getLogger("medmcp.update")
 
@@ -248,12 +249,8 @@ def _default_state() -> JsonDict:
 def load_state() -> JsonDict:
     """The persisted check state (defaults when absent or unreadable)."""
     state = _default_state()
-    if not UPDATE_STATE_PATH.exists():
-        return state
-    try:
-        data = cast("JsonDict", json.loads(UPDATE_STATE_PATH.read_text(encoding="utf-8")))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("could not read %s: %s", UPDATE_STATE_PATH, exc)
+    data = read_json(UPDATE_STATE_PATH)
+    if data is None:
         return state
     for key in state:
         if key in data:
@@ -343,12 +340,8 @@ def collect_updater_result() -> JsonDict | None:
     container itself is removed once its record is in, so ``docker ps -a``
     does not accumulate one per update.
     """
-    if not UPDATE_RESULT_PATH.exists():
-        return None
-    try:
-        result = cast("JsonDict", json.loads(UPDATE_RESULT_PATH.read_text(encoding="utf-8")))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("could not read %s: %s", UPDATE_RESULT_PATH, exc)
+    result = read_json(UPDATE_RESULT_PATH)
+    if result is None:
         return None
     state = load_state()
     state["last_result"] = result

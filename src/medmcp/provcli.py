@@ -78,7 +78,7 @@ def _parse_bindings(pairs: list[str]) -> dict[str, str]:
 
 def _workflow_dir(name: str) -> Path | None:
     """Resolve a workflow name to its recipe directory."""
-    return workflow.workflow_dir(distill.resolve_root(), name)
+    return workflow.workflow_dir(workflow.resolve_root(), name)
 
 
 def _replay(
@@ -98,7 +98,7 @@ def _replay(
     if workflow_dir is None:
         print(f"error: no workflow named {name!r}", file=sys.stderr)
         return 1
-    recipe = distill.load_recipe(workflow_dir)
+    recipe = workflow.read_recipe(workflow_dir)
     servers = settings.active_servers()
     cwd = os.environ.get("MEDMCP_WORKSPACE") or None
 
@@ -148,7 +148,7 @@ def _replay(
 
 def _list_workflows() -> int:
     """Print personal workflows discovered under ``.vibe/workflows/``."""
-    rows = workflow.list_workflows(distill.resolve_root())
+    rows = workflow.list_workflows(workflow.resolve_root())
     for row in rows:
         print(f"{row['name']}\t{row['description']}")
     if not rows:
@@ -159,7 +159,7 @@ def _list_workflows() -> int:
 def _delete(name: str) -> int:
     """Delete a personal workflow by name."""
     try:
-        removed = distill.delete_workflow(name)
+        removed = workflow.delete_workflow(name)
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

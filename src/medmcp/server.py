@@ -79,7 +79,7 @@ from medmcp import (
     update,
     workflow,
 )
-from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict, VibeAcpClient
+from medmcp.acp import PROJECT_ROOT, JsonDict, VibeAcpClient
 from medmcp.backend_broker import BackendBroker
 from medmcp.backend_pool import BackendPool, BackendSpec
 from medmcp.reasoning import ThoughtStripper
@@ -869,11 +869,6 @@ async def ws_stack_install(ws: WebSocket) -> None:
 # recipe deterministically (no LLM) on new inputs.
 
 
-def _workflow_dir(name: str) -> Path | None:
-    """Return the on-disk dir for workflow *name*, or ``None``."""
-    return workflow.workflow_dir(VIBE_HOME / "workflows", name)
-
-
 def _requirement_statuses(recipe: workflow.Recipe, servers: list[JsonDict]) -> list[JsonDict]:
     """Each requirement enriched with its availability against the installed stacks.
 
@@ -902,10 +897,7 @@ def _requirement_statuses(recipe: workflow.Recipe, servers: list[JsonDict]) -> l
 
 def _workflow_detail(name: str) -> JsonDict:
     """Load a workflow's recipe and replayability state (blocking; run in a thread)."""
-    d = _workflow_dir(name)
-    if d is None:
-        raise FileNotFoundError(f"no workflow named {name!r}")
-    recipe = distill.load_recipe(d)
+    recipe = workflow.load_workflow(name)
     examples = {i.name: i.example for i in recipe.inputs}
     servers = settings.active_servers()
     replay_error = replay.validate(recipe, examples, servers)
@@ -1389,7 +1381,7 @@ class WorkflowRenamePayload(BaseModel):
 async def post_rename_workflow(name: str, payload: WorkflowRenamePayload) -> JsonDict:
     """Rename a workflow; returns the new (slugified) name. 409 if that name is taken."""
     try:
-        new_dir = await asyncio.to_thread(distill.rename_workflow, name, payload.new_name)
+        new_dir = await asyncio.to_thread(workflow.rename_workflow, name, payload.new_name)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except FileExistsError as exc:
@@ -1401,7 +1393,7 @@ async def post_rename_workflow(name: str, payload: WorkflowRenamePayload) -> Jso
 async def delete_workflow(name: str) -> JsonDict:
     """Delete a personal workflow. The UI confirms first."""
     try:
-        await asyncio.to_thread(distill.delete_workflow, name)
+        await asyncio.to_thread(workflow.delete_workflow, name)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     _audit.info("workflow deleted: %s", name)
@@ -1566,10 +1558,7 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
     """
 
     def _preview() -> JsonDict:
-        d = _workflow_dir(name)
-        if d is None:
-            raise FileNotFoundError(f"no workflow named {name!r}")
-        recipe = distill.load_recipe(d)
+        recipe = workflow.load_workflow(name)
         bindings_list = [_confined_input_paths(dict(r)) for r in payload.runs]
         servers = settings.active_servers()
         arg_names = _input_argument_names(recipe)
@@ -1627,10 +1616,7 @@ async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> Json
     """
 
     def _build() -> JsonDict:
-        d = _workflow_dir(name)
-        if d is None:
-            raise FileNotFoundError(f"no workflow named {name!r}")
-        recipe = distill.load_recipe(d)
+        recipe = workflow.load_workflow(name)
         try:
             rows = batchplan.read_manifest(_confined_input_path(payload.plan_csv))
         except OSError as exc:
@@ -1715,12 +1701,14 @@ async def ws_replay(ws: WebSocket) -> None:
                 _audit.warning("replay refused: %s", exc)
                 await ws.send_json({"type": "result", "ok": False, "error": str(exc)})
                 return
-            d = _workflow_dir(first.name)
-            if d is None or not bindings:
-                error = f"no workflow named {first.name!r}" if d is None else "no inputs to run"
-                await ws.send_json({"type": "result", "ok": False, "error": error})
+            if not bindings:
+                await ws.send_json({"type": "result", "ok": False, "error": "no inputs to run"})
                 return
-            recipe = await asyncio.to_thread(distill.load_recipe, d)
+            try:
+                recipe = await asyncio.to_thread(workflow.load_workflow, first.name)
+            except FileNotFoundError as exc:
+                await ws.send_json({"type": "result", "ok": False, "error": str(exc)})
+                return
             servers = await asyncio.to_thread(settings.active_servers)
             record = _runs.start(
                 recipe=recipe,

@@ -25,11 +25,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
-import os
 import secrets
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -38,6 +35,7 @@ from typing import Any, cast
 
 from medmcp import replay
 from medmcp.acp import VIBE_HOME
+from medmcp.statefile import atomic_write_json, read_json
 from medmcp.workflow import Recipe
 
 JsonDict = dict[str, Any]
@@ -332,27 +330,13 @@ def run_path(run_id: str, *, root: Path | None = None) -> Path:
 
 def save_run(record: RunRecord, *, root: Path | None = None) -> None:
     """Write the record atomically (a reader never sees a half-written file)."""
-    path = run_path(record.id, root=root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(record.to_dict(), fh)
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    atomic_write_json(run_path(record.id, root=root), record.to_dict())
 
 
 def load_run(run_id: str, *, root: Path | None = None) -> RunRecord | None:
     """Read one record; ``None`` when absent or unreadable."""
-    path = run_path(run_id, root=root)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return RunRecord.from_dict(cast("JsonDict", data)) if isinstance(data, dict) else None
+    data = read_json(run_path(run_id, root=root))
+    return RunRecord.from_dict(data) if data is not None else None
 
 
 def list_runs(

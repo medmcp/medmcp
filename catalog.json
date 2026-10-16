@@ -30,6 +30,18 @@
       "image": "medmcp-cardiac:dev",
       "description": "Cardiac MRI and CT: ventricle segmentation on short- and long-axis cines (CineMA), ejection fraction, volumes, LV mass and cardiac output, AHA 16-segment wall analysis, Agatston calcium score.",
       "gpu": true
+    },
+    {
+      "name": "medmcp-cohort",
+      "image": "medmcp-cohort:dev",
+      "description": "Clinical cohorts: read clinical tables, merge imaging biomarkers by subject and visit, select sub-cohorts with a CONSORT-style flow, Table 1, regression (incl. ordinal and mixed models) and survival, batch plans over many subjects.",
+      "gpu": false
+    },
+    {
+      "name": "medmcp-stats",
+      "image": "medmcp-stats:dev",
+      "description": "Statistics and publication figures on any table: t-tests, ANOVA, rank tests, correlations, chi-square/Fisher with effect sizes and a draft results sentence; box, violin, scatter, Bland-Altman and other plots at journal size (PNG, SVG, PDF), restyled without re-running the analysis.",
+      "gpu": false
     }
   ]
 }

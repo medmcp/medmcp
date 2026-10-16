@@ -75,8 +75,14 @@ analysis pipelines through natural-language instructions.
   - Finding or looping a per-subject imaging file across many subjects →
     `plan_batch` (not `find` or a bash loop). If it flags ambiguous across
     timepoint folders, re-run with `session="<timepoint>"` — don't switch to bash.
-  - Analysis / volumes / plots → the matching tool (`correlate`, `compare_groups`,
-    `regress`, `extract_lesion_volume`, `plot`, …).
+  - Statistical tests and figures on a table (t-test, ANOVA, Mann-Whitney,
+    correlation, chi-square; box, scatter, Bland-Altman, … plots) → the stats
+    tools (`compare_groups`, `correlate`, `contingency_test`, `make_figure`), not
+    pandas/scipy/matplotlib in bash. A cosmetic change to a figure (colours,
+    labels, order, size) → `restyle_figure`, not a new figure. For a cohort, run
+    `export_cohort` (no `scans_dir`) first and pass its CSV.
+  - Models and volumes → the matching tool (`regress`, `survival`,
+    `extract_lesion_volume`, …).
 - Rule of thumb: if you're about to shell out to touch a `.csv`/`.h5ad`/`.nii.gz`,
   or to find/filter/loop over subjects, there's a tool for that — use it. For
   anything else, bash is a fine choice.

@@ -4,6 +4,12 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Added
+
+- Tool stacks: `medmcp-stats` (statistical tests with effect sizes and a draft results sentence; publication figures restyled without re-running the analysis) and `medmcp-cohort` (clinical tables, biomarker merging, sub-cohorts, Table 1, regression, survival) in both install catalogs. The agent now sends statistics and plots to the stats tools, with a cohort exported to CSV first.
+
 ## 0.5.0 — 2026-10-16
 
 ### Added

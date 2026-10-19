@@ -6,6 +6,20 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Changed
+
+- Agent: mistral-vibe 2.26 with its Unified Harness runtime; the MedMCP agent profile (`.vibe/agents/medmcp.toml`) carries the system prompt and the approval posture, and the build-time vibe patches are gone.
+- Agent: stack tools are discovered and called by the model through the harness (`search_tool_functions`, `run_typescript`); each stack call still asks for approval on its own and shows as its own card.
+- Model: the shim renders tool definitions and parses the model's tool calls itself (`MEDMCP_SHIM_TOOLS=glimmer`, default), so Ollama's Glimmer parser no longer truncates turns; `MEDMCP_SHIM_TOOLS=ollama` restores the old path.
+- Chats: the workspace keeps its own transcript of every chat; export, titles and distillation read it, and chats written by older versions still read.
+- Chats: a tool-catalogue lookup shows as a note, not a card.
+
+### Fixed
+
+- Chats: opening a chat right after closing one no longer fails on vibe 2.26.1's post-close race; the server waits it out.
+- Approval dialog: vibe 2.26's session-scoped options are filtered by what they do, so none approves more than the call in hand.
+- Tooling: ruff 0.17.1, pyright 1.1.414, pre-commit 4.7.0, types-pyyaml.
+
 ## 0.6.0 — 2026-10-19
 
 ### Added

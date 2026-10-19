@@ -29,3 +29,9 @@ def test_looks_failed_markers() -> None:
     assert looks_failed("RETRY THIS CALL WITH A CORRECTED PATH.\n\nNobody refused this call")
     assert looks_failed("command failed (exit 2)")
     assert not looks_failed('{"ok": true}')
+
+
+def test_structured_blob_ignores_text_after_the_object() -> None:
+    """The harness may follow the JSON result with another block (the route it called)."""
+    text = '{\n  "brain_path": "/ws/t1_brain.nii.gz"\n}\nmcp_medmcp_neuro_core.skull_strip'
+    assert parse_structured_blob(text) == {"brain_path": "/ws/t1_brain.nii.gz"}

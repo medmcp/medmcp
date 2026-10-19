@@ -555,3 +555,37 @@ def test_default_survives_a_recipe_round_trip(tmp_path: Path) -> None:
     draft.mkdir()
     (draft / "recipe.yaml").write_text(yaml.safe_dump(recipe.to_dict()), encoding="utf-8")
     assert _defaults(workflow.read_recipe(draft))["in_2"] == "{{dir(in_1)}}"
+
+
+def test_harness_routes_in_an_old_transcript_are_translated() -> None:
+    """A transcript recorded before the relay translated routes still distils clean."""
+    messages = [
+        {"role": "user", "content": "do it"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "t1", "function": {"name": "vibe.todo", "arguments": '{"action": "write"}'}},
+                {"id": "s1", "function": {"name": "search_tool_functions", "arguments": "{}"}},
+                {
+                    "id": "c1",
+                    "function": {
+                        "name": "medmcp-neuro_skull_strip",
+                        "arguments": '{"input_path": "/ws/t1.nii.gz", "output_dir": "/ws"}',
+                    },
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "t1", "content": '{"verb": "Updated"}'},
+        {"role": "tool", "tool_call_id": "s1", "content": "Searched for relevant tools"},
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": '{"brain_path": "/ws/t1_brain.nii.gz"}\nmcp_medmcp_neuro.skull_strip',
+        },
+    ]
+    recipe = distill.build_recipe(
+        messages, server_names=["medmcp-neuro"], name="n", description="d"
+    )
+    assert [s.tool for s in recipe.steps] == ["skull_strip"]
+    assert recipe.manual_steps == []
+    assert recipe.steps[0].produces == {"brain_path": "step1.brain_path"}

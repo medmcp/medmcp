@@ -105,8 +105,10 @@ def unwrap_result(raw_output: object) -> tuple[str, object]:
         text = "\n".join(parts)
         stripped = text.strip()
         if stripped.startswith("{"):
+            # The result may be followed by further blocks (the route called);
+            # the value is the object the text starts with.
             try:
-                parsed: object = json.loads(stripped)
+                parsed, _end = json.JSONDecoder().raw_decode(stripped)
             except ValueError:
                 return text, text
             return text, cast("dict[str, object]", parsed) if isinstance(parsed, dict) else text

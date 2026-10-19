@@ -80,3 +80,16 @@ class TestUnwrapResult:
         assert harness.unwrap_result("ok: True") == ("ok: True", "ok: True")
         assert harness.unwrap_result({"path": "/x"}) == ('{"path": "/x"}', {"path": "/x"})
         assert harness.unwrap_result(None) == ("", None)
+
+    def test_value_is_the_leading_object_when_blocks_follow(self) -> None:
+        """A route-name block after the JSON result must not spoil the value."""
+        raw = {
+            "type": "success",
+            "content": [
+                {"type": "text", "text": '{"brain_path": "/ws/b.nii.gz"}'},
+                {"type": "text", "text": "mcp_medmcp_neuro_core.skull_strip"},
+            ],
+        }
+        text, value = harness.unwrap_result(raw)
+        assert text.startswith('{"brain_path"') and text.endswith("skull_strip")
+        assert value == {"brain_path": "/ws/b.nii.gz"}

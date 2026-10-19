@@ -38,17 +38,26 @@ def parse_structured_blob(text: str) -> JsonDict:
     match = _STRUCTURED_RE.search(text)
     if match is None:
         # vibe ≥2.26 hands an MCP tool's structured result over as plain JSON.
-        stripped = text.strip()
-        if stripped.startswith("{"):
-            try:
-                parsed_json: object = json.loads(stripped)
-            except ValueError:
-                return {}
-            return cast("JsonDict", parsed_json) if isinstance(parsed_json, dict) else {}
-        return {}
+        return _leading_json_object(text)
     try:
         parsed = ast.literal_eval(match.group(1))
     except (ValueError, SyntaxError):
+        return {}
+    return cast("JsonDict", parsed) if isinstance(parsed, dict) else {}
+
+
+def _leading_json_object(text: str) -> JsonDict:
+    """The JSON object *text* starts with, ignoring anything after it; ``{}`` if none.
+
+    vibe ≥2.26 hands an MCP tool's structured result over as JSON text, and may
+    follow it with further text blocks (the route it called, for one).
+    """
+    stripped = text.strip()
+    if not stripped.startswith("{"):
+        return {}
+    try:
+        parsed, _end = json.JSONDecoder().raw_decode(stripped)
+    except ValueError:
         return {}
     return cast("JsonDict", parsed) if isinstance(parsed, dict) else {}
 

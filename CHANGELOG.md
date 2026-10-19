@@ -8,6 +8,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Changed
 
+- Agent: a model stream silent for 180 s fails the turn instead of hanging the chat; vibe's experiments client is pinned off.
 - Workflows: a finished run shows its file count, not a list of every output file.
 - Agent: mistral-vibe 2.26 with its Unified Harness runtime; the MedMCP agent profile (`.vibe/agents/medmcp.toml`) carries the system prompt and the approval posture, and the build-time vibe patches are gone.
 - Agent: stack tools are discovered and called by the model through the harness (`search_tool_functions`, `run_typescript`); each stack call still asks for approval on its own and shows as its own card.

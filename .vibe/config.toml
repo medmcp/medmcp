@@ -19,6 +19,10 @@ include_model_info = true
 include_project_context = true
 include_prompt_detail = true
 api_timeout = 720.0
+# Seconds of silence after the model starts answering before the turn fails as
+# stalled (unified harness). The shim holds a tool-call block back until it
+# closes, so a long call on a slow GPU is silence here; keep headroom for it.
+api_stream_idle_timeout = 180.0
 enable_telemetry = false
 enable_update_checks = false
 enable_auto_update = false
@@ -37,6 +41,11 @@ disabled_skills = [
     "skill-creator",
     "vibe",
 ]
+
+# vibe's A/B experiments client would contact a Mistral host. It is already
+# gated on enable_telemetry; pinned off so a change to that gate cannot open it.
+[experiments]
+enable = false
 
 [[providers]]
 name = "ollama"

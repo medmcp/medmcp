@@ -135,3 +135,38 @@ def test_bash_allowlist_survives_vibes_migration(rel: str) -> None:
     # vibe adds `find` unconditionally (that one carries no one-shot id); the
     # read-only defaults it would otherwise union in must stay out.
     assert set(cfg["tools"]["bash"]["allowlist"]) <= {"find"}
+
+
+@pytest.mark.parametrize("rel", CONFIGS)
+def test_vibe_makes_no_unattended_requests(rel: str) -> None:
+    """Every switch behind which vibe talks to Mistral is off, and vibe knows each key.
+
+    The experiments client is gated on telemetry in vibe's code; the pin makes
+    the posture independent of that gate.
+    """
+    from vibe.core.config.models import (  # pyright: ignore[reportMissingTypeStubs]  # vibe ships no stubs
+        ExperimentsConfig,
+    )
+    from vibe.core.config.vibe_schema import (  # pyright: ignore[reportMissingTypeStubs]  # vibe ships no stubs
+        VibeConfigSchema,
+    )
+
+    cfg = _load(rel)
+    for key in ("enable_telemetry", "enable_update_checks", "enable_auto_update"):
+        assert key in VibeConfigSchema.model_fields
+        assert cfg[key] is False, key
+    assert "experiments" in VibeConfigSchema.model_fields
+    assert "enable" in ExperimentsConfig.model_fields
+    assert cfg["experiments"]["enable"] is False
+
+
+@pytest.mark.parametrize("rel", CONFIGS)
+def test_stalled_stream_fails_the_turn(rel: str) -> None:
+    """A model stream that goes silent fails instead of hanging the chat."""
+    from vibe.core.config.vibe_schema import (  # pyright: ignore[reportMissingTypeStubs]  # vibe ships no stubs
+        VibeConfigSchema,
+    )
+
+    cfg = _load(rel)
+    assert "api_stream_idle_timeout" in VibeConfigSchema.model_fields
+    assert cfg["api_stream_idle_timeout"] >= 60

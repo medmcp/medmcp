@@ -8,19 +8,23 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Added
 
-- Approval dialog: a read-only shell command (`ls`, `cat`, `head`, `tail`, `wc`, `du`, `df`, `stat`, `grep`, `pwd`, `md5sum`, `sha256sum`) can be approved for the rest of the chat ("Allow ls for this chat"). Never offered for a command with an output redirect or a path outside the workspace; `MEDMCP_READ_ONLY_APPROVAL=0` turns it off.
-- Explorer: upload a whole folder (subfolders kept), upload files or folders into any folder, and download a file or a folder (as a `.zip`, streamed; symlinks left out).
-- Chats: Export opens the chat as a printable page (messages, every tool call with its inputs, approval and result, and the provenance record) with a Save as PDF button. Hidden reasoning and the system prompt are left out; times are UTC.
+- Approval dialog: a read-only shell command (`ls`, `cat`, `grep`, …) can be approved for the rest of the chat; one that redirects to a file or leaves the workspace still asks. `MEDMCP_READ_ONLY_APPROVAL=0` turns it off.
+- Explorer: upload a whole folder (subfolders kept), upload into any folder, and download a file or a folder as a streamed `.zip`.
+- Explorer: right-click on empty space opens New folder / Upload files… / Upload folder… / Refresh; the header's New folder and Upload files act on the selected folder; folders upload by drag-and-drop.
+- Chats: Export opens a chat as a printable page (messages, tool calls with inputs, approval and result) with Save as PDF.
 
 ### Fixed
 
 - Chats: returning to a chat after a page reload or reconnect opens that chat again instead of silently starting a new, empty one.
-- Chats: a message sent while a reply is still running no longer gets "A turn is already running" and leaves the chat stuck; the running reply is ended first.
+- Chats: a message sent while a reply is still running no longer leaves the chat stuck on "A turn is already running".
 - Approval dialog: tool-call explanations from a slow local model are no longer cut off after 20 s (now 90 s).
+- Viewer: a file rewritten by a tool is reloaded instead of served from the browser cache.
+- Stacks: containers get 8 GB of shared memory; Docker's 64 MB default killed full-resolution TotalSegmentator runs.
 
 ### Changed
 
-- Image build: the agent (mistral-vibe) is patched at build time. Every chat uses the same scratchpad folder, so a new chat starts with the same system prompt and its first reply reuses the model's cached prompt instead of re-reading it; chats share that folder. A chat-long approval never covers a command with an output redirect. The build fails if a vibe update no longer matches the patches.
+- Image build: the agent (mistral-vibe) is patched so every chat shares one scratchpad path (the model's cached prompt is reused) and a chat-long approval never covers a redirect; the build fails if a vibe update no longer matches.
+- Chats: consecutive calls of one tool share a single card, and shell commands no longer get View/Overlay chips.
 
 ## 0.5.0 — 2026-10-16
 

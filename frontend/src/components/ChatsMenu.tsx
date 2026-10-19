@@ -266,7 +266,6 @@ export function ChatsMenu({
           <button
             className="btn-icon"
             aria-label="Export (printable page, save as PDF)"
-            title="Export"
             onClick={() =>
               window.open(`/api/sessions/${encodeURIComponent(s.id)}/export`, '_blank', 'noopener')
             }

@@ -243,7 +243,10 @@ export const FileExplorer = memo(function FileExplorer({
   const [data, setData] = useState<TreeNode[]>([])
   const [error, setError] = useState<string | null>(null)
   const [size, setSize] = useState({ width: 280, height: 400 })
-  const [menu, setMenu] = useState<{ x: number; y: number; node: NodeApi<TreeNode> } | null>(null)
+  // The context menu: for a row, or for the empty space (node null) as file managers have it.
+  const [menu, setMenu] = useState<{ x: number; y: number; node: NodeApi<TreeNode> | null } | null>(
+    null,
+  )
   const containerRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -325,6 +328,8 @@ export const FileExplorer = memo(function FileExplorer({
       reload()
     })
   }
+
+  const pickFiles = () => fileInputRef.current?.click()
 
   const startUpload = (items: UploadItem[]) => {
     if (items.length === 0) return
@@ -435,10 +440,23 @@ export const FileExplorer = memo(function FileExplorer({
     setMenu({ x: e.clientX, y: e.clientY, node })
   }
 
+  // Right-click on empty space: the background menu (New folder, …), as in any
+  // file manager. A row's own handler stops propagation, so this only sees the
+  // space between and below the rows; the click also drops the selection.
+  const openBackgroundMenu = (e: ReactDragEvent<HTMLDivElement> | ReactMouseEvent) => {
+    if ((e.target as HTMLElement | null)?.closest('[data-path]')) return
+    e.preventDefault()
+    treeRef.current?.deselectAll()
+    setMenu({ x: e.clientX, y: e.clientY, node: null })
+  }
+
   const menuAction = (fn: () => void) => () => {
     setMenu(null)
     fn()
   }
+
+  // Hoisted so the row branch below narrows once, closures included.
+  const menuNode = menu?.node ?? null
 
   return (
     <div className="panel">
@@ -455,7 +473,7 @@ export const FileExplorer = memo(function FileExplorer({
           <button
             className="btn-icon"
             aria-label="Upload files"
-            onClick={() => fileInputRef.current?.click()}
+            onClick={pickFiles}
           >
             <UploadIcon />
           </button>
@@ -492,6 +510,7 @@ export const FileExplorer = memo(function FileExplorer({
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
         onDrop={onDrop}
+        onContextMenu={openBackgroundMenu}
       >
         {/* Every other panel says what to do when it is empty; this one showed
             a blank rectangle, which reads as a failure to load. */}
@@ -547,47 +566,71 @@ export const FileExplorer = memo(function FileExplorer({
               }}
               onContextMenu={(e) => e.preventDefault()}
             >
-            {menu.node.isLeaf ? (
-              <>
-                <button onClick={menuAction(() => onOpenFile(menu.node.data.id))}>Open</button>
-                <button onClick={menuAction(() => downloadPath(menu.node.data.id))}>
-                  Download
-                </button>
-              </>
-            ) : (
+            {menuNode === null ? (
               <>
                 <button
                   onClick={() => {
                     setMenu(null)
-                    startNewFolder(menu.node.data.id)
+                    startNewFolder('')
                   }}
                 >
-                  New folder inside
+                  New folder
                 </button>
-                <button onClick={menuAction(() => downloadPath(menu.node.data.id))}>
-                  Download as .zip
+                <button
+                  onClick={() => {
+                    setMenu(null)
+                    pickFiles()
+                  }}
+                >
+                  Upload files…
                 </button>
+                <button onClick={menuAction(reload)}>Refresh</button>
+              </>
+            ) : (
+              <>
+                {menuNode.isLeaf ? (
+                  <>
+                    <button onClick={menuAction(() => onOpenFile(menuNode.data.id))}>Open</button>
+                    <button onClick={menuAction(() => downloadPath(menuNode.data.id))}>
+                      Download
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => {
+                        setMenu(null)
+                        startNewFolder(menuNode.data.id)
+                      }}
+                    >
+                      New folder inside
+                    </button>
+                    <button onClick={menuAction(() => downloadPath(menuNode.data.id))}>
+                      Download as .zip
+                    </button>
+                  </>
+                )}
+                <button onClick={menuAction(() => void menuNode.edit())}>Rename</button>
+                {(() => {
+                  const sel = menuNode.tree.selectedNodes
+                  const targets =
+                    sel.length > 1 && sel.some((n) => n.id === menuNode.id) ? sel : [menuNode]
+                  const label = targets.length > 1 ? `${targets.length} items` : menuNode.data.name
+                  return (
+                    <button
+                      className="danger"
+                      onClick={menuAction(() => {
+                        void confirmDialog(`Delete ${label}?`).then(
+                          (ok) => ok && deleteMany(targets.map((n) => n.data.id)),
+                        )
+                      })}
+                    >
+                      {targets.length > 1 ? `Delete ${targets.length} items` : 'Delete'}
+                    </button>
+                  )
+                })()}
               </>
             )}
-            <button onClick={menuAction(() => void menu.node.edit())}>Rename</button>
-            {(() => {
-              const sel = menu.node.tree.selectedNodes
-              const targets =
-                sel.length > 1 && sel.some((n) => n.id === menu.node.id) ? sel : [menu.node]
-              const label = targets.length > 1 ? `${targets.length} items` : menu.node.data.name
-              return (
-                <button
-                  className="danger"
-                  onClick={menuAction(() => {
-                    void confirmDialog(`Delete ${label}?`).then(
-                      (ok) => ok && deleteMany(targets.map((n) => n.data.id)),
-                    )
-                  })}
-                >
-                  {targets.length > 1 ? `Delete ${targets.length} items` : 'Delete'}
-                </button>
-              )
-            })()}
             </div>,
             document.body,
           )}

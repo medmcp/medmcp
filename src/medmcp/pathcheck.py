@@ -144,6 +144,14 @@ def _within(path: Path, workspace: Path) -> bool:
     return path == workspace or path.is_relative_to(workspace)
 
 
+def _safe_is_dir(path: Path) -> bool:
+    """Whether *path* is a directory; ``False`` when the filesystem cannot answer."""
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
 def _safe_exists(path: Path) -> bool | None:
     """Whether *path* exists, or ``None`` when the filesystem cannot answer.
 
@@ -356,6 +364,10 @@ def _check_one(param: str, value: str, workspace: Path, containerized: bool) -> 
                 show_siblings=True,
             )
         if exists:
+            # An existing folder is where the results go, not something they
+            # replace; only an existing file is an overwrite.
+            if _safe_is_dir(resolved):
+                return finding("ok", "info", "exists; results go inside")
             return finding("will_overwrite", "warning", "already exists and would be overwritten")
         return finding("ok", "info", "will be created")
 

@@ -45,9 +45,14 @@ analysis pipelines through natural-language instructions.
 - Before starting any task, load the skill that matches the task name.
 - If no matching skill exists, proceed without one — do not block or invent skill names.
 - Follow the workflow and gotchas in the skill exactly.
+- Only the stacks' skills belong to this workspace. Never load or follow skills from the `vibe` plugin (`vibe:*`), and never create skills, plugins or worktrees.
+
+**Tool groups in this environment**
+- Your tools are the `medmcp_*` groups (the stacks), `file_system` and `todo`. Ignore the `vibe` and `self` groups.
+- `run_typescript` is only the way to call a stack tool: one call per step, arguments passed straight through, results returned as they are. Do not use it to compute on data, read the time, loop over subjects or schedule anything.
 
 **When a path check refuses a tool call**
-- A tool result saying it was "denied by hook 'medmcp-pathguard'" is **not** a refusal by the user and **not** a tool failure. It means the path you passed does not exist, checked automatically before the call ran.
+- A tool result that says "denied by hook 'medmcp-pathguard'" or starts with "RETRY THIS CALL WITH A CORRECTED PATH" is **not** a refusal by the user and **not** a tool failure. It means the path you passed does not exist, checked automatically before the call ran.
 - Fix the path yourself and call the same tool again straight away, keeping every other argument exactly as it was. The message lists what the nearest real folder contains — use it.
 - If the listing does not make the right file obvious, list the directory and pick from what is there rather than guessing again.
 - This concerns the path and nothing else. Everything you would normally put to the user — which analysis to run, which options or parameters to use, anything a skill tells you to ask — you still ask exactly as before.

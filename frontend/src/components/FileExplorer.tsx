@@ -330,12 +330,20 @@ export const FileExplorer = memo(function FileExplorer({
     })
   }
 
-  const pickFiles = () => fileInputRef.current?.click()
+  // Folder the open picker uploads into; read when the picker returns.
+  const pickDir = useRef('')
+  const pickFiles = (dir: string) => {
+    pickDir.current = dir
+    fileInputRef.current?.click()
+  }
   // `webkitdirectory` is not in React's input typings; set it on the element.
   useEffect(() => {
     folderInputRef.current?.setAttribute('webkitdirectory', '')
   }, [])
-  const pickFolder = () => folderInputRef.current?.click()
+  const pickFolder = (dir: string) => {
+    pickDir.current = dir
+    folderInputRef.current?.click()
+  }
 
   const startUpload = (items: UploadItem[]) => {
     if (items.length === 0) return
@@ -489,7 +497,7 @@ export const FileExplorer = memo(function FileExplorer({
           <button
             className="btn-icon"
             aria-label="Upload files"
-            onClick={pickFiles}
+            onClick={() => pickFiles(selectedDir())}
           >
             <UploadIcon />
           </button>
@@ -503,7 +511,7 @@ export const FileExplorer = memo(function FileExplorer({
           multiple
           hidden
           onChange={(e) => {
-            startUpload(pickedItems(e.target.files, ''))
+            startUpload(pickedItems(e.target.files, pickDir.current))
             e.target.value = ''
           }}
         />
@@ -512,7 +520,7 @@ export const FileExplorer = memo(function FileExplorer({
           type="file"
           hidden
           onChange={(e) => {
-            startUpload(pickedItems(e.target.files, ''))
+            startUpload(pickedItems(e.target.files, pickDir.current))
             e.target.value = ''
           }}
         />
@@ -604,7 +612,7 @@ export const FileExplorer = memo(function FileExplorer({
                 <button
                   onClick={() => {
                     setMenu(null)
-                    pickFiles()
+                    pickFiles('')
                   }}
                 >
                   Upload files…
@@ -612,7 +620,7 @@ export const FileExplorer = memo(function FileExplorer({
                 <button
                   onClick={() => {
                     setMenu(null)
-                    pickFolder()
+                    pickFolder('')
                   }}
                 >
                   Upload folder…

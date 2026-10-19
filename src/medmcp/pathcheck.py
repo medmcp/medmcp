@@ -144,14 +144,6 @@ def _within(path: Path, workspace: Path) -> bool:
     return path == workspace or path.is_relative_to(workspace)
 
 
-def _safe_is_dir(path: Path) -> bool:
-    """Whether *path* is a directory; ``False`` when the filesystem cannot answer."""
-    try:
-        return path.is_dir()
-    except OSError:
-        return False
-
-
 def _safe_exists(path: Path) -> bool | None:
     """Whether *path* exists, or ``None`` when the filesystem cannot answer.
 

@@ -150,7 +150,10 @@ def test_manual_chat_title_trusts_the_registry_over_vibe(
     """A generated title the registry marks auto is not a name, whatever vibe says."""
     from medmcp import provenance
 
-    monkeypatch.setattr(provenance, "vibe_manual_session_title", lambda _sid: "Written through")
+    def _vibe(_sid: str) -> str | None:
+        return "Written through"
+
+    monkeypatch.setattr(provenance, "vibe_manual_session_title", _vibe)
     sessions.set_auto_title("s1", "Generated")
     assert sessions.manual_chat_title("s1") is None
     sessions.set_title("s1", "Typed")

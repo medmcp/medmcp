@@ -42,6 +42,7 @@ let itemSeq = 0
 const nextItemId = () => ++itemSeq
 
 const TODO_TOOL = 'todo'
+const SHELL_TOOL = 'bash'
 
 const TODO_MARK: Record<string, string> = {
   completed: '✓',
@@ -144,12 +145,14 @@ const ToolCard = memo(function ToolCard({
   onOpenFile?: (path: string) => void
   onOverlayFile?: (path: string) => void
 }) {
+  // A stack tool's output names the files it produced; a shell listing names
+  // every file it saw, and a chip per file is a wall rather than a result.
   const resultPaths = useMemo(
     () =>
-      tc.status === 'completed' && tc.output
+      tc.status === 'completed' && tc.output && tc.toolName !== SHELL_TOOL
         ? extractWorkspacePaths(tc.output, workspaceRoot ?? null)
         : [],
-    [tc.status, tc.output, workspaceRoot],
+    [tc.status, tc.output, tc.toolName, workspaceRoot],
   )
   // The path guard turned this call back before it ran, and the agent corrects
   // the path and calls again by itself. A red "failed" card would be untrue —

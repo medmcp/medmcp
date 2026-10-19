@@ -4,28 +4,27 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
-## Unreleased
+## 0.7.0 — 2026-10-19
 
 ### Changed
 
-- Agent: a model stream silent for 180 s fails the turn instead of hanging the chat; vibe's experiments client is pinned off.
+- Agent: mistral-vibe 2.26 with its Unified Harness runtime. The MedMCP agent profile (`.vibe/agents/medmcp.toml`) carries the system prompt and the approval posture; the build-time vibe patches are gone, since 2.26 keeps a chat-long approval from covering a redirect itself.
+- Agent: the model looks stack tools up through the harness and calls them from `run_typescript`; each stack call still asks for approval on its own and shows as its own card. The lookups themselves are not shown.
+- Model: the shim renders the tool definitions and parses the model's tool calls itself (`MEDMCP_SHIM_TOOLS=glimmer`, the default), so Ollama's Glimmer parser can no longer truncate a turn; `MEDMCP_SHIM_TOOLS=ollama` restores the old path. While it holds a tool call back it sends an SSE keepalive.
+- Agent: a model stream silent for 180 s fails the turn (Retry offered) instead of hanging the chat; vibe's experiments client is pinned off.
+- Chats: the workspace keeps its own transcript of every chat; export, titles and distillation read it. A branch inherits it, a rewind cuts it back, and chats from older versions still read whole.
+- Chats: a generated title stays in the workspace and is no longer written to vibe, which recorded it as typed by hand.
+- Chat: no file chips under tool cards.
+- Workflows: a distilled workflow is named after its steps (`skull-strip-register-to-template`) unless the chat was named by hand; a to-do written by the model is not a step.
 - Workflows: a finished run shows its file count, not a list of every output file.
-- Agent: mistral-vibe 2.26 with its Unified Harness runtime; the MedMCP agent profile (`.vibe/agents/medmcp.toml`) carries the system prompt and the approval posture, and the build-time vibe patches are gone.
-- Agent: stack tools are discovered and called by the model through the harness (`search_tool_functions`, `run_typescript`); each stack call still asks for approval on its own and shows as its own card.
-- Model: the shim renders tool definitions and parses the model's tool calls itself (`MEDMCP_SHIM_TOOLS=glimmer`, default), so Ollama's Glimmer parser no longer truncates turns; `MEDMCP_SHIM_TOOLS=ollama` restores the old path.
-- Chats: the workspace keeps its own transcript of every chat; export, titles and distillation read it, and chats written by older versions still read.
-- Chats: a tool-catalogue lookup shows as a note, not a card.
 
 ### Fixed
 
-- Chat record: answer text is written before each tool call it preceded and kept when a turn is stopped; a chat from before the upgrade keeps its old turns on resume; a branch inherits its source's record; a rewind cuts the record back.
-- Shim: calls from a second tool-call block in one turn are numbered after the first; an SSE keepalive while a block is held keeps vibe's idle timer quiet; `MEDMCP_SHIM_TOOLS` is forwarded by both compose files and carried across an update.
-- Path guard: tools arriving by harness route (`mcp_<stack>.<tool>`) are classified by their MedMCP name again.
-- Branching a chat with a generated title keeps the branch's title generated; the `medmcp distill` CLI never names a workflow after a generated title.
-- Workflows: a distilled workflow is never named after a generated chat title; generated titles are no longer written through to vibe, which records them as typed.
+- Workflows: a workflow distilled from a chat with a generated title took that title as its name, also from `medmcp distill` and for a branch of such a chat.
 - Viewer: the intensity window survives a panel resize instead of falling back to Auto.
-- Chats: opening a chat right after closing one no longer fails on vibe 2.26.1's post-close race; the server waits it out.
+- Approval dialog: an existing output folder is no longer reported as an overwrite.
 - Approval dialog: vibe 2.26's session-scoped options are filtered by what they do, so none approves more than the call in hand.
+- Chats: opening a chat right after closing one no longer fails on vibe 2.26.1's post-close race.
 - Tooling: ruff 0.17.1, pyright 1.1.414, pre-commit 4.7.0, types-pyyaml.
 
 ## 0.6.0 — 2026-10-19

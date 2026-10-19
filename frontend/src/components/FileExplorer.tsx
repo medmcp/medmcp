@@ -250,6 +250,7 @@ export const FileExplorer = memo(function FileExplorer({
   const containerRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const folderInputRef = useRef<HTMLInputElement>(null)
   const treeRef = useRef<TreeApi<TreeNode> | null>(null)
   const newFolderParent = useRef('')
   const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null)
@@ -330,6 +331,11 @@ export const FileExplorer = memo(function FileExplorer({
   }
 
   const pickFiles = () => fileInputRef.current?.click()
+  // `webkitdirectory` is not in React's input typings; set it on the element.
+  useEffect(() => {
+    folderInputRef.current?.setAttribute('webkitdirectory', '')
+  }, [])
+  const pickFolder = () => folderInputRef.current?.click()
 
   const startUpload = (items: UploadItem[]) => {
     if (items.length === 0) return
@@ -376,6 +382,16 @@ export const FileExplorer = memo(function FileExplorer({
   // with a single reload (which also restores anything whose delete failed).
   // A new folder is named inline, like a rename: a placeholder row goes into the
   // tree and opens in edit mode; onRename creates the folder (or drops the row).
+  /** The folder the selection points at: a selected folder itself, a selected file's parent. */
+  const selectedDir = (): string => {
+    const tree = treeRef.current
+    if (!tree) return ''
+    const focused = tree.focusedNode
+    const node = focused?.isSelected ? focused : tree.selectedNodes.at(-1)
+    if (!node || node.data.id === NEW_FOLDER_ID) return ''
+    return node.isLeaf ? parentDir(node.data.id) : node.data.id
+  }
+
   const startNewFolder = (parentId: string) => {
     const placeholder: TreeNode = { id: NEW_FOLDER_ID, name: '', children: [] }
     newFolderParent.current = parentId
@@ -466,7 +482,7 @@ export const FileExplorer = memo(function FileExplorer({
           <button
             className="btn-icon"
             aria-label="New folder"
-            onClick={() => startNewFolder('')}
+            onClick={() => startNewFolder(selectedDir())}
           >
             <FolderPlusIcon />
           </button>
@@ -485,6 +501,15 @@ export const FileExplorer = memo(function FileExplorer({
           ref={fileInputRef}
           type="file"
           multiple
+          hidden
+          onChange={(e) => {
+            startUpload(pickedItems(e.target.files, ''))
+            e.target.value = ''
+          }}
+        />
+        <input
+          ref={folderInputRef}
+          type="file"
           hidden
           onChange={(e) => {
             startUpload(pickedItems(e.target.files, ''))
@@ -583,6 +608,14 @@ export const FileExplorer = memo(function FileExplorer({
                   }}
                 >
                   Upload files…
+                </button>
+                <button
+                  onClick={() => {
+                    setMenu(null)
+                    pickFolder()
+                  }}
+                >
+                  Upload folder…
                 </button>
                 <button onClick={menuAction(reload)}>Refresh</button>
               </>

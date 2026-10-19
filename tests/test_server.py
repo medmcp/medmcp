@@ -34,6 +34,35 @@ def workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return resolved
 
 
+# ── /api/raw: a file's bytes, never a stale copy ─────────────────────────────
+
+
+class TestRawFiles:
+    """The viewer must see a file as it is now, not as the browser cached it."""
+
+    def test_raw_is_marked_no_cache_and_answers_head(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """A rewritten file must reach the viewer: no heuristic caching, and HEAD revalidates."""
+        (workspace_root / "seg.nii.gz").write_bytes(b"v1")
+        got = client.get("/api/raw/seg.nii.gz")
+        assert got.status_code == 200
+        assert got.content == b"v1"
+        assert got.headers["cache-control"] == "no-cache"
+        head = client.head("/api/raw/seg.nii.gz")
+        assert head.status_code == 200
+        assert head.content == b""
+        assert head.headers["etag"] == got.headers["etag"]
+        (workspace_root / "seg.nii.gz").write_bytes(b"v2-longer")
+        assert client.head("/api/raw/seg.nii.gz").headers["etag"] != got.headers["etag"]
+
+    def test_raw_missing_file_is_404_for_head_too(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """HEAD on an absent file is a 404 like GET, not a 405 that reads as a server fault."""
+        assert client.head("/api/raw/nope.nii.gz").status_code == 404
+
+
 # ── _safe_path: the workspace traversal guard ────────────────────────────────
 
 

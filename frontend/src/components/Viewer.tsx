@@ -121,7 +121,7 @@ async function fetchVolumeBytes(url: string): Promise<ArrayBuffer> {
   const hit = volumeCache.get(url)
   if (hit) {
     try {
-      const head = await fetch(url, { method: 'HEAD' })
+      const head = await fetch(url, { method: 'HEAD', cache: 'no-cache' })
       if (head.ok && headerStamp(head) === hit.etag) {
         volumeCache.delete(url)
         volumeCache.set(url, hit)
@@ -131,7 +131,9 @@ async function fetchVolumeBytes(url: string): Promise<ArrayBuffer> {
       // revalidation failed — fall through to a full fetch
     }
   }
-  const r = await fetch(url)
+  // Always revalidate with the server: a tool rewrites files in place, and a
+  // browser otherwise treats a days-old file's response as fresh for hours.
+  const r = await fetch(url, { cache: 'no-cache' })
   if (!r.ok) throw new Error(`could not load volume (HTTP ${r.status})`)
   const buffer = await r.arrayBuffer()
   volumeCache.set(url, { buffer, etag: headerStamp(r) })

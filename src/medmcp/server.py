@@ -361,13 +361,20 @@ async def get_tree() -> JsonDict:
     return {"tree": root.get("children", [])}
 
 
-@app.get("/api/raw/{rel_path:path}")
+@app.api_route("/api/raw/{rel_path:path}", methods=["GET", "HEAD"])
 async def get_raw(rel_path: str) -> FileResponse:
-    """Serve a file's raw bytes (viewer content, downloads)."""
+    """Serve a file's raw bytes (viewer content, downloads).
+
+    ``no-cache`` because a tool rewrites files in place: without it a browser
+    treats a response for a days-old file as fresh for hours (heuristic
+    freshness off ``Last-Modified``) and keeps showing the overlay from before
+    the segmentation ran. HEAD is answered so the viewer's own volume cache can
+    revalidate with headers instead of refetching a 24 MB volume.
+    """
     path = _safe_path(rel_path)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="file not found")
-    return FileResponse(path)
+    return FileResponse(path, headers={"Cache-Control": "no-cache"})
 
 
 # The kernel writes a mount path's space, tab, newline and backslash as octal

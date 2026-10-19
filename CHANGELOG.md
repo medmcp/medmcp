@@ -16,6 +16,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Fixed
 
+- Workflows: a distilled workflow is never named after a generated chat title; generated titles are no longer written through to vibe, which records them as typed.
 - Viewer: the intensity window survives a panel resize instead of falling back to Auto.
 - Chats: opening a chat right after closing one no longer fails on vibe 2.26.1's post-close race; the server waits it out.
 - Approval dialog: vibe 2.26's session-scoped options are filtered by what they do, so none approves more than the call in hand.

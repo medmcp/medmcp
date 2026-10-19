@@ -2717,12 +2717,13 @@ class _ChatConnection:
         task.add_done_callback(self._title_tasks.discard)
 
     async def send_title(self, title: str) -> None:
-        """Push a generated title to the browser and write it through to vibe (best-effort)."""
+        """Push a generated title to the browser.
+
+        Deliberately not written through to vibe: its ``set_title`` stamps every
+        title as manual, and a generated name recorded there would pass for a
+        typed one at the next refresh and at distillation.
+        """
         await self._send({"type": "title", "title": title})
-        with contextlib.suppress(Exception):
-            await _client.request(
-                "_session/set_title", {"sessionId": self.session_id, "title": title}
-            )
 
     async def _refresh_title(self, ticket: titles.TitleTicket) -> None:
         """Generate a title from the transcript and push it if it changed.
@@ -2732,10 +2733,9 @@ class _ChatConnection:
         vibe's own session metadata, which every rename is written through to
         and which lives on a persisted volume in a container; if the registry
         was reset (container recreate) the name is re-seeded from vibe rather
-        than overwritten. A refresh that yields nothing (model outage,
-        transcript not flushed yet) hands its slot back so the next turn
-        retries. The result is written through to vibe's session metadata as
-        well (best-effort) so its resume picker shows the same name.
+        than overwritten (``sessions.manual_chat_title``). A refresh that
+        yields nothing (model outage, transcript not flushed yet) hands its
+        slot back so the next turn retries.
         """
         cid = self.canonical_id
         try:
@@ -2743,7 +2743,9 @@ class _ChatConnection:
             if sessions.has_manual_title(entry):
                 self._title_locked = True
                 return
-            manual = await asyncio.to_thread(provenance.vibe_manual_session_title, self.session_id)
+            manual = await asyncio.to_thread(
+                sessions.manual_chat_title, cid, vibe_id=self.session_id
+            )
             if manual is not None:
                 self._title_locked = True
                 await asyncio.to_thread(sessions.set_title, cid, manual)

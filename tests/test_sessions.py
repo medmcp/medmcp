@@ -142,3 +142,35 @@ def test_chat_title_none_when_unnamed(monkeypatch: pytest.MonkeyPatch) -> None:
     """A chat nobody has named yet has no title."""
     monkeypatch.setattr(sessions.provenance, "vibe_manual_session_title", _no_vibe_title)
     assert sessions.chat_title("s1") is None
+
+
+def test_manual_chat_title_trusts_the_registry_over_vibe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A generated title the registry marks auto is not a name, whatever vibe says."""
+    from medmcp import provenance
+
+    monkeypatch.setattr(provenance, "vibe_manual_session_title", lambda _sid: "Written through")
+    sessions.set_auto_title("s1", "Generated")
+    assert sessions.manual_chat_title("s1") is None
+    sessions.set_title("s1", "Typed")
+    assert sessions.manual_chat_title("s1") == "Typed"
+
+
+def test_manual_chat_title_falls_back_to_vibe_without_an_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the registry lost, vibe's manual record names the chat (by its vibe id)."""
+    from medmcp import provenance
+
+    seen: list[str] = []
+
+    def _vibe(sid: str) -> str | None:
+        seen.append(sid)
+        return "From vibe"
+
+    monkeypatch.setattr(provenance, "vibe_manual_session_title", _vibe)
+    assert sessions.manual_chat_title("root", vibe_id="tip") == "From vibe"
+    assert seen == ["tip"]
+    sessions.set_archived("root", True)
+    assert sessions.manual_chat_title("root") == "From vibe"

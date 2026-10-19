@@ -55,12 +55,21 @@ def chat_title(session_id: str) -> str | None:
     return provenance.vibe_manual_session_title(session_id)
 
 
-def manual_chat_title(session_id: str) -> str | None:
-    """The chat's name as the person typed it, or ``None`` (a generated one does not count)."""
+def manual_chat_title(session_id: str, *, vibe_id: str | None = None) -> str | None:
+    """The chat's name as the person typed it, or ``None`` (a generated one does not count).
+
+    The registry decides while it holds a title: it marks generated ones, and
+    nothing else can tell them from typed ones. vibe's own record (which every
+    rename is written through to, and which outlives a container recreate) is
+    consulted only when the registry has no title for the chat. *vibe_id* is
+    the session vibe knows the chat by when that differs from *session_id*.
+    """
     entry = get_entry(session_id)
     if has_manual_title(entry):
         return str(entry["title"]).strip()
-    return provenance.vibe_manual_session_title(session_id)
+    if entry.get("title"):
+        return None
+    return provenance.vibe_manual_session_title(vibe_id or session_id)
 
 
 def _update(session_id: str, mutate: Callable[[JsonDict], None]) -> None:

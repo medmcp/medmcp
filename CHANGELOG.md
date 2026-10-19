@@ -16,6 +16,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Fixed
 
+- Viewer: the intensity window survives a panel resize instead of falling back to Auto.
 - Chats: opening a chat right after closing one no longer fails on vibe 2.26.1's post-close race; the server waits it out.
 - Approval dialog: vibe 2.26's session-scoped options are filtered by what they do, so none approves more than the call in hand.
 - Tooling: ruff 0.17.1, pyright 1.1.414, pre-commit 4.7.0, types-pyyaml.

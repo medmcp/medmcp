@@ -427,6 +427,12 @@ const FRAME_INTERVAL_MS = 50
  *  view) and reopening a file resume where the reader was. */
 const lastFrameByPath = new Map<string, number>()
 
+/** The intensity window last set per file, for the same reason: a resize
+ *  rebuilds the view from a fresh load, which would fall back to the header's
+ *  window and lose the one chosen. Only an explicit choice (a preset, typed
+ *  bounds, a right-drag) is remembered. */
+const lastWindowByPath = new Map<string, { min: number; max: number }>()
+
 type OverlayVol = {
   path: string
   vol: NVImage
@@ -764,7 +770,11 @@ function VolumeView({
     }
     // Right-drag (Niivue's contrast mode) changes the base window; mirror it.
     nv.onIntensityChange = (vol: NVImage) => {
-      if (vol === nv.volumes[0]) setWin({ min: vol.cal_min ?? 0, max: vol.cal_max ?? 1 })
+      if (vol === nv.volumes[0]) {
+        const next = { min: vol.cal_min ?? 0, max: vol.cal_max ?? 1 }
+        lastWindowByPath.set(path, next)
+        setWin(next)
+      }
     }
     let cancelled = false
     const load = async () => {
@@ -807,6 +817,14 @@ function VolumeView({
           frames: base.nFrame4D ?? 1,
           isCT: looksLikeCT(gmin, gmax),
         })
+        // A window chosen before the rebuild (or the last time this file was
+        // open) takes precedence over the header's.
+        const kept = lastWindowByPath.get(path)
+        if (kept) {
+          base.cal_min = kept.min
+          base.cal_max = kept.max
+          nv.updateGLVolume()
+        }
         setWin({ min: base.cal_min ?? gmin, max: base.cal_max ?? gmax })
         nv.createOnLocationChange()
         // Resume a 4D file on the frame it was last shown at.
@@ -986,6 +1004,7 @@ function VolumeView({
     base.cal_min = Math.min(min, max)
     base.cal_max = Math.max(min, max)
     nv.updateGLVolume()
+    lastWindowByPath.set(path, { min: base.cal_min, max: base.cal_max })
     setWin({ min: base.cal_min, max: base.cal_max })
   }
 

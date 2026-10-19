@@ -43,6 +43,9 @@ const nextItemId = () => ++itemSeq
 
 const TODO_TOOL = 'todo'
 const SHELL_TOOL = 'bash'
+// The harness's own catalogue lookup (vibe ≥2.26): the model finding a stack
+// tool, not a step of the work. Noted, not carded.
+const TOOL_SEARCH = 'search_tool_functions'
 
 const TODO_MARK: Record<string, string> = {
   completed: '✓',
@@ -167,6 +170,9 @@ const ToolCard = memo(function ToolCard({
       </div>
     )
   }
+  if (tc.toolName === TOOL_SEARCH) {
+    return <div className="tool-retry-note">⌕ looked up the available tools</div>
+  }
   // The plan reads as a plan, not as a tool invocation: a checklist you can
   // glance at, rather than a card wrapping a JSON blob you have to expand.
   if (tc.toolName === TODO_TOOL) {
@@ -201,7 +207,9 @@ const ToolCard = memo(function ToolCard({
 
 /** Whether this call may fold into a run of calls to the same tool. */
 function groupable(tc: ToolCallState): boolean {
-  return !!tc.toolName && tc.toolName !== TODO_TOOL && !tc.pathGuardRetry
+  return (
+    !!tc.toolName && tc.toolName !== TODO_TOOL && tc.toolName !== TOOL_SEARCH && !tc.pathGuardRetry
+  )
 }
 
 function callStatusClass(status: string): string {

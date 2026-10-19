@@ -90,35 +90,37 @@ export async function uploadFile(file: File, dir: string): Promise<void> {
   await check(res)
 }
 
+/** One file to upload and the workspace folder it goes into ("" = root). */
+export interface UploadItem {
+  file: File
+  dir: string
+}
+
 /**
- * Upload files into `dir`, recreating each file's folder from a folder pick
- * (`webkitRelativePath`, e.g. "case1/series2/IM0001.dcm"). A few requests run at
- * once; `onProgress` reports files done so far. Resolves to the failure count.
+ * Upload several files, a few requests at a time; `onProgress` reports files
+ * done so far. Resolves to the failure count. Each item names its own target
+ * folder, so a dropped or picked folder tree is recreated by the caller.
  */
 export async function uploadFiles(
-  files: File[],
-  dir: string,
+  items: UploadItem[],
   onProgress: (done: number, total: number) => void,
 ): Promise<number> {
-  const join = (a: string, b: string) => (a && b ? `${a}/${b}` : a || b)
   let next = 0
   let done = 0
   let failed = 0
   const worker = async () => {
-    while (next < files.length) {
-      const file = files[next++]
-      if (!file) continue
-      const rel = file.webkitRelativePath
-      const sub = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : ''
+    while (next < items.length) {
+      const item = items[next++]
+      if (!item) continue
       try {
-        await uploadFile(file, join(dir, sub))
+        await uploadFile(item.file, item.dir)
       } catch {
         failed++
       }
-      onProgress(++done, files.length)
+      onProgress(++done, items.length)
     }
   }
-  await Promise.all(Array.from({ length: Math.min(4, files.length) }, worker))
+  await Promise.all(Array.from({ length: Math.min(4, items.length) }, worker))
   return failed
 }
 

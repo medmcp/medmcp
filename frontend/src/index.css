@@ -332,6 +332,12 @@ button:hover {
   font-variant-numeric: tabular-nums;
 }
 
+/* A desktop file drag is over the explorer: outline the drop area. */
+.panel-body.drop-target {
+  outline: 2px dashed var(--blue-l);
+  outline-offset: -2px;
+}
+
 /* ── File explorer ── */
 
 .tree-row {

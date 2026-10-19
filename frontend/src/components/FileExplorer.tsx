@@ -1,10 +1,12 @@
 import { memo, useEffect, useRef, useState } from 'react'
+import type { DragEvent as ReactDragEvent } from 'react'
 import { useConfirm } from '../confirm'
 import { createPortal } from 'react-dom'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { Tree } from 'react-arborist'
 import type { NodeApi, NodeRendererProps, TreeApi } from 'react-arborist'
 import { deletePath, downloadPath, fetchTree, mkdir, renamePath, uploadFiles } from '../api'
+import type { UploadItem } from '../api'
 import { setDraggedFilePath } from '../dragState'
 import { classify } from '../fileKinds'
 import { DRAG_PATH_MIME, type TreeNode } from '../types'
@@ -14,7 +16,6 @@ import {
   FolderIcon,
   FolderOpenIcon,
   FolderPlusIcon,
-  FolderUploadIcon,
   ImageIcon,
   LayersIcon,
   TableIcon,
@@ -39,6 +40,68 @@ function parentDir(path: string): string {
 
 function joinPath(dir: string, name: string): string {
   return dir ? `${dir}/${name}` : name
+}
+
+/** Files from the picker, each going into `dir` (a picked folder keeps its subfolders). */
+function pickedItems(list: FileList | null, dir: string): UploadItem[] {
+  return Array.from(list ?? []).map((file) => {
+    const rel = file.webkitRelativePath
+    const sub = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : ''
+    return { file, dir: joinPath(dir, sub) }
+  })
+}
+
+/** Whether a drag carries files from outside the browser (not one of our own rows). */
+function carriesFiles(dt: DataTransfer): boolean {
+  return Array.from(dt.types).includes('Files')
+}
+
+/**
+ * The workspace folder a drop at this point lands in: the folder row under the
+ * pointer, a file row's parent folder, or the root when over empty space.
+ */
+function dropTargetDir(target: EventTarget | null): string {
+  const row = (target as HTMLElement | null)?.closest<HTMLElement>('[data-path]')
+  const path = row?.dataset.path
+  if (!path || path === NEW_FOLDER_ID) return ''
+  return row?.dataset.dir !== undefined ? path : parentDir(path)
+}
+
+/** Walk a dropped entry (file or folder) into upload items under `dir`. */
+async function walkEntry(entry: FileSystemEntry, dir: string, out: UploadItem[]): Promise<void> {
+  if (entry.isFile) {
+    const file = await new Promise<File>((resolve, reject) =>
+      (entry as FileSystemFileEntry).file(resolve, reject),
+    )
+    out.push({ file, dir })
+    return
+  }
+  if (!entry.isDirectory) return
+  const reader = (entry as FileSystemDirectoryEntry).createReader()
+  const sub = joinPath(dir, entry.name)
+  // readEntries hands out batches (Chromium: 100 at a time) until an empty one.
+  for (;;) {
+    const batch = await new Promise<FileSystemEntry[]>((resolve, reject) =>
+      reader.readEntries(resolve, reject),
+    )
+    if (batch.length === 0) break
+    for (const child of batch) await walkEntry(child, sub, out)
+  }
+}
+
+/**
+ * Everything dropped from the desktop, as upload items under `dir`. The entries
+ * must be taken from the DataTransfer synchronously, inside the drop event —
+ * they are gone after it — so this is called with them already collected.
+ */
+async function droppedItems(entries: (FileSystemEntry | null)[], files: File[], dir: string) {
+  const out: UploadItem[] = []
+  if (entries.some((e) => e !== null)) {
+    for (const entry of entries) if (entry) await walkEntry(entry, dir, out)
+    return out
+  }
+  // No entry API (older browsers): plain files only, no folders.
+  return files.map((file) => ({ file, dir }))
 }
 
 function FileTypeIcon({ name }: { name: string }) {
@@ -81,6 +144,8 @@ function NodeRow({
       ref={editing ? undefined : dragHandle}
       style={style}
       className={`tree-row${node.isSelected ? ' selected' : ''}`}
+      data-path={node.data.id}
+      data-dir={isDir ? '' : undefined}
       onClick={() => {
         if (!editing && isDir) node.toggle()
       }}
@@ -163,7 +228,7 @@ function insertIntoTree(nodes: TreeNode[], parentId: string, node: TreeNode): Tr
 /** The row a new folder is named in before it exists; never a real path. */
 const NEW_FOLDER_ID = '\u0000new-folder'
 
-/** Workspace file tree with open/rename/move/delete, file and folder upload/download. */
+/** Workspace file tree: open/rename/move/delete, upload (picker or desktop drop), download. */
 // Memoized so a separator drag — which re-renders the panel content every frame
 // via react-resizable-panels — doesn't re-run react-arborist's tree on each
 // frame. Props from App are stable refs (refreshSignal changes only on fs
@@ -184,14 +249,9 @@ export const FileExplorer = memo(function FileExplorer({
   const fileInputRef = useRef<HTMLInputElement>(null)
   const treeRef = useRef<TreeApi<TreeNode> | null>(null)
   const newFolderParent = useRef('')
-  const folderInputRef = useRef<HTMLInputElement>(null)
-  // Folder the next file/folder pick uploads into ("" = workspace root).
-  const uploadDirRef = useRef('')
   const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null)
-  // `webkitdirectory` is not in React's input typings; set it on the element.
-  useEffect(() => {
-    folderInputRef.current?.setAttribute('webkitdirectory', '')
-  }, [])
+  // Folder a desktop drag currently hovering the tree would upload into; null when none.
+  const [dropDir, setDropDir] = useState<string | null>(null)
   // Read inside the mount-once observer effect without re-subscribing.
   const isResizingRef = useRef(isResizing)
   useEffect(() => {
@@ -266,24 +326,44 @@ export const FileExplorer = memo(function FileExplorer({
     })
   }
 
-  const pickUpload = (kind: 'files' | 'folder', dir: string) => {
-    uploadDirRef.current = dir
-    ;(kind === 'files' ? fileInputRef : folderInputRef).current?.click()
-  }
-
-  const startUpload = (list: FileList | null) => {
-    const files = list ? Array.from(list) : []
-    if (files.length === 0) return
+  const startUpload = (items: UploadItem[]) => {
+    if (items.length === 0) return
     setError(null)
-    setUploading({ done: 0, total: files.length })
-    void uploadFiles(files, uploadDirRef.current, (done, total) => setUploading({ done, total }))
+    setUploading({ done: 0, total: items.length })
+    void uploadFiles(items, (done, total) => setUploading({ done, total }))
       .then((failed) => {
-        if (failed > 0) setError(`failed to upload ${failed} of ${files.length} file(s)`)
+        if (failed > 0) setError(`failed to upload ${failed} of ${items.length} file(s)`)
       })
       .finally(() => {
         setUploading(null)
         reload()
       })
+  }
+
+  // Files and folders dragged in from the desktop. A picker cannot offer files
+  // and folders at once, so folders come in this way: dropped on a folder row
+  // they go inside it, on a file row beside it, on empty space into the root.
+  // react-arborist's own row drags carry no 'Files' type and are left alone.
+  const onDragOver = (e: ReactDragEvent<HTMLDivElement>) => {
+    if (!carriesFiles(e.dataTransfer)) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+    const dir = dropTargetDir(e.target)
+    if (dir !== dropDir) setDropDir(dir)
+  }
+  const onDragLeave = (e: ReactDragEvent<HTMLDivElement>) => {
+    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
+    setDropDir(null)
+  }
+  const onDrop = (e: ReactDragEvent<HTMLDivElement>) => {
+    if (!carriesFiles(e.dataTransfer)) return
+    e.preventDefault()
+    setDropDir(null)
+    const dir = dropTargetDir(e.target)
+    // Both must be read now, synchronously: the DataTransfer is emptied after the event.
+    const entries = Array.from(e.dataTransfer.items).map((item) => item.webkitGetAsEntry())
+    const files = Array.from(e.dataTransfer.files)
+    void droppedItems(entries, files, dir).then(startUpload)
   }
 
   // Delete one or more paths: drop them from the tree immediately so they vanish
@@ -375,18 +455,9 @@ export const FileExplorer = memo(function FileExplorer({
           <button
             className="btn-icon"
             aria-label="Upload files"
-            title="Upload files"
-            onClick={() => pickUpload('files', '')}
+            onClick={() => fileInputRef.current?.click()}
           >
             <UploadIcon />
-          </button>
-          <button
-            className="btn-icon"
-            aria-label="Upload folder"
-            title="Upload folder"
-            onClick={() => pickUpload('folder', '')}
-          >
-            <FolderUploadIcon />
           </button>
           <button className="btn-icon" aria-label="Refresh" onClick={reload}>
             <RefreshIcon />
@@ -398,32 +469,35 @@ export const FileExplorer = memo(function FileExplorer({
           multiple
           hidden
           onChange={(e) => {
-            startUpload(e.target.files)
-            e.target.value = ''
-          }}
-        />
-        <input
-          ref={folderInputRef}
-          type="file"
-          hidden
-          onChange={(e) => {
-            startUpload(e.target.files)
+            startUpload(pickedItems(e.target.files, ''))
             e.target.value = ''
           }}
         />
       </div>
-      {uploading && (
+      {uploading ? (
         <div className="panel-status" role="status">
           Uploading {uploading.done} of {uploading.total} file(s)…
         </div>
+      ) : (
+        dropDir !== null && (
+          <div className="panel-status" role="status">
+            Drop to upload into {dropDir ? `${dropDir}/` : 'the workspace'}
+          </div>
+        )
       )}
       {error && <div className="panel-error">{error}</div>}
-      <div className="panel-body" ref={containerRef}>
+      <div
+        className={`panel-body${dropDir !== null ? ' drop-target' : ''}`}
+        ref={containerRef}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+      >
         {/* Every other panel says what to do when it is empty; this one showed
             a blank rectangle, which reads as a failure to load. */}
         {data.length === 0 && !error && (
           <div className="viewer-message">
-            This workspace is empty. Upload a file, or drop one here.
+            This workspace is empty. Upload files, or drop files or folders here.
           </div>
         )}
         <Tree<TreeNode>
@@ -469,7 +543,7 @@ export const FileExplorer = memo(function FileExplorer({
               className="ctx-menu"
               style={{
                 left: Math.min(menu.x, window.innerWidth - 170),
-                top: Math.min(menu.y, window.innerHeight - 240),
+                top: Math.min(menu.y, window.innerHeight - 190),
               }}
               onContextMenu={(e) => e.preventDefault()}
             >
@@ -489,22 +563,6 @@ export const FileExplorer = memo(function FileExplorer({
                   }}
                 >
                   New folder inside
-                </button>
-                <button
-                  onClick={() => {
-                    setMenu(null)
-                    pickUpload('files', menu.node.data.id)
-                  }}
-                >
-                  Upload files here
-                </button>
-                <button
-                  onClick={() => {
-                    setMenu(null)
-                    pickUpload('folder', menu.node.data.id)
-                  }}
-                >
-                  Upload folder here
                 </button>
                 <button onClick={menuAction(() => downloadPath(menu.node.data.id))}>
                   Download as .zip

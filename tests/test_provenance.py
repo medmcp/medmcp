@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from medmcp import provenance
 
 from .conftest import make_vibe_session
@@ -375,3 +377,129 @@ def test_vibe_manual_session_title_only_for_user_set_titles(tmp_path: Path) -> N
         meta.write_text(json.dumps({"session_id": sid, "title": "", "title_source": "manual"}))
         assert provenance.vibe_manual_session_title(sid) is None
         assert provenance.vibe_manual_session_title("missing-id") is None
+
+
+# ── MedMCP's own transcript and the unified session store ────────────────────
+
+
+def _unified_session(root: Path, session_id: str, *, parent: str | None = None) -> Path:
+    """A vibe ≥2.26 session dir: ``logs/session/unified/<id>/meta.json``."""
+    d = root / "logs" / "session" / "unified" / session_id
+    d.mkdir(parents=True)
+    meta: dict[str, object] = {"session_id": session_id, "parent_session_id": parent}
+    (d / "meta.json").write_text(json.dumps(meta))
+    (d / "journal").mkdir()
+    return d
+
+
+def test_transcript_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the relay records comes back in the shape distillation and titles read."""
+    monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
+    provenance.append_transcript("s1", {"role": "user", "content": "segment it"})
+    call, result = provenance.transcript_tool_records(
+        "effect-1",
+        "medmcp-neuro_skull_strip",
+        {"input_path": "/ws/t1.nii.gz"},
+        '{"ok": true}',
+        status="completed",
+    )
+    provenance.append_transcript("s1", call)
+    provenance.append_transcript("s1", result)
+    provenance.append_transcript("s1", {"role": "assistant", "content": "Done."})
+    messages = provenance.read_transcript("s1")
+    assert [m["role"] for m in messages] == ["user", "assistant", "tool", "assistant"]
+    fn = messages[1]["tool_calls"][0]["function"]
+    assert fn["name"] == "medmcp-neuro_skull_strip"
+    assert json.loads(fn["arguments"]) == {"input_path": "/ws/t1.nii.gz"}
+    assert messages[2]["tool_call_id"] == "effect-1" and messages[2]["status"] == "completed"
+    assert all("ts" in m for m in messages)
+
+
+def test_transcript_falls_back_to_vibes_legacy_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chat written before the workspace kept its own record still reads whole."""
+    monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
+    make_vibe_session(tmp_path, "legacy-1", messages=[{"role": "user", "content": "hi"}])
+    assert [m["role"] for m in provenance.read_transcript("legacy-1")] == ["user"]
+    assert provenance.read_transcript("nobody") == []
+
+
+def test_transcript_does_not_count_as_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record every chat gets must not light the provenance dot; only a run log does."""
+    monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
+    provenance.append_transcript("s1", {"role": "user", "content": "hi"})
+    assert provenance.list_provenance_sessions() == []
+    provenance.append_run_event("s1", {"tool": "x"})
+    assert provenance.list_provenance_sessions() == ["s1"]
+
+
+def test_unified_session_dir_is_found_and_purged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vibe ≥2.26 chat lives under its full id; lookup, chain walk and purge see it."""
+    monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
+    d = _unified_session(tmp_path, "aaaa-1")
+    fork = _unified_session(tmp_path, "bbbb-2", parent="aaaa-1")
+    assert provenance.find_vibe_session_dir("aaaa-1") == d
+    assert provenance.vibe_session_parents() == {"bbbb-2": "aaaa-1"}
+    assert provenance.find_vibe_session_dirs("aaaa-1", stop_ids={"bbbb-2"}) == [d]
+    provenance.append_transcript("aaaa-1", {"role": "user", "content": "hi"})
+    provenance.purge_session("aaaa-1", stop_ids={"bbbb-2"})
+    assert not d.exists() and fork.exists()
+    assert not provenance.transcript_path("aaaa-1").exists()
+
+
+def test_record_tool_event_prefers_the_canonical_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under the harness the title is prose; the relay's canonical name keys the event."""
+    monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
+    info: dict[str, object] = {
+        "title": "mcp_medmcp_neuro.skull_strip",
+        "toolName": "medmcp-neuro_skull_strip",
+        "status": "completed",
+        "rawInput": {"input_path": "/ws/t1.nii.gz"},
+    }
+    provenance.record_tool_event("s1", "effect-1", info, ["medmcp-neuro"])
+    event = provenance.read_run_events("s1")[0]
+    assert (event["server"], event["tool"]) == ("medmcp-neuro", "skull_strip")
+
+
+def test_transcript_reads_legacy_turns_before_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chat resumed after the upgrade keeps its old turns ahead of the new ones."""
+    monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
+    make_vibe_session(tmp_path, "old-1", messages=[{"role": "user", "content": "before"}])
+    provenance.append_transcript("old-1", {"role": "user", "content": "after"})
+    assert [m["content"] for m in provenance.read_transcript("old-1")] == ["before", "after"]
+
+
+def test_branch_inherits_the_transcript(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fork starts with its source's record; a source without one leaves nothing behind."""
+    monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
+    provenance.append_transcript("src", {"role": "user", "content": "hi"})
+    provenance.copy_transcript("src", "fork")
+    assert [m["content"] for m in provenance.read_transcript("fork")] == ["hi"]
+    provenance.copy_transcript("nobody", "fork2")
+    assert provenance.read_transcript("fork2") == []
+
+
+def test_rewind_truncates_the_transcript(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Everything from the rewound-to turn on is gone; an unknown id changes nothing."""
+    monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
+    for rec in (
+        {"role": "user", "content": "one", "message_id": "m1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "two", "message_id": "m2"},
+        {"role": "assistant", "content": "a2"},
+    ):
+        provenance.append_transcript("s", rec)
+    assert provenance.truncate_transcript("s", "m9") is False
+    assert len(provenance.read_transcript("s")) == 4
+    assert provenance.truncate_transcript("s", "m2") is True
+    assert [m["content"] for m in provenance.read_transcript("s")] == ["one", "a1"]
+    assert provenance.truncate_transcript("missing", "m1") is False

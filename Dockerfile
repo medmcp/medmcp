@@ -41,16 +41,17 @@ COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
-# MedMCP's patches to the agent (stable scratchpad, no chat-long approval for
-# redirects); fails the build if the locked vibe no longer matches them.
-COPY docker/patch_vibe.py ./docker/patch_vibe.py
-RUN /app/.venv/bin/python docker/patch_vibe.py
+# vibe ships its own skills (vibe, skill-creator, worktree, create-plugin) as a
+# built-in plugin that the harness mounts into every session and tells the model
+# to load; there is no switch for it, and none of them is for this workspace.
+RUN rm -rf /app/.venv/lib/python3.12/site-packages/vibe/plugins/builtins
 
 # App assets: built frontend, baked vibe config + system prompt + model def.
 COPY --from=frontend /app/frontend/dist ./frontend/dist
 COPY docker/config.toml ./.vibe/config.toml
 COPY docker/hooks.toml ./.vibe/hooks.toml
 COPY .vibe/prompts ./.vibe/prompts
+COPY .vibe/agents ./.vibe/agents
 COPY Modelfile.muse ./Modelfile.muse
 COPY catalog.json ./catalog.json
 COPY catalog.ghcr.json ./catalog.ghcr.json

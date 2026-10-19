@@ -11,8 +11,7 @@ import { StackMarketplace } from './components/StackMarketplace'
 import { SettingsDrawer } from './components/SettingsDrawer'
 import { UpdateWindow } from './components/UpdateWindow'
 import { Viewer } from './components/Viewer'
-import { EMPTY_OVERLAY, overlayFor, type OverlayState } from './components/viewerData'
-import { isVolumePath } from './fileKinds'
+import { EMPTY_OVERLAY, type OverlayState } from './components/viewerData'
 import { WorkflowPanel } from './components/WorkflowPanel'
 import { GearIcon, StoreIcon, XIcon } from './components/icons'
 import {
@@ -20,7 +19,6 @@ import {
   checkForUpdate,
   dismissUpdate,
   fetchUpdate,
-  fetchWorkspaceRoot,
   setUpdateAutoCheck,
 } from './api'
 import type { UpdateState } from './types'
@@ -51,29 +49,6 @@ export default function App() {
   // the chat can set it (a tool result's "Overlay" chip) and so it survives the
   // viewer's resize rebuild.
   const [overlay, setOverlay] = useState<OverlayState>(EMPTY_OVERLAY)
-  // Read through a ref so the callback keeps its identity: it reaches every
-  // memoised tool card in the chat, which would otherwise re-render (and
-  // re-scan its output for paths) each time a file is opened.
-  const openPathRef = useRef(openPath)
-  useEffect(() => {
-    openPathRef.current = openPath
-  }, [openPath])
-  const overlayFile = useCallback((p: string) => {
-    const base = openPathRef.current
-    // Nothing to overlay onto (or the same file): open it as the base instead.
-    if (!isVolumePath(base) || base === p) {
-      setOpenPath(p)
-      return
-    }
-    setOverlay(overlayFor(base, p))
-  }, [])
-  // The absolute workspace root, for mapping paths in tool results.
-  const [workspaceRoot, setWorkspaceRoot] = useState<string | null>(null)
-  useEffect(() => {
-    fetchWorkspaceRoot()
-      .then(setWorkspaceRoot)
-      .catch(() => {})
-  }, [])
   // Files multi-selected in the explorer — feeds the workflow batch editor.
   const [selectedPaths, setSelectedPaths] = useState<string[]>([])
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -323,7 +298,6 @@ export default function App() {
               <WorkflowPanel
                 distillSessionId={distillSessionId}
                 onWorkspaceChanged={notifyFsChanged}
-                onOpenFile={setOpenPath}
                 selectedPaths={selectedPaths}
               />
             </Panel>
@@ -338,9 +312,6 @@ export default function App() {
                 onSessionEstablished={handleSessionEstablished}
                 onNewChat={startNewChat}
                 onOpenModels={openModels}
-                workspaceRoot={workspaceRoot}
-                onOpenFile={setOpenPath}
-                onOverlayFile={overlayFile}
                 currentSessionId={resumeId}
                 onSelectSession={openSession}
               />

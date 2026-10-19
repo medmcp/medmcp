@@ -2783,39 +2783,6 @@ textarea.wf-input {
   text-decoration: underline;
 }
 
-/* Produced files as chips: name only, path on hover, click opens the viewer. */
-.wf-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.wf-file-chip {
-  font: inherit;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--blue-xl);
-  background: var(--card);
-  border: 1px solid var(--border2);
-  border-radius: 5px;
-  padding: 1px 7px;
-  cursor: pointer;
-  max-width: 100%;
-  text-align: left;
-  /* Long imaging names wrap rather than truncate: a cut name is a wrong name. */
-  white-space: normal;
-  word-break: break-all;
-}
-
-.wf-file-chip:hover {
-  border-color: var(--blue-l);
-}
-
-.wf-file-chip.static {
-  color: var(--muted2);
-  cursor: default;
-}
-
 /* One line per step / per item in the run card. */
 .wf-steprows,
 .wf-itemrows {
@@ -2880,8 +2847,7 @@ textarea.wf-input {
   white-space: nowrap;
 }
 
-.wf-itemrow-wrap .wf-steprows,
-.wf-itemrow-wrap .wf-chips {
+.wf-itemrow-wrap .wf-steprows {
   padding-left: 15px;
 }
 

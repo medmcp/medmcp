@@ -10,6 +10,7 @@ carry its own copy of these two rules; a recipe and its replay now agree on
 from __future__ import annotations
 
 import ast
+import json
 import re
 from typing import Any, cast
 
@@ -27,6 +28,8 @@ _STRUCTURED_RE = re.compile(r"structured:\s*(\{.*\})", re.DOTALL)
 # left. ``_NONZERO_EXIT_RE`` additionally catches "(exit N)" for tools that
 # embed a subprocess exit code in the message.
 _TOOL_ERROR_MARKER = "Error executing tool"
+# The path guard's own refusal text (``pathguard.py``): a call that never ran.
+_PATHGUARD_MARKER = "RETRY THIS CALL WITH A CORRECTED PATH."
 _NONZERO_EXIT_RE = re.compile(r"\(exit ([1-9]\d*)\)")
 
 
@@ -34,10 +37,27 @@ def parse_structured_blob(text: str) -> JsonDict:
     """The ``structured: {...}`` object in a rendered tool result; ``{}`` when none."""
     match = _STRUCTURED_RE.search(text)
     if match is None:
-        return {}
+        # vibe ≥2.26 hands an MCP tool's structured result over as plain JSON.
+        return _leading_json_object(text)
     try:
         parsed = ast.literal_eval(match.group(1))
     except (ValueError, SyntaxError):
+        return {}
+    return cast("JsonDict", parsed) if isinstance(parsed, dict) else {}
+
+
+def _leading_json_object(text: str) -> JsonDict:
+    """The JSON object *text* starts with, ignoring anything after it; ``{}`` if none.
+
+    vibe ≥2.26 hands an MCP tool's structured result over as JSON text, and may
+    follow it with further text blocks (the route it called, for one).
+    """
+    stripped = text.strip()
+    if not stripped.startswith("{"):
+        return {}
+    try:
+        parsed, _end = json.JSONDecoder().raw_decode(stripped)
+    except ValueError:
         return {}
     return cast("JsonDict", parsed) if isinstance(parsed, dict) else {}
 
@@ -48,5 +68,6 @@ def looks_failed(text: str) -> bool:
         "ok: False" in text
         or "returncode: 1" in text
         or _TOOL_ERROR_MARKER in text
+        or _PATHGUARD_MARKER in text
         or _NONZERO_EXIT_RE.search(text) is not None
     )

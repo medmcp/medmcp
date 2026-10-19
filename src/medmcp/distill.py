@@ -21,9 +21,8 @@ from collections.abc import Collection
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
-from medmcp import provenance, workflow
+from medmcp import harness, provenance, workflow
 from medmcp.pathcheck import looks_like_path
-from medmcp.statefile import read_jsonl
 from medmcp.toolresult import looks_failed, parse_structured_blob
 from medmcp.workflow import Recipe, RecipeStep, StackRequirement, WorkflowInput
 from medmcp.workspace_note import display_content_text, strip_workspace_note
@@ -138,7 +137,11 @@ def _iter_tool_calls(messages: list[JsonDict]) -> list[tuple[str, JsonDict, str]
         if msg.get("role") == "tool":
             call_id = msg.get("tool_call_id")
             if isinstance(call_id, str):
-                results[call_id] = str(msg.get("content") or "")
+                # The workspace's own transcript records the harness's verdict;
+                # a failed call's text alone may not say so.
+                failed = msg.get("status") == "failed"
+                content = str(msg.get("content") or "")
+                results[call_id] = f"Error executing tool: {content}" if failed else content
 
     calls: list[tuple[str, JsonDict, str]] = []
     for msg in messages:
@@ -146,9 +149,11 @@ def _iter_tool_calls(messages: list[JsonDict]) -> list[tuple[str, JsonDict, str]
             continue
         for tc in cast("list[JsonDict]", msg.get("tool_calls") or []):
             fn = cast("JsonDict", tc.get("function") or {})
-            name = str(fn.get("name") or "")
+            # A transcript written before the relay translated the harness's
+            # routes still names ``vibe.todo``; translate on the way in.
+            name = harness.canonical_tool_name(str(fn.get("name") or ""))
             call_id = str(tc.get("id") or "")
-            if not name or call_id not in results:
+            if not name or call_id not in results or harness.is_harness_tool(name):
                 continue
             try:
                 args = cast("JsonDict", json.loads(str(fn.get("arguments") or "{}")))
@@ -276,6 +281,27 @@ def build_recipe(
     return recipe
 
 
+def step_summary(recipe: Recipe) -> tuple[str, str] | None:
+    """A name and a one-line description derived from the recipe's steps.
+
+    The name joins the distinct tools in order (``skull-strip-register-to-template``);
+    the description spells the sequence and names the stacks. ``None`` for a
+    recipe with no steps.
+    """
+    tools: list[str] = []
+    servers: list[str] = []
+    for step in recipe.steps:
+        if step.tool not in tools:
+            tools.append(step.tool)
+        if step.server not in servers:
+            servers.append(step.server)
+    if not tools:
+        return None
+    name = " ".join(t.replace("_", " ") for t in tools[:4])
+    description = " → ".join(tools) + " · " + ", ".join(servers)
+    return name, description
+
+
 def resolve_digest(image: str) -> str:
     """Resolve *image*'s digest best-effort; never raise (distillation must not fail)."""
     try:
@@ -342,14 +368,9 @@ def distill_session(
 
     Raises ``FileNotFoundError`` if the session's raw log cannot be located.
     """
-    session_dirs = provenance.find_vibe_session_dirs(session_id, stop_ids=chain_stop_ids)
-    if not session_dirs:
-        raise FileNotFoundError(f"no vibe session log found for session {session_id!r}")
-    message_paths = [d / "messages.jsonl" for d in session_dirs if (d / "messages.jsonl").exists()]
-    if not message_paths:
-        raise FileNotFoundError(f"no messages.jsonl in {session_dirs[0]}")
-
-    messages = [m for path in message_paths for m in read_jsonl(path)]
+    messages = provenance.read_transcript(session_id, stop_ids=chain_stop_ids)
+    if not messages:
+        raise FileNotFoundError(f"no transcript found for session {session_id!r}")
     manifest = provenance.read_manifest(session_id)
     server_names = (
         [str(s.get("name")) for s in cast("list[JsonDict]", manifest.get("stacks") or [])]
@@ -358,18 +379,27 @@ def distill_session(
     )
 
     context = _first_user_message(messages)
+    recipe = build_recipe(
+        messages,
+        server_names=server_names,
+        name="",
+        description=context[:120] if context else "Distilled MedMCP workflow",
+    )
+    # A workflow is named after what it does. A name the person gave the chat
+    # wins; otherwise the steps name it — a chat's generated title or opening
+    # words describe the conversation ("list the files…"), not the pipeline.
+    summary = step_summary(recipe)
     if name_hint.strip():
         base = workflow.slugify(name_hint)
+    elif summary:
+        base = workflow.slugify(summary[0])
     elif context:
         base = workflow.slugify(context)
     else:
         base = f"workflow-{session_id[:8]}"
-    recipe = build_recipe(
-        messages,
-        server_names=server_names,
-        name=base,
-        description=context[:120] if context else "Distilled MedMCP workflow",
-    )
+    recipe.name = base
+    if summary:
+        recipe.description = summary[1]
     recipe.requires = build_requirements(recipe, manifest)
 
     root = workflow.resolve_root(workflows_root)

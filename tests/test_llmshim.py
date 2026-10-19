@@ -7,6 +7,7 @@ truncated stream is identifiable by its missing ``finish_reason``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -351,3 +352,355 @@ async def test_client_error_ends_a_stream_after_one_attempt() -> None:
     assert len(seen) == 1
     assert "medmcp-shim-error" in out
     assert "HTTP 400" in out
+
+
+# ── Glimmer mode: the shim renders and parses tool calls itself ──────────────
+
+
+_BASH: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": "Run a shell command.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "timeout_seconds": {"type": "integer", "default": 300},
+                "paths": {"type": "array", "items": {"type": "string"}},
+                "verbose": {"type": "boolean"},
+                "note": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            },
+            "required": ["command"],
+        },
+    },
+}
+_FUNCTIONS: dict[str, dict[str, Any]] = {"bash": _BASH["function"]}
+_BLOCK = (
+    "<atem:function_calls>\n"
+    '<atem:invoke name="bash">\n'
+    '<atem:parameter name="command">ls -la</atem:parameter>\n'
+    '<atem:parameter name="timeout_seconds">30</atem:parameter>\n'
+    '<atem:parameter name="paths">["a", "b"]</atem:parameter>\n'
+    '<atem:parameter name="verbose">true</atem:parameter>\n'
+    '<atem:parameter name="note">null</atem:parameter>\n'
+    "</atem:invoke>\n"
+    "</atem:function_calls>"
+)
+
+
+class TestGlimmerRender:
+    """The tool section matches what Ollama's renderer puts into the prompt."""
+
+    def test_section_has_metadata_schemas_and_example(self) -> None:
+        """Namespace metadata, every schema as JSON, and the worked example, in that order."""
+        section = llmshim.render_tool_section([_BASH["function"]])
+        assert section.startswith("In this environment you have access to a set of tools")
+        meta = section.index('{"name": "bash", "description": ""}')
+        schemas = section.index("// Function schemas")
+        schema = section.index(
+            '{"name": "bash", "description": "Run a shell command.", "parameters": '
+        )
+        example = section.index("to=example_tool_name.example_function_name")
+        assert meta < schemas < schema < example
+        assert section.endswith("</atem:function_calls>")
+
+    def test_namespace_is_the_part_before_the_dot(self) -> None:
+        """``group.tool`` names share one metadata line, as in Ollama."""
+        fns: list[dict[str, Any]] = [
+            {"name": "mcp_neuro.a", "parameters": {}},
+            {"name": "mcp_neuro.b", "parameters": {}},
+        ]
+        section = llmshim.render_tool_section(fns)
+        assert section.count('{"name": "mcp_neuro", "description": ""}') == 1
+
+    def test_request_moves_tools_into_the_system_message(self) -> None:
+        """``tools``/``tool_choice`` leave the request; the section lands after the prompt."""
+        req = {
+            "model": "m",
+            "messages": [
+                {"role": "system", "content": "You are X."},
+                {"role": "user", "content": "hi"},
+            ],
+            "tools": [_BASH],
+            "tool_choice": "auto",
+        }
+        out, functions = llmshim.glimmer_request(req)
+        assert "tools" not in out and "tool_choice" not in out
+        assert out["messages"][0]["content"].startswith("You are X.\n\nIn this environment")
+        assert list(functions) == ["bash"]
+        assert "tools" in req  # the caller's payload is untouched
+
+    def test_request_without_tools_is_unchanged(self) -> None:
+        """No tools, nothing to render: the same object comes back."""
+        req = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+        out, functions = llmshim.glimmer_request(req)
+        assert out is req and functions == {}
+
+    def test_request_without_system_message_gets_one(self) -> None:
+        """The section needs a system message to live in."""
+        req = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "tools": [_BASH]}
+        out, _ = llmshim.glimmer_request(req)
+        assert out["messages"][0]["role"] == "system"
+        assert out["messages"][1]["role"] == "user"
+
+
+class TestAtemParse:
+    """ATEM blocks become OpenAI tool calls with schema-typed arguments."""
+
+    def test_values_are_typed_from_the_schema(self) -> None:
+        """Integer, array, boolean and null parameters convert; strings stay verbatim."""
+        calls = llmshim.parse_atem_block(_BLOCK, _FUNCTIONS)
+        assert len(calls) == 1
+        call = calls[0]
+        assert call["type"] == "function" and call["id"].startswith("call_")
+        assert call["function"]["name"] == "bash"
+        assert json.loads(call["function"]["arguments"]) == {
+            "command": "ls -la",
+            "timeout_seconds": 30,
+            "paths": ["a", "b"],
+            "verbose": True,
+            "note": None,
+        }
+
+    def test_whitespace_between_parameters_is_tolerated(self) -> None:
+        """Blank lines and indentation, which trip Ollama's parser, are fine here."""
+        block = (
+            '<atem:function_calls>\n\n  <atem:invoke name="bash">\n\n'
+            '    <atem:parameter name="command">pwd</atem:parameter>\n\n'
+            "  </atem:invoke>\n</atem:function_calls>"
+        )
+        calls = llmshim.parse_atem_block(block, _FUNCTIONS)
+        assert json.loads(calls[0]["function"]["arguments"]) == {"command": "pwd"}
+
+    def test_string_values_keep_their_spaces_and_lines(self) -> None:
+        """Strings are not stripped, as the prompt promises the model."""
+        block = (
+            '<atem:function_calls><atem:invoke name="bash">'
+            '<atem:parameter name="command">  echo "a"\n  echo "b"  </atem:parameter>'
+            "</atem:invoke></atem:function_calls>"
+        )
+        calls = llmshim.parse_atem_block(block, _FUNCTIONS)
+        assert (
+            json.loads(calls[0]["function"]["arguments"])["command"] == '  echo "a"\n  echo "b"  '
+        )
+
+    def test_unknown_tool_and_untyped_value_pass_through(self) -> None:
+        """A name the schema lacks is still a call; its values stay strings unless JSON-like."""
+        block = (
+            '<atem:function_calls><atem:invoke name="mystery">'
+            '<atem:parameter name="n">7</atem:parameter>'
+            '<atem:parameter name="o">{"k": 1}</atem:parameter>'
+            "</atem:invoke></atem:function_calls>"
+        )
+        calls = llmshim.parse_atem_block(block, _FUNCTIONS)
+        assert json.loads(calls[0]["function"]["arguments"]) == {"n": "7", "o": {"k": 1}}
+
+    def test_two_invokes_are_two_calls(self) -> None:
+        """One block may carry several calls; indices count up."""
+        block = (
+            '<atem:function_calls><atem:invoke name="bash"><atem:parameter name="command">a'
+            "</atem:parameter></atem:invoke>"
+            '<atem:invoke name="bash"><atem:parameter name="command">b'
+            "</atem:parameter></atem:invoke></atem:function_calls>"
+        )
+        calls = llmshim.parse_atem_block(block, _FUNCTIONS)
+        assert [c["index"] for c in calls] == [0, 1]
+
+
+class TestAtemSplitter:
+    """Text around a block streams; the block is held until it closes."""
+
+    def test_marker_split_across_deltas(self) -> None:
+        """A partial opening marker is held back, never shown as text."""
+        sp = llmshim.AtemSplitter(_FUNCTIONS)
+        out = [
+            sp.feed(x)
+            for x in (
+                "Sure, ",
+                "let me <at",
+                "em:function_calls>",
+                _BLOCK[len("<atem:function_calls>") :],
+            )
+        ]
+        assert out[:2] == ["Sure, ", "let me "]
+        assert "".join(out[2:]) == ""
+        assert not sp.open and len(sp.calls) == 1
+        assert sp.flush() == ""
+
+    def test_lone_angle_bracket_is_released_when_it_is_not_the_marker(self) -> None:
+        """Held text that turns out not to be the marker comes out with the next delta."""
+        sp = llmshim.AtemSplitter(_FUNCTIONS)
+        assert sp.feed("a <") == "a "
+        assert sp.feed(" b") == "< b"
+
+    def test_unterminated_block_is_never_released(self) -> None:
+        """A cut stream leaves the block open: nothing leaks, no call is produced."""
+        sp = llmshim.AtemSplitter(_FUNCTIONS)
+        assert sp.feed('<atem:function_calls>\n<atem:invoke name="bash">') == ""
+        assert sp.open and sp.calls == [] and sp.flush() == ""
+
+
+class TestGlimmerStream:
+    """The full streaming path: content in, OpenAI tool-call chunks out."""
+
+    @staticmethod
+    def _events(*contents: str, finish: str = "stop") -> list[dict[str, object]]:
+        out: list[dict[str, object]] = []
+        for text in contents:
+            out.append(
+                {"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]}
+            )
+        out.append({"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]})
+        out.append({"choices": [], "usage": {"total_tokens": 1}})
+        return out
+
+    def test_block_becomes_tool_calls_and_finish_reason_is_rewritten(self) -> None:
+        """Ollama says ``stop`` (it saw text); the shim says ``tool_calls`` and carries them."""
+        outcome = llmshim.StreamOutcome("live", functions=_FUNCTIONS)
+        forwarded = [e for e in (outcome.feed(ev) for ev in self._events("Running: ", _BLOCK)) if e]
+        released = outcome.release()
+        assert outcome.healthy
+        assert forwarded[0]["choices"][0]["delta"]["content"] == "Running: "
+        final = next(e for e in released if e["choices"] and e["choices"][0].get("finish_reason"))
+        assert final["choices"][0]["finish_reason"] == "tool_calls"
+        calls = final["choices"][0]["delta"]["tool_calls"]
+        assert calls[0]["function"]["name"] == "bash"
+        assert json.loads(calls[0]["function"]["arguments"])["command"] == "ls -la"
+
+    def test_plain_answer_is_untouched(self) -> None:
+        """No block: text streams through and ``stop`` stays ``stop``."""
+        outcome = llmshim.StreamOutcome("live", functions=_FUNCTIONS)
+        forwarded = [e for e in (outcome.feed(ev) for ev in self._events("Hello", " there")) if e]
+        assert [e["choices"][0]["delta"]["content"] for e in forwarded] == ["Hello", " there"]
+        final = next(
+            e for e in outcome.release() if e["choices"] and e["choices"][0].get("finish_reason")
+        )
+        assert final["choices"][0]["finish_reason"] == "stop"
+        assert "tool_calls" not in final["choices"][0]["delta"]
+
+    def test_stream_cut_inside_a_block_is_unhealthy(self) -> None:
+        """An open block at the end means truncation, whatever Ollama's finish_reason."""
+        outcome = llmshim.StreamOutcome("live", functions=_FUNCTIONS)
+        for ev in self._events('<atem:function_calls>\n<atem:invoke name="bash">'):
+            outcome.feed(ev)
+        assert not outcome.healthy
+
+    def test_non_streaming_completion_is_parsed_too(self) -> None:
+        """The same block in a ``message.content`` becomes ``tool_calls``."""
+        body = {
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": "Let me look.\n" + _BLOCK},
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+        out = llmshim.parse_completion(body, _FUNCTIONS)
+        choice = out["choices"][0]
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["message"]["content"] == "Let me look.\n"
+        assert choice["message"]["tool_calls"][0]["function"]["name"] == "bash"
+
+
+class TestToolMode:
+    """``MEDMCP_SHIM_TOOLS`` picks who parses tool calls."""
+
+    def test_glimmer_mode_forwards_no_tools_and_restores_calls(self) -> None:
+        """Through the app: tools leave the request, the ATEM block comes back as tool_calls."""
+        seen: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.update(json.loads(request.content))
+            sse = (
+                "".join(
+                    f"data: {json.dumps(ev)}\n\n" for ev in TestGlimmerStream._events("", _BLOCK)
+                )
+                + "data: [DONE]\n\n"
+            )
+            return httpx.Response(
+                200, content=sse.encode(), headers={"content-type": "text/event-stream"}
+            )
+
+        async def run() -> list[dict[str, object]]:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                payload, functions = llmshim.glimmer_request(
+                    {
+                        "model": "m",
+                        "stream": True,
+                        "messages": [{"role": "user", "content": "ls"}],
+                        "tools": [_BASH],
+                    }
+                )
+                chunks: list[dict[str, object]] = []
+                async for raw in llmshim._stream_with_retry(
+                    "http://up/v1/chat/completions",
+                    payload,
+                    {},
+                    1,
+                    "m",
+                    client=client,
+                    functions=functions,
+                ):
+                    ev = llmshim.parse_sse_line(raw.decode().strip())
+                    if ev:
+                        chunks.append(ev)
+                return chunks
+
+        chunks = asyncio.run(run())
+        assert "tools" not in seen
+        assert "// Function schemas" in str(seen["messages"])
+        final = next(c for c in chunks if c["choices"] and c["choices"][0].get("finish_reason"))  # type: ignore[index]
+        assert final["choices"][0]["finish_reason"] == "tool_calls"  # type: ignore[index]
+
+    def test_unknown_tool_mode_is_rejected(self) -> None:
+        """A typo in the env var must not silently pick a mode."""
+        with pytest.raises(ValueError):
+            llmshim.create_app("http://up", tool_mode="magic")
+
+
+class TestCallsAcrossBlocks:
+    """A turn with two blocks numbers its calls once, as a client merges deltas by index."""
+
+    def test_second_block_continues_the_numbering(self) -> None:
+        """Index 0 twice would merge two calls into one garbled call."""
+        sp = llmshim.AtemSplitter(_FUNCTIONS)
+        sp.feed(_BLOCK)
+        sp.feed("some text ")
+        sp.feed(_BLOCK)
+        assert [c["index"] for c in sp.calls] == [0, 1]
+
+
+async def test_keepalive_comment_while_a_block_is_held() -> None:
+    """Upstream keeps sending a tool-call block the shim holds: the caller still sees bytes."""
+    cut = _BLOCK.index("\n") + 1  # between the opening marker and the first invoke
+    head, tail = _BLOCK[:cut], _BLOCK[cut:]
+    pieces = [head] + [" "] * 5 + [tail]
+    events: list[JsonDict] = [
+        {"choices": [{"index": 0, "delta": {"content": t}, "finish_reason": None}]} for t in pieces
+    ]
+    events.append({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+    body = _sse(events, done=True)
+
+    async def run(keepalive: float) -> str:
+        async with _client([body]) as client:
+            chunks = [
+                chunk
+                async for chunk in llmshim._stream_with_retry(
+                    "http://upstream/v1/chat/completions",
+                    {"model": "m", "stream": True},
+                    {},
+                    1,
+                    "m",
+                    relay="live",
+                    client=client,
+                    functions=_FUNCTIONS,
+                    keepalive_sec=keepalive,
+                )
+            ]
+        return b"".join(chunks).decode()
+
+    out = await run(1e-9)
+    assert ": keepalive\n\n" in out
+    assert '"finish_reason": "tool_calls"' in out
+    assert (await run(0)).count(": keepalive") == 0

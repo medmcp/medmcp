@@ -356,6 +356,10 @@ def _check_one(param: str, value: str, workspace: Path, containerized: bool) -> 
                 show_siblings=True,
             )
         if exists:
+            # An existing folder is where the results go, not something they
+            # replace; only an existing file is an overwrite.
+            if _safe_is_dir(resolved):
+                return finding("ok", "info", "exists; results go inside")
             return finding("will_overwrite", "warning", "already exists and would be overwritten")
         return finding("ok", "info", "will be created")
 

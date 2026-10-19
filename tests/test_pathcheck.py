@@ -108,6 +108,13 @@ class TestOutputPaths:
         assert finding["status"] == "will_overwrite"
         assert finding["severity"] == "warning"
 
+    def test_existing_output_folder_is_not_an_overwrite(self, workspace: Path) -> None:
+        """Results written into a folder that exists replace nothing."""
+        args = {"output_dir": str(workspace / "sub-01")}
+        (finding,) = pathcheck.check_tool_call_paths(args, workspace)
+        assert finding["status"] == "ok"
+        assert finding["severity"] == "info"
+
 
 class TestAncestorListing:
     """A missing path carries a look at the nearest folder that does exist."""

@@ -230,3 +230,37 @@ class TestHookContract:
         proc = self._run(payload)
         assert proc.returncode == 0
         assert json.loads(proc.stdout) == {"decision": "allow"}
+
+
+class TestHarnessRoutes:
+    """vibe 2.26 names a tool by route; the guard works in MedMCP's names."""
+
+    def test_stack_route_is_classified_as_containerized(
+        self,
+        workspace: Path,
+        tmp_path_factory: pytest.TempPathFactory,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A path outside the workspace is an error for a container stack, whatever the spelling."""
+        elsewhere = tmp_path_factory.mktemp("elsewhere")
+        stacks_d = elsewhere / "stacks.d"
+        stacks_d.mkdir()
+        (stacks_d / "medmcp-neuro-core.toml").write_text("command = 'docker'\n")
+        monkeypatch.setenv("MEDMCP_STACKS_D", str(stacks_d))
+        outside = elsewhere / "t1.nii.gz"
+        outside.write_bytes(b"")
+        inv = _invocation(workspace, {"input_path": str(outside)})
+        inv["tool_name"] = "mcp_medmcp_neuro_core.register_to_template"
+        out = pathguard.decide(inv)
+        assert out["decision"] == "deny"
+        assert "cannot see" in out["reason"]
+
+    def test_builtin_route_is_recorded_under_its_tool_name(
+        self, workspace: Path, tmp_path: Path
+    ) -> None:
+        """The ledger counts ``file_system.read_file`` as ``read_file``."""
+        inv = _invocation(workspace, {"input_path": str(workspace / "nope" / "t1.nii.gz")})
+        inv["tool_name"] = "file_system.read_file"
+        assert pathguard.decide(inv)["decision"] == "deny"
+        ledger = json.loads((tmp_path / "vibe" / "pathguard_retries.json").read_text())
+        assert all(":read_file:" in key for key in ledger)

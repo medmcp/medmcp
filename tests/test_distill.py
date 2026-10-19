@@ -309,17 +309,17 @@ class TestRequirements:
 
 
 def test_distill_session_end_to_end(tmp_path: Path) -> None:
-    """distill_session writes one recipe.yaml, named from the opening request."""
+    """distill_session writes one recipe.yaml, named from its steps."""
     make_vibe_session(tmp_path, SESSION_ID, messages=_MESSAGES)
     workflows_root = tmp_path / "workflows"
     with patch.object(provenance, "VIBE_HOME", tmp_path):
         target = distill.distill_session(SESSION_ID, workflows_root=workflows_root)
 
-    assert target == workflows_root / "skull-strip-and-register-the-t1"
+    assert target == workflows_root / "skull-strip-register-to-template"
     assert sorted(p.name for p in target.iterdir()) == ["recipe.yaml"]
     recipe = yaml.safe_load((target / "recipe.yaml").read_text())
-    assert recipe["name"] == "skull-strip-and-register-the-t1"
-    assert recipe["description"] == "Skull strip and register the T1"
+    assert recipe["name"] == "skull-strip-register-to-template"
+    assert recipe["description"] == "skull_strip → register_to_template · medmcp-neuro"
     assert [s["tool"] for s in recipe["steps"]] == ["skull_strip", "register_to_template"]
     assert recipe["steps"][1]["arguments"]["input_path"] == "{{step1.brain_path}}"
 
@@ -334,7 +334,20 @@ def test_distill_names_the_workflow_after_the_chat(tmp_path: Path) -> None:
             workflows_root=tmp_path / "workflows",
         )
     assert target.name == "brain-mri-strip-register"
-    assert workflow.read_recipe(target).description == "Skull strip and register the T1"
+    recipe = workflow.read_recipe(target)
+    assert recipe.description.startswith(recipe.steps[0].tool)
+    assert "medmcp-neuro" in recipe.description
+
+
+def test_distill_names_the_workflow_after_its_steps_otherwise(tmp_path: Path) -> None:
+    """Without a person-given chat name, the steps name the workflow, not the opening words."""
+    make_vibe_session(tmp_path, SESSION_ID, messages=_MESSAGES)
+    with patch.object(provenance, "VIBE_HOME", tmp_path):
+        target = distill.distill_session(SESSION_ID, workflows_root=tmp_path / "workflows")
+    recipe = workflow.read_recipe(target)
+    tools = list(dict.fromkeys(s.tool for s in recipe.steps))
+    assert target.name == "-".join(t.replace("_", "-") for t in tools)
+    assert recipe.description == " → ".join(tools) + " · medmcp-neuro"
 
 
 def test_distill_never_replaces_an_existing_workflow(tmp_path: Path) -> None:
@@ -555,3 +568,37 @@ def test_default_survives_a_recipe_round_trip(tmp_path: Path) -> None:
     draft.mkdir()
     (draft / "recipe.yaml").write_text(yaml.safe_dump(recipe.to_dict()), encoding="utf-8")
     assert _defaults(workflow.read_recipe(draft))["in_2"] == "{{dir(in_1)}}"
+
+
+def test_harness_routes_in_an_old_transcript_are_translated() -> None:
+    """A transcript recorded before the relay translated routes still distils clean."""
+    messages = [
+        {"role": "user", "content": "do it"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "t1", "function": {"name": "vibe.todo", "arguments": '{"action": "write"}'}},
+                {"id": "s1", "function": {"name": "search_tool_functions", "arguments": "{}"}},
+                {
+                    "id": "c1",
+                    "function": {
+                        "name": "medmcp-neuro_skull_strip",
+                        "arguments": '{"input_path": "/ws/t1.nii.gz", "output_dir": "/ws"}',
+                    },
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "t1", "content": '{"verb": "Updated"}'},
+        {"role": "tool", "tool_call_id": "s1", "content": "Searched for relevant tools"},
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": '{"brain_path": "/ws/t1_brain.nii.gz"}\nmcp_medmcp_neuro.skull_strip',
+        },
+    ]
+    recipe = distill.build_recipe(
+        messages, server_names=["medmcp-neuro"], name="n", description="d"
+    )
+    assert [s.tool for s in recipe.steps] == ["skull_strip"]
+    assert recipe.manual_steps == []
+    assert recipe.steps[0].produces == {"brain_path": "step1.brain_path"}

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import platform
 import re
 import shutil
@@ -252,6 +253,120 @@ def read_run_events(session_id: str) -> list[JsonDict]:
     return read_jsonl(provenance_dir(session_id) / "run.jsonl")
 
 
+# ── MedMCP's own transcript ──────────────────────────────────────────────────
+#
+# vibe's Unified Harness (≥2.26) stores a chat as a hash-chained journal of
+# runtime events — nothing a reader outside vibe should parse. The workspace
+# already relays every turn over ACP, so it records the transcript it relays:
+# one ``transcript.jsonl`` per chat in the shape of vibe's old ``messages.jsonl``
+# (``role`` user / assistant / tool, assistant ``tool_calls`` with ``function``
+# ``name`` and JSON-string ``arguments``, tool results by ``tool_call_id``), so
+# titles, export and distillation read one format whatever vibe version wrote
+# the chat. Written whether or not provenance capture is on: it is the chat's
+# own record, not the reproducibility record.
+
+TRANSCRIPT_FILE = "transcript.jsonl"
+
+
+def transcript_path(session_id: str) -> Path:
+    """Where *session_id*'s MedMCP-written transcript lives."""
+    return provenance_dir(session_id) / TRANSCRIPT_FILE
+
+
+def append_transcript(session_id: str, record: JsonDict) -> None:
+    """Append one message-shaped record to the chat's transcript (best-effort)."""
+    with contextlib.suppress(Exception):
+        d = _ensure_dir(session_id)
+        with (d / TRANSCRIPT_FILE).open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": _utc_now_iso(), **record}) + "\n")
+
+
+def transcript_tool_records(
+    tool_call_id: str, name: str, arguments: object, output: str, *, status: str
+) -> tuple[JsonDict, JsonDict]:
+    """The assistant call and the tool result that record one completed tool call."""
+    call: JsonDict = {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "id": tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(arguments if arguments is not None else {}),
+                },
+            }
+        ],
+    }
+    result: JsonDict = {
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "name": name,
+        "content": output,
+        "status": status,
+    }
+    return call, result
+
+
+def read_transcript(session_id: str, *, stop_ids: Collection[str] = ()) -> list[JsonDict]:
+    """A chat's messages: vibe's legacy ``messages.jsonl``, then the MedMCP transcript.
+
+    The legacy file is concatenated across the pre-2.24 compaction chain (see
+    :func:`find_vibe_session_dirs`; ``stop_ids`` keeps the walk out of forks), so
+    chats written before the workspace kept its own transcript still read whole,
+    and one resumed since then reads its old turns followed by the new ones (the
+    transcript records live turns only, never a replay). Empty when neither exists.
+    """
+    messages: list[JsonDict] = []
+    for session_dir in find_vibe_session_dirs(session_id, stop_ids=stop_ids):
+        path = session_dir / "messages.jsonl"
+        if path.exists():
+            messages.extend(read_jsonl(path))
+    own = transcript_path(session_id)
+    if own.exists():
+        messages.extend(read_jsonl(own))
+    return messages
+
+
+def copy_transcript(src_id: str, dst_id: str) -> None:
+    """Give a branched chat its source's MedMCP transcript (best-effort).
+
+    vibe copies the history it holds into the fork; the workspace's own record
+    has to follow, or the branch would read as starting at the fork. Only the
+    source's own file is copied: legacy turns reach the branch through vibe's
+    ``parent_session_id`` backlink, as for any chain.
+    """
+    with contextlib.suppress(Exception):
+        src = transcript_path(src_id)
+        if not src.exists():
+            return
+        d = _ensure_dir(dst_id)
+        shutil.copyfile(src, d / TRANSCRIPT_FILE)
+
+
+def truncate_transcript(session_id: str, message_id: str) -> bool:
+    """Cut the MedMCP transcript back to before the user turn *message_id*.
+
+    The counterpart of vibe's in-place rewind, which truncates its own history
+    the same way. Returns whether the turn was found (and the file rewritten);
+    a transcript that does not carry the id is left as it is.
+    """
+    path = transcript_path(session_id)
+    if not path.exists():
+        return False
+    records = read_jsonl(path)
+    for index, record in enumerate(records):
+        if record.get("role") == "user" and record.get("message_id") == message_id:
+            kept = records[:index]
+            tmp = path.with_suffix(".tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                for rec in kept:
+                    f.write(json.dumps(rec) + "\n")
+            os.replace(tmp, path)
+            return True
+    return False
+
+
 def log_permission(session_id: str, *, title: str, decision: str) -> None:
     """Append a permission decision to ``permissions.log`` for *session_id*.
 
@@ -279,7 +394,13 @@ def record_tool_event(session_id: str, tc_id: str, info: JsonDict, server_names:
     duration = time.monotonic() - started if isinstance(started, (int, float)) else None
     title = info.get("title")
     title_str = title if isinstance(title, str) else None
-    server, tool = split_tool_name(title_str or tc_id, server_names)
+    # The relay stores the canonical tool name (see ``harness``); the title is
+    # prose under vibe ≥2.26 and only ever named the tool before that.
+    tool_name = info.get("toolName")
+    server, tool = split_tool_name(
+        tool_name if isinstance(tool_name, str) and tool_name else (title_str or tc_id),
+        server_names,
+    )
     risks = info.get("risks")
     decision = info.get("decision")
     human_readable = info.get("humanReadable")
@@ -316,6 +437,15 @@ def _read_session_meta(session_dir: Path) -> JsonDict | None:
         return None
 
 
+def _session_dirs(sessions_root: Path) -> list[Path]:
+    """Every vibe session dir: the legacy ``session_*`` dirs and the unified ones."""
+    dirs = [d for d in sorted(sessions_root.iterdir()) if d.is_dir() and d.name != "unified"]
+    unified = sessions_root / "unified"
+    if unified.is_dir():
+        dirs.extend(d for d in sorted(unified.iterdir()) if d.is_dir())
+    return dirs
+
+
 def find_vibe_session_dir(session_id: str) -> Path | None:
     """Locate vibe-acp's log dir for *session_id* under ``.vibe/logs/session/``.
 
@@ -325,6 +455,10 @@ def find_vibe_session_dir(session_id: str) -> Path | None:
     sessions_root = VIBE_HOME / "logs" / "session"
     if not sessions_root.is_dir():
         return None
+    # vibe ≥2.26 (Unified Harness) keeps a chat under its full id.
+    unified = sessions_root / "unified" / session_id
+    if unified.is_dir():
+        return unified
     short = session_id[:8]
     candidates = sorted(sessions_root.glob(f"session_*_{short}"))
     for candidate in candidates:
@@ -364,9 +498,7 @@ def find_vibe_session_dirs(session_id: str, *, stop_ids: Collection[str] = ()) -
     sessions_root = VIBE_HOME / "logs" / "session"
     # One scan builds the parent → children map; session counts are small.
     children: dict[str, list[tuple[Path, str]]] = {}
-    for candidate in sorted(sessions_root.iterdir()):
-        if not candidate.is_dir():
-            continue
+    for candidate in _session_dirs(sessions_root):
         data = _read_session_meta(candidate)
         if data is None:
             continue
@@ -400,9 +532,7 @@ def vibe_session_parents() -> dict[str, str]:
     if not sessions_root.is_dir():
         return {}
     parents: dict[str, str] = {}
-    for candidate in sessions_root.iterdir():
-        if not candidate.is_dir():
-            continue
+    for candidate in _session_dirs(sessions_root):
         data = _read_session_meta(candidate)
         if data is None:
             continue
@@ -465,7 +595,9 @@ def list_provenance_sessions() -> list[str]:
     root = VIBE_HOME / "provenance"
     if not root.is_dir():
         return []
-    return sorted(p.name for p in root.iterdir() if p.is_dir())
+    # The transcript lives in the same dir whether capture is on or off; only a
+    # run log means the chat has a provenance record.
+    return sorted(p.name for p in root.iterdir() if p.is_dir() and (p / "run.jsonl").exists())
 
 
 def purge_session(session_id: str, *, stop_ids: Collection[str] = ()) -> None:

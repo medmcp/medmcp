@@ -9,14 +9,14 @@ This file is generated — do not edit it by hand. Regenerate with `just notices
 after changing a runtime dependency. The model and base OS/CUDA layers are not
 package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 
-## Python (98 packages, runtime closure)
+## Python (99 packages, runtime closure)
 
 | Component | Version | License |
 | --- | --- | --- |
 | agent-client-protocol | 0.11.0 | Apache-2.0 |
 | annotated-doc | 0.0.4 | MIT |
 | annotated-types | 0.7.0 | MIT |
-| anyio | 4.14.1 | MIT |
+| anyio | 4.15.1 | MIT |
 | attrs | 26.1.0 | MIT |
 | beautifulsoup4 | 4.14.3 | MIT |
 | cachetools | 7.0.6 | MIT |
@@ -24,11 +24,12 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | cffi | 2.0.0 | MIT |
 | charset-normalizer | 3.4.7 | MIT |
 | click | 8.3.3 | BSD-3-Clause |
+| croniter | 6.2.4 | MIT |
 | cryptography | 50.0.0 | Apache-2.0 OR BSD-3-Clause |
 | eval-type-backport | 0.3.1 | MIT |
 | fastapi | 0.141.1 | MIT |
 | gitdb | 4.0.12 | BSD-3-Clause |
-| gitpython | 3.1.58 | BSD-3-Clause |
+| gitpython | 3.1.62 | BSD-3-Clause |
 | giturlparse | 0.15.0 | Apache-2.0 |
 | google-auth | 2.49.2 | Apache-2.0 |
 | googleapis-common-protos | 1.74.0 | Apache-2.0 |
@@ -55,7 +56,8 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | mcp | 1.28.1 | MIT |
 | mdit-py-plugins | 0.5.0 | MIT |
 | mdurl | 0.1.2 | MIT |
-| mistral-vibe | 2.24.5 | Apache-2.0 |
+| miniaudio | 1.71 | MIT |
+| mistral-vibe | 2.26.1 | Apache-2.0 |
 | mistralai | 2.6.0 | Apache-2.0 |
 | more-itertools | 11.0.2 | MIT |
 | opentelemetry-api | 1.39.1 | Apache-2.0 |
@@ -76,7 +78,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | pydantic-core | 2.46.4 | MIT |
 | pydantic-settings | 2.14.2 | MIT |
 | pygments | 2.20.0 | BSD-2-Clause |
-| pyjwt | 2.13.0 | MIT |
+| pyjwt | 2.15.1 | MIT |
 | pyperclip | 1.11.0 | BSD-3-Clause |
 | python-dateutil | 2.9.0.post0 | Apache-2.0 |
 | python-dotenv | 1.2.2 | BSD-3-Clause |
@@ -92,8 +94,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | setproctitle | 1.3.7 | BSD-3-Clause |
 | six | 1.17.0 | MIT |
 | smmap | 5.0.3 | BSD-3-Clause |
-| sounddevice | 0.5.5 | MIT |
-| soupsieve | 2.8.4 | MIT |
+| soupsieve | 2.9.2 | MIT |
 | sse-starlette | 3.4.1 | BSD-3-Clause |
 | starlette | 1.3.1 | BSD-3-Clause |
 | textual | 8.2.8 | MIT |
@@ -102,10 +103,10 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | tree-sitter | 0.26.0 | MIT |
 | tree-sitter-bash | 0.25.1 | MIT |
 | truststore | 0.10.4 | MIT |
-| typing-extensions | 4.15.0 | PSF-2.0 |
+| typing-extensions | 4.16.0 | PSF-2.0 |
 | typing-inspection | 0.4.2 | MIT |
 | uc-micro-py | 2.0.0 | MIT |
-| urllib3 | 2.7.0 | MIT |
+| urllib3 | 2.8.0 | MIT |
 | uvicorn | 0.46.0 | BSD-3-Clause |
 | watchfiles | 1.2.0 | MIT |
 | websockets | 16.0 | BSD-3-Clause |

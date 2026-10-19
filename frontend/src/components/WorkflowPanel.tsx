@@ -197,40 +197,6 @@ function runTiming(r: RunState, now: number): string {
   return label
 }
 
-/** Produced files as small chips: the file name, full path on hover, and a
- *  click opens it in the viewer when it lives inside the workspace. */
-function FileChips({
-  paths,
-  root,
-  onOpenFile,
-}: {
-  paths: string[]
-  root: string
-  onOpenFile?: (path: string) => void
-}) {
-  if (paths.length === 0) return null
-  return (
-    <span className="wf-chips">
-      {paths.map((p) => {
-        const rel = workspacePath(p, root)
-        const openable = rel !== null && !!onOpenFile
-        return (
-          <button
-            key={p}
-            type="button"
-            className={openable ? 'wf-file-chip' : 'wf-file-chip static'}
-            aria-label={openable ? `${rel} — open in viewer` : p}
-            disabled={!openable}
-            onClick={() => rel !== null && onOpenFile?.(rel)}
-          >
-            {basename(p)}
-          </button>
-        )
-      })}
-    </span>
-  )
-}
-
 /** A tool error: its first line, with the rest behind a toggle. */
 function ErrorText({ text }: { text: string }) {
   const [open, setOpen] = useState(false)
@@ -398,19 +364,9 @@ function StepRows({
   return <div className="wf-steprows">{rows}</div>
 }
 
-/** One line per batch item — finished ones with outputs, the current one with
- *  its step, the rest folded into a count. Click a line for its steps. */
-function ItemRows({
-  r,
-  now,
-  root,
-  onOpenFile,
-}: {
-  r: RunState
-  now: number
-  root: string
-  onOpenFile?: (path: string) => void
-}) {
+/** One line per batch item — finished ones with their file count, the current
+ *  one with its step, the rest folded into a count. Click a line for its steps. */
+function ItemRows({ r, now, root }: { r: RunState; now: number; root: string }) {
   const [open, setOpen] = useState<number | null>(null)
   const labels = itemLabels(r.runs, root)
   const rows: ReactNode[] = []
@@ -448,9 +404,6 @@ function ItemRows({
                 : 'starting'}
           </span>
         </button>
-        {expanded && it?.ok && (
-          <FileChips paths={it.outputs} root={root} onOpenFile={onOpenFile} />
-        )}
         {expanded && (
           <StepRows
             steps={steps}
@@ -545,14 +498,11 @@ function placeFiles(
 export const WorkflowPanel = memo(function WorkflowPanel({
   distillSessionId,
   onWorkspaceChanged,
-  onOpenFile,
   selectedPaths = [],
 }: {
   distillSessionId: string | null
   /** Called when a replay step may have written files into the workspace. */
   onWorkspaceChanged?: () => void
-  /** Open a produced file in the viewer. */
-  onOpenFile?: (path: string) => void
   /** Files multi-selected in the explorer — offered to the run editor. */
   selectedPaths?: string[]
 }) {
@@ -1018,12 +968,9 @@ export const WorkflowPanel = memo(function WorkflowPanel({
               now={now}
               stepsPerItem={r.stepsPerItem}
             />
-            {!live && r.items[0]?.outputs.length ? (
-              <FileChips paths={r.items[0].outputs} root={root} onOpenFile={onOpenFile} />
-            ) : null}
           </>
         ) : (
-          <ItemRows r={r} now={now} root={root} onOpenFile={onOpenFile} />
+          <ItemRows r={r} now={now} root={root} />
         )}
         {!live && !single && r.error && r.status === 'failed' && failedRan === 0 && (
           <div className="wf-step-error">{firstLine(r.error)}</div>

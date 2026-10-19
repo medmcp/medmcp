@@ -298,7 +298,6 @@ export default function App() {
               <WorkflowPanel
                 distillSessionId={distillSessionId}
                 onWorkspaceChanged={notifyFsChanged}
-                onOpenFile={setOpenPath}
                 selectedPaths={selectedPaths}
               />
             </Panel>

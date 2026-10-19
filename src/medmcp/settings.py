@@ -290,7 +290,34 @@ def _stack_pids_limit() -> int:
 # value is raised, an existing higher one is left alone. Everything else in
 # _STACK_RUN_HARDENING is presence-checked only, so a deliberate opt-out (a stack
 # that sets "network": true and installs with `--network bridge`) survives.
-_STACK_RUN_MINIMUMS: tuple[str, ...] = ("--pids-limit",)
+_STACK_RUN_MINIMUMS: tuple[str, ...] = ("--pids-limit", "--shm-size")
+
+# /dev/shm for a stack container. Docker's default is 64 MB, and nnUNet's
+# preprocessing workers pass whole volumes to each other through it: a
+# full-resolution CT dies in seconds with "Background workers died … your RAM
+# was full" (reproduced on a host with 900 GB free) while the 3 mm model fits.
+# A tmpfs cap, not a reservation — nothing is used until a worker writes.
+_STACK_SHM_SIZE = "8g"
+
+_SIZE_UNITS = {"": 1, "b": 1, "k": 1024, "m": 1024**2, "g": 1024**3}
+
+
+def _size_bytes(value: str) -> int | None:
+    """Bytes for a docker size string (``64m``, ``8g``, ``1024``); None if malformed."""
+    match = re.fullmatch(r"(\d+)\s*([bkmgBKMG]?)", value.strip())
+    if match is None:
+        return None
+    return int(match.group(1)) * _SIZE_UNITS[match.group(2).lower()]
+
+
+def _floor_value(flag: str, current: str, floor: str) -> str:
+    """*current* raised to *floor* where it is lower; a malformed value unchanged."""
+    if flag == "--shm-size":
+        have, want = _size_bytes(current), _size_bytes(floor)
+        return floor if have is not None and want is not None and have < want else current
+    with contextlib.suppress(ValueError):
+        return str(max(int(current), int(floor)))
+    return current
 
 
 def _stack_run_hardening() -> tuple[tuple[str, tuple[str, ...]], ...]:
@@ -319,6 +346,7 @@ def _stack_run_hardening() -> tuple[tuple[str, tuple[str, ...]], ...]:
         ("--cap-add", ("--cap-add", "DAC_OVERRIDE")),
         ("--security-opt", ("--security-opt", "no-new-privileges")),
         ("--pids-limit", ("--pids-limit", str(_stack_pids_limit()))),
+        ("--shm-size", ("--shm-size", _STACK_SHM_SIZE)),
     )
 
 
@@ -378,8 +406,7 @@ def _harden_stack_run_args(args: list[str]) -> list[str]:
         # anything guessed here.
         index = args.index(flag) + 1
         if index < len(args):
-            with contextlib.suppress(ValueError):
-                args[index] = str(max(int(args[index]), int(addition[1])))
+            args[index] = _floor_value(flag, args[index], addition[1])
     return [args[0], *missing, *args[1:]] if missing else args
 
 

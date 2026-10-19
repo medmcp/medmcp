@@ -325,6 +325,7 @@ class TestStackIsolation:
         ):
             assert args[args.index(flag) + 1] == value
         assert "--pids-limit" in args
+        assert args[args.index("--shm-size") + 1] == settings._STACK_SHM_SIZE
         # Isolation must precede the image reference, or docker treats it as an
         # argument to the container rather than to `run`.
         assert args.index("--network") < args.index("img:tag")
@@ -446,6 +447,22 @@ class TestStackIsolation:
         """A non-numeric value is passed through for docker to reject clearly."""
         args = settings._harden_stack_run_args(["run", "--pids-limit", "lots", "img:tag"])
         assert args[args.index("--pids-limit") + 1] == "lots"
+
+    @pytest.mark.parametrize(
+        ("current", "expected"),
+        [
+            ("64m", "8g"),  # docker's default, written by an older install
+            ("67108864", "8g"),  # the same in bytes
+            ("16g", "16g"),  # a deliberately larger value is a floor, not a target
+            ("8G", "8G"),
+            ("lots", "lots"),  # malformed: left for docker to reject clearly
+        ],
+    )
+    def test_shm_size_floor(self, current: str, expected: str) -> None:
+        """The nnUNet workers share volumes through /dev/shm; 64 MB kills a full-res CT."""
+        args = settings._harden_stack_run_args(["run", "--shm-size", current, "img:tag"])
+        assert args[args.index("--shm-size") + 1] == expected
+        assert args.count("--shm-size") == 1
 
     def test_hardening_is_idempotent(self) -> None:
         """Re-applying the hardening does not duplicate flags."""

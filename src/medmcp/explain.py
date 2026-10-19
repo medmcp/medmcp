@@ -22,9 +22,10 @@ from medmcp.settings import OLLAMA_BASE_URL, local_helper_request
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
 
-# Timeout for the explanation call.  Local Ollama inference is fast but the
-# model may be cold-starting; 20 s is generous without blocking the UI too long.
-EXPLAIN_TIMEOUT: float = 20.0
+# Timeout for the explanation call. The explanation is pushed into an approval
+# dialog that is already open, so a late one still helps; a dense ~30B local
+# model writes ~10 tokens/s, and 20 s cut off nearly every explanation.
+EXPLAIN_TIMEOUT: float = 90.0
 
 # ── Risk taxonomy ──────────────────────────────────────────
 # Predefined categories for tool-call risk assessment.  The LLM is instructed

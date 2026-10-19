@@ -369,7 +369,7 @@ def _check_one(param: str, value: str, workspace: Path, containerized: bool) -> 
     )
 
 
-def _coerce_arguments(raw_input: object) -> dict[str, Any]:
+def coerce_arguments(raw_input: object) -> dict[str, Any]:
     """Return the argument mapping, parsing the JSON-string form if needed.
 
     vibe-acp ships some tool calls' ``rawInput`` as a JSON-encoded *string* rather
@@ -412,7 +412,7 @@ def check_tool_call_paths(
         number. Empty when the call takes no path-like arguments.
     """
     findings: list[PathFinding] = []
-    for param, value in _coerce_arguments(raw_input).items():
+    for param, value in coerce_arguments(raw_input).items():
         # A list of paths (e.g. several inputs) is checked element-wise; everything
         # non-string is skipped, since only a string can name a path.
         values: list[Any] = cast("list[Any]", value) if isinstance(value, list) else [value]

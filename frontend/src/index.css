@@ -324,6 +324,20 @@ button:hover {
   border-bottom: 1px solid rgba(210, 34, 41, 0.25);
 }
 
+.panel-status {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A desktop file drag is over the explorer: outline the drop area. */
+.panel-body.drop-target {
+  outline: 2px dashed var(--blue-l);
+  outline-offset: -2px;
+}
+
 /* ── File explorer ── */
 
 .tree-row {
@@ -1495,6 +1509,35 @@ button.model-name:hover {
 
 .tool-card summary:hover {
   color: var(--text);
+}
+
+.tool-group-call > details > summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--text);
+  font-weight: 400;
+  font-size: 12.5px;
+}
+
+.tool-group-call > details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-group-call > details > summary .status-dot {
+  width: 5px;
+  height: 5px;
+}
+
+.tool-group-label {
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-group-call > details > details {
+  margin-left: 14px;
 }
 
 .tool-card pre {

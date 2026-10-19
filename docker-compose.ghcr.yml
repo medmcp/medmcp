@@ -140,6 +140,8 @@ services:
       # where to read the newest release from (a mirror serving the same JSON).
       MEDMCP_UPDATE_CHECK: "${MEDMCP_UPDATE_CHECK:-}"
       MEDMCP_UPDATE_URL: "${MEDMCP_UPDATE_URL:-}"
+      # Chat-long approval of read-only shell commands (ls, cat, …); off with 0.
+      MEDMCP_READ_ONLY_APPROVAL: "${MEDMCP_READ_ONLY_APPROVAL:-}"
     healthcheck:
       test:
         - CMD

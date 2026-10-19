@@ -90,6 +90,50 @@ export async function uploadFile(file: File, dir: string): Promise<void> {
   await check(res)
 }
 
+/** One file to upload and the workspace folder it goes into ("" = root). */
+export interface UploadItem {
+  file: File
+  dir: string
+}
+
+/**
+ * Upload several files, a few requests at a time; `onProgress` reports files
+ * done so far. Resolves to the failure count. Each item names its own target
+ * folder, so a dropped or picked folder tree is recreated by the caller.
+ */
+export async function uploadFiles(
+  items: UploadItem[],
+  onProgress: (done: number, total: number) => void,
+): Promise<number> {
+  let next = 0
+  let done = 0
+  let failed = 0
+  const worker = async () => {
+    while (next < items.length) {
+      const item = items[next++]
+      if (!item) continue
+      try {
+        await uploadFile(item.file, item.dir)
+      } catch {
+        failed++
+      }
+      onProgress(++done, items.length)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(4, items.length) }, worker))
+  return failed
+}
+
+/** Start a browser download of a file, or of a folder as a .zip. */
+export function downloadPath(path: string): void {
+  const a = document.createElement('a')
+  a.href = `/api/files/download?path=${encodeURIComponent(path)}`
+  a.download = ''
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
 export async function fetchSettings(): Promise<SettingsState> {
   const res = await check(await fetch('/api/settings'))
   return (await res.json()) as SettingsState

@@ -3,7 +3,14 @@ import { useConfirm } from '../confirm'
 import { createPortal } from 'react-dom'
 import { archiveSession, deleteSession, fetchSessions, forkSession, renameSession } from '../api'
 import type { SessionInfo } from '../types'
-import { ArchiveIcon, BranchIcon, ChevronRightIcon, PencilIcon, TrashIcon } from './icons'
+import {
+  ArchiveIcon,
+  BranchIcon,
+  ChevronRightIcon,
+  DownloadIcon,
+  PencilIcon,
+  TrashIcon,
+} from './icons'
 
 /** Where the popover goes, in viewport pixels (it is rendered at document level). */
 interface Placement {
@@ -256,6 +263,15 @@ export function ChatsMenu({
               <PencilIcon size={14} />
             </button>
           )}
+          <button
+            className="btn-icon"
+            aria-label="Export (printable page, save as PDF)"
+            onClick={() =>
+              window.open(`/api/sessions/${encodeURIComponent(s.id)}/export`, '_blank', 'noopener')
+            }
+          >
+            <DownloadIcon size={14} />
+          </button>
           <button
             className="btn-icon"
             aria-label={isArchived ? 'Restore' : 'Archive'}

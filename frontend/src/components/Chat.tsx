@@ -42,6 +42,7 @@ let itemSeq = 0
 const nextItemId = () => ++itemSeq
 
 const TODO_TOOL = 'todo'
+const SHELL_TOOL = 'bash'
 
 const TODO_MARK: Record<string, string> = {
   completed: '✓',
@@ -144,12 +145,14 @@ const ToolCard = memo(function ToolCard({
   onOpenFile?: (path: string) => void
   onOverlayFile?: (path: string) => void
 }) {
+  // A stack tool's output names the files it produced; a shell listing names
+  // every file it saw, and a chip per file is a wall rather than a result.
   const resultPaths = useMemo(
     () =>
-      tc.status === 'completed' && tc.output
+      tc.status === 'completed' && tc.output && tc.toolName !== SHELL_TOOL
         ? extractWorkspacePaths(tc.output, workspaceRoot ?? null)
         : [],
-    [tc.status, tc.output, workspaceRoot],
+    [tc.status, tc.output, tc.toolName, workspaceRoot],
   )
   // The path guard turned this call back before it ran, and the agent corrects
   // the path and calls again by itself. A red "failed" card would be untrue —
@@ -195,6 +198,112 @@ const ToolCard = memo(function ToolCard({
     </div>
   )
 })
+
+/** Whether this call may fold into a run of calls to the same tool. */
+function groupable(tc: ToolCallState): boolean {
+  return !!tc.toolName && tc.toolName !== TODO_TOOL && !tc.pathGuardRetry
+}
+
+function callStatusClass(status: string): string {
+  return status === 'completed' ? 'ok' : status === 'failed' ? 'fail' : 'busy'
+}
+
+// Several calls to one tool in a row — an agent listing its way through a
+// workspace runs bash four times before it answers — fold into one card: the
+// tool name and a count in the head, one collapsed row per call below. Each
+// row opens to that call's input and output.
+const ToolGroup = memo(
+  function ToolGroup({
+    calls,
+    workspaceRoot,
+    onOpenFile,
+    onOverlayFile,
+  }: {
+    calls: ToolCallState[]
+    workspaceRoot?: string | null
+    onOpenFile?: (path: string) => void
+    onOverlayFile?: (path: string) => void
+  }) {
+    const tool = calls[0].toolName ?? 'tool'
+    const running = calls.filter((c) => c.status !== 'completed' && c.status !== 'failed').length
+    const failed = calls.filter((c) => c.status === 'failed').length
+    const statusClass = running > 0 ? 'busy' : failed > 0 ? 'fail' : 'ok'
+    const status =
+      `${calls.length} calls` +
+      (running > 0 ? ', running' : failed > 0 ? `, ${failed} failed` : '')
+    return (
+      <div className="tool-card tool-group">
+        <div className="tool-card-head">
+          <span className={`status-dot ${statusClass}`} />
+          <span className="tool-title">{tool}</span>
+          <span className="tool-status">{status}</span>
+        </div>
+        {calls.map((tc) => {
+          // The row's title repeats the tool the head already names.
+          const label = tc.title.startsWith(`${tool}: `) ? tc.title.slice(tool.length + 2) : tc.title
+          const paths =
+            tc.status === 'completed' && tc.output && tc.toolName !== SHELL_TOOL
+              ? extractWorkspacePaths(tc.output, workspaceRoot ?? null)
+              : []
+          return (
+            <div key={tc.toolCallId} className="tool-group-call">
+              <details>
+                <summary>
+                  <span className={`status-dot ${callStatusClass(tc.status)}`} />
+                  <span className="tool-group-label">{label}</span>
+                </summary>
+                {tc.rawInput != null && (
+                  <details>
+                    <summary>input</summary>
+                    <pre>{formatToolInput(tc.rawInput)}</pre>
+                  </details>
+                )}
+                {tc.output && (
+                  <details>
+                    <summary>output</summary>
+                    <pre>{tc.output}</pre>
+                  </details>
+                )}
+              </details>
+              <ResultFiles paths={paths} onOpen={onOpenFile} onOverlay={onOverlayFile} />
+            </div>
+          )
+        })}
+      </div>
+    )
+  },
+  // The calls array is rebuilt on every render; compare its members instead so
+  // a streaming chunk elsewhere in the transcript doesn't re-render the group.
+  (a, b) =>
+    a.workspaceRoot === b.workspaceRoot &&
+    a.onOpenFile === b.onOpenFile &&
+    a.onOverlayFile === b.onOverlayFile &&
+    a.calls.length === b.calls.length &&
+    a.calls.every((c, i) => c === b.calls[i]),
+)
+
+/** A transcript row: one item, or a run of same-tool calls folded together. */
+type ChatRow =
+  | { kind: 'item'; item: ChatItem; index: number }
+  | { kind: 'group'; id: number; calls: ToolCallState[] }
+
+function groupRows(items: ChatItem[], toolCalls: Record<string, ToolCallState>): ChatRow[] {
+  const rows: ChatRow[] = []
+  items.forEach((item, index) => {
+    const tc = item.kind === 'tool' ? toolCalls[item.toolCallId] : undefined
+    const last = rows[rows.length - 1]
+    if (tc && groupable(tc)) {
+      if (last?.kind === 'group' && last.calls[0].toolName === tc.toolName) {
+        last.calls.push(tc)
+        return
+      }
+      rows.push({ kind: 'group', id: item.id, calls: [tc] })
+      return
+    }
+    rows.push({ kind: 'item', item, index })
+  })
+  return rows
+}
 
 /** Render a token count compactly, e.g. 131072 → "131k". */
 function fmtTokens(n: number): string {
@@ -496,6 +605,7 @@ export const Chat = memo(function Chat({
 }) {
   const [items, setItems] = useState<ChatItem[]>([])
   const [toolCalls, setToolCalls] = useState<Record<string, ToolCallState>>({})
+  const rows = useMemo(() => groupRows(items, toolCalls), [items, toolCalls])
   const [status, setStatus] = useState<ChatSocketStatus>('connecting')
   const [busy, setBusy] = useState(false)
   const [model, setModel] = useState<string | null>(null)
@@ -849,7 +959,27 @@ export const Chat = memo(function Chat({
         {items.length === 0 && (
           <div className="viewer-message">Ask the MedMCP agent anything about your workspace.</div>
         )}
-        {items.map((item, i) => {
+        {rows.map((row) => {
+          if (row.kind === 'group') {
+            return row.calls.length > 1 ? (
+              <ToolGroup
+                key={row.id}
+                calls={row.calls}
+                workspaceRoot={workspaceRoot}
+                onOpenFile={onOpenFile}
+                onOverlayFile={onOverlayFile}
+              />
+            ) : (
+              <ToolCard
+                key={row.id}
+                tc={row.calls[0]}
+                workspaceRoot={workspaceRoot}
+                onOpenFile={onOpenFile}
+                onOverlayFile={onOverlayFile}
+              />
+            )
+          }
+          const { item, index: i } = row
           if (item.kind === 'tool') {
             const tc = toolCalls[item.toolCallId]
             return tc ? (

@@ -300,6 +300,12 @@ function groupRows(items: ChatItem[], toolCalls: Record<string, ToolCallState>):
   items.forEach((item, index) => {
     const tc = item.kind === 'tool' ? toolCalls[item.toolCallId] : undefined
     const last = rows[rows.length - 1]
+    // The harness looks a tool up in two calls (a search, then the details)
+    // before every first use; one note covers the sequence.
+    if (tc?.toolName === TOOL_SEARCH && last?.kind === 'item') {
+      const prev = last.item.kind === 'tool' ? toolCalls[last.item.toolCallId] : undefined
+      if (prev?.toolName === TOOL_SEARCH) return
+    }
     if (tc && groupable(tc)) {
       if (last?.kind === 'group' && last.calls[0].toolName === tc.toolName) {
         last.calls.push(tc)

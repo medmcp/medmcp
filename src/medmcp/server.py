@@ -2612,9 +2612,10 @@ class _ChatConnection:
         self._prompt_rpc = prompt_fut
         self._thoughts.reset()  # start each turn with a clean reasoning-strip state
         turn_ok = False
+        get_task: asyncio.Task[JsonDict] | None = None
         try:
             while True:
-                get_task: asyncio.Task[JsonDict] = asyncio.create_task(self.queue.get())
+                get_task = asyncio.create_task(self.queue.get())
                 done, _pending = await asyncio.wait(
                     {get_task, prompt_fut}, return_when=asyncio.FIRST_COMPLETED
                 )
@@ -2658,6 +2659,12 @@ class _ChatConnection:
                 await _client.notify("session/cancel", {"session_id": self.session_id})
             await self._send({"type": "error", "message": str(exc)})
             await self._send({"type": "done"})
+        finally:
+            # A cancelled turn leaves the queue reader parked on an empty queue;
+            # unreferenced, it is collected mid-wait and asyncio logs "Task was
+            # destroyed but it is pending" at every chat close or new prompt.
+            if get_task is not None and not get_task.done():
+                get_task.cancel()
 
     def _schedule_title(self) -> None:
         """Start a background title refresh when one is due; never blocks the turn.

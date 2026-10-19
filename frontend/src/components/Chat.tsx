@@ -15,7 +15,6 @@ import type {
 } from '../types'
 import { ChatsMenu } from './ChatsMenu'
 import { PlusIcon, ShieldIcon } from './icons'
-import { extractWorkspacePaths, isVolumePath } from '../fileKinds'
 
 // vibe-acp >= 2.14 sends a tool call's rawInput as a JSON-encoded *string*
 // (read/edit/write tools) rather than an object. Parse it back so the card
@@ -42,7 +41,6 @@ let itemSeq = 0
 const nextItemId = () => ++itemSeq
 
 const TODO_TOOL = 'todo'
-const SHELL_TOOL = 'bash'
 // The harness's own catalogue lookup (vibe ≥2.26): the model finding a stack
 // tool, not a step of the work. Noted, not carded.
 const TOOL_SEARCH = 'search_tool_functions'
@@ -98,65 +96,11 @@ const PlanCard = memo(function PlanCard({ items }: { items: TodoItem[] }) {
   )
 })
 
-/** Files a finished tool call named, offered straight into the viewer. The
- *  agent writes a segmentation and says where; without this the person has to
- *  find it in the explorer by hand. Volumes can also be laid over the open one. */
-function ResultFiles({
-  paths,
-  onOpen,
-  onOverlay,
-}: {
-  paths: string[]
-  onOpen?: (path: string) => void
-  onOverlay?: (path: string) => void
-}) {
-  if (paths.length === 0 || !onOpen) return null
-  const names = paths.map((p) => p.split('/').pop() ?? p)
-  return (
-    <div className="tool-files">
-      {paths.map((p, i) => {
-        // One file name per subject in a batch result: show the folder too.
-        const ambiguous = names.indexOf(names[i]) !== names.lastIndexOf(names[i])
-        return (
-          <span key={p} className="tool-file">
-            <span className="tool-file-name">{ambiguous ? p : names[i]}</span>
-            <button className="btn-text" aria-label={`View ${p}`} onClick={() => onOpen(p)}>
-              View
-            </button>
-            {onOverlay && isVolumePath(p) && (
-              <button className="btn-text" aria-label={`Overlay ${p}`} onClick={() => onOverlay(p)}>
-                Overlay
-              </button>
-            )}
-          </span>
-        )
-      })}
-    </div>
-  )
-}
-
 // Memoized so a streaming update to the newest message doesn't re-render
 // (and re-parse the markdown of) every earlier row in the transcript.
-const ToolCard = memo(function ToolCard({
-  tc,
-  workspaceRoot,
-  onOpenFile,
-  onOverlayFile,
-}: {
-  tc: ToolCallState
-  workspaceRoot?: string | null
-  onOpenFile?: (path: string) => void
-  onOverlayFile?: (path: string) => void
-}) {
+const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
   // A stack tool's output names the files it produced; a shell listing names
   // every file it saw, and a chip per file is a wall rather than a result.
-  const resultPaths = useMemo(
-    () =>
-      tc.status === 'completed' && tc.output && tc.toolName !== SHELL_TOOL
-        ? extractWorkspacePaths(tc.output, workspaceRoot ?? null)
-        : [],
-    [tc.status, tc.output, tc.toolName, workspaceRoot],
-  )
   // The path guard turned this call back before it ran, and the agent corrects
   // the path and calls again by itself. A red "failed" card would be untrue —
   // nothing failed and nothing ran — and would leave you looking for a problem
@@ -170,9 +114,8 @@ const ToolCard = memo(function ToolCard({
       </div>
     )
   }
-  if (tc.toolName === TOOL_SEARCH) {
-    return <div className="tool-retry-note">⌕ looked up the available tools</div>
-  }
+  // The harness's catalogue lookups are the model finding a tool, not work.
+  if (tc.toolName === TOOL_SEARCH) return null
   // The plan reads as a plan, not as a tool invocation: a checklist you can
   // glance at, rather than a card wrapping a JSON blob you have to expand.
   if (tc.toolName === TODO_TOOL) {
@@ -200,7 +143,6 @@ const ToolCard = memo(function ToolCard({
           <pre>{tc.output}</pre>
         </details>
       )}
-      <ResultFiles paths={resultPaths} onOpen={onOpenFile} onOverlay={onOverlayFile} />
     </div>
   )
 })
@@ -221,17 +163,7 @@ function callStatusClass(status: string): string {
 // tool name and a count in the head, one collapsed row per call below. Each
 // row opens to that call's input and output.
 const ToolGroup = memo(
-  function ToolGroup({
-    calls,
-    workspaceRoot,
-    onOpenFile,
-    onOverlayFile,
-  }: {
-    calls: ToolCallState[]
-    workspaceRoot?: string | null
-    onOpenFile?: (path: string) => void
-    onOverlayFile?: (path: string) => void
-  }) {
+  function ToolGroup({ calls }: { calls: ToolCallState[] }) {
     const tool = calls[0].toolName ?? 'tool'
     const running = calls.filter((c) => c.status !== 'completed' && c.status !== 'failed').length
     const failed = calls.filter((c) => c.status === 'failed').length
@@ -249,10 +181,6 @@ const ToolGroup = memo(
         {calls.map((tc) => {
           // The row's title repeats the tool the head already names.
           const label = tc.title.startsWith(`${tool}: `) ? tc.title.slice(tool.length + 2) : tc.title
-          const paths =
-            tc.status === 'completed' && tc.output && tc.toolName !== SHELL_TOOL
-              ? extractWorkspacePaths(tc.output, workspaceRoot ?? null)
-              : []
           return (
             <div key={tc.toolCallId} className="tool-group-call">
               <details>
@@ -273,7 +201,6 @@ const ToolGroup = memo(
                   </details>
                 )}
               </details>
-              <ResultFiles paths={paths} onOpen={onOpenFile} onOverlay={onOverlayFile} />
             </div>
           )
         })}
@@ -283,9 +210,6 @@ const ToolGroup = memo(
   // The calls array is rebuilt on every render; compare its members instead so
   // a streaming chunk elsewhere in the transcript doesn't re-render the group.
   (a, b) =>
-    a.workspaceRoot === b.workspaceRoot &&
-    a.onOpenFile === b.onOpenFile &&
-    a.onOverlayFile === b.onOverlayFile &&
     a.calls.length === b.calls.length &&
     a.calls.every((c, i) => c === b.calls[i]),
 )
@@ -298,16 +222,11 @@ type ChatRow =
 function groupRows(items: ChatItem[], toolCalls: Record<string, ToolCallState>): ChatRow[] {
   const rows: ChatRow[] = []
   // The harness looks a tool up (a search, then its details) before each first
-  // use, with text or other calls in between; one note per turn covers them all.
-  let lookupNoted = false
+  // use; those calls are the model finding a tool, not work, and are not shown.
   items.forEach((item, index) => {
     const tc = item.kind === 'tool' ? toolCalls[item.toolCallId] : undefined
     const last = rows[rows.length - 1]
-    if (item.kind === 'user') lookupNoted = false
-    if (tc?.toolName === TOOL_SEARCH) {
-      if (lookupNoted) return
-      lookupNoted = true
-    }
+    if (tc?.toolName === TOOL_SEARCH) return
     if (tc && groupable(tc)) {
       if (last?.kind === 'group' && last.calls[0].toolName === tc.toolName) {
         last.calls.push(tc)
@@ -589,9 +508,6 @@ export const Chat = memo(function Chat({
   currentSessionId,
   onSelectSession,
   onOpenModels,
-  workspaceRoot,
-  onOpenFile,
-  onOverlayFile,
 }: {
   /** Called with the vibe session id whenever a prompt is sent into it. */
   onPromptedSession?: (id: string) => void
@@ -611,13 +527,6 @@ export const Chat = memo(function Chat({
   onSelectSession?: (id: string) => void
   /** Open the Models window (the header's model name is its entry point). */
   onOpenModels?: () => void
-  /** Absolute workspace root, to turn the absolute paths in tool results into
-   *  workspace-relative ones the viewer can open. */
-  workspaceRoot?: string | null
-  /** Open a workspace file in the viewer. */
-  onOpenFile?: (path: string) => void
-  /** Lay a workspace volume over the one open in the viewer. */
-  onOverlayFile?: (path: string) => void
 }) {
   const [items, setItems] = useState<ChatItem[]>([])
   const [toolCalls, setToolCalls] = useState<Record<string, ToolCallState>>({})
@@ -981,17 +890,11 @@ export const Chat = memo(function Chat({
               <ToolGroup
                 key={row.id}
                 calls={row.calls}
-                workspaceRoot={workspaceRoot}
-                onOpenFile={onOpenFile}
-                onOverlayFile={onOverlayFile}
               />
             ) : (
               <ToolCard
                 key={row.id}
                 tc={row.calls[0]}
-                workspaceRoot={workspaceRoot}
-                onOpenFile={onOpenFile}
-                onOverlayFile={onOverlayFile}
               />
             )
           }
@@ -1002,9 +905,6 @@ export const Chat = memo(function Chat({
               <ToolCard
                 key={item.id}
                 tc={tc}
-                workspaceRoot={workspaceRoot}
-                onOpenFile={onOpenFile}
-                onOverlayFile={onOverlayFile}
               />
             ) : null
           }

@@ -80,25 +80,32 @@ def test_both_install_paths_agree() -> None:
 
 @pytest.mark.parametrize("rel", CONFIGS)
 def test_agent_profile_keeps_edits_gated(rel: str) -> None:
-    """The agent profile is pinned to one that leaves tool permissions alone.
+    """The agent profile is ours, and it leaves every acting tool behind the prompt.
 
-    vibe ≥2.24 starts in ``accept-edits`` unless told otherwise, and a profile's
-    overrides are layered *above* the project config — so ``write_file`` and
-    ``edit`` would be auto-approved no matter what ``[tools.*]`` says. Checked
-    against vibe's own profile table rather than a hard-coded expectation, so a
-    future profile change that starts auto-approving something fails here too.
+    vibe 2.26 reads a custom system prompt only from the active profile, and a
+    profile's keys sit *above* the project config — so the profile is where the
+    posture lives. It is parsed with vibe's own loader, so a key vibe would not
+    honour fails here too. Built-in profiles that approve on their own
+    (``accept-edits``, ``smart-approve``, ``auto-approve``) must never be the default.
     """
     agent = _load(rel).get("default_agent")
-    assert agent == "ask", f"{rel}: default_agent must be pinned to 'ask'"
+    assert agent == "medmcp", f"{rel}: default_agent must be pinned to 'medmcp'"
     try:
         from vibe.core.agents.models import (  # pyright: ignore[reportMissingTypeStubs]  # vibe ships no stubs
-            BUILTIN_AGENTS,
+            AgentProfile,
+            AgentSafety,
         )
     except ImportError:  # pragma: no cover - docs-only checkout
         pytest.skip("vibe not installed")
-    profile = BUILTIN_AGENTS[agent]
-    assert not profile.overrides.get("bypass_tool_permissions")
-    tool_overrides: dict[str, Any] = profile.overrides.get("tools", {})
+    profile = AgentProfile.from_toml(ROOT / ".vibe" / "agents" / f"{agent}.toml")
+    assert profile.safety == AgentSafety.NEUTRAL
+    overrides: dict[str, Any] = profile.overrides
+    assert not overrides.get("bypass_tool_permissions")
+    assert overrides.get("system_prompt_id") == "medmcp"
+    assert overrides.get("enable_subagents") is False
+    assert overrides.get("enable_background_processes") is False
+    assert {"cron", "web_search"} <= set(overrides.get("disabled_tools", []))
+    tool_overrides: dict[str, Any] = overrides.get("tools", {})
     for name in MUST_ASK:
         assert tool_overrides.get(name, {}).get("permission") in (None, "ask"), (
             f"{rel}: the {agent!r} profile auto-approves {name}"

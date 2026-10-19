@@ -100,6 +100,7 @@ def vibe_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]
         ("CLOUD_MODEL_PATH", "cloud_model.json"),
         ("CLOUD_MODEL_SECRET_PATH", "cloud_model_secret.json"),
         ("LOCAL_MODEL_PATH", "local_model.json"),
+        ("AGENT_PROFILE_PATH", "agents/medmcp.toml"),
     ):
         monkeypatch.setattr(settings, attr, tmp_path / filename)
     monkeypatch.setattr(settings, "STACKS_D_PATH", tmp_path / "absent-stacks.d")

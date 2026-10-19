@@ -9,6 +9,7 @@ shadowing a local stack, and no relaxed system prompt unless one is actually in 
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 from typing import Any, cast
 
@@ -571,6 +572,45 @@ def test_prompt_switches_only_while_external_is_in_use(tmp_path: Path) -> None:
 
     settings.set_external_mcp_enabled(False)
     assert synced_config(tmp_path)["system_prompt_id"] == settings.BASE_SYSTEM_PROMPT_ID
+
+
+def test_agent_profile_follows_the_prompt_switch(tmp_path: Path) -> None:
+    """Vibe 2.26 reads the prompt from the agent profile, so the switch lands there too."""
+    profile = settings.AGENT_PROFILE_PATH
+    profile.parent.mkdir(parents=True)
+    profile.write_text('safety = "neutral"\nsystem_prompt_id = "medmcp"\n')
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    _add()
+    synced_config(tmp_path)
+    assert (
+        tomllib.loads(profile.read_text())["system_prompt_id"] == settings.EXTERNAL_SYSTEM_PROMPT_ID
+    )
+    settings.set_external_mcp_enabled(False)
+    synced_config(tmp_path)
+    assert tomllib.loads(profile.read_text())["system_prompt_id"] == settings.BASE_SYSTEM_PROMPT_ID
+    # The other keys survive the rewrite.
+    assert tomllib.loads(profile.read_text())["safety"] == "neutral"
+
+
+def test_agent_profile_with_its_own_prompt_is_left_alone(tmp_path: Path) -> None:
+    """A hand-edited profile naming another prompt is not reset, like the config key."""
+    profile = settings.AGENT_PROFILE_PATH
+    profile.parent.mkdir(parents=True)
+    profile.write_text('system_prompt_id = "my-own"\n')
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    _add()
+    synced_config(tmp_path)
+    assert tomllib.loads(profile.read_text())["system_prompt_id"] == "my-own"
+
+
+def test_missing_agent_profile_does_not_break_the_sync(tmp_path: Path) -> None:
+    """No profile file (a stripped install) is vibe's problem, not a sync failure."""
+    settings.acknowledge_external_mcp()
+    settings.set_external_mcp_enabled(True)
+    _add()
+    assert synced_config(tmp_path)["system_prompt_id"] == settings.EXTERNAL_SYSTEM_PROMPT_ID
 
 
 def test_custom_prompt_id_is_left_alone(tmp_path: Path) -> None:

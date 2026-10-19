@@ -1,0 +1,14 @@
+# The MedMCP agent profile. vibe 2.26 reads a custom system prompt only from the
+# active profile (the config's system_prompt_id names a built-in prompt variant),
+# and a profile's keys sit above config.toml, so this is where the posture is
+# pinned: our prompt, no subagents or background processes, no scheduler, and
+# nothing that would approve a tool call on its own. `default_agent` in
+# config.toml selects it. The sync rewrites system_prompt_id here when the
+# external-MCP or cloud-model posture changes.
+display_name = "MedMCP"
+description = "Asks before every tool call; MedMCP system prompt"
+safety = "neutral"
+system_prompt_id = "medmcp"
+enable_background_processes = false
+enable_subagents = false
+disabled_tools = ["exit_plan_mode", "cron", "web_search"]

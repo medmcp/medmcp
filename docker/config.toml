@@ -23,7 +23,7 @@ auto_approve = false
 # vibe ≥2.24 starts in its accept-edits profile unless told otherwise, and a
 # profile's overrides sit above this file — write_file/edit would be "always"
 # no matter what [tools.*] says. ask keeps every edit behind the prompt.
-default_agent = "ask"
+default_agent = "medmcp"
 system_prompt_id = "medmcp"
 include_commit_signature = true
 include_model_info = true

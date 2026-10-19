@@ -1522,6 +1522,10 @@ def _apply_model_selection_to_config(cfg: dict[str, Any]) -> bool:
 # and the drift is silent. The anchor below is asserted by a test, so editing it
 # out of the base prompt fails CI instead of quietly producing an identical file.
 BASE_SYSTEM_PROMPT_ID: str = "medmcp"
+# vibe 2.26 takes a custom prompt only from the active agent profile; the config's
+# system_prompt_id names a built-in variant. The profile is the one place the
+# prompt is read from, so the posture switch has to land there too.
+AGENT_PROFILE_PATH: Path = VIBE_HOME / "agents" / "medmcp.toml"
 EXTERNAL_SYSTEM_PROMPT_ID: str = "medmcp-external"
 CLOUD_SYSTEM_PROMPT_ID: str = "medmcp-cloud"
 CLOUD_EXTERNAL_SYSTEM_PROMPT_ID: str = "medmcp-cloud-external"
@@ -1555,6 +1559,25 @@ OWNED_SYSTEM_PROMPT_IDS: tuple[str, ...] = (
     BASE_SYSTEM_PROMPT_ID,
     *(prompt_id for prompt_id, _ in _PROMPT_VARIANTS.values()),
 )
+
+
+def _sync_agent_profile_prompt(prompt_id: str) -> None:
+    """Point the MedMCP agent profile at *prompt_id* when it carries a prompt we own.
+
+    A hand-edited profile naming some other prompt is left alone, like the config
+    key. Best-effort: a missing or unreadable profile is vibe's problem to report,
+    not a reason to fail a config sync.
+    """
+    try:
+        with AGENT_PROFILE_PATH.open("rb") as fh:
+            profile = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return
+    current = str(profile.get("system_prompt_id", ""))
+    if current == prompt_id or current not in OWNED_SYSTEM_PROMPT_IDS:
+        return
+    profile["system_prompt_id"] = prompt_id
+    atomic_write_toml(AGENT_PROFILE_PATH, profile)
 
 
 def write_prompt_variant(prompt_id: str, rule: str) -> bool:
@@ -2291,6 +2314,7 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
         prompt_id = variant[0]
     if str(cfg.get("system_prompt_id", "")) in OWNED_SYSTEM_PROMPT_IDS:
         cfg["system_prompt_id"] = prompt_id
+    _sync_agent_profile_prompt(prompt_id)
 
     # Collect skills_path values from discovered servers and write them to
     # skill_paths so vibe-acp loads the bundled skill docs automatically.

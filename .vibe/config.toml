@@ -9,7 +9,7 @@ auto_approve = false
 # vibe ≥2.24 starts in its accept-edits profile unless told otherwise, and a
 # profile's overrides sit above this file — write_file/edit would be "always"
 # no matter what [tools.*] says. ask keeps every edit behind the prompt.
-default_agent = "ask"
+default_agent = "medmcp"
 # vibe's one-shot allowlist migration otherwise unions its read-only defaults
 # into the deliberately empty [tools.bash] allowlist on every start.
 applied_migrations = ["bash_read_only_defaults_v1"]

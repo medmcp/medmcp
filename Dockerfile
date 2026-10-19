@@ -43,14 +43,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # MedMCP's patches to the agent (stable scratchpad, no chat-long approval for
 # redirects); fails the build if the locked vibe no longer matches them.
-COPY docker/patch_vibe.py ./docker/patch_vibe.py
-RUN /app/.venv/bin/python docker/patch_vibe.py
 
 # App assets: built frontend, baked vibe config + system prompt + model def.
 COPY --from=frontend /app/frontend/dist ./frontend/dist
 COPY docker/config.toml ./.vibe/config.toml
 COPY docker/hooks.toml ./.vibe/hooks.toml
 COPY .vibe/prompts ./.vibe/prompts
+COPY .vibe/agents ./.vibe/agents
 COPY Modelfile.muse ./Modelfile.muse
 COPY catalog.json ./catalog.json
 COPY catalog.ghcr.json ./catalog.ghcr.json

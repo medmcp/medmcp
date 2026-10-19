@@ -6,6 +6,8 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+## 0.6.0 — 2026-10-19
+
 ### Added
 
 - Approval dialog: a read-only shell command (`ls`, `cat`, `grep`, …) can be approved for the rest of the chat; one that redirects to a file or leaves the workspace still asks. `MEDMCP_READ_ONLY_APPROVAL=0` turns it off.

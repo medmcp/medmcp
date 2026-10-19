@@ -37,6 +37,10 @@ class TestCanonicalToolName:
         """Nothing to map back to: the route's own spelling is still a usable name."""
         assert harness.canonical_tool_name("mcp_other_server.tool", []) == "other_server_tool"
 
+    def test_vibe_group_routes_are_the_tool(self) -> None:
+        """``vibe.todo`` is the todo tool; the plan card keys on that name."""
+        assert harness.canonical_tool_name("vibe.todo") == "todo"
+
     def test_harness_tools_and_plain_names_pass_through(self) -> None:
         """A harness tool or an already-canonical name is left alone."""
         for name in ("search_tool_functions", "run_typescript", "todo", "medmcp-neuro_skull_strip"):

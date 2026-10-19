@@ -45,6 +45,7 @@ PATHGUARD_MARKER = "RETRY THIS CALL WITH A CORRECTED PATH."
 
 _IDENTIFIER_CHAR = re.compile(r"[A-Za-z0-9_]")
 _MCP_PREFIX = "mcp_"
+_VIBE_GROUP = "vibe"
 
 
 def normalize_segment(value: str) -> str:
@@ -70,6 +71,9 @@ def canonical_tool_name(route: str, server_names: Iterable[str] = ()) -> str:
     if route in BUILTIN_ROUTES:
         return BUILTIN_ROUTES[route]
     group, dot, tool = route.partition(".")
+    if dot and group == _VIBE_GROUP:
+        # The harness's own group carries vibe's remaining tools (``vibe.todo``).
+        return tool
     if not dot or not group.startswith(_MCP_PREFIX):
         return route
     for name in server_names:

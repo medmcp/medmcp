@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import io
 import logging
 import os
@@ -62,6 +63,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.types import ASGIApp, Receive, Scope, Send
+from tree_sitter import Language, Node, Parser
 
 from medmcp import (
     __version__,
@@ -2194,14 +2196,54 @@ def _read_only_approval_enabled() -> bool:
     return value not in {"0", "false", "no", "off"}
 
 
-def _read_only_session_label(option: JsonDict) -> str | None:
+_REDIRECT_OPERATORS = frozenset({">&", "<&", ">", ">>", "<", "&>", "&>>", ">|"})
+
+
+def _redirects_are_harmless(command: str) -> bool:
+    """Whether every redirect in *command* merges streams or discards to /dev/null.
+
+    vibe folds any redirect into one ``<redirect>`` token, so ``ls 2>&1 | head``
+    and ``ls > scan.nii.gz`` reach us looking alike. The raw command still tells
+    them apart: parsed with the bash grammar vibe itself uses, a redirect that
+    duplicates a descriptor (``2>&1``, ``>&2``) or writes to ``/dev/null`` touches
+    no file. Anything else — a file target, ``&>``, a heredoc — and the answer is
+    no, as it is when the grammar is unavailable or the command does not parse.
+    """
+    try:
+        tsbash: Any = importlib.import_module("tree_sitter_bash")
+        parser = Parser(Language(cast("object", tsbash.language())))
+        root = parser.parse(command.encode("utf-8")).root_node
+    except Exception:
+        return False
+
+    def harmless(node: Node) -> bool:
+        if node.type in {"heredoc_redirect", "herestring_redirect"}:
+            return False
+        if node.type == "file_redirect":
+            kinds = [(child.type, (child.text or b"").decode("utf-8")) for child in node.children]
+            operators = [k for k, _ in kinds if k in _REDIRECT_OPERATORS]
+            targets = [(k, t) for k, t in kinds if k in {"number", "word"}]
+            if len(operators) != 1 or len(targets) != 1:
+                return False
+            operator, (target_kind, target) = operators[0], targets[0]
+            if operator in {">&", "<&"}:
+                return target_kind == "number"
+            return operator in {">", ">>"} and target == "/dev/null"
+        return all(harmless(child) for child in node.children)
+
+    return not root.has_error and harmless(root)
+
+
+def _read_only_session_label(option: JsonDict, command: str | None = None) -> str | None:
     """Label for a session approval of *option*, or None if it is not read-only.
 
     vibe attaches the rules a session approval would add as
     ``_meta.required_permissions``. The option qualifies only when there is at
     least one rule and every rule is a command pattern from
     :data:`_READ_ONLY_SESSION_PATTERNS` — an outside-the-workspace rule, an exact
-    pattern, or a tool-wide approval (no rules) all disqualify it.
+    pattern, or a tool-wide approval (no rules) all disqualify it. A redirect
+    disqualifies too, unless *command* shows it only merges streams or goes to
+    ``/dev/null`` (see :func:`_redirects_are_harmless`).
     """
     meta = option.get("_meta") or option.get("meta")
     if not isinstance(meta, dict):
@@ -2219,7 +2261,9 @@ def _read_only_session_label(option: JsonDict) -> str | None:
             return None
         # vibe folds a redirect into the command as a ``<redirect>`` token and still
         # derives ``ls *`` from it, so ``ls > scan.nii.gz`` would look read-only.
-        if "<redirect>" in str(rule_dict.get("invocation_pattern", "")):
+        if "<redirect>" in str(rule_dict.get("invocation_pattern", "")) and not (
+            command is not None and _redirects_are_harmless(command)
+        ):
             return None
         if pattern not in _READ_ONLY_SESSION_PATTERNS:
             return None
@@ -2228,7 +2272,9 @@ def _read_only_session_label(option: JsonDict) -> str | None:
     return f"Allow {commands} for this chat"
 
 
-def _visible_permission_options(options: list[JsonDict]) -> list[JsonDict]:
+def _visible_permission_options(
+    options: list[JsonDict], command: str | None = None
+) -> list[JsonDict]:
     """Reduce vibe's permission options to allow/deny, plus a read-only session approval.
 
     Every option that would auto-approve anything beyond the call in hand is
@@ -2248,7 +2294,7 @@ def _visible_permission_options(options: list[JsonDict]) -> list[JsonDict]:
     for option in options:
         option_id = option.get("optionId")
         if option_id == _SESSION_APPROVE_OPTION and session_ok:
-            label = _read_only_session_label(option)
+            label = _read_only_session_label(option, command)
             if label is not None:
                 visible.append({**option, "name": label})
             continue
@@ -2832,13 +2878,17 @@ class _ChatConnection:
             return
         params = cast("JsonDict", msg.get("params") or {})
         tool_call: JsonDict = dict(cast("JsonDict", params.get("toolCall") or {}))
-        options = _visible_permission_options(cast("list[JsonDict]", params.get("options") or []))
         tc_id = str(tool_call.get("toolCallId") or "")
         cached = self._tool_calls.get(tc_id, {})
         for key in ("title", "rawInput", "humanReadable", "risks"):
             if tool_call.get(key) is None and cached.get(key) is not None:
                 tool_call[key] = cached[key]
         title = tool_call.get("title") or tc_id or "<unknown>"
+        command = pathcheck.coerce_arguments(tool_call.get("rawInput")).get("command")
+        options = _visible_permission_options(
+            cast("list[JsonDict]", params.get("options") or []),
+            command if isinstance(command, str) else None,
+        )
 
         if not options:
             _audit.warning("permission request had no options; cancelling: %s", title)

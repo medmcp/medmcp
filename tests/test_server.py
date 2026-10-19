@@ -818,6 +818,45 @@ class TestReadOnlySessionApproval:
         visible = server._visible_permission_options(options)
         assert [o["optionId"] for o in visible] == ["allow_once", "reject_once"]
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "ls -R /ws/demo_data 2>&1 | head -n 200",
+            "ls /ws >&2",
+            "cat /ws/x.csv 2>/dev/null",
+            "grep -r pattern /ws 2>>/dev/null",
+        ],
+    )
+    def test_offers_session_approval_when_redirects_touch_no_file(self, command: str) -> None:
+        """``2>&1`` or ``2>/dev/null`` writes nothing; the raw command tells it from ``> x``."""
+        options = self._bash_options(("command_pattern", "ls *"))
+        meta = cast("dict[str, list[dict[str, str]]]", options[1]["_meta"])
+        meta["required_permissions"][0]["invocation_pattern"] = "ls -R <redirect>"
+        visible = server._visible_permission_options(options, command)
+        assert [o["optionId"] for o in visible] == ["allow_once", "allow_always", "reject_once"]
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "ls /ws > out.txt",
+            "ls /ws >> out.txt",
+            "ls /ws &> out.txt",
+            "ls /ws 2>&1 > out.txt",
+            "ls /ws 2> err.txt",
+            "cat /ws/x > /dev/null/../out",
+            "cat <<EOF\nhello\nEOF",
+            "ls /ws 2>&1 | head -n 200",  # a harmless redirect, but the command is unknown
+        ],
+    )
+    def test_withholds_session_approval_when_a_redirect_may_write(self, command: str) -> None:
+        """A file target, ``&>``, a heredoc, or no command text at all keeps the per-call box."""
+        options = self._bash_options(("command_pattern", "ls *"))
+        meta = cast("dict[str, list[dict[str, str]]]", options[1]["_meta"])
+        meta["required_permissions"][0]["invocation_pattern"] = "ls <redirect>"
+        unknown = command.endswith("head -n 200")
+        visible = server._visible_permission_options(options, None if unknown else command)
+        assert [o["optionId"] for o in visible] == ["allow_once", "reject_once"]
+
     def test_withholds_tool_wide_session_approval(self) -> None:
         """No rules means vibe would approve the whole tool for the session — never offered."""
         options: list[dict[str, object]] = [

@@ -55,7 +55,7 @@ def _distill(session_id: str) -> int:
     """Save a replayable workflow for *session_id*, named after the chat."""
     try:
         target = distill.distill_session(
-            session_id, name_hint=sessions.chat_title(session_id) or ""
+            session_id, name_hint=sessions.manual_chat_title(session_id) or ""
         )
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)

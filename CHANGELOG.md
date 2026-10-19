@@ -18,6 +18,10 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Fixed
 
+- Chat record: answer text is written before each tool call it preceded and kept when a turn is stopped; a chat from before the upgrade keeps its old turns on resume; a branch inherits its source's record; a rewind cuts the record back.
+- Shim: calls from a second tool-call block in one turn are numbered after the first; an SSE keepalive while a block is held keeps vibe's idle timer quiet; `MEDMCP_SHIM_TOOLS` is forwarded by both compose files and carried across an update.
+- Path guard: tools arriving by harness route (`mcp_<stack>.<tool>`) are classified by their MedMCP name again.
+- Branching a chat with a generated title keeps the branch's title generated; the `medmcp distill` CLI never names a workflow after a generated title.
 - Workflows: a distilled workflow is never named after a generated chat title; generated titles are no longer written through to vibe, which records them as typed.
 - Viewer: the intensity window survives a panel resize instead of falling back to Auto.
 - Chats: opening a chat right after closing one no longer fails on vibe 2.26.1's post-close race; the server waits it out.

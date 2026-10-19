@@ -62,6 +62,7 @@ import logging
 import os
 import re
 import secrets
+import time
 from collections.abc import AsyncIterator, Mapping
 from typing import Any, cast
 
@@ -96,6 +97,14 @@ _DEFAULT_UPSTREAM = "http://llm:11434"
 TOOL_MODES: tuple[str, ...] = ("glimmer", "ollama")
 DEFAULT_TOOL_MODE: str = "glimmer"
 _TOOL_MODE_ENV = "MEDMCP_SHIM_TOOLS"
+
+# While the shim holds output back (a tool-call block being written, the whole
+# answer in buffered relay) vibe sees silence, and vibe ≥2.26 fails a stream that
+# is silent for ``api_stream_idle_timeout``. An SSE comment every so often keeps
+# the connection visibly alive without adding to the answer. 0 disables it.
+DEFAULT_KEEPALIVE_SEC: float = 15.0
+_KEEPALIVE_ENV = "MEDMCP_SHIM_KEEPALIVE"
+_SSE_KEEPALIVE = b": keepalive\n\n"
 
 # ATEM markers, as in Ollama's ``model/parsers/glimmer.go``.
 ATEM_CALLS_OPEN = "<atem:function_calls>"
@@ -388,16 +397,19 @@ def coerce_value(raw: str, types: set[str]) -> object:
     return text
 
 
-def parse_atem_block(block: str, functions: Mapping[str, JsonDict]) -> list[JsonDict]:
+def parse_atem_block(
+    block: str, functions: Mapping[str, JsonDict], *, first_index: int = 0
+) -> list[JsonDict]:
     """Parse one ``<atem:function_calls>`` block into OpenAI tool-call objects.
 
     Lenient where Ollama's parser is not: whitespace between tags is ignored and
     an invoke with no parameters is a call with ``{}``. Unknown tool names are
     kept — vibe answers the model with its own error, which is better than a
-    dropped call.
+    dropped call. ``first_index`` numbers the calls after those of an earlier
+    block in the same turn: clients merge streamed deltas by index.
     """
     calls: list[JsonDict] = []
-    for index, invoke in enumerate(_ATEM_INVOKE_RE.finditer(block)):
+    for index, invoke in enumerate(_ATEM_INVOKE_RE.finditer(block), start=first_index):
         name = invoke.group(1).strip()
         fn = functions.get(name)
         arguments: JsonDict = {}
@@ -455,7 +467,7 @@ class AtemSplitter:
             if end < 0:
                 return out
             block = self._held[: end + len(ATEM_CALLS_CLOSE)]
-            self.calls.extend(parse_atem_block(block, self._functions))
+            self.calls.extend(parse_atem_block(block, self._functions, first_index=len(self.calls)))
             self._held = self._held[end + len(ATEM_CALLS_CLOSE) :]
             self._in_block = False
             # Text after a block (rare) is treated like any other text: loop.
@@ -661,6 +673,7 @@ def create_app(
     attempts: int = DEFAULT_ATTEMPTS,
     relay: str = DEFAULT_RELAY,
     tool_mode: str = DEFAULT_TOOL_MODE,
+    keepalive_sec: float = DEFAULT_KEEPALIVE_SEC,
 ) -> FastAPI:
     """Build the shim ASGI app forwarding to ``upstream``."""
     if relay not in RELAY_MODES:
@@ -697,7 +710,14 @@ def create_app(
         if payload.get("stream"):
             return StreamingResponse(
                 _stream_with_retry(
-                    url, payload, inverse, attempts, model, relay=relay, functions=functions
+                    url,
+                    payload,
+                    inverse,
+                    attempts,
+                    model,
+                    relay=relay,
+                    functions=functions,
+                    keepalive_sec=keepalive_sec,
                 ),
                 media_type="text/event-stream",
             )
@@ -843,13 +863,16 @@ async def _stream_with_retry(
     relay: str = DEFAULT_RELAY,
     client: httpx.AsyncClient | None = None,
     functions: Mapping[str, JsonDict] | None = None,
+    keepalive_sec: float = DEFAULT_KEEPALIVE_SEC,
 ) -> AsyncIterator[bytes]:
     """Relay a streaming completion, retrying attempts that truncate silently.
 
     In ``live`` relay a retry is only possible while no answer text has gone out;
     a truncation after that ends the stream without ``finish_reason`` (and without
     ``[DONE]``) so the caller sees an incomplete stream rather than a silent or a
-    duplicated answer. ``client`` lets tests inject a transport.
+    duplicated answer. ``client`` lets tests inject a transport. While upstream
+    chunks arrive but nothing is forwarded for ``keepalive_sec``, an SSE comment
+    goes out so the caller's idle timer does not fire on a held block.
     """
     detail = "unknown error"
     async with (
@@ -874,6 +897,7 @@ async def _stream_with_retry(
                             attempts,
                         )
                         continue
+                    last_out = time.monotonic()
                     async for line in resp.aiter_lines():
                         event = parse_sse_line(line)
                         if event is None:
@@ -881,6 +905,10 @@ async def _stream_with_retry(
                         forward = outcome.feed(restore_response(event, inverse))
                         if forward is not None:
                             yield _encode(forward)
+                            last_out = time.monotonic()
+                        elif keepalive_sec > 0 and time.monotonic() - last_out >= keepalive_sec:
+                            yield _SSE_KEEPALIVE
+                            last_out = time.monotonic()
             except httpx.HTTPError as exc:
                 detail = f"{type(exc).__name__}: {exc}"
                 log.warning("shim: stream error on attempt %d/%d: %s", attempt, attempts, exc)
@@ -943,6 +971,11 @@ def main() -> None:
         log.warning("shim: unknown %s=%r, using %r", _TOOL_MODE_ENV, tool_mode, DEFAULT_TOOL_MODE)
         tool_mode = DEFAULT_TOOL_MODE
     renames = _renames_from_env() if tool_mode == "ollama" else {}
+    try:
+        keepalive_sec = float(os.environ.get(_KEEPALIVE_ENV, str(DEFAULT_KEEPALIVE_SEC)))
+    except ValueError:
+        log.warning("shim: unreadable %s, using %s", _KEEPALIVE_ENV, DEFAULT_KEEPALIVE_SEC)
+        keepalive_sec = DEFAULT_KEEPALIVE_SEC
     log.info(
         "medmcp-llm-shim -> %s (tools=%s, renames=%s, attempts=%d, relay=%s)",
         upstream,
@@ -952,7 +985,14 @@ def main() -> None:
         relay,
     )
     uvicorn.run(
-        create_app(upstream, renames=renames, attempts=attempts, relay=relay, tool_mode=tool_mode),
+        create_app(
+            upstream,
+            renames=renames,
+            attempts=attempts,
+            relay=relay,
+            tool_mode=tool_mode,
+            keepalive_sec=keepalive_sec,
+        ),
         host=host,
         port=port,
         log_level="warning",

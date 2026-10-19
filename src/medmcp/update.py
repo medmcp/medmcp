@@ -79,6 +79,7 @@ _CORE_ENV_VARS: tuple[str, ...] = (
     "MEDMCP_STACK_POOL",
     "MEDMCP_LLM_SHIM",
     "MEDMCP_SHIM_RELAY",
+    "MEDMCP_SHIM_TOOLS",
     "GHCR_USER",
     "GHCR_TOKEN",
     "MEDMCP_UPDATE_CHECK",

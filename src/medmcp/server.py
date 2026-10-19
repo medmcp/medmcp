@@ -2192,9 +2192,9 @@ READ_ONLY_APPROVAL_ENV_VAR = "MEDMCP_READ_ONLY_APPROVAL"
 # makes it write: ``find`` is out (``-delete``, and ``-fprint`` writes a file;
 # vibe guards only the ``-exec`` family), as are ``tree`` (``-o`` writes a file)
 # and ``file`` (``-C`` compiles a magic file). A redirect is folded into its command as a
-# ``<redirect>`` token, which a bare ``ls *`` rule would still match: a call with
-# one is never offered this approval, and the image's vibe is patched so an
-# approved rule never covers one either (``ls > out.txt`` always asks).
+# ``<redirect>`` token: a call with one is never offered this approval, and vibe
+# ≥2.26 matches such a call only against a rule for exactly that command line,
+# never against ``ls *`` (``ls > out.txt`` always asks).
 # Interpreters and anything that can write (``sed -i``, ``tee``, ``cp``) are
 # deliberately absent.
 _READ_ONLY_SESSION_PATTERNS = frozenset(
@@ -2684,9 +2684,12 @@ class _ChatConnection:
             # for the wrong turn. An intentional Stop gets its done from the
             # `cancel` branch in run(). The RPC itself is left running:
             # _cancel_prompt awaits it so the next prompt only goes out once
-            # vibe-acp has really ended this turn.
+            # vibe-acp has really ended this turn. The partial answer is kept:
+            # vibe keeps it too.
+            self._flush_answer()
             raise
         except Exception as exc:  # surface engine errors instead of a silent hang
+            self._flush_answer()
             if not prompt_fut.done():
                 prompt_fut.cancel()
             with contextlib.suppress(Exception):
@@ -2780,7 +2783,12 @@ class _ChatConnection:
         provenance.append_transcript(self.canonical_id, record)
 
     def _record_tool_call(self, tc_id: str, info: JsonDict, status: str) -> None:
-        """Record a settled tool call as an assistant call plus its result."""
+        """Record a settled tool call as an assistant call plus its result.
+
+        The answer text streamed so far goes first, so the transcript keeps the
+        order the person saw: text, call, text, call, closing text.
+        """
+        self._flush_answer()
         output_text = info.get("outputText")
         raw_output = info.get("rawOutput")
         if isinstance(output_text, str) and output_text:
@@ -3312,14 +3320,22 @@ async def fork_session(session_id: str) -> JsonDict:
     _audit.info("chat branched: %s -> %s", session_id, new_id)
 
     def _register() -> None:
-        src_title = sessions.load_registry().get(session_id, {}).get("title")
+        entry = sessions.get_entry(session_id)
+        src_title = entry.get("title")
+        typed = sessions.has_manual_title(entry)
         if not (isinstance(src_title, str) and src_title):
-            # No user title — inherit vibe's auto-title (note-stripped: old
+            # No registry title — inherit vibe's auto-title (note-stripped: old
             # transcripts derived titles from the raw prompt text).
             auto = provenance.vibe_session_title(tip)
             src_title = _strip_workspace_note(auto) if auto else None
         title = f"{src_title} (branch)" if src_title else "Branch"
-        sessions.set_title(new_id, title)
+        # A name derived from a generated one is still generated: it must not
+        # pin the branch as user-named, nor name a workflow distilled from it.
+        if typed:
+            sessions.set_title(new_id, title)
+        else:
+            sessions.set_auto_title(new_id, title)
+        provenance.copy_transcript(session_id, new_id)
 
     await asyncio.to_thread(_register)
     return {"id": new_id}
@@ -3365,6 +3381,14 @@ async def rewind_session(session_id: str, payload: RewindPayload) -> JsonDict:
         raise HTTPException(status_code=409, detail=str(err.get("message", err)))
     if not payload.preview:
         _audit.info("rewind performed: %s -> message %s", session_id, payload.message_id)
+        # The workspace's own transcript follows vibe's history back.
+        found = await asyncio.to_thread(
+            provenance.truncate_transcript, session_id, payload.message_id
+        )
+        if not found:
+            _audit.warning(
+                "rewind: transcript of %s carries no turn %s", session_id, payload.message_id
+            )
     return cast("JsonDict", resp.get("result") or {})
 
 

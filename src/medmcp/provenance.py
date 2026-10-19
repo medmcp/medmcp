@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import platform
 import re
 import shutil
@@ -308,22 +309,62 @@ def transcript_tool_records(
 
 
 def read_transcript(session_id: str, *, stop_ids: Collection[str] = ()) -> list[JsonDict]:
-    """A chat's messages: the MedMCP transcript, else vibe's legacy ``messages.jsonl``.
+    """A chat's messages: vibe's legacy ``messages.jsonl``, then the MedMCP transcript.
 
     The legacy file is concatenated across the pre-2.24 compaction chain (see
     :func:`find_vibe_session_dirs`; ``stop_ids`` keeps the walk out of forks), so
-    chats written before the workspace kept its own transcript still read whole.
-    Empty when neither exists.
+    chats written before the workspace kept its own transcript still read whole,
+    and one resumed since then reads its old turns followed by the new ones (the
+    transcript records live turns only, never a replay). Empty when neither exists.
     """
-    own = transcript_path(session_id)
-    if own.exists():
-        return read_jsonl(own)
     messages: list[JsonDict] = []
     for session_dir in find_vibe_session_dirs(session_id, stop_ids=stop_ids):
         path = session_dir / "messages.jsonl"
         if path.exists():
             messages.extend(read_jsonl(path))
+    own = transcript_path(session_id)
+    if own.exists():
+        messages.extend(read_jsonl(own))
     return messages
+
+
+def copy_transcript(src_id: str, dst_id: str) -> None:
+    """Give a branched chat its source's MedMCP transcript (best-effort).
+
+    vibe copies the history it holds into the fork; the workspace's own record
+    has to follow, or the branch would read as starting at the fork. Only the
+    source's own file is copied: legacy turns reach the branch through vibe's
+    ``parent_session_id`` backlink, as for any chain.
+    """
+    with contextlib.suppress(Exception):
+        src = transcript_path(src_id)
+        if not src.exists():
+            return
+        d = _ensure_dir(dst_id)
+        shutil.copyfile(src, d / TRANSCRIPT_FILE)
+
+
+def truncate_transcript(session_id: str, message_id: str) -> bool:
+    """Cut the MedMCP transcript back to before the user turn *message_id*.
+
+    The counterpart of vibe's in-place rewind, which truncates its own history
+    the same way. Returns whether the turn was found (and the file rewritten);
+    a transcript that does not carry the id is left as it is.
+    """
+    path = transcript_path(session_id)
+    if not path.exists():
+        return False
+    records = read_jsonl(path)
+    for index, record in enumerate(records):
+        if record.get("role") == "user" and record.get("message_id") == message_id:
+            kept = records[:index]
+            tmp = path.with_suffix(".tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                for rec in kept:
+                    f.write(json.dumps(rec) + "\n")
+            os.replace(tmp, path)
+            return True
+    return False
 
 
 def log_permission(session_id: str, *, title: str, decision: str) -> None:

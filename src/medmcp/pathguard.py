@@ -38,6 +38,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+from medmcp import harness
 from medmcp.pathcheck import PathFinding, check_tool_call_paths
 from medmcp.statefile import atomic_write_json, read_json
 
@@ -141,19 +142,28 @@ def is_containerized_tool(tool_name: str) -> bool:
     A uv-tool stack (local development) runs on this filesystem like a builtin, and
     correctly reports False.
     """
-    root = os.environ.get("MEDMCP_STACKS_D")
-    stacks_d = Path(root) if root else Path(__file__).resolve().parents[2] / "stacks.d"
-    try:
-        names = [p.stem for p in stacks_d.glob("*.toml")]
-    except OSError:
-        return False
+    names = container_stack_names()
     # Longest first so a stack whose name prefixes another cannot mis-bind.
     return any(tool_name.startswith(f"{n}_") for n in sorted(names, key=len, reverse=True))
 
 
+def container_stack_names() -> list[str]:
+    """The names of the installed container stacks (``stacks.d/<name>.toml``)."""
+    root = os.environ.get("MEDMCP_STACKS_D")
+    stacks_d = Path(root) if root else Path(__file__).resolve().parents[2] / "stacks.d"
+    try:
+        return [p.stem for p in stacks_d.glob("*.toml")]
+    except OSError:
+        return []
+
+
 def decide(invocation: dict[str, Any]) -> dict[str, Any]:
     """Return the hook response for one ``pre_tool`` invocation."""
-    tool_name = str(invocation.get("tool_name") or "")
+    # The harness names a tool by route (``mcp_medmcp_neuro.skull_strip``,
+    # ``file_system.read_file``); the checks and the ledger key use MedMCP's name.
+    tool_name = harness.canonical_tool_name(
+        str(invocation.get("tool_name") or ""), container_stack_names()
+    )
     session_id = str(invocation.get("session_id") or "")
     tool_input = invocation.get("tool_input")
 

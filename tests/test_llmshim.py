@@ -657,3 +657,50 @@ class TestToolMode:
         """A typo in the env var must not silently pick a mode."""
         with pytest.raises(ValueError):
             llmshim.create_app("http://up", tool_mode="magic")
+
+
+class TestCallsAcrossBlocks:
+    """A turn with two blocks numbers its calls once, as a client merges deltas by index."""
+
+    def test_second_block_continues_the_numbering(self) -> None:
+        """Index 0 twice would merge two calls into one garbled call."""
+        sp = llmshim.AtemSplitter(_FUNCTIONS)
+        sp.feed(_BLOCK)
+        sp.feed("some text ")
+        sp.feed(_BLOCK)
+        assert [c["index"] for c in sp.calls] == [0, 1]
+
+
+async def test_keepalive_comment_while_a_block_is_held() -> None:
+    """Upstream keeps sending a tool-call block the shim holds: the caller still sees bytes."""
+    cut = _BLOCK.index("\n") + 1  # between the opening marker and the first invoke
+    head, tail = _BLOCK[:cut], _BLOCK[cut:]
+    pieces = [head] + [" "] * 5 + [tail]
+    events: list[JsonDict] = [
+        {"choices": [{"index": 0, "delta": {"content": t}, "finish_reason": None}]} for t in pieces
+    ]
+    events.append({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+    body = _sse(events, done=True)
+
+    async def run(keepalive: float) -> str:
+        async with _client([body]) as client:
+            chunks = [
+                chunk
+                async for chunk in llmshim._stream_with_retry(
+                    "http://upstream/v1/chat/completions",
+                    {"model": "m", "stream": True},
+                    {},
+                    1,
+                    "m",
+                    relay="live",
+                    client=client,
+                    functions=_FUNCTIONS,
+                    keepalive_sec=keepalive,
+                )
+            ]
+        return b"".join(chunks).decode()
+
+    out = await run(1e-9)
+    assert ": keepalive\n\n" in out
+    assert '"finish_reason": "tool_calls"' in out
+    assert (await run(0)).count(": keepalive") == 0

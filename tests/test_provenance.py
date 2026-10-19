@@ -466,3 +466,40 @@ def test_record_tool_event_prefers_the_canonical_name(
     provenance.record_tool_event("s1", "effect-1", info, ["medmcp-neuro"])
     event = provenance.read_run_events("s1")[0]
     assert (event["server"], event["tool"]) == ("medmcp-neuro", "skull_strip")
+
+
+def test_transcript_reads_legacy_turns_before_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chat resumed after the upgrade keeps its old turns ahead of the new ones."""
+    monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
+    make_vibe_session(tmp_path, "old-1", messages=[{"role": "user", "content": "before"}])
+    provenance.append_transcript("old-1", {"role": "user", "content": "after"})
+    assert [m["content"] for m in provenance.read_transcript("old-1")] == ["before", "after"]
+
+
+def test_branch_inherits_the_transcript(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fork starts with its source's record; a source without one leaves nothing behind."""
+    monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
+    provenance.append_transcript("src", {"role": "user", "content": "hi"})
+    provenance.copy_transcript("src", "fork")
+    assert [m["content"] for m in provenance.read_transcript("fork")] == ["hi"]
+    provenance.copy_transcript("nobody", "fork2")
+    assert provenance.read_transcript("fork2") == []
+
+
+def test_rewind_truncates_the_transcript(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Everything from the rewound-to turn on is gone; an unknown id changes nothing."""
+    monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
+    for rec in (
+        {"role": "user", "content": "one", "message_id": "m1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "two", "message_id": "m2"},
+        {"role": "assistant", "content": "a2"},
+    ):
+        provenance.append_transcript("s", rec)
+    assert provenance.truncate_transcript("s", "m9") is False
+    assert len(provenance.read_transcript("s")) == 4
+    assert provenance.truncate_transcript("s", "m2") is True
+    assert [m["content"] for m in provenance.read_transcript("s")] == ["one", "a1"]
+    assert provenance.truncate_transcript("missing", "m1") is False

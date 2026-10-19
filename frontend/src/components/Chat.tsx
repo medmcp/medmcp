@@ -297,14 +297,16 @@ type ChatRow =
 
 function groupRows(items: ChatItem[], toolCalls: Record<string, ToolCallState>): ChatRow[] {
   const rows: ChatRow[] = []
+  // The harness looks a tool up (a search, then its details) before each first
+  // use, with text or other calls in between; one note per turn covers them all.
+  let lookupNoted = false
   items.forEach((item, index) => {
     const tc = item.kind === 'tool' ? toolCalls[item.toolCallId] : undefined
     const last = rows[rows.length - 1]
-    // The harness looks a tool up in two calls (a search, then the details)
-    // before every first use; one note covers the sequence.
-    if (tc?.toolName === TOOL_SEARCH && last?.kind === 'item') {
-      const prev = last.item.kind === 'tool' ? toolCalls[last.item.toolCallId] : undefined
-      if (prev?.toolName === TOOL_SEARCH) return
+    if (item.kind === 'user') lookupNoted = false
+    if (tc?.toolName === TOOL_SEARCH) {
+      if (lookupNoted) return
+      lookupNoted = true
     }
     if (tc && groupable(tc)) {
       if (last?.kind === 'group' && last.calls[0].toolName === tc.toolName) {

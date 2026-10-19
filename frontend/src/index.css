@@ -1511,6 +1511,35 @@ button.model-name:hover {
   color: var(--text);
 }
 
+.tool-group-call > details > summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--text);
+  font-weight: 400;
+  font-size: 12.5px;
+}
+
+.tool-group-call > details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-group-call > details > summary .status-dot {
+  width: 5px;
+  height: 5px;
+}
+
+.tool-group-label {
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-group-call > details > details {
+  margin-left: 14px;
+}
+
 .tool-card pre {
   background: var(--dark);
   border: 1px solid var(--border);

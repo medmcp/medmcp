@@ -1548,3 +1548,25 @@ class TestPathGuardDenial:
             "RETRY THIS CALL WITH A CORRECTED PATH.\n\nNobody refused this call"
         )
         assert not server._is_pathguard_denial("Error executing tool: boom")
+
+
+class TestDisplayTitle:
+    """A tool card is titled by vibe's prose, or by the tool's own name."""
+
+    def test_route_title_becomes_the_canonical_name(self) -> None:
+        """The harness titles an MCP call with its route; the person sees the stack tool."""
+        title = server._display_title(
+            "mcp_medmcp_neuro.skull_strip",
+            "mcp_medmcp_neuro.skull_strip",
+            "medmcp-neuro_skull_strip",
+        )
+        assert title == "medmcp-neuro_skull_strip"
+
+    def test_prose_title_is_kept(self) -> None:
+        """A title that says more than the route stays as written."""
+        assert server._display_title("bash: ls -la", "file_system.bash", "bash") == "bash: ls -la"
+
+    def test_empty_title_falls_back(self) -> None:
+        """No title and no name still gives the card something to say."""
+        assert server._display_title(None, "", "") == "tool"
+        assert server._display_title("", "x.y", "x_y") == "x_y"

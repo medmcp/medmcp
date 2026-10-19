@@ -2140,6 +2140,19 @@ def _tool_name(update: JsonDict) -> str:
     return str(meta.get("tool_name") or meta.get("toolName") or "")
 
 
+def _display_title(title: object, route: str, tool_name: str) -> str:
+    """The card's title: vibe's prose where it wrote some, else the tool's own name.
+
+    Under the harness an MCP call's title *is* its route (``mcp_medmcp_neuro.x``),
+    which is not a name anyone asked for; the canonical name takes its place.
+    A title that says more than the route ("bash: ls -la") is kept.
+    """
+    text = str(title or "")
+    if text and text != route:
+        return text
+    return tool_name or text or "tool"
+
+
 def _tool_output(update: JsonDict) -> tuple[str, object]:
     """A tool-call update's output as text, and its structured value if any.
 
@@ -2842,12 +2855,13 @@ class _ChatConnection:
                         self._record(record)
             elif update_type == "tool_call":
                 tc_id = str(update.get("toolCallId") or "")
-                title = str(update.get("title") or "tool")
                 status = str(update.get("status") or "pending")
                 info = self._tool_calls.setdefault(tc_id, {"_started": time.monotonic()})
+                route = _tool_name(update)
+                tool_name = harness.canonical_tool_name(route, self._server_names)
+                title = _display_title(update.get("title"), route, tool_name)
                 info["title"] = title
                 info["status"] = status
-                tool_name = harness.canonical_tool_name(_tool_name(update), self._server_names)
                 if tool_name:
                     info["toolName"] = tool_name
                 if update.get("rawInput") is not None:

@@ -55,6 +55,14 @@ def chat_title(session_id: str) -> str | None:
     return provenance.vibe_manual_session_title(session_id)
 
 
+def manual_chat_title(session_id: str) -> str | None:
+    """The chat's name as the person typed it, or ``None`` (a generated one does not count)."""
+    entry = get_entry(session_id)
+    if has_manual_title(entry):
+        return str(entry["title"]).strip()
+    return provenance.vibe_manual_session_title(session_id)
+
+
 def _update(session_id: str, mutate: Callable[[JsonDict], None]) -> None:
     """Apply *mutate* to a session's entry, then persist (dropping it if empty)."""
     registry = load_registry()

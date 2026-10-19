@@ -281,6 +281,27 @@ def build_recipe(
     return recipe
 
 
+def step_summary(recipe: Recipe) -> tuple[str, str] | None:
+    """A name and a one-line description derived from the recipe's steps.
+
+    The name joins the distinct tools in order (``skull-strip-register-to-template``);
+    the description spells the sequence and names the stacks. ``None`` for a
+    recipe with no steps.
+    """
+    tools: list[str] = []
+    servers: list[str] = []
+    for step in recipe.steps:
+        if step.tool not in tools:
+            tools.append(step.tool)
+        if step.server not in servers:
+            servers.append(step.server)
+    if not tools:
+        return None
+    name = " ".join(t.replace("_", " ") for t in tools[:4])
+    description = " → ".join(tools) + " · " + ", ".join(servers)
+    return name, description
+
+
 def resolve_digest(image: str) -> str:
     """Resolve *image*'s digest best-effort; never raise (distillation must not fail)."""
     try:
@@ -358,18 +379,27 @@ def distill_session(
     )
 
     context = _first_user_message(messages)
+    recipe = build_recipe(
+        messages,
+        server_names=server_names,
+        name="",
+        description=context[:120] if context else "Distilled MedMCP workflow",
+    )
+    # A workflow is named after what it does. A name the person gave the chat
+    # wins; otherwise the steps name it — a chat's generated title or opening
+    # words describe the conversation ("list the files…"), not the pipeline.
+    summary = step_summary(recipe)
     if name_hint.strip():
         base = workflow.slugify(name_hint)
+    elif summary:
+        base = workflow.slugify(summary[0])
     elif context:
         base = workflow.slugify(context)
     else:
         base = f"workflow-{session_id[:8]}"
-    recipe = build_recipe(
-        messages,
-        server_names=server_names,
-        name=base,
-        description=context[:120] if context else "Distilled MedMCP workflow",
-    )
+    recipe.name = base
+    if summary:
+        recipe.description = summary[1]
     recipe.requires = build_requirements(recipe, manifest)
 
     root = workflow.resolve_root(workflows_root)

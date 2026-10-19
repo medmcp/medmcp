@@ -1500,27 +1500,12 @@ class DistillPayload(BaseModel):
 
 
 async def _chat_title_for_distill(sid: str) -> str:
-    """The chat's name for the workflow distilled from it, generated now if it has none.
+    """The name the person gave the chat, or "" — only that names the workflow.
 
-    A workflow should be named after what the chat did, not after its opening
-    words. A title made here is stored and pushed like a scheduled one, so the
-    chat gets the same name; with no usable answer the caller falls back to the
-    opening request.
+    A generated title describes the conversation's opening, not the pipeline;
+    distillation names the workflow after its steps instead.
     """
-    title = await asyncio.to_thread(sessions.chat_title, sid)
-    if title or not titles.enabled():
-        return title or ""
-    messages = await asyncio.to_thread(
-        lambda: titles.load_session_messages(sid, stop_ids=_chain_stop_ids(sid))
-    )
-    generated = await titles.generate_title(messages)
-    if not generated:
-        return ""
-    await asyncio.to_thread(sessions.set_auto_title, sid, generated)
-    for conn in list(_connections):
-        if conn.canonical_id == sid:
-            await conn.send_title(generated)
-    return generated
+    return await asyncio.to_thread(sessions.manual_chat_title, sid) or ""
 
 
 @app.post("/api/workflows/distill")

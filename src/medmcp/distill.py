@@ -23,7 +23,6 @@ from typing import Any, cast
 
 from medmcp import provenance, workflow
 from medmcp.pathcheck import looks_like_path
-from medmcp.statefile import read_jsonl
 from medmcp.toolresult import looks_failed, parse_structured_blob
 from medmcp.workflow import Recipe, RecipeStep, StackRequirement, WorkflowInput
 from medmcp.workspace_note import display_content_text, strip_workspace_note
@@ -138,7 +137,11 @@ def _iter_tool_calls(messages: list[JsonDict]) -> list[tuple[str, JsonDict, str]
         if msg.get("role") == "tool":
             call_id = msg.get("tool_call_id")
             if isinstance(call_id, str):
-                results[call_id] = str(msg.get("content") or "")
+                # The workspace's own transcript records the harness's verdict;
+                # a failed call's text alone may not say so.
+                failed = msg.get("status") == "failed"
+                content = str(msg.get("content") or "")
+                results[call_id] = f"Error executing tool: {content}" if failed else content
 
     calls: list[tuple[str, JsonDict, str]] = []
     for msg in messages:
@@ -342,14 +345,9 @@ def distill_session(
 
     Raises ``FileNotFoundError`` if the session's raw log cannot be located.
     """
-    session_dirs = provenance.find_vibe_session_dirs(session_id, stop_ids=chain_stop_ids)
-    if not session_dirs:
-        raise FileNotFoundError(f"no vibe session log found for session {session_id!r}")
-    message_paths = [d / "messages.jsonl" for d in session_dirs if (d / "messages.jsonl").exists()]
-    if not message_paths:
-        raise FileNotFoundError(f"no messages.jsonl in {session_dirs[0]}")
-
-    messages = [m for path in message_paths for m in read_jsonl(path)]
+    messages = provenance.read_transcript(session_id, stop_ids=chain_stop_ids)
+    if not messages:
+        raise FileNotFoundError(f"no transcript found for session {session_id!r}")
     manifest = provenance.read_manifest(session_id)
     server_names = (
         [str(s.get("name")) for s in cast("list[JsonDict]", manifest.get("stacks") or [])]

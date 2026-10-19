@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 import importlib
 import io
+import json
 import logging
 import os
 import re
@@ -71,6 +72,7 @@ from medmcp import (
     chat_export,
     distill,
     explain,
+    harness,
     localmodels,
     origincheck,
     pathcheck,
@@ -2138,6 +2140,22 @@ def _tool_name(update: JsonDict) -> str:
     return str(meta.get("tool_name") or meta.get("toolName") or "")
 
 
+def _tool_output(update: JsonDict) -> tuple[str, object]:
+    """A tool-call update's output as text, and its structured value if any.
+
+    The text is what the browser shows and the transcript keeps; the value is
+    what provenance records. Under the harness both hide inside a result
+    envelope (see :func:`harness.unwrap_result`); before it, the ACP content
+    blocks carried the text and ``rawOutput`` the value.
+    """
+    text = _extract_text(update.get("content"))
+    raw_output = update.get("rawOutput")
+    if raw_output is None:
+        return text, None
+    unwrapped_text, value = harness.unwrap_result(raw_output)
+    return text or unwrapped_text, value
+
+
 def _is_pathguard_denial(output: str) -> bool:
     """True if *output* is the path guard turning a call back, not a real failure.
 
@@ -2145,7 +2163,10 @@ def _is_pathguard_denial(output: str) -> bool:
     '<name>': …", so the hook's own name is the marker. Matched on that rather than
     on the reason text, which is written for the model and free to change.
     """
-    return f"denied by hook '{settings.PATHGUARD_HOOK_NAME}'" in output
+    return (
+        f"denied by hook '{settings.PATHGUARD_HOOK_NAME}'" in output
+        or harness.PATHGUARD_MARKER in output
+    )
 
 
 # Permission options that approve more than the call being asked about:
@@ -2300,12 +2321,15 @@ def _visible_permission_options(
     visible: list[JsonDict] = []
     for option in options:
         option_id = option.get("optionId")
+        kind = option.get("kind")
         if option_id == _SESSION_APPROVE_OPTION and session_ok:
             label = _read_only_session_label(option, command)
             if label is not None:
                 visible.append({**option, "name": label})
             continue
-        if option_id in _AUTO_APPROVE_OPTIONS:
+        # vibe ≥2.26 adds session-scoped ids of its own (``allow_session_exact``);
+        # the kind says what an option does, whatever it is called.
+        if option_id in _AUTO_APPROVE_OPTIONS or kind in _AUTO_APPROVE_OPTIONS:
             continue
         if option_id == "allow_once":
             option = {**option, "name": "Allow"}
@@ -2369,6 +2393,8 @@ class _ChatConnection:
         self.canonical_id = canonical_id or session_id
         self.queue = queue
         self.servers = servers
+        # The answer text of the running turn, recorded to the transcript at its end.
+        self._answer: list[str] = []
         chosen = cloud or local
         self.model_name: str = str(chosen["model"]) if chosen else settings.OLLAMA_MODEL
         self._cloud_budget: int | None = int(cloud["compact_threshold"]) if cloud else None
@@ -2618,6 +2644,7 @@ class _ChatConnection:
         prompt_fut = asyncio.create_task(_client.request("session/prompt", params))
         self._prompt_rpc = prompt_fut
         self._thoughts.reset()  # start each turn with a clean reasoning-strip state
+        self._answer = []
         turn_ok = False
         get_task: asyncio.Task[JsonDict] | None = None
         try:
@@ -2647,7 +2674,9 @@ class _ChatConnection:
                 break
             tail = self._thoughts.flush()  # emit any real text held back at a tag boundary
             if tail:
+                self._answer.append(tail)
                 await self._send({"type": "chunk", "text": tail})
+            self._flush_answer()
             await self._send({"type": "done"})
             if turn_ok:
                 self._schedule_title()
@@ -2742,6 +2771,38 @@ class _ChatConnection:
             self._title_cadence.restore(ticket)
             _audit.warning("chat title refresh failed", exc_info=True)
 
+    @property
+    def _server_names(self) -> list[str]:
+        return [str(s["name"]) for s in self.servers]
+
+    def _record(self, record: JsonDict) -> None:
+        """Append one message to the chat's own transcript (never raises)."""
+        provenance.append_transcript(self.canonical_id, record)
+
+    def _record_tool_call(self, tc_id: str, info: JsonDict, status: str) -> None:
+        """Record a settled tool call as an assistant call plus its result."""
+        output_text = info.get("outputText")
+        raw_output = info.get("rawOutput")
+        if isinstance(output_text, str) and output_text:
+            output = output_text
+        elif raw_output is not None:
+            output = raw_output if isinstance(raw_output, str) else json.dumps(raw_output)
+        else:
+            output = ""
+        name = info.get("toolName") or info.get("title") or tc_id
+        call, result = provenance.transcript_tool_records(
+            tc_id, str(name), info.get("rawInput"), output, status=status
+        )
+        self._record(call)
+        self._record(result)
+
+    def _flush_answer(self) -> None:
+        """Record the turn's answer text, if any, and start the next turn clean."""
+        text = "".join(self._answer).strip()
+        self._answer = []
+        if text:
+            self._record({"role": "assistant", "content": text})
+
     async def _forward_frame(self, msg: JsonDict, *, replay: bool = False) -> None:
         """Translate one inbound vibe-acp frame into a browser message.
 
@@ -2759,6 +2820,8 @@ class _ChatConnection:
                 if content.get("type") == "text":
                     visible = self._thoughts.feed(str(content.get("text") or ""))
                     if visible:
+                        if not replay:
+                            self._answer.append(visible)
                         await self._send({"type": "chunk", "text": visible})
             elif update_type == "user_message_chunk":
                 # Replayed user turns (session/load) — and, since vibe 2.23, an
@@ -2772,6 +2835,11 @@ class _ChatConnection:
                     if isinstance(mid, str) and mid:
                         frame["messageId"] = mid
                     await self._send(frame)
+                    if not replay:
+                        record: JsonDict = {"role": "user", "content": text}
+                        if isinstance(mid, str) and mid:
+                            record["message_id"] = mid
+                        self._record(record)
             elif update_type == "tool_call":
                 tc_id = str(update.get("toolCallId") or "")
                 title = str(update.get("title") or "tool")
@@ -2779,17 +2847,17 @@ class _ChatConnection:
                 info = self._tool_calls.setdefault(tc_id, {"_started": time.monotonic()})
                 info["title"] = title
                 info["status"] = status
+                tool_name = harness.canonical_tool_name(_tool_name(update), self._server_names)
+                if tool_name:
+                    info["toolName"] = tool_name
                 if update.get("rawInput") is not None:
                     info["rawInput"] = update.get("rawInput")
                 # A settled call replayed on resume arrives as this one frame,
                 # output included (vibe's `_effect_start`); no update follows.
-                output = _extract_text(update.get("content"))
-                raw_output = update.get("rawOutput")
-                if not output and raw_output is not None:
-                    output = str(raw_output)
+                output, raw_output = _tool_output(update)
                 if raw_output is not None:
                     info["rawOutput"] = raw_output
-                elif output:
+                if output:
                     info["outputText"] = output
                 await self._send(
                     {
@@ -2798,7 +2866,7 @@ class _ChatConnection:
                         "title": title,
                         "status": status,
                         "kind": update.get("kind"),
-                        "toolName": _tool_name(update),
+                        "toolName": tool_name,
                         "rawInput": update.get("rawInput"),
                         "output": _clip_output(output) if output else None,
                         "pathGuardRetry": _is_pathguard_denial(output),
@@ -2806,10 +2874,7 @@ class _ChatConnection:
                 )
             elif update_type == "tool_call_update":
                 tc_id = str(update.get("toolCallId") or "")
-                output = _extract_text(update.get("content"))
-                raw_output = update.get("rawOutput")
-                if not output and raw_output is not None:
-                    output = str(raw_output)
+                output, raw_output = _tool_output(update)
                 status = update.get("status")
                 # A tool call is announced before the model has finished streaming
                 # its arguments, so the opening `tool_call` frame can carry an empty
@@ -2826,7 +2891,7 @@ class _ChatConnection:
                         info["rawInput"] = raw_input
                     if raw_output is not None:
                         info["rawOutput"] = raw_output
-                    elif output:
+                    if output:
                         info["outputText"] = output
                 # A call the path guard turned back never ran, and the model
                 # corrects and retries on its own, so rendering it as a failure
@@ -2843,6 +2908,8 @@ class _ChatConnection:
                     }
                 )
                 if status in ("completed", "failed") and info is not None:
+                    if not replay:
+                        self._record_tool_call(tc_id, info, status)
                     if not replay and settings.load_provenance_enabled():
                         event_info = info
                         with contextlib.suppress(Exception):
@@ -2894,7 +2961,7 @@ class _ChatConnection:
         tool_call: JsonDict = dict(cast("JsonDict", params.get("toolCall") or {}))
         tc_id = str(tool_call.get("toolCallId") or "")
         cached = self._tool_calls.get(tc_id, {})
-        for key in ("title", "rawInput", "humanReadable", "risks"):
+        for key in ("title", "rawInput", "humanReadable", "risks", "toolName"):
             if tool_call.get(key) is None and cached.get(key) is not None:
                 tool_call[key] = cached[key]
         title = tool_call.get("title") or tc_id or "<unknown>"
@@ -3165,7 +3232,7 @@ def _merge_session_registry(raw: list[JsonDict]) -> list[JsonDict]:
                 "title": title or None,
                 "updatedAt": updated,
                 "archived": bool(entry.get("archived")),
-                "hasProvenance": provenance.provenance_dir(sid).is_dir(),
+                "hasProvenance": (provenance.provenance_dir(sid) / "run.jsonl").exists(),
             }
         )
     return out
@@ -3357,9 +3424,34 @@ async def delete_session(session_id: str) -> JsonDict:
 # ── WebSocket chat ─────────────────────────────────────────
 
 
+# vibe 2.26.1 validates a new session's callbacks by asking every session its
+# host still holds for its runtime identity, and a session just released by
+# ``session/close`` answers that with "The child Runtime access method is not
+# implemented yet" until its teardown completes — so opening a chat right after
+# closing one fails for a moment. Observed three times in one afternoon, each a
+# few hundred milliseconds after a close; a retry a moment later succeeds.
+_SESSION_RACE_MARKER = "child Runtime access"
+_SESSION_RACE_ATTEMPTS = 4
+_SESSION_RACE_DELAY = 0.5
+
+
+async def _session_request(method: str, params: JsonDict) -> JsonDict:
+    """A ``session/new`` or ``session/load`` that waits out vibe's post-close race."""
+    resp = await _client.request(method, params)
+    for attempt in range(1, _SESSION_RACE_ATTEMPTS):
+        error = resp.get("error")
+        message = str(cast("JsonDict", error).get("message", "")) if isinstance(error, dict) else ""
+        if _SESSION_RACE_MARKER not in message:
+            break
+        log.warning("%s hit vibe's post-close race (attempt %d); retrying", method, attempt)
+        await asyncio.sleep(_SESSION_RACE_DELAY)
+        resp = await _client.request(method, params)
+    return resp
+
+
 async def _new_session() -> str:
     """Open a fresh vibe-acp session and return its id (``""`` on failure)."""
-    resp = await _client.request("session/new", {"cwd": str(WORKSPACE_ROOT), "mcpServers": []})
+    resp = await _session_request("session/new", {"cwd": str(WORKSPACE_ROOT), "mcpServers": []})
     if "error" in resp:
         return ""
     result = cast("JsonDict", resp.get("result") or {})
@@ -3416,7 +3508,7 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
             )
             queue = _client.register_session(tip)
             load_params: JsonDict = {"cwd": str(WORKSPACE_ROOT), "mcpServers": [], "sessionId": tip}
-            load = await _client.request("session/load", load_params)
+            load = await _session_request("session/load", load_params)
             if "error" in load and not any(c.session_id == tip for c in _connections):
                 # vibe-acp still holds the session though no socket uses it (a
                 # disconnect that predates session/close on close, or one cut
@@ -3426,7 +3518,7 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
                         _client.request("session/close", {"sessionId": tip}),
                         timeout=SESSION_CLOSE_TIMEOUT,
                     )
-                load = await _client.request("session/load", load_params)
+                load = await _session_request("session/load", load_params)
             if "error" in load:
                 _client.unregister_session(tip)
                 queue = None

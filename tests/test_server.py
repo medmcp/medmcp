@@ -886,6 +886,31 @@ class TestReadOnlySessionApproval:
         visible = server._visible_permission_options(options, None if unknown else command)
         assert [o["optionId"] for o in visible] == ["allow_once", "reject_once"]
 
+    def test_drops_session_scoped_options_by_kind(self) -> None:
+        """The 2.26 ``allow_session_exact`` is an "always" by kind; ids are not a list we own."""
+        meta = {
+            "required_permissions": [
+                {
+                    "scope": "outside_directory",
+                    "invocation_pattern": "/nonexistent/x",
+                    "session_pattern": "/nonexistent/*",
+                    "label": "/nonexistent/*",
+                }
+            ]
+        }
+        options: list[dict[str, object]] = [
+            {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+            {
+                "optionId": "allow_session_exact",
+                "name": "Allow this file only for this session",
+                "kind": "allow_always",
+                "_meta": meta,
+            },
+            {"optionId": "reject_once", "name": "Deny", "kind": "reject_once"},
+        ]
+        visible = server._visible_permission_options(options)
+        assert [o["optionId"] for o in visible] == ["allow_once", "reject_once"]
+
     def test_withholds_tool_wide_session_approval(self) -> None:
         """No rules means vibe would approve the whole tool for the session — never offered."""
         options: list[dict[str, object]] = [
@@ -991,6 +1016,7 @@ class TestSessionsApi:
             return {"s1": {"title": "My name"}, "s2": {"archived": True}}
 
         (tmp_path / "s1").mkdir()  # s1 has a provenance record; s2 does not
+        (tmp_path / "s1" / "run.jsonl").write_text("{}\n")
 
         def _prov_dir(session_id: str) -> Path:
             return tmp_path / session_id
@@ -1508,3 +1534,17 @@ class TestChatSessionLifecycle:
             ("turn-ended", "session/prompt"),
             ("request", "session/close"),
         ]
+
+
+class TestPathGuardDenial:
+    """A call the path guard turned back renders as a note, not a failure."""
+
+    def test_vibes_hook_wording_and_our_own_marker_both_count(self) -> None:
+        """Older vibe names the hook; the harness relays only our refusal text."""
+        assert server._is_pathguard_denial(
+            f"Tool 'x' was denied by hook '{settings.PATHGUARD_HOOK_NAME}': no"
+        )
+        assert server._is_pathguard_denial(
+            "RETRY THIS CALL WITH A CORRECTED PATH.\n\nNobody refused this call"
+        )
+        assert not server._is_pathguard_denial("Error executing tool: boom")

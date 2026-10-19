@@ -32,7 +32,6 @@ import httpx
 from medmcp import provenance
 from medmcp.acp import JsonDict
 from medmcp.settings import OLLAMA_BASE_URL, local_helper_request
-from medmcp.statefile import read_jsonl
 from medmcp.workspace_note import display_content_text, strip_workspace_note
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
@@ -160,18 +159,12 @@ class TitleCadence:
 
 
 def load_session_messages(session_id: str, *, stop_ids: Collection[str] = ()) -> list[JsonDict]:
-    """Read a chat's transcript from vibe's ``messages.jsonl`` (empty if not found).
+    """Read a chat's transcript (empty if not found).
 
-    Concatenated across the session's compaction chain, like distillation, so a
-    chat resumed across a pre-2.24 compaction still titles off its whole history;
-    ``stop_ids`` keeps the walk out of forks (see :func:`provenance.find_vibe_session_dirs`).
+    The workspace's own record first, else vibe's legacy ``messages.jsonl``
+    concatenated across the compaction chain; see :func:`provenance.read_transcript`.
     """
-    messages: list[JsonDict] = []
-    for session_dir in provenance.find_vibe_session_dirs(session_id, stop_ids=stop_ids):
-        path = session_dir / "messages.jsonl"
-        if path.exists():
-            messages.extend(read_jsonl(path))
-    return messages
+    return provenance.read_transcript(session_id, stop_ids=stop_ids)
 
 
 def _message_text(msg: JsonDict, policy: TitlePolicy) -> str | None:

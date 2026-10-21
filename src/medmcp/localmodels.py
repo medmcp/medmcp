@@ -73,6 +73,10 @@ class LocalModel:
     license: str
     # Not Apache-2.0: the operator accepts the terms before the download starts.
     license_ack: bool = False
+    # Ollama's output parser, for a tag that ships without one: the Mistral tags
+    # fall back to the template parser, which drops a malformed tool call and
+    # leaves an empty turn (12-14 % of the agent's requests, measured 2026-10-21).
+    parser: str | None = None
 
 
 DEFAULT_MODEL_ID: str = "muse-glimmer"
@@ -94,6 +98,7 @@ CATALOG: tuple[LocalModel, ...] = (
         "24B, dense",
         15.2,
         "Apache 2.0",
+        parser="ministral",
     ),
     LocalModel("gemma4", "Gemma 4 31B", "Google", "gemma4:31b", "31B, dense", 20.4, "Apache 2.0"),
     LocalModel(
@@ -107,6 +112,7 @@ CATALOG: tuple[LocalModel, ...] = (
         "24B, dense",
         15.2,
         "Apache 2.0",
+        parser="ministral",
     ),
     LocalModel(
         "nemotron-3.5-lightning",
@@ -298,11 +304,16 @@ def _vendor_temperature(info: JsonDict) -> float | None:
     return None
 
 
-async def _create(client: httpx.AsyncClient, name: str, base: str, num_ctx: int) -> None:
-    """Create (or refresh) the derived model that carries the context length."""
+async def _create(
+    client: httpx.AsyncClient, name: str, base: str, num_ctx: int, parser: str | None = None
+) -> None:
+    """Create (or refresh) the derived model that carries the context length (and parser)."""
+    body: JsonDict = {"model": name, "from": base, "parameters": {"num_ctx": num_ctx}}
+    if parser is not None:
+        body["parser"] = parser
     resp = await client.post(
         "/api/create",
-        json={"model": name, "from": base, "parameters": {"num_ctx": num_ctx}, "stream": False},
+        json={**body, "stream": False},
         timeout=httpx.Timeout(10.0, read=600.0),
     )
     if resp.status_code >= 400:
@@ -399,7 +410,7 @@ async def _select_locked(
             raise ModelError(
                 f"{model.label} has a context of {num_ctx} tokens, too small for the agent"
             )
-        await _create(client, name, model.tag, num_ctx)
+        await _create(client, name, model.tag, num_ctx, model.parser)
 
     vendor_temperature = _vendor_temperature(info)
     thinks = isinstance(capabilities, list) and "thinking" in capabilities

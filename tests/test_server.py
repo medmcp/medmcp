@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import io
+import os
 import zipfile
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -1570,3 +1571,33 @@ class TestDisplayTitle:
         """No title and no name still gives the card something to say."""
         assert server._display_title(None, "", "") == "tool"
         assert server._display_title("", "x.y", "x_y") == "x_y"
+
+
+def test_workspace_is_exported_for_stack_container_mounts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """MEDMCP_WORKSPACE must be in the environment the server's children inherit.
+
+    Container-stack manifests mount the workspace as
+    ``-v ${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}`` and deliberately leave the
+    placeholder unexpanded for vibe-acp to resolve at spawn time, so host and
+    container agree on the path. If the core never exports it, the literal
+    reaches ``docker run``, the mount is rejected, and every container stack
+    fails MCP discovery at once — the agent still loads the skills but has none
+    of the tools, so it invents shell/Python workarounds instead.
+
+    This regressed once by exporting it only when the stack pool was enabled,
+    which left the default pool-off deployment with no working stacks. The
+    export lives in the lifespan rather than at import, so this drives the app.
+    """
+    resolved = tmp_path.resolve()
+    monkeypatch.setattr(server, "WORKSPACE_ROOT", resolved)
+    monkeypatch.setattr(settings, "stack_pool_enabled", lambda: False)
+    # setenv (rather than delenv) so monkeypatch records the variable and undoes
+    # it afterwards: the lifespan assigns it for the whole process, and sibling
+    # tests -- pathguard's especially -- resolve paths against it.
+    monkeypatch.setenv("MEDMCP_WORKSPACE", "unset-by-this-test")
+
+    with TestClient(server.app, base_url="http://127.0.0.1:8100"):
+        assert os.environ.get("MEDMCP_WORKSPACE") == str(resolved)
+        assert "$" not in os.environ["MEDMCP_WORKSPACE"]

@@ -103,14 +103,6 @@ log: logging.Logger = logging.getLogger(__name__)
 WORKSPACE_ROOT: Path = Path(
     os.environ.get("MEDMCP_WORKSPACE", str(Path(PROJECT_ROOT) / "data"))
 ).resolve()
-# Export the resolved value so every child inherits it. Container-stack manifests
-# mount the workspace as ``-v ${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}`` and leave
-# that literal for vibe-acp to expand at spawn time (path parity). If it is not
-# in vibe-acp's environment the placeholder reaches `docker run` verbatim, the
-# mount is rejected, and *every* container stack fails MCP discovery — the agent
-# then sees the skills but none of the tools. Setting it only when the stack pool
-# was enabled left the default (pool-off) deployment broken.
-os.environ["MEDMCP_WORKSPACE"] = str(WORKSPACE_ROOT)
 FRONTEND_DIST: Path = Path(PROJECT_ROOT) / "frontend" / "dist"
 DEFAULT_PORT: int = 8100
 
@@ -186,9 +178,24 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         if outcome is None and await asyncio.to_thread(update.updater_pending)
         else None
     )
+    # Export the resolved workspace so every child this server spawns inherits it.
+    # Container-stack manifests mount the workspace as
+    # ``-v ${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}`` and leave that literal for
+    # vibe-acp to expand at spawn time (path parity). If it is not in vibe-acp's
+    # environment the placeholder reaches `docker run` verbatim, the mount is
+    # rejected, and *every* container stack fails MCP discovery — the agent then
+    # sees the skills but none of the tools, and works around their absence
+    # instead of reporting it. Proxy children read it for their fallback cwd too.
+    # Assigned rather than setdefault so a relative or symlinked value is
+    # normalised to the same resolved path the bind mount uses.
+    #
+    # This belongs in the lifespan, not at import: it is the *running server*
+    # that spawns those children, and mutating the environment on import would
+    # make a bare `import medmcp.server` change the behaviour of unrelated
+    # processes (it did: the proxy and pathguard tests spawn children that then
+    # inherited a data/ directory which need not exist).
+    os.environ["MEDMCP_WORKSPACE"] = str(WORKSPACE_ROOT)
     if settings.stack_pool_enabled():
-        # MEDMCP_WORKSPACE is exported at import time (see WORKSPACE_ROOT), which
-        # proxy children also read for their fallback cwd.
         _pool = BackendPool(resolve_spec=_resolve_backend_spec, cwd=str(WORKSPACE_ROOT))
         _broker = BackendBroker(_pool, settings.backend_socket_path())
         try:

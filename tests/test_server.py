@@ -1573,8 +1573,10 @@ class TestDisplayTitle:
         assert server._display_title("", "x.y", "x_y") == "x_y"
 
 
-def test_workspace_is_exported_for_stack_container_mounts() -> None:
-    """MEDMCP_WORKSPACE must be in the environment children inherit.
+def test_workspace_is_exported_for_stack_container_mounts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """MEDMCP_WORKSPACE must be in the environment the server's children inherit.
 
     Container-stack manifests mount the workspace as
     ``-v ${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}`` and deliberately leave the
@@ -1585,7 +1587,17 @@ def test_workspace_is_exported_for_stack_container_mounts() -> None:
     of the tools, so it invents shell/Python workarounds instead.
 
     This regressed once by exporting it only when the stack pool was enabled,
-    which left the default pool-off deployment with no working stacks.
+    which left the default pool-off deployment with no working stacks. The
+    export lives in the lifespan rather than at import, so this drives the app.
     """
-    assert os.environ.get("MEDMCP_WORKSPACE") == str(server.WORKSPACE_ROOT)
-    assert "$" not in os.environ["MEDMCP_WORKSPACE"]
+    resolved = tmp_path.resolve()
+    monkeypatch.setattr(server, "WORKSPACE_ROOT", resolved)
+    monkeypatch.setattr(settings, "stack_pool_enabled", lambda: False)
+    # setenv (rather than delenv) so monkeypatch records the variable and undoes
+    # it afterwards: the lifespan assigns it for the whole process, and sibling
+    # tests -- pathguard's especially -- resolve paths against it.
+    monkeypatch.setenv("MEDMCP_WORKSPACE", "unset-by-this-test")
+
+    with TestClient(server.app, base_url="http://127.0.0.1:8100"):
+        assert os.environ.get("MEDMCP_WORKSPACE") == str(resolved)
+        assert "$" not in os.environ["MEDMCP_WORKSPACE"]

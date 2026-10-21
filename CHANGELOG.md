@@ -4,6 +4,16 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Changed
+
+- Ollama 0.40.7 (`docker compose` installs; was 0.33.2).
+
+### Fixed
+
+- Devstral Small 2 and Mistral Small 3.2 no longer lose tool calls: their models are prepared with Ollama's ministral parser.
+
 ## 0.7.0 — 2026-10-19
 
 ### Changed

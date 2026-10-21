@@ -8,11 +8,12 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Changed
 
-- Ollama 0.40.7 (`docker compose` installs; was 0.33.2).
+- Model: Ollama 0.40.7 for `docker compose` installs (was 0.33.2).
 
 ### Fixed
 
-- Devstral Small 2 and Mistral Small 3.2 no longer lose tool calls: their models are prepared with Ollama's ministral parser.
+- Model: Devstral Small 2 and Mistral Small 3.2 no longer drop tool calls (Ollama's ministral parser).
+- Model: a tool call named after the tool section's example (`bash.action`) reaches the tool it means.
 
 ## 0.7.0 — 2026-10-19
 

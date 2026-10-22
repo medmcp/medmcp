@@ -10,8 +10,11 @@
 #     torch self-contains its CUDA libs, so its GPU requirement is driven by the
 #     wheel, not by this base).
 # Multi-arch: nvidia/cuda *-runtime-ubuntu24.04 publishes both amd64 and arm64.
+# CUDA_DIGEST pins the default tag's index, so a re-pushed tag cannot change what
+# is built; pass CUDA_DIGEST="" (or the new digest) along with another CUDA_TAG.
 ARG CUDA_TAG=12.8.1
-FROM nvidia/cuda:${CUDA_TAG}-runtime-ubuntu24.04
+ARG CUDA_DIGEST=sha256:ebef3c171eeef0298e4eb2e4be843105edf3b8b0ac45e0b43acee358e8046867
+FROM nvidia/cuda:${CUDA_TAG}-runtime-ubuntu24.04${CUDA_DIGEST:+@${CUDA_DIGEST}}
 
 # Ubuntu 24.04 ships Python 3.12 as the system interpreter; uv builds the venvs
 # against it (no standalone Python download).

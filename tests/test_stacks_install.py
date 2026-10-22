@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from medmcp import settings
+from medmcp import settings, signing
 
 LABEL = (
     '{"name": "medmcp-foo", "gpu": false, "tool_timeout_sec": 1800, '
@@ -552,3 +552,18 @@ def test_resolve_image_digest_matches_a_registry_with_a_port(
     monkeypatch.setattr(settings, "_image_present", present)
     monkeypatch.setattr(settings, "_run_docker", inspect)
     assert settings.resolve_image_digest("localhost:5000/medmcp-neuro") == want
+
+
+def test_an_unsigned_stack_is_refused_when_only_signed_ones_are_allowed(
+    stacks_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MEDMCP_REQUIRE_SIGNED_STACKS turns the unverified-install warning into a refusal."""
+    monkeypatch.setenv("MEDMCP_REQUIRE_SIGNED_STACKS", "1")
+    with (
+        patch("medmcp.settings._run_docker", _fake_docker(LABEL)),
+        patch("medmcp.settings._image_present", _always_present),
+        patch("medmcp.settings._extract_image_skills", _fake_extract),
+        pytest.raises(signing.SignatureError, match="signed stacks only"),
+    ):
+        settings.install_stack_image("img:tag")
+    assert not any(stacks_dir.glob("*.toml"))

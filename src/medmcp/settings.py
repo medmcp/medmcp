@@ -1857,6 +1857,20 @@ def _write_stack_manifest(name: str, entry: JsonDict) -> None:
     atomic_write_toml(STACKS_D_PATH / f"{name}.toml", entry)
 
 
+def unsigned_stacks_refused() -> bool:
+    """Whether stack images outside the signing policy are refused, not warned about.
+
+    Off until every published stack repository signs its images; a deployment
+    that installs only signed stacks can turn it on now.
+    """
+    return os.environ.get("MEDMCP_REQUIRE_SIGNED_STACKS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def install_stack_image(
     image: str, on_progress: ProgressFn | None = None, *, accept_network: bool = False
 ) -> str:
@@ -1892,6 +1906,11 @@ def install_stack_image(
     if signing.policy_for(image) is not None:
         verified = signing.verify_image(image)
         report(signing.describe(verified))
+    elif unsigned_stacks_refused():
+        raise signing.SignatureError(
+            f"{image} is not covered by the signing policy, and this workspace installs "
+            "signed stacks only (MEDMCP_REQUIRE_SIGNED_STACKS)"
+        )
     else:
         report("No signing policy covers this image; installing it unverified.")
         log.warning("stack image %s has no signing policy; installed unverified", image)

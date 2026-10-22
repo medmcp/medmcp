@@ -76,6 +76,10 @@ dev = [
 
 [tool.uv]
 default-groups = ["dev"]
+# mistral-vibe pins certifi exactly; its pinned bundle still trusts the emSign ECC
+# Root CA - G3, whose intermediates' keys were compromised (PYSEC-2026-4320).
+# The CA bundle is data, so overriding it cannot break vibe.
+override-dependencies = ["certifi>=2026.10.19"]
 
 
 [tool.ruff]

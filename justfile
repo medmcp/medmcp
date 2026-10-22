@@ -189,8 +189,9 @@ medmcp: setup pull-model workspace-build
 
 # Build the shared base image (medmcp-base) locally for the host arch.
 # CUDA_TAG aligns the base CUDA runtime with the deployment target (see Dockerfile.base).
-docker-base CUDA_TAG="12.8.1":
-    docker build -f Dockerfile.base --build-arg CUDA_TAG={{CUDA_TAG}} -t medmcp-base:dev .
+# Another CUDA_TAG needs its own CUDA_DIGEST (or CUDA_DIGEST="" to build unpinned).
+docker-base CUDA_TAG="12.8.1" CUDA_DIGEST="sha256:ebef3c171eeef0298e4eb2e4be843105edf3b8b0ac45e0b43acee358e8046867":
+    docker build -f Dockerfile.base --build-arg CUDA_TAG={{CUDA_TAG}} --build-arg CUDA_DIGEST={{CUDA_DIGEST}} -t medmcp-base:dev .
 
 # Build the core image locally (depends on medmcp-base).
 docker-build: docker-base
@@ -202,8 +203,8 @@ docker-build-stack DIR TAG:
 
 # Build the multi-arch base + push (needs a docker-container builder + registry login).
 # Usage: just docker-base-multiarch ghcr.io/medmcp/base:dev "linux/amd64,linux/arm64"
-docker-base-multiarch TAG PLATFORMS="linux/amd64,linux/arm64" CUDA_TAG="12.8.1":
-    docker buildx build -f Dockerfile.base --build-arg CUDA_TAG={{CUDA_TAG}} \
+docker-base-multiarch TAG PLATFORMS="linux/amd64,linux/arm64" CUDA_TAG="12.8.1" CUDA_DIGEST="sha256:ebef3c171eeef0298e4eb2e4be843105edf3b8b0ac45e0b43acee358e8046867":
+    docker buildx build -f Dockerfile.base --build-arg CUDA_TAG={{CUDA_TAG}} --build-arg CUDA_DIGEST={{CUDA_DIGEST}} \
         --platform {{PLATFORMS}} -t {{TAG}} --push .
 
 # Bring up the full stack (llm + core). Defaults: workspace=./data, models=host ~/.ollama

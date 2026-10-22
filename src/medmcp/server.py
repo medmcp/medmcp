@@ -176,6 +176,11 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         "agent runs %s",
         "in its own container" if agentbox.isolation_enabled() else "as a child process",
     )
+    # Before any agent can run: fingerprint the legacy transcripts, so one that
+    # appears in the agent-writable logs volume later is never replayed.
+    recorded = await asyncio.to_thread(provenance.record_legacy_transcripts)
+    if recorded:
+        _audit.info("recorded %d legacy transcript(s)", recorded)
     # A run record still marked "running" was cut off by the previous process.
     interrupted = await asyncio.to_thread(runs.reconcile_interrupted)
     if interrupted:

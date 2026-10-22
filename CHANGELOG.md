@@ -11,6 +11,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Agent: in a `docker compose` install the agent runs in its own container, with no docker socket, no access to the state volume or credentials, its config read-only, no capabilities but `DAC_OVERRIDE` and a read-only root file system; stack tools reach the core's pool through the broker (`MEDMCP_AGENT_ISOLATION`, default `container`).
 - Compose: every service drops all capabilities and privilege escalation; the core keeps `DAC_OVERRIDE` and a pids limit.
 - Workspace: `.vibe` (transcripts, provenance, workflows) is private to its owner on a shared host, and the updater writes its recovered env file `0600` from the start.
+- Chats: the core no longer trusts the agent-writable session logs: a pre-2.26 transcript is replayed only if it was there, unchanged, before this version first ran, and links in the logs volume are never followed.
 - Docs: SECURITY.md says what approving a command grants in each install, and describes the access token.
 - Workspace: the API needs an access token. Open the pairing link once per browser (`medmcp url`, or the server log); `MEDMCP_UI_TOKEN` fixes it for scripts. Other accounts on the machine can no longer use a running workspace.
 - Explorer: an upload never writes through a symlink, the tree does not list folders a link points to outside the workspace, and delete/rename act on a link itself.

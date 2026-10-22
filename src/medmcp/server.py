@@ -69,6 +69,7 @@ from tree_sitter import Language, Node, Parser
 
 from medmcp import (
     __version__,
+    access,
     batchplan,
     chat_export,
     distill,
@@ -167,6 +168,9 @@ def _resolve_backend_spec(name: str) -> BackendSpec | None:
 async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     """Start the stack pool + broker on boot (when enabled); tear them down on exit."""
     global _pool, _broker
+    port = int(os.environ.get("MEDMCP_WORKSPACE_PORT", str(DEFAULT_PORT)))
+    link = access.pairing_url(access.public_base_url(port))
+    log.info("open %s to use MedMCP in this browser (once per browser)", link)
     # A run record still marked "running" was cut off by the previous process.
     interrupted = await asyncio.to_thread(runs.reconcile_interrupted)
     if interrupted:
@@ -292,8 +296,44 @@ class OriginGuard:
         await response(scope, receive, send)
 
 
+class AccessGuard:
+    """Refuse an ``/api`` or ``/ws`` request that does not carry the access token.
+
+    The origin check keeps other sites out, but lets a request with no ``Origin``
+    through — every non-browser client — and loopback is shared by every account
+    and process on the machine. See :mod:`medmcp.access`. Pure ASGI for the same
+    reason as :class:`OriginGuard`: the WebSocket upgrade is refused before
+    ``accept``.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        """Wrap *app*, checking the token on every API request and upgrade."""
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Pass the request through, or refuse it without reaching the route."""
+        if scope["type"] not in ("http", "websocket") or not access.needs_token(
+            str(scope.get("path", ""))
+        ):
+            await self.app(scope, receive, send)
+            return
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
+        if access.matches(access.presented(headers)):
+            await self.app(scope, receive, send)
+            return
+        _audit.warning("refused %s %s: no access token", scope["type"], scope.get("path", ""))
+        if scope["type"] == "websocket":
+            await receive()
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        response = JSONResponse({"detail": "not paired"}, status_code=401)
+        await response(scope, receive, send)
+
+
 app = FastAPI(title="MedMCP Workspace", lifespan=_lifespan)
-# Outermost, so a refused request never reaches a route or a static file.
+# Outermost, so a refused request never reaches a route or a static file: the
+# origin check first, then the token.
+app.add_middleware(AccessGuard)
 app.add_middleware(OriginGuard)
 
 # One vibe-acp subprocess shared by every websocket connection. The subprocess
@@ -748,6 +788,41 @@ def _apply_stack_change() -> None:
     """Re-discover stacks and re-sync vibe-acp config after an install/uninstall."""
     settings.load_mcp_servers.cache_clear()
     settings.sync_servers_to_vibe_config(settings.active_servers())
+
+
+class PairPayload(BaseModel):
+    """Request body: the token from the pairing link."""
+
+    token: str
+
+
+@app.post("/api/pair")
+async def post_pair(payload: PairPayload, response: Response) -> JsonDict:
+    """Pair this browser: trade the token from the pairing link for a cookie.
+
+    The one ``/api`` route that answers without the token (see
+    :mod:`medmcp.access`). The cookie is ``HttpOnly`` so page script never holds
+    it, and ``SameSite=Strict`` so no other site's request carries it.
+    """
+    if not access.matches(payload.token.strip()):
+        _audit.warning("pairing refused: wrong token")
+        raise HTTPException(status_code=403, detail="wrong token")
+    response.set_cookie(
+        access.COOKIE_NAME,
+        access.token(),
+        max_age=access.COOKIE_MAX_AGE_SEC,
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+    _audit.info("browser paired")
+    return {"ok": True}
+
+
+@app.get("/api/access")
+async def get_access() -> JsonDict:
+    """Answer 200 when the request carries the token (the guard refuses it otherwise)."""
+    return {"ok": True}
 
 
 @app.get("/healthz")
@@ -3669,11 +3744,11 @@ else:
 
 
 def main() -> None:
-    """Run the workspace server on localhost (no auth — do not expose).
+    """Run the workspace server on localhost (token-gated — do not expose).
 
     Binds 127.0.0.1 by default. In a container set ``MEDMCP_WORKSPACE_HOST=0.0.0.0``
-    so the published port is reachable — the no-auth posture is preserved by
-    publishing the port only to the host's loopback (``127.0.0.1:8100:8100``).
+    so the published port is reachable — publish it only to the host's loopback
+    (``127.0.0.1:8100:8100``); the access token is not a reason to widen that.
     """
     # The medmcp.* loggers (title and explanation outcomes, settings warnings)
     # are otherwise dropped at the root logger's default WARNING level; uvicorn

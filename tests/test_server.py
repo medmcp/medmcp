@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 
 from medmcp import provenance, server, sessions, settings
 
-from .conftest import WS_HEADERS
+from .conftest import AUTH_HEADERS, WS_HEADERS
 
 
 @pytest.fixture
@@ -1442,7 +1442,7 @@ class TestFolderTransfer:
     def client(self, root: Path) -> TestClient:
         """A same-origin client for the real routes."""
         del root
-        return TestClient(server.app, base_url="http://127.0.0.1:8100")
+        return TestClient(server.app, base_url="http://127.0.0.1:8100", headers=AUTH_HEADERS)
 
     def test_upload_recreates_nested_folders(self, root: Path, client: TestClient) -> None:
         """A folder upload sends each file with its relative folder as ``dir``."""

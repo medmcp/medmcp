@@ -4360,3 +4360,24 @@ textarea.wf-input {
   padding: 1px 6px;
   font-size: 11px;
 }
+
+/* Pairing: the screen a browser sees until it presents the access token. */
+.pairing {
+  height: 100%;
+  background: var(--dark);
+}
+
+.pairing-input {
+  width: 100%;
+  margin-top: 14px;
+  padding: 8px 10px;
+  background: var(--dark2);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  color: var(--text);
+  font: 13px/16px var(--mono);
+}
+
+.confirm-dialog p.pairing-error {
+  color: var(--red-tint);
+}

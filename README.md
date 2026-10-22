@@ -26,7 +26,7 @@ MEDMCP_WORKSPACE="$HOME/medmcp-data" \
   docker compose -f oci://ghcr.io/medmcp/compose:latest up -d
 ```
 
-Then open **http://localhost:8100**.
+Then open the link `docker exec medmcp-medmcp-1 medmcp url` prints (once per browser; it is also in the container's log).
 
 - **Requirements:** Linux, an NVIDIA GPU (≥ 24 GB VRAM recommended) with driver ≥ R570, and Docker with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/).
 - **Stop:** `docker compose -f oci://ghcr.io/medmcp/compose:latest down`

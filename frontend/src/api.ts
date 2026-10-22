@@ -20,6 +20,9 @@ import type {
 /** Thin client for the workspace filesystem API. */
 
 async function check(res: Response): Promise<Response> {
+  // The access cookie is gone or the token changed: the reload lands on the
+  // pairing screen rather than leaving every panel failing on its own.
+  if (res.status === 401) window.location.reload()
   if (!res.ok) {
     let detail = res.statusText
     try {
@@ -49,6 +52,16 @@ async function sendJson(
 
 async function postJson(url: string, body: object): Promise<Response> {
   return sendJson('POST', url, body)
+}
+
+/** Trade the token from the pairing link for this browser's access cookie. */
+export async function pair(token: string): Promise<void> {
+  await postJson('/api/pair', { token })
+}
+
+/** Whether this browser is paired (carries the access cookie). */
+export async function isPaired(): Promise<boolean> {
+  return (await fetch('/api/access')).ok
 }
 
 /** The absolute on-disk workspace root, so absolute tool outputs can be shown

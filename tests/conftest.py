@@ -12,13 +12,30 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from medmcp import provenance, server, settings
+from medmcp import access, provenance, server, settings
 
 JsonDict = dict[str, Any]
 
+# Every /api and /ws request carries the access token (see medmcp.access); the
+# tests pin it so a client can present it as a bearer header.
+TEST_TOKEN = "test-access-token-0123456789"
+AUTH_HEADERS = {"authorization": f"Bearer {TEST_TOKEN}"}
+
 # The server's OriginGuard admits only a loopback Host + Origin pair: the client's
 # base_url and these WebSocket headers exist to satisfy it.
-WS_HEADERS = {"host": "127.0.0.1:8100", "origin": "http://127.0.0.1:8100"}
+WS_HEADERS = {"host": "127.0.0.1:8100", "origin": "http://127.0.0.1:8100", **AUTH_HEADERS}
+
+
+@pytest.fixture(autouse=True)
+def _pin_access_token(  # pyright: ignore[reportUnusedFunction]  # autouse fixture, invoked by pytest
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Use :data:`TEST_TOKEN`, never this checkout's real token file."""
+    monkeypatch.setenv(access.TOKEN_ENV, TEST_TOKEN)
+    access.token.cache_clear()
+    yield
+    access.token.cache_clear()
+
 
 # A local-only vibe config.toml, the starting point for the model-switch tests.
 BASE_CONFIG = """\
@@ -130,7 +147,7 @@ def entries_by_name(cfg: JsonDict) -> dict[str, JsonDict]:
 @pytest.fixture
 def client() -> TestClient:
     """A client for the workspace app, presenting a loopback origin (see ``WS_HEADERS``)."""
-    return TestClient(server.app, base_url="http://127.0.0.1:8100")
+    return TestClient(server.app, base_url="http://127.0.0.1:8100", headers=AUTH_HEADERS)
 
 
 def make_vibe_session(

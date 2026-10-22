@@ -8,6 +8,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Security
 
+- Workspace: the API needs an access token. Open the pairing link once per browser (`medmcp url`, or the server log); `MEDMCP_UI_TOKEN` fixes it for scripts. Other accounts on the machine can no longer use a running workspace.
 - Explorer: an upload never writes through a symlink, the tree does not list folders a link points to outside the workspace, and delete/rename act on a link itself.
 - Viewer: workspace HTML and SVG files are served under a CSP sandbox, so opening one in a tab cannot act as the app.
 - Workflows: a replay step naming a path outside the workspace is refused (recipe constants, defaults and step outputs included), and a workflow name can no longer reach a recipe outside the workflows folder.

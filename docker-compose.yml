@@ -25,6 +25,9 @@ services:
       - "nvidia.com/gpu=${MEDMCP_GPU:-all}"
     volumes:
       - "${OLLAMA_MODELS_DIR:-ollama-models}:/root/.ollama"
+    # Nothing here needs a capability or a setuid binary.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 5s
@@ -46,6 +49,9 @@ services:
       MEDMCP_MODELFILE: "${MEDMCP_MODELFILE:-/Modelfile.muse}"
     volumes:
       - "./Modelfile.muse:/Modelfile.muse:ro"
+    # Nothing here needs a capability or a setuid binary.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     entrypoint: ["/bin/sh", "-c"]
     # Idempotent: skipped when the model is already built. The base tag is read
     # from the Modelfile's FROM line so this stays correct for either model.
@@ -63,6 +69,9 @@ services:
     environment:
       OLLAMA_HOST: "http://llm:11434"
       MEDMCP_MODEL: "${OLLAMA_MODEL:-muse-medmcp}"
+    # Nothing here needs a capability or a setuid binary.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     entrypoint: ["/bin/sh", "-c"]
     # Preload the model into VRAM at startup so the first prompt is instant
     # instead of paying the cold-load latency. Nothing depends on this service,
@@ -130,6 +139,13 @@ services:
       MEDMCP_UPDATE_URL: "${MEDMCP_UPDATE_URL:-}"
       # Chat-long approval of read-only shell commands (ls, cat, …); off with 0.
       MEDMCP_READ_ONLY_APPROVAL: "${MEDMCP_READ_ONLY_APPROVAL:-}"
+      # The agent runs in its own container: no docker socket, no state volume,
+      # its config read-only, stack tools through the core (forces the stack
+      # pool on). Empty runs it inside this container, as before.
+      MEDMCP_AGENT_ISOLATION: "${MEDMCP_AGENT_ISOLATION:-container}"
+      # Fixes the access token (default: generated once, kept in vibe-state).
+      # Open the link `docker exec medmcp-medmcp-1 medmcp url` prints.
+      MEDMCP_UI_TOKEN: "${MEDMCP_UI_TOKEN:-}"
     healthcheck:
       test:
         - CMD
@@ -142,6 +158,11 @@ services:
       start_period: 20s
     ports:
       - "127.0.0.1:8100:8100"
+    # DAC_OVERRIDE for a rootful host, where the workspace belongs to another uid.
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 4096
     volumes:
       # Docker socket → core spawns sibling stack containers. Rootless by
       # default; rootful hosts set XDG_RUNTIME_DIR=/var/run. Long form so a wrong
@@ -168,6 +189,9 @@ services:
       # External MCP servers and the consent that armed them. Losing these on an
       # image update would silently disconnect a configured setup.
       - "vibe-state:/app/.vibe/state"
+      # What the isolated agent container reads (config, profile, hooks,
+      # prompts), published here by the core and mounted read-only there.
+      - "vibe-agent:/app/.vibe/agent-home"
       # Host registry creds, read-only at a staging path — the entrypoint copies
       # only `auths` to /root/.docker/config.json, dropping the host's
       # `currentContext` (which would break every in-container stack pull/run).
@@ -184,3 +208,4 @@ volumes:
   vibe-runs:
   vibe-logs:
   vibe-state:
+  vibe-agent:

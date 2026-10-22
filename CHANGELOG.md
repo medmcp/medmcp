@@ -8,6 +8,8 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Security
 
+- Agent: in a `docker compose` install the agent runs in its own container, with no docker socket, no access to the state volume or credentials, its config read-only, no capabilities but `DAC_OVERRIDE` and a read-only root file system; stack tools reach the core's pool through the broker (`MEDMCP_AGENT_ISOLATION`, default `container`).
+- Compose: every service drops all capabilities and privilege escalation; the core keeps `DAC_OVERRIDE` and a pids limit.
 - Workspace: the API needs an access token. Open the pairing link once per browser (`medmcp url`, or the server log); `MEDMCP_UI_TOKEN` fixes it for scripts. Other accounts on the machine can no longer use a running workspace.
 - Explorer: an upload never writes through a symlink, the tree does not list folders a link points to outside the workspace, and delete/rename act on a link itself.
 - Viewer: workspace HTML and SVG files are served under a CSP sandbox, so opening one in a tab cannot act as the app.

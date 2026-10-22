@@ -164,7 +164,9 @@ denylist = []
 
 [tools.bash]
 permission = "ask"
-allowlist = []
+# vibe adds find on every start, and rewrites this file to do it; listing it
+# here keeps the file unchanged (the agent's copy is mounted read-only).
+allowlist = ["find"]
 denylist_standalone = []
 sensitive_patterns = [
     "sudo",

@@ -49,6 +49,10 @@ PINNED_TOOL_PERMISSIONS: dict[str, str] = {
 # vibe's one-shot migration unions read-only commands into the bash allowlist
 # unless this id is recorded as applied.
 _PINNED_MIGRATION = "bash_read_only_defaults_v1"
+# The only allowlist entries a gated tool may carry. vibe adds `find` to bash's on
+# every start and rewrites config.toml to do it, which a read-only agent home
+# refuses; listing it keeps the file as vibe wants it.
+_PINNED_ALLOWLISTS: dict[str, list[str]] = {"bash": ["find"]}
 
 # The MedMCP agent profile, minus its prompt id (owned by the prompt sync). A
 # profile's keys override config.toml, so any key not listed here is removed.
@@ -94,9 +98,11 @@ def enforce_config(cfg: JsonDict) -> list[str]:
         if entry.get("permission") != permission:
             changed.append(f"tools.{name}.permission={entry.get('permission')!r}")
             entry["permission"] = permission
-        if permission != "always" and entry.get("allowlist"):
-            changed.append(f"tools.{name}.allowlist={entry['allowlist']!r}")
-            entry["allowlist"] = []
+        allowlist = _PINNED_ALLOWLISTS.get(name, [])
+        if permission != "always" and entry.get("allowlist", []) != allowlist:
+            if not set(entry.get("allowlist", [])) <= set(allowlist):
+                changed.append(f"tools.{name}.allowlist={entry['allowlist']!r}")
+            entry["allowlist"] = list(allowlist)
     for name, entry in tools.items():
         if name not in PINNED_TOOL_PERMISSIONS and entry.get("permission") == "always":
             changed.append(f"tools.{name}.permission='always'")
@@ -223,6 +229,8 @@ _FLAG_VALUES: dict[str, re.Pattern[str]] = {
     "-e": re.compile(r"[A-Za-z_][A-Za-z0-9_]*(=.*)?", re.DOTALL),
     "--env": re.compile(r"[A-Za-z_][A-Za-z0-9_]*(=.*)?", re.DOTALL),
     "--name": re.compile(r"[\w.-]+"),
+    # Inside the container, like the command after the image.
+    "--entrypoint": re.compile(r"[\w./-]+"),
     "-w": re.compile(r"/.*"),
     "--workdir": re.compile(r"/.*"),
 }

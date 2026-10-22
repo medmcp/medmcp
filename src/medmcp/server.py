@@ -70,6 +70,7 @@ from tree_sitter import Language, Node, Parser
 from medmcp import (
     __version__,
     access,
+    agentbox,
     batchplan,
     chat_export,
     distill,
@@ -171,6 +172,10 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     port = int(os.environ.get("MEDMCP_WORKSPACE_PORT", str(DEFAULT_PORT)))
     link = access.pairing_url(access.public_base_url(port))
     log.info("open %s to use MedMCP in this browser (once per browser)", link)
+    _audit.info(
+        "agent runs %s",
+        "in its own container" if agentbox.isolation_enabled() else "as a child process",
+    )
     # A run record still marked "running" was cut off by the previous process.
     interrupted = await asyncio.to_thread(runs.reconcile_interrupted)
     if interrupted:
@@ -209,6 +214,10 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
         await _runs.shutdown()
+        # An isolated agent is a sibling container, not part of the compose
+        # project: left running, it would outlive the core and hold its network.
+        with contextlib.suppress(Exception):
+            await _client.stop()
         if _broker is not None:
             await _broker.aclose()
         if _pool is not None:
@@ -343,7 +352,17 @@ app.add_middleware(OriginGuard)
 # model's API key — is needed; this process holds them so the operator does not
 # have to plumb one into the deployment by hand. Passed as a provider, re-read
 # on every (re)start.
-_client: VibeAcpClient = VibeAcpClient(extra_env=settings.agent_secret_env)
+# With MEDMCP_AGENT_ISOLATION=container it runs in a sibling container that has
+# no docker socket, no state volume and a read-only view of its own config (see
+# medmcp.agentbox); otherwise as a child of this process.
+_client: VibeAcpClient = VibeAcpClient(
+    extra_env=settings.agent_secret_env,
+    launcher=(
+        agentbox.ContainerLauncher(os.environ.get("MEDMCP_WORKSPACE") or str(WORKSPACE_ROOT))
+        if agentbox.isolation_enabled()
+        else None
+    ),
+)
 
 # Live websocket connections, so a settings-triggered vibe restart can close
 # them (each client auto-reconnects into a fresh session on the new process).

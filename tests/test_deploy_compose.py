@@ -86,3 +86,40 @@ def test_both_compose_files_persist_the_same_paths() -> None:
     local = _persisted_paths("docker-compose.yml")
     assert local, "no /app mounts found — did the mount format change?"
     assert local == _persisted_paths("docker-compose.ghcr.yml")
+
+
+COMPOSE_FILES = ("docker-compose.yml", "docker-compose.ghcr.yml")
+
+
+def _services(filename: str) -> dict[str, dict[str, Any]]:
+    doc = cast("dict[str, Any]", yaml.safe_load((ROOT / filename).read_text()))
+    return cast("dict[str, dict[str, Any]]", doc["services"])
+
+
+def test_only_the_core_publishes_a_port_and_only_on_loopback() -> None:
+    """Ollama is unauthenticated and the workspace is not for the network: loopback only."""
+    for filename in COMPOSE_FILES:
+        published: dict[str, list[str]] = {
+            name: cast("list[str]", svc.get("ports") or [])
+            for name, svc in _services(filename).items()
+        }
+        assert published.pop("medmcp") == ["127.0.0.1:8100:8100"], filename
+        assert not any(published.values()), filename
+
+
+def test_every_service_drops_capabilities_and_privilege_escalation() -> None:
+    """No service needs a capability beyond the core's DAC_OVERRIDE, or a setuid binary."""
+    for filename in COMPOSE_FILES:
+        for name, svc in _services(filename).items():
+            assert svc.get("cap_drop") == ["ALL"], (filename, name)
+            assert "no-new-privileges:true" in (svc.get("security_opt") or []), (filename, name)
+            assert set(svc.get("cap_add") or []) <= {"DAC_OVERRIDE"}, (filename, name)
+
+
+def test_the_agent_is_isolated_by_default() -> None:
+    """The agent's own container is the default; its read-only home is persisted per install."""
+    for filename in COMPOSE_FILES:
+        core = _services(filename)["medmcp"]
+        env = cast("dict[str, str]", core["environment"])
+        assert env["MEDMCP_AGENT_ISOLATION"] == "${MEDMCP_AGENT_ISOLATION:-container}"
+        assert "vibe-agent:/app/.vibe/agent-home" in core["volumes"]

@@ -84,6 +84,8 @@ _CORE_ENV_VARS: tuple[str, ...] = (
     "GHCR_TOKEN",
     "MEDMCP_UPDATE_CHECK",
     "MEDMCP_UPDATE_URL",
+    "MEDMCP_AGENT_ISOLATION",
+    "MEDMCP_UI_TOKEN",
 )
 _DEFAULT_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}")
 # What may follow ``X.Y.Z-`` in a tag: the tag is used as an image tag verbatim.

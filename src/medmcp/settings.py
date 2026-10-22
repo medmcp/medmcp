@@ -42,7 +42,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from medmcp import posture, signing
+from medmcp import agentbox, posture, signing
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict
 from medmcp.statefile import atomic_write_json, atomic_write_toml, read_json
 from medmcp.workflow import list_workflows
@@ -163,12 +163,24 @@ _POOL_ENV_KEYS: tuple[str, ...] = ("MEDMCP_BROKER_SOCK", "MEDMCP_WORKSPACE")
 
 
 def stack_pool_enabled() -> bool:
-    """Whether the persistent stack pool / pre-warm proxy is enabled (default off)."""
+    """Whether the persistent stack pool / pre-warm proxy is enabled (default off).
+
+    Always on for an isolated agent: its container has no docker socket, so the
+    broker in this process is the only way its stack calls can run.
+    """
+    if agentbox.isolation_enabled():
+        return True
     return os.environ.get("MEDMCP_STACK_POOL", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def backend_socket_path() -> Path:
-    """Unix socket the broker binds and the proxy connects to."""
+    """Unix socket the broker binds and the proxy connects to.
+
+    In the agent home when the agent is isolated, the one directory both
+    containers mount at the same path.
+    """
+    if agentbox.isolation_enabled():
+        return agentbox.AGENT_HOME / "backend.sock"
     return VIBE_HOME / "backend.sock"
 
 
@@ -2351,3 +2363,5 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
     posture.enforce_config(cfg)
 
     atomic_write_toml(config_path, cfg)
+    if agentbox.isolation_enabled():
+        agentbox.publish_home(VIBE_HOME, agentbox.AGENT_HOME)

@@ -42,7 +42,7 @@ class TestConfig:
         assert cfg["bypass_tool_permissions"] is False
         assert "bash_read_only_defaults_v1" in cfg["applied_migrations"]
         assert "web_search" in cfg["disabled_tools"]
-        assert cfg["tools"]["bash"] == {"permission": "ask", "allowlist": []}
+        assert cfg["tools"]["bash"] == {"permission": "ask", "allowlist": ["find"]}
         assert cfg["tools"]["mcp_medmcp-neuro_skull_strip"]["permission"] == "ask"
 
 

@@ -11,6 +11,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Agent: in a `docker compose` install the agent runs in its own container, with no docker socket, no access to the state volume or credentials, its config read-only, no capabilities but `DAC_OVERRIDE` and a read-only root file system; stack tools reach the core's pool through the broker (`MEDMCP_AGENT_ISOLATION`, default `container`).
 - Compose: the core no longer holds the docker socket; a `docker-guard` service does, and forwards only what the core needs — containers without `--privileged`, host namespaces, extra capabilities or foreign mounts, and lifecycle calls only on containers it created.
 - Compose: every service drops all capabilities and privilege escalation; the core keeps `DAC_OVERRIDE` and a pids limit.
+- Workspace: a host-native install shows a standing notice that the agent is not isolated.
 - Workspace: `.vibe` (transcripts, provenance, workflows) is private to its owner on a shared host, and the updater writes its recovered env file `0600` from the start.
 - Agent: the isolated agent sits on an internal network with no route out; the model, a cloud model and external MCP servers are reached through an egress gateway in the core, which adds the credentials, so the agent holds none. Ollama's admin API is out of its reach.
 - Stacks: the broker runs a stack call only if the person approved that exact call (stack, tool, arguments), once; the agent's shell can no longer call stack tools through it.

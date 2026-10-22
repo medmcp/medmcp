@@ -1673,3 +1673,8 @@ def test_an_approved_stack_call_is_granted_to_the_broker() -> None:
     assert ledger.consume("medmcp-neuro-core", "skull_strip", {"input_path": "/w/t1.nii"})
     assert not ledger.consume("medmcp-neuro-core", "skull_strip", {"input_path": "/w/t1.nii"})
     assert not ledger.consume("builtin", "bash", {"command": "ls"})
+
+
+def test_the_page_learns_whether_the_agent_is_isolated(client: TestClient) -> None:
+    """A host-native install shows a standing notice; the flag drives it."""
+    assert client.get("/api/workspace").json()["agent_isolated"] is False

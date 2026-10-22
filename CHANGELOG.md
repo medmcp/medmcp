@@ -4,31 +4,30 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
-## Unreleased
+## 0.7.2 — 2026-10-22
 
 ### Security
 
+- Workspace: the API needs an access token. Open the pairing link once per browser (`medmcp url`, or the server log); `MEDMCP_UI_TOKEN` fixes it for scripts. Other accounts on the machine can no longer use a running workspace.
 - Agent: in a `docker compose` install the agent runs in its own container, with no docker socket, no access to the state volume or credentials, its config read-only, no capabilities but `DAC_OVERRIDE` and a read-only root file system; stack tools reach the core's pool through the broker (`MEDMCP_AGENT_ISOLATION`, default `container`).
-- Gateway and docker guard: an encoded path no longer slips past the gateway's model-endpoint check (and the shim refuses Ollama's model-management routes); the guard accepts the update helper only in its exact shape, from a pulled core image by digest, allows pulls but not imports, and forwards exactly one request per connection.
-- Compose: the core no longer holds the docker socket; a `docker-guard` service does, and forwards only what the core needs — containers without `--privileged`, host namespaces, extra capabilities or foreign mounts, and lifecycle calls only on containers it created.
-- Compose: every service drops all capabilities and privilege escalation; the core keeps `DAC_OVERRIDE` and a pids limit.
-- Workspace: `.vibe` (transcripts, provenance, workflows) is private to its owner on a shared host, and the updater writes its recovered env file `0600` from the start.
 - Agent: the isolated agent sits on an internal network with no route out; the model, a cloud model and external MCP servers are reached through an egress gateway in the core, which adds the credentials, so the agent holds none. Ollama's admin API is out of its reach.
 - Stacks: the broker runs a stack call only if the person approved that exact call (stack, tool, arguments), once; the agent's shell can no longer call stack tools through it.
-- Chats: the core no longer trusts the agent-writable session logs: a pre-2.26 transcript is replayed only if it was there, unchanged, before this version first ran, and links in the logs volume are never followed.
-- CI: an Isolation workflow builds the core image and runs the shipped compose file against it with a scripted model, checking the agent container, its network, the gateway, broker approvals and the docker guard (`just e2e-isolation`).
-- Supply chain: Ollama, the CUDA base and the Node build image are pinned by digest, workflow actions by commit; a Security workflow audits Python and npm dependencies on every PR and scans the published image weekly; Dependabot also tracks images and npm.
-- Dependencies: certifi 2026.10.19 (drops a root CA with compromised intermediates; overrides mistral-vibe's pin), fflate 0.8.3 (malformed-ZIP64 hang in the spreadsheet viewer).
+- Compose: the core no longer holds the docker socket; a `docker-guard` service does, and forwards only what the core needs — containers without `--privileged`, host namespaces, extra capabilities or foreign mounts, and lifecycle calls only on containers it created.
+- Compose: every service drops all capabilities and privilege escalation; the core keeps `DAC_OVERRIDE` and a pids limit.
+- Agent: every config sync restores the approval posture (`default_agent`, `auto_approve`, tool permissions, the agent profile, hooks, trusted folders) and audit-logs what it had to undo.
+- Agent: the agent process no longer inherits credentials (registry tokens, update secrets, anything key- or token-shaped); it gets only the ones its active external servers and cloud model use.
 - Approvals: risk labels are worked out by rules from the call itself (network, deletion, writes, system changes, code assembled at run time, paths outside the workspace); the model's labels can only add to them.
-- Stacks: `MEDMCP_REQUIRE_SIGNED_STACKS=1` refuses stack images the signing policy does not cover; a refused signature now answers 403 instead of 500.
-- Docs: SECURITY.md says what approving a command grants in each install, and describes the access token.
-- Workspace: the API needs an access token. Open the pairing link once per browser (`medmcp url`, or the server log); `MEDMCP_UI_TOKEN` fixes it for scripts. Other accounts on the machine can no longer use a running workspace.
 - Explorer: an upload never writes through a symlink, the tree does not list folders a link points to outside the workspace, and delete/rename act on a link itself.
 - Viewer: workspace HTML and SVG files are served under a CSP sandbox, so opening one in a tab cannot act as the app.
 - Workflows: a replay step naming a path outside the workspace is refused (recipe constants, defaults and step outputs included), and a workflow name can no longer reach a recipe outside the workflows folder.
-- Agent: every config sync restores the approval posture (`default_agent`, `auto_approve`, tool permissions, the agent profile, hooks, trusted folders) and audit-logs what it had to undo.
+- Chats: the core no longer trusts the agent-writable session logs: a pre-2.26 transcript is replayed only if it was there, unchanged, before this version first ran, and links in the logs volume are never followed.
 - Stacks: a `stacks.d` manifest must launch `docker` with the hardening intact; extra mounts, `--privileged`, host namespaces and manifest `env` are refused.
-- Agent: the agent process no longer inherits credentials (registry tokens, update secrets, anything key- or token-shaped); it gets only the ones its active external servers and cloud model use.
+- Stacks: `MEDMCP_REQUIRE_SIGNED_STACKS=1` refuses stack images the signing policy does not cover; a refused signature now answers 403 instead of 500.
+- Workspace: `.vibe` (transcripts, provenance, workflows) is private to its owner on a shared host, and the updater writes its recovered env file `0600` from the start.
+- Supply chain: Ollama, the CUDA base and the Node build image are pinned by digest, workflow actions by commit; a Security workflow audits Python and npm dependencies on every PR and scans the published image weekly; Dependabot also tracks images and npm.
+- Dependencies: certifi 2026.10.19 (drops a root CA with compromised intermediates; overrides mistral-vibe's pin), fflate 0.8.3 (malformed-ZIP64 hang in the spreadsheet viewer).
+- CI: an Isolation workflow builds the core image and runs the shipped compose file against it with a scripted model, checking the agent container, its network, the gateway, broker approvals and the docker guard (`just e2e-isolation`).
+- Docs: SECURITY.md says what approving a command grants in each install, and describes the access token.
 
 ## 0.7.1 — 2026-10-21
 

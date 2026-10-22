@@ -16,6 +16,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Agent: the isolated agent sits on an internal network with no route out; the model, a cloud model and external MCP servers are reached through an egress gateway in the core, which adds the credentials, so the agent holds none. Ollama's admin API is out of its reach.
 - Stacks: the broker runs a stack call only if the person approved that exact call (stack, tool, arguments), once; the agent's shell can no longer call stack tools through it.
 - Chats: the core no longer trusts the agent-writable session logs: a pre-2.26 transcript is replayed only if it was there, unchanged, before this version first ran, and links in the logs volume are never followed.
+- CI: an Isolation workflow builds the core image and runs the shipped compose file against it with a scripted model, checking the agent container, its network, the gateway, broker approvals and the docker guard (`just e2e-isolation`).
 - Supply chain: Ollama, the CUDA base and the Node build image are pinned by digest, workflow actions by commit; a Security workflow audits Python and npm dependencies on every PR and scans the published image weekly; Dependabot also tracks images and npm.
 - Dependencies: certifi 2026.10.19 (drops a root CA with compromised intermediates; overrides mistral-vibe's pin), fflate 0.8.3 (malformed-ZIP64 hang in the spreadsheet viewer).
 - Stacks: `MEDMCP_REQUIRE_SIGNED_STACKS=1` refuses stack images the signing policy does not cover; a refused signature now answers 403 instead of 500.

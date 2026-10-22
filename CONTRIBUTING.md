@@ -125,6 +125,7 @@ just docker-base                                    # shared base image (medmcp-
 just docker-build                                   # core image (medmcp-core:dev)
 just docker-build-stack ../medmcp-dicom-dev medmcp-dicom:dev   # a stack image
 just compose-up                                     # core + bundled Ollama; link: docker exec medmcp-medmcp-1 medmcp url
+just e2e-isolation                                  # isolation check of the compose install against medmcp-core:dev
 just compose-down                                   # tear it down
 ```
 

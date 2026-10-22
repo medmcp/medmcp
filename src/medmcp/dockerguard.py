@@ -9,21 +9,26 @@ hands the core a filtered one. It forwards only what the core does:
 - reads: ping, version, info, image and network inspection, container lists;
   a container's own details only for containers of this compose project or that
   the guard created;
-- pulls and registry logins;
+- pulls by name (``fromImage``) with no body, and registry logins — never an
+  image import, which would let the caller name its own image anything;
 - ``POST /containers/create`` after checking the body: no ``--privileged``, no
   host or container namespaces, no capabilities beyond ``DAC_OVERRIDE``, no
   security option beyond ``no-new-privileges``, no devices but NVIDIA GPUs, and
   bind mounts only of the workspace and the core's own volumes. The real socket
-  may be mounted only into the update helper (``medmcp-update`` from the core's
-  own image repository), and only with the workspace unchanged. Every container
-  created gets a label marking it as the guard's;
+  may be mounted only into the update helper, and only in exactly the shape
+  :func:`medmcp.update.updater_command` creates it: the core image by a digest
+  the daemon recorded from a registry pull, ``medmcp-update apply``, its fixed
+  mounts, and an environment whose every value is what this install already
+  runs with. Every container created gets a label marking it as the guard's;
 - start, attach, wait, resize, kill, stop, remove and copy-out only for
   containers carrying that label.
 
-Everything else — exec, build, image push, swarm, plugins, volume and network
-creation, container update — is refused. One request per connection: each is
-forwarded with ``Connection: close`` (or as the upgrade it asks for, for
-``attach``) and the bytes are then piped both ways untouched.
+Everything else — exec, build, image push or import, swarm, plugins, volume and
+network creation, container update — is refused. One request per connection:
+the head and its declared body are forwarded with ``Connection: close`` and only
+the response is relayed back. The one exception is ``attach`` on a container the
+guard created, whose upgrade is honoured, and piped both ways, only once the
+daemon has answered ``101``.
 """
 
 from __future__ import annotations
@@ -39,9 +44,11 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import httpx
+
+from medmcp.update import CORE_ENV_VARS
 
 log: logging.Logger = logging.getLogger("medmcp.dockerguard")
 
@@ -60,6 +67,23 @@ _SAFE_NETWORK_MODES = frozenset({"", "default", "bridge", "none"})
 _NAMESPACE_KEYS = ("PidMode", "IpcMode", "UTSMode", "UsernsMode", "CgroupnsMode")
 _MUST_BE_EMPTY = ("Devices", "DeviceCgroupRules", "VolumesFrom", "Sysctls", "CgroupParent")
 UPDATER_ENTRYPOINT = "medmcp-update"
+_SOCKET_TARGET = "/var/run/docker.sock"
+_STATE_TARGET = "/app/.vibe/state"
+_DOCKER_CONFIG_TARGET = "/run/host-docker-config.json"
+_OLLAMA_MODELS_TARGET = "/root/.ollama"
+_UPDATER_ENV_KEYS = frozenset(
+    {
+        "DOCKER_HOST",
+        "MEDMCP_UPDATE_REPLACE",
+        "MEDMCP_UPDATE_PROJECT",
+        "MEDMCP_UPDATE_PROJECT_DIR",
+        "MEDMCP_UPDATE_PREVIOUS_TAG",
+        "MEDMCP_UPDATE_PREVIOUS_DIGEST",
+        "MEDMCP_UPDATE_DIGEST",
+        "MEDMCP_UPDATE_ENV",
+    }
+)
+_PULL_QUERY_KEYS = frozenset({"fromImage", "tag", "platform"})
 
 # (method, path pattern) → rule. Container ids and image names may contain "/".
 _READS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
@@ -80,7 +104,6 @@ _READS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ("GET", r"/volumes"),
         ("GET", r"/volumes/[^/]+"),
         ("GET", r"/plugins/[^/]+/json"),
-        ("POST", r"/images/create"),
         ("POST", r"/auth"),
     )
 )
@@ -111,6 +134,16 @@ class GuardContext:
     core_image_repo: str
     mount_sources: set[str] = field(default_factory=set[str])
     networks: set[str] = field(default_factory=set[str])
+    # What the update helper must match (see check_updater).
+    core_id: str = ""
+    core_env: dict[str, str] = field(default_factory=dict[str, str])
+    core_digests: set[str] = field(default_factory=set[str])
+    project_dir: str = ""
+    state_volume: str = ""
+    docker_config_source: str = ""
+    llm_image: str = ""
+    llm_env: dict[str, str] = field(default_factory=dict[str, str])
+    llm_models_source: str = ""
 
 
 @dataclass
@@ -120,6 +153,7 @@ class Decision:
     allowed: bool
     reason: str = ""
     body: bytes | None = None
+    upgrade: bool = False
 
 
 def _repo(image: str) -> str:
@@ -133,11 +167,12 @@ def _bind_source(bind: str) -> str:
     return bind.split(":", 1)[0]
 
 
-def check_create(body: JsonDict, ctx: GuardContext, image_repo_of: dict[str, str]) -> str | None:
+def check_create(body: JsonDict, ctx: GuardContext, repo_digests: list[str]) -> str | None:
     """Why a ``POST /containers/create`` body must be refused, or ``None``.
 
-    *image_repo_of* resolves an image reference (an id, for the agent) to its
-    repository, so the update helper is recognised by what it is, not by name.
+    *repo_digests* are the ``repo@digest`` references the daemon recorded for the
+    body's image when it was pulled (none for an image that was not), which is
+    how the update helper's image is recognised.
     """
     host = cast("JsonDict", body.get("HostConfig") or {})
     if host.get("Privileged"):
@@ -176,38 +211,100 @@ def check_create(body: JsonDict, ctx: GuardContext, image_repo_of: dict[str, str
     for mount in cast("list[JsonDict]", host.get("Mounts") or []):
         if str(mount.get("Type") or "") in {"bind", "volume"}:
             sources.append(str(mount.get("Source") or ""))
-    image = str(body.get("Image") or "")
-    entrypoint = body.get("Entrypoint")
-    is_updater = image_repo_of.get(image, _repo(image)) == ctx.core_image_repo and entrypoint in (
-        [UPDATER_ENTRYPOINT],
-        UPDATER_ENTRYPOINT,
-    )
+    if ctx.socket_source and ctx.socket_source in sources:
+        return check_updater(body, ctx, repo_digests)
     allowed = {ctx.workspace, *ctx.mount_sources}
     for source in sources:
-        if source == ctx.socket_source:
-            if not is_updater:
-                return "the docker socket may only be mounted into the update helper"
-            continue
         if source not in allowed:
             return f"mount source {source!r} is not the workspace or one of the core's volumes"
-    if is_updater:
-        return _check_updater_env(body, ctx)
     return None
 
 
-def _check_updater_env(body: JsonDict, ctx: GuardContext) -> str | None:
-    """The helper may redeploy the core, but not onto another workspace."""
+def _env_map(body: JsonDict) -> dict[str, str]:
+    out: dict[str, str] = {}
     for item in cast("list[Any]", body.get("Env") or []):
         key, _, value = str(item).partition("=")
-        if key != "MEDMCP_UPDATE_ENV":
-            continue
-        try:
-            carried = cast("JsonDict", json.loads(value))
-        except json.JSONDecodeError:
-            return "MEDMCP_UPDATE_ENV is not JSON"
-        workspace = carried.get("MEDMCP_WORKSPACE")
-        if workspace is not None and workspace != ctx.workspace:
-            return "the update helper may not change the workspace"
+        out[key] = value
+    return out
+
+
+def _carried_value_ok(key: str, value: str, ctx: GuardContext) -> bool:
+    """Whether a compose variable the helper would redeploy with is this install's own."""
+    if key in CORE_ENV_VARS:
+        return value == ctx.core_env.get(key)
+    if key == "XDG_RUNTIME_DIR":
+        return value == os.path.dirname(ctx.socket_source)
+    if key == "HOME":
+        home, sep, _ = ctx.docker_config_source.rpartition("/.docker/")
+        return bool(sep) and value == home
+    if key == "OLLAMA_IMAGE":
+        return value == ctx.llm_image
+    if key == "OLLAMA_KEEP_ALIVE":
+        return value == ctx.llm_env.get(key)
+    if key == "OLLAMA_MODELS_DIR":
+        return value == ctx.llm_models_source
+    return False
+
+
+def check_updater(body: JsonDict, ctx: GuardContext, repo_digests: list[str]) -> str | None:
+    """Why a create that mounts the real socket is not the update helper, or ``None``.
+
+    The helper is the one container that holds the real socket, so it must be
+    exactly what :func:`medmcp.update.updater_command` asks for — the signed core
+    image (by a digest the daemon recorded from a registry pull, which an import
+    cannot produce), ``medmcp-update apply``, its fixed mounts — and may carry
+    only values this install already runs with, so it can redeploy the stack but
+    not change what it mounts or runs.
+    """
+    host = cast("JsonDict", body.get("HostConfig") or {})
+    image = str(body.get("Image") or "")
+    digest = re.fullmatch(rf"{re.escape(ctx.core_image_repo)}@(sha256:[0-9a-f]{{64}})", image)
+    if not ctx.core_image_repo or digest is None:
+        return "the update helper must be the core image, by digest"
+    if image not in repo_digests:
+        return "the update helper's image was not pulled from the core's registry"
+    if body.get("Entrypoint") != [UPDATER_ENTRYPOINT] or body.get("Cmd") != ["apply"]:
+        return "the update helper must run 'medmcp-update apply'"
+    if body.get("User") or body.get("WorkingDir") or host.get("Mounts"):
+        return "the update helper may not set a user, working directory or extra mounts"
+    expected = {f"{ctx.socket_source}:{_SOCKET_TARGET}", f"{ctx.state_volume}:{_STATE_TARGET}"}
+    optional = (
+        {f"{ctx.docker_config_source}:{_DOCKER_CONFIG_TARGET}:ro"}
+        if ctx.docker_config_source
+        else set[str]()
+    )
+    binds = {str(b) for b in cast("list[Any]", host.get("Binds") or [])}
+    if not ctx.state_volume or not expected <= binds or not binds <= expected | optional:
+        return "the update helper's mounts are not the ones it is given"
+    env = _env_map(body)
+    if not set(env) <= _UPDATER_ENV_KEYS:
+        return f"the update helper may not set {sorted(set(env) - _UPDATER_ENV_KEYS)}"
+    fixed = {
+        "DOCKER_HOST": f"unix://{_SOCKET_TARGET}",
+        "MEDMCP_UPDATE_REPLACE": ctx.core_id,
+        "MEDMCP_UPDATE_PROJECT": ctx.project,
+        "MEDMCP_UPDATE_PROJECT_DIR": ctx.project_dir,
+        "MEDMCP_UPDATE_DIGEST": digest.group(1),
+    }
+    for key, value in fixed.items():
+        if not value or env.get(key) != value:
+            return f"the update helper's {key} is not this install's"
+    if env.get("MEDMCP_UPDATE_PREVIOUS_DIGEST", "") not in {"", *ctx.core_digests}:
+        return "the update helper may roll back only to the running core"
+    if not re.fullmatch(r"[\w.-]*", env.get("MEDMCP_UPDATE_PREVIOUS_TAG", "")):
+        return "the update helper's previous tag is malformed"
+    try:
+        loaded: object = json.loads(env.get("MEDMCP_UPDATE_ENV", ""))
+    except json.JSONDecodeError:
+        return "MEDMCP_UPDATE_ENV is not JSON"
+    if not isinstance(loaded, dict):
+        return "MEDMCP_UPDATE_ENV is not an object"
+    carried = cast("JsonDict", loaded)
+    if carried.get("MEDMCP_WORKSPACE") != ctx.workspace:
+        return "the update helper may not change the workspace"
+    for key, value in carried.items():
+        if not isinstance(value, str) or not _carried_value_ok(key, value, ctx):
+            return f"the update helper may not carry {key}={value!r}"
     return None
 
 
@@ -244,53 +341,70 @@ class Daemon:
         found = self._get(f"/containers/{ref}/json")
         return found if isinstance(found, dict) else None
 
-    def image_repo(self, ref: str) -> str:
-        """The repository an image reference (tag or id) belongs to."""
-        found = self._get(f"/images/{ref}/json")
-        if isinstance(found, dict):
-            for tag in cast("list[Any]", found.get("RepoTags") or []) + cast(
-                "list[Any]", found.get("RepoDigests") or []
-            ):
-                return _repo(str(tag))
-        return _repo(ref)
+    def repo_digests(self, ref: str) -> list[str]:
+        """``repo@digest`` references the daemon recorded for an image's pulls."""
+        found = self._get(f"/images/{ref}/json") if ref else None
+        if not isinstance(found, dict):
+            return []
+        return [str(d) for d in cast("list[Any]", found.get("RepoDigests") or [])]
+
+    def _service(self, service: str) -> JsonDict | None:
+        flt = json.dumps(
+            {
+                "label": [
+                    f"com.docker.compose.project={self._project}",
+                    f"com.docker.compose.service={service}",
+                ]
+            }
+        )
+        listed = self._client.get("/containers/json", params={"filters": flt}).json()
+        return self.container(str(listed[0]["Id"])) if listed else None
 
     def context(self) -> GuardContext:
         """The core's mounts, networks and image, re-read every few seconds."""
         if self._ctx is not None and time.monotonic() - self._ctx_at < 10:
             return self._ctx
-        flt = json.dumps(
-            {
-                "label": [
-                    f"com.docker.compose.project={self._project}",
-                    "com.docker.compose.service=medmcp",
-                ]
-            }
-        )
-        listed = self._client.get("/containers/json", params={"filters": flt}).json()
-        core = self.container(str(listed[0]["Id"])) if listed else None
-        mounts: set[str] = set()
-        networks: set[str] = set()
-        repo = ""
-        if core is not None:
-            for mount in cast("list[JsonDict]", core.get("Mounts") or []):
-                if str(mount.get("Destination", "")).startswith("/run/medmcp-guard"):
-                    continue  # the filtered socket stays with the core
-                mounts.add(str(mount.get("Name") or mount.get("Source") or ""))
-            networks = set(
-                cast(
-                    "JsonDict",
-                    cast("JsonDict", core.get("NetworkSettings") or {}).get("Networks") or {},
-                )
-            )
-            repo = _repo(str(cast("JsonDict", core.get("Config") or {}).get("Image") or ""))
-        self._ctx = GuardContext(
+        core = self._service("medmcp")
+        llm = self._service("llm")
+        ctx = GuardContext(
             project=self._project,
             workspace=self._workspace,
             socket_source=os.environ.get("MEDMCP_DOCKER_SOCKET_SOURCE", ""),
-            core_image_repo=repo,
-            mount_sources=mounts - {""},
-            networks=networks,
+            core_image_repo="",
         )
+        if core is not None:
+            config = cast("JsonDict", core.get("Config") or {})
+            for mount in cast("list[JsonDict]", core.get("Mounts") or []):
+                dest = str(mount.get("Destination", ""))
+                if dest.startswith("/run/medmcp-guard"):
+                    continue  # the filtered socket stays with the core
+                ctx.mount_sources.add(str(mount.get("Name") or mount.get("Source") or ""))
+                if dest == _STATE_TARGET and mount.get("Type") == "volume":
+                    ctx.state_volume = str(mount.get("Name") or "")
+                if dest == _DOCKER_CONFIG_TARGET:
+                    ctx.docker_config_source = str(mount.get("Source") or "")
+            ctx.mount_sources.discard("")
+            net_settings = cast("JsonDict", core.get("NetworkSettings") or {})
+            ctx.networks = set(cast("JsonDict", net_settings.get("Networks") or {}))
+            ctx.core_image_repo = _repo(str(config.get("Image") or ""))
+            ctx.core_id = str(core.get("Id") or "")
+            ctx.core_env = _env_map(config)
+            labels = cast("JsonDict", config.get("Labels") or {})
+            ctx.project_dir = str(labels.get("com.docker.compose.project.working_dir") or "")
+            ctx.core_digests = {
+                d.partition("@")[2] for d in self.repo_digests(str(core.get("Image") or ""))
+            }
+        if llm is not None:
+            llm_config = cast("JsonDict", llm.get("Config") or {})
+            ctx.llm_image = str(llm_config.get("Image") or "")
+            ctx.llm_env = _env_map(llm_config)
+            for mount in cast("list[JsonDict]", llm.get("Mounts") or []):
+                if (
+                    mount.get("Destination") == _OLLAMA_MODELS_TARGET
+                    and mount.get("Type") == "bind"
+                ):
+                    ctx.llm_models_source = str(mount.get("Source") or "")
+        self._ctx = ctx
         self._ctx_at = time.monotonic()
         return self._ctx
 
@@ -302,14 +416,20 @@ def check_request(method: str, target: str, body: bytes, daemon: Daemon) -> Deci
     for allowed_method, pattern in _READS:
         if method == allowed_method and pattern.fullmatch(path):
             return Decision(True)
+    if method == "POST" and path == "/images/create":
+        # A pull, never an import: ``fromSrc`` with a body or URL would let the
+        # caller name an image of its own making after the core's repository.
+        query = parse_qs(parts.query, keep_blank_values=True)
+        if not query.get("fromImage") or not set(query) <= _PULL_QUERY_KEYS or body:
+            return Decision(False, "only pulls by name are allowed")
+        return Decision(True)
     if method == "POST" and path == "/containers/create":
         try:
             parsed = cast("JsonDict", json.loads(body or b"{}"))
         except json.JSONDecodeError:
             return Decision(False, "create body is not JSON")
         ctx = daemon.context()
-        image = str(parsed.get("Image") or "")
-        reason = check_create(parsed, ctx, {image: daemon.image_repo(image)})
+        reason = check_create(parsed, ctx, daemon.repo_digests(str(parsed.get("Image") or "")))
         if reason is not None:
             return Decision(False, reason)
         return Decision(True, body=json.dumps(with_guard_label(parsed)).encode())
@@ -328,7 +448,7 @@ def check_request(method: str, target: str, body: bytes, daemon: Daemon) -> Deci
         same_project = labels.get("com.docker.compose.project") == daemon.context().project
         return Decision(ours or same_project, "" if ours or same_project else "not this project's")
     if (method, op) in _LABELLED_OPS and ours:
-        return Decision(True)
+        return Decision(True, upgrade=(method, op) == ("POST", "/attach"))
     return Decision(False, f"{method} {path} is not allowed on this container")
 
 
@@ -411,18 +531,17 @@ class Guard:
     async def _handle_one(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         method, target, headers = _parse_head(await _read_head(reader))
         names = {k.lower(): v for k, v in headers}
-        chunked = "chunked" in names.get("transfer-encoding", "").lower()
+        path = _VERSION_PREFIX.sub("", unquote(urlsplit(target).path))
+        if "transfer-encoding" in names:
+            writer.write(_refusal("request bodies must have a length"))
+            await writer.drain()
+            return
         length = int(names.get("content-length", "0") or 0)
         if length > _BODY_LIMIT:
             writer.write(_refusal("request body too large"))
             await writer.drain()
             return
         body = await reader.readexactly(length) if length else b""
-        path = _VERSION_PREFIX.sub("", unquote(urlsplit(target).path))
-        if chunked and path == "/containers/create":
-            writer.write(_refusal("a create body must have a length"))
-            await writer.drain()
-            return
         decision = await asyncio.to_thread(check_request, method, target, body, self._daemon)
         if not decision.allowed:
             log.warning("refused %s %s: %s", method, path, decision.reason)
@@ -431,17 +550,28 @@ class Guard:
             return
         if decision.body is not None:
             body = decision.body
-            headers = [(k, v) for k, v in headers if k.lower() != "content-length"]
+        # Exactly one request goes upstream: the connection is closed after its
+        # response, unless this is an attach the guard allowed to upgrade.
+        hop = {"connection", "upgrade", "keep-alive", "content-length", "transfer-encoding"}
+        headers = [(k, v) for k, v in headers if k.lower() not in hop]
+        if body:
             headers.append(("Content-Length", str(len(body))))
-        upgrade = names.get("connection", "").lower() == "upgrade"
-        if not upgrade:
-            headers = [(k, v) for k, v in headers if k.lower() != "connection"]
+        if decision.upgrade and names.get("upgrade"):
+            headers += [("Connection", "Upgrade"), ("Upgrade", names["upgrade"])]
+        else:
             headers.append(("Connection", "close"))
         up_reader, up_writer = await asyncio.open_unix_connection(self._upstream)
         try:
             up_writer.write(_render_head(method, target, headers) + body)
             await up_writer.drain()
-            await asyncio.gather(_pipe(reader, up_writer), _pipe(up_reader, writer))
+            response_head = await up_reader.readuntil(b"\r\n\r\n")
+            writer.write(response_head)
+            await writer.drain()
+            status = response_head.split(b" ", 2)[1] if b" " in response_head else b""
+            if decision.upgrade and status == b"101":
+                await asyncio.gather(_pipe(reader, up_writer), _pipe(up_reader, writer))
+            else:
+                await _pipe(up_reader, writer)
         finally:
             with contextlib.suppress(Exception):
                 up_writer.close()

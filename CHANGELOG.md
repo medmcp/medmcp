@@ -9,6 +9,7 @@ Notable, user-visible changes to MedMCP. Format follows
 ### Security
 
 - Agent: in a `docker compose` install the agent runs in its own container, with no docker socket, no access to the state volume or credentials, its config read-only, no capabilities but `DAC_OVERRIDE` and a read-only root file system; stack tools reach the core's pool through the broker (`MEDMCP_AGENT_ISOLATION`, default `container`).
+- Gateway and docker guard: an encoded path no longer slips past the gateway's model-endpoint check (and the shim refuses Ollama's model-management routes); the guard accepts the update helper only in its exact shape, from a pulled core image by digest, allows pulls but not imports, and forwards exactly one request per connection.
 - Compose: the core no longer holds the docker socket; a `docker-guard` service does, and forwards only what the core needs — containers without `--privileged`, host namespaces, extra capabilities or foreign mounts, and lifecycle calls only on containers it created.
 - Compose: every service drops all capabilities and privilege escalation; the core keeps `DAC_OVERRIDE` and a pids limit.
 - Workspace: `.vibe` (transcripts, provenance, workflows) is private to its owner on a shared host, and the updater writes its recovered env file `0600` from the start.

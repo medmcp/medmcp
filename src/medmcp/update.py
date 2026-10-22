@@ -71,7 +71,7 @@ _OLLAMA_MODELS_TARGET = "/root/.ollama"
 # (plus the ones shared with the llm service). Read back from the container's
 # environment; a value equal to the compose default is not carried, so a
 # release that changes a default is not pinned to the old one by the update.
-_CORE_ENV_VARS: tuple[str, ...] = (
+CORE_ENV_VARS: tuple[str, ...] = (
     "MEDMCP_WORKSPACE",
     "MEDMCP_GPU",
     "OLLAMA_MODEL",
@@ -643,7 +643,7 @@ def plan_apply(
 
     env: dict[str, str] = {}
     have = _env(self_info)
-    for key in _CORE_ENV_VARS:
+    for key in CORE_ENV_VARS:
         # An empty value never overrides a ``${VAR:-default}`` in compose, so it
         # is the same as unset; carrying it would only pin a blank.
         if have.get(key) and have[key] != defaults.get(key, ""):

@@ -111,6 +111,32 @@ class TestRoutes:
         assert client.post(f"/provider/ollama/{path}", json={}).status_code == 403
         assert seen == []
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "api/pull%3Fx=models",  # a decoded ? would move /models into the query
+            "api/create%23models",  # a decoded # would make it a fragment
+            "v1/../api/pull/models",
+            "v1/%2E%2E/api/copy/chat/completions",
+            "api/tags/models",  # ends like a model endpoint, but is not one
+            "v1/chat/completions/extra",
+        ],
+    )
+    def test_no_spelling_of_a_path_reaches_anything_but_a_model_endpoint(
+        self, client: TestClient, seen: list[httpx.Request], path: str
+    ) -> None:
+        """The check and the upstream URL see the same path, matched exactly."""
+        assert client.post(f"/provider/ollama/{path}", json={}).status_code == 403
+        assert seen == []
+
+    @pytest.mark.parametrize("path", ["v1/chat/completions", "v1/models"])
+    def test_the_model_endpoints_are_forwarded(
+        self, client: TestClient, seen: list[httpx.Request], path: str
+    ) -> None:
+        """Under the provider's base path."""
+        assert client.post(f"/provider/ollama/{path}", json={}).status_code == 200
+        assert seen[0].url.path == f"/{path}"
+
     def test_a_provider_not_in_force_is_refused(
         self, client: TestClient, seen: list[httpx.Request]
     ) -> None:

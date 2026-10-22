@@ -27,6 +27,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import tomllib
 from typing import Any, cast
 from urllib.parse import urlsplit
@@ -50,6 +51,10 @@ GATEWAY_PORT = 11436
 # The paths a model provider is reached on. Anything else on the local model
 # server (Ollama's /api/pull, /api/delete, /api/create …) is not the agent's.
 _PROVIDER_PATH_SUFFIXES: tuple[str, ...] = ("chat/completions", "models", "responses", "messages")
+# What a forwarded path may contain. The path arrives percent-decoded, so a
+# literal ?, # or % would be re-read as a query, fragment or escape when the
+# upstream URL is built — a route around the endpoint check.
+_SAFE_PATH = re.compile(r"[A-Za-z0-9._~\-/:@+,=]*")
 # Request headers never forwarded: hop-by-hop, the agent's own (placeholder)
 # credentials, and anything the client cannot be trusted to set.
 _DROP_REQUEST_HEADERS: frozenset[str] = frozenset(
@@ -134,14 +139,33 @@ def _core_config() -> JsonDict:
         return {}
 
 
-def _provider_target(name: str) -> tuple[str, dict[str, str]] | None:
-    """``(origin, auth headers)`` for the provider *name* now in force, or ``None``."""
+def _safe_path(path: str) -> bool:
+    """Whether *path* is plain path characters with no ``.``/``..`` segment."""
+    return bool(_SAFE_PATH.fullmatch(path)) and not any(
+        seg in {".", ".."} for seg in path.split("/")
+    )
+
+
+def _model_endpoint(path: str, base: str) -> bool:
+    """Whether *path* is a model endpoint under the provider's base path, exactly."""
+    prefixes = {base, f"{base}/v1"} if base else {"", "v1"}
+    path = path.strip("/")
+    return any(
+        path == f"{prefix}/{suffix}".lstrip("/")
+        for prefix in prefixes
+        for suffix in _PROVIDER_PATH_SUFFIXES
+    )
+
+
+def _provider_target(name: str) -> tuple[str, str, dict[str, str]] | None:
+    """``(origin, base path, auth headers)`` for the provider *name* in force, or ``None``."""
     providers = cast("list[JsonDict]", _core_config().get("providers", []))
     provider = next((p for p in providers if p.get("name") == name), None)
     if provider is None or not provider.get("api_base"):
         return None
     if name != settings.CLOUD_PROVIDER_NAME:
-        return _origin(str(provider["api_base"])), {}
+        api_base = str(provider["api_base"])
+        return _origin(api_base), urlsplit(api_base).path.strip("/"), {}
     cloud = settings.active_cloud_model()
     if cloud is None:
         return None
@@ -155,7 +179,8 @@ def _provider_target(name: str) -> tuple[str, dict[str, str]] | None:
             headers["x-api-key"] = key
         else:
             headers["authorization"] = f"Bearer {key}"
-    return _origin(str(cloud["api_base"])), headers
+    api_base = str(cloud["api_base"])
+    return _origin(api_base), urlsplit(api_base).path.strip("/"), headers
 
 
 def _mcp_target(name: str) -> tuple[str, dict[str, str]] | None:
@@ -241,15 +266,18 @@ class EgressGateway:
         target = _provider_target(name)
         if target is None:
             return self._refuse(request, f"provider {name!r} is not in force")
-        if not path.rstrip("/").endswith(_PROVIDER_PATH_SUFFIXES):
+        origin, base, auth = target
+        if not _safe_path(path) or not _model_endpoint(path, base):
             return self._refuse(request, f"path {path!r} is not a model endpoint")
-        return await self._forward(request, target[0], path, target[1])
+        return await self._forward(request, origin, path, auth)
 
     async def _mcp(self, request: Request) -> Response:
         name, path = request.path_params["name"], request.path_params["path"]
         target = _mcp_target(name)
         if target is None:
             return self._refuse(request, f"external server {name!r} is not switched on")
+        if not _safe_path(path):
+            return self._refuse(request, f"path {path!r} is not allowed")
         return await self._forward(request, target[0], path, target[1])
 
     def _refuse(self, request: Request, reason: str) -> Response:
@@ -267,9 +295,10 @@ class EgressGateway:
             k: v for k, v in request.headers.items() if k.lower() not in _DROP_REQUEST_HEADERS
         }
         headers.update(auth)
+        # Built from parts, never by formatting a string the client influenced.
         upstream = self._client.build_request(
             request.method,
-            f"{origin}/{path}",
+            httpx.URL(origin).copy_with(path="/" + path.lstrip("/")),
             params=request.query_params,
             headers=headers,
             content=await request.body(),

@@ -37,6 +37,9 @@ SHELL_PROBE = "; ".join(
         "grep CapEff /proc/self/status",
         "env | grep -ciE 'token|secret|api_key' || true",
         "grep -c /provider/ /app/.vibe/agent-home/config.toml",
+        "gw=$(grep -o 'http://[0-9.]*:11436' /app/.vibe/agent-home/config.toml | head -1)",
+        "curl -s -o /dev/null -w 'GATEWAY-%{http_code}\\n' -X POST -d '{}'"
+        ' "$gw/provider/ollama/api/pull%3Fx=models"',
         "touch /app/x 2>/dev/null && echo ROOT-WRITABLE || echo ROOT-READONLY",
         'touch "$MEDMCP_WORKSPACE/agent-wrote-this" && echo WORKSPACE-WRITABLE',
         "python3 - <<'PY'\n" + BROKER_PROBE + "PY",

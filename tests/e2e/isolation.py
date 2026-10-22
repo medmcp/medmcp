@@ -184,6 +184,7 @@ def _checks(env: dict[str, str]) -> None:
         ("ROOT-READONLY", "agent's root file system is read-only"),
         ("WORKSPACE-WRITABLE", "agent can write the workspace"),
         ("not approved", "unapproved broker call is refused"),
+        ("GATEWAY-403", "gateway refuses an encoded path to Ollama's admin API"),
     ):
         _check(marker in probe, what)
     _check("\\n0\\n" in probe, "agent environment holds no credential-shaped variable")
@@ -205,6 +206,7 @@ def _checks(env: dict[str, str]) -> None:
         (["run", "--rm", "--privileged", STACK_IMAGE], "a privileged container"),
         (["run", "--rm", "-v", "/:/host", STACK_IMAGE], "a host root mount"),
         (["exec", f"{PROJECT}-llm-1", "true"], "exec into another container"),
+        (["import", "/dev/null", "ghcr.io/medmcp/core:e2e"], "an image import"),
     ):
         out = _run("docker", "exec", core, "docker", *args, env=env, check=False)
         _check("refused by medmcp-docker-guard" in out, f"guard refuses {what}")

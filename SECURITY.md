@@ -27,6 +27,33 @@ Out of scope:
 - Issues that only apply to clinical use (MedMCP is not approved for it — see the warning in the README)
 - Denial of service on deliberately malformed inputs where the fix is "don't feed it malformed inputs"
 
+## Threat model
+
+What MedMCP protects is the imaging data in the workspace and the operator's
+machine. It assumes:
+
+- **The model can be steered.** Anything it reads — a document, a DICOM tag, a
+  tool's output, a shared workflow — may carry instructions. So the model gets
+  no authority of its own: every action waits for a person, and the agent runs
+  in a container that can reach the workspace and nothing else.
+- **Other accounts and processes on the machine are not trusted.** The port is
+  loopback-only and the API needs a token.
+- **Web pages are not trusted.** Requests from another origin are refused.
+- **Stack images are trusted once installed.** They run sandboxed (no network,
+  no capabilities, the workspace only); a stack that needs the network says so
+  and asks for consent at install.
+
+Trust boundaries in a `docker compose` install: the browser ↔ the workspace
+server (token, origin check); the server ↔ the agent container (stdio, a
+read-only config, the broker that only runs approved stack calls, the egress
+gateway that holds every credential); the server ↔ Docker (the guard); the
+server ↔ stacks (sandboxed containers).
+
+Not covered: a person approving a harmful call (the dialog shows the command,
+rule-based risk labels and every path, but the decision is theirs); a
+compromised stack image or model file; and a host-native install, where the
+agent runs with the operator's rights.
+
 ## Network posture
 
 The workspace server listens on loopback. Do not expose the port. In a container

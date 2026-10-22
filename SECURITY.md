@@ -72,7 +72,10 @@ user control:
 - **What approving a command grants.** A shell command runs with the agent's
   rights. In a `docker compose` install the agent has its own container: the
   workspace, its own configuration read-only, and nothing else — no Docker
-  socket, no credentials, no capabilities beyond writing your files. Run
+  socket, no credentials, no capabilities beyond writing your files, and no
+  network: the model, a cloud model and external MCP servers are reached
+  through a gateway in the core, which holds their keys and forwards only to
+  what you configured. A stack tool runs only when you approved that exact call. Run
   host-native (`just workspace`), the agent is you: an approved command can do
   whatever your account can, so read each one before you allow it.
 - **The agent cannot loosen its own rules.** Its configuration is read-only in

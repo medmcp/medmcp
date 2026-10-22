@@ -76,6 +76,7 @@ from medmcp import (
     chat_export,
     distill,
     explain,
+    gateway,
     harness,
     localmodels,
     origincheck,
@@ -172,7 +173,7 @@ def _resolve_backend_spec(name: str) -> BackendSpec | None:
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     """Start the stack pool + broker on boot (when enabled); tear them down on exit."""
-    global _pool, _broker
+    global _pool, _broker, _gateway
     port = int(os.environ.get("MEDMCP_WORKSPACE_PORT", str(DEFAULT_PORT)))
     link = access.pairing_url(access.public_base_url(port))
     log.info("open %s to use MedMCP in this browser (once per browser)", link)
@@ -180,6 +181,16 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         "agent runs %s",
         "in its own container" if agentbox.isolation_enabled() else "as a child process",
     )
+    # The isolated agent's only way out, listening before the agent can start;
+    # a core that cannot set it up leaves the agent unstartable, not unconfined.
+    if _agent_launcher is not None:
+        try:
+            box = await asyncio.to_thread(_agent_launcher.prepare)
+            _gateway = gateway.EgressGateway(box.gateway_host)
+            await _gateway.start()
+            agentbox.set_gateway_base(_gateway.base_url)
+        except Exception:
+            _audit.exception("agent isolation unavailable; the agent will not start")
     # Before any agent can run: fingerprint the legacy transcripts, so one that
     # appears in the agent-writable logs volume later is never replayed.
     recorded = await asyncio.to_thread(provenance.record_legacy_transcripts)
@@ -231,8 +242,11 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
             await _broker.aclose()
         if _pool is not None:
             await _pool.aclose()
+        if _gateway is not None:
+            await _gateway.aclose()
         _broker = None
         _pool = None
+        _gateway = None
 
 
 async def _update_check_loop() -> None:
@@ -362,16 +376,24 @@ app.add_middleware(OriginGuard)
 # have to plumb one into the deployment by hand. Passed as a provider, re-read
 # on every (re)start.
 # With MEDMCP_AGENT_ISOLATION=container it runs in a sibling container that has
-# no docker socket, no state volume and a read-only view of its own config (see
-# medmcp.agentbox); otherwise as a child of this process.
-_client: VibeAcpClient = VibeAcpClient(
-    extra_env=settings.agent_secret_env,
-    launcher=(
-        agentbox.ContainerLauncher(os.environ.get("MEDMCP_WORKSPACE") or str(WORKSPACE_ROOT))
-        if agentbox.isolation_enabled()
-        else None
-    ),
+# no docker socket, no state volume, a read-only view of its own config and no
+# route out but this process's egress gateway, which holds the credentials — so
+# the agent gets placeholders (see medmcp.agentbox, medmcp.gateway); otherwise as
+# a child of this process, with the credentials themselves.
+_agent_launcher: agentbox.ContainerLauncher | None = (
+    agentbox.ContainerLauncher(os.environ.get("MEDMCP_WORKSPACE") or str(WORKSPACE_ROOT))
+    if agentbox.isolation_enabled()
+    else None
 )
+_client: VibeAcpClient = VibeAcpClient(
+    extra_env=(
+        (lambda: gateway.placeholder_env(settings.agent_secret_env()))
+        if _agent_launcher is not None
+        else settings.agent_secret_env
+    ),
+    launcher=_agent_launcher,
+)
+_gateway: gateway.EgressGateway | None = None
 
 # Live websocket connections, so a settings-triggered vibe restart can close
 # them (each client auto-reconnects into a fresh session on the new process).

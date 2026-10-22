@@ -163,6 +163,9 @@ services:
     cap_add: [DAC_OVERRIDE]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 4096
+    # The isolated agent's network: internal, so its only peer is this container
+    # (the API, the broker, and the egress gateway that reaches the model).
+    networks: [default, agent]
     volumes:
       # Docker socket → core spawns sibling stack containers. Rootless by
       # default; rootful hosts set XDG_RUNTIME_DIR=/var/run. Long form so a wrong
@@ -200,6 +203,10 @@ services:
       # than plain auths, pre-pull on the host instead.)
       - "${HOME}/.docker/config.json:/run/host-docker-config.json:ro"
     restart: unless-stopped
+
+networks:
+  agent:
+    internal: true
 
 volumes:
   ollama-models:

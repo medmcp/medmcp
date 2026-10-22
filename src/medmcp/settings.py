@@ -2364,4 +2364,12 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
 
     atomic_write_toml(config_path, cfg)
     if agentbox.isolation_enabled():
-        agentbox.publish_home(VIBE_HOME, agentbox.AGENT_HOME)
+        # The agent reaches every endpoint through the core's egress gateway.
+        from medmcp import gateway
+
+        base = agentbox.gateway_base()
+        agentbox.publish_home(
+            VIBE_HOME,
+            agentbox.AGENT_HOME,
+            config=gateway.agent_config(cfg, base) if base else None,
+        )

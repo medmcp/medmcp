@@ -123,3 +123,14 @@ def test_the_agent_is_isolated_by_default() -> None:
         env = cast("dict[str, str]", core["environment"])
         assert env["MEDMCP_AGENT_ISOLATION"] == "${MEDMCP_AGENT_ISOLATION:-container}"
         assert "vibe-agent:/app/.vibe/agent-home" in core["volumes"]
+
+
+def test_the_agent_network_has_no_route_out() -> None:
+    """The isolated agent's network is internal, and only the core joins it."""
+    for filename in COMPOSE_FILES:
+        doc = cast("dict[str, Any]", yaml.safe_load((ROOT / filename).read_text()))
+        assert doc["networks"]["agent"] == {"internal": True}, filename
+        members = [
+            n for n, svc in _services(filename).items() if "agent" in (svc.get("networks") or [])
+        ]
+        assert members == ["medmcp"], filename

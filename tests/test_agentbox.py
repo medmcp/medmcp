@@ -12,12 +12,18 @@ from medmcp import agentbox, settings
 from .conftest import synced_config
 
 WS = "/srv/data"
+INTERNAL = {"medmcp_agent"}
 
 CORE: dict[str, Any] = {
     "Id": "0123456789abcdef",
     "Name": "/medmcp-medmcp-1",
     "Image": "sha256:core",
-    "NetworkSettings": {"Networks": {"medmcp_default": {}}},
+    "NetworkSettings": {
+        "Networks": {
+            "medmcp_default": {"IPAddress": "172.18.0.5"},
+            "medmcp_agent": {"IPAddress": "172.19.0.2"},
+        }
+    },
     "Mounts": [
         {
             "Type": "bind",
@@ -42,10 +48,11 @@ class TestPlan:
 
     def test_only_the_agents_mounts_are_carried(self) -> None:
         """No docker socket and no state volume; the agent home and stacks.d read-only."""
-        box = agentbox.plan(CORE, WS)
+        box = agentbox.plan(CORE, WS, INTERNAL)
         assert box.owner == "medmcp-medmcp-1"
         assert box.image == "sha256:core"
-        assert box.network == "medmcp_default"
+        assert box.network == "medmcp_agent"
+        assert box.gateway_host == "172.19.0.2"
         assert box.mounts == (
             f"{WS}:{WS}",
             f"medmcp_vibe-agent:{agentbox.AGENT_HOME}:ro",
@@ -57,12 +64,18 @@ class TestPlan:
         """Isolation never degrades into running the agent with the core's mounts."""
         core = {**CORE, "Mounts": [m for m in CORE["Mounts"] if "vibe-agent" not in str(m)]}
         with pytest.raises(agentbox.IsolationUnavailableError, match="vibe-agent"):
-            agentbox.plan(core, WS)
+            agentbox.plan(core, WS, INTERNAL)
+
+
+def test_a_core_on_no_internal_network_refuses() -> None:
+    """Without a network that has no route out, the agent would reach the internet."""
+    with pytest.raises(agentbox.IsolationUnavailableError, match="internal network"):
+        agentbox.plan(CORE, WS, set())
 
 
 def test_docker_argv_is_hardened() -> None:
     """Capabilities, privileges and the root file system are locked down."""
-    argv = agentbox.docker_argv(agentbox.plan(CORE, WS), ["OLLAMA_BASE_URL"], "agent-x")
+    argv = agentbox.docker_argv(agentbox.plan(CORE, WS, INTERNAL), ["OLLAMA_BASE_URL"], "agent-x")
     joined = " ".join(argv)
     assert "docker.sock" not in joined
     assert "vibe-state" not in joined
@@ -70,7 +83,7 @@ def test_docker_argv_is_hardened() -> None:
         "--cap-drop ALL",
         "--security-opt no-new-privileges",
         "--read-only",
-        "--network medmcp_default",
+        "--network medmcp_agent",
         f"--label {agentbox.OWNER_LABEL}=medmcp-medmcp-1",
     ):
         assert flag in joined

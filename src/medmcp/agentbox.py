@@ -18,7 +18,9 @@ JSON-RPC to it over the ``docker run -i`` stdio. That container gets:
 - ``stacks.d`` read-only, for the skills it names;
 - the broker socket, inside the agent home, through which every stack tool runs
   in the core's pool — so the core stays the only process that starts containers;
-- the core's network, to reach the model.
+- an internal network shared with the core and nothing else: the model, a cloud
+  model and external MCP servers are reached through the core's egress gateway
+  (:mod:`medmcp.gateway`), which holds their credentials.
 
 No docker socket, no state volume, no provenance or workflow volumes, no docker
 credentials, all capabilities dropped but ``DAC_OVERRIDE`` (a rootful host's
@@ -36,15 +38,14 @@ import secrets
 import shutil
 import socket
 import subprocess
-import sys
 import tempfile
-import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 from medmcp.acp import VIBE_HOME, JsonDict
+from medmcp.statefile import atomic_write_toml
 
 log: logging.Logger = logging.getLogger(__name__)
 
@@ -64,6 +65,21 @@ _FORWARD_PREFIXES: tuple[str, ...] = ("MEDMCP_", "OLLAMA_", "LC_")
 _FORWARD_NAMES: frozenset[str] = frozenset({"LANG", "TZ"})
 # Where the path guard keeps its retry ledger: the agent home is read-only.
 _PATHGUARD_LEDGER = "/tmp/pathguard_retries.json"
+
+# The egress gateway's base URL once it listens (set by the server at start); the
+# agent's copy of config.toml names it instead of the real endpoints.
+_gateway_base: str | None = None
+
+
+def set_gateway_base(url: str | None) -> None:
+    """Record where the agent reaches the egress gateway."""
+    global _gateway_base
+    _gateway_base = url
+
+
+def gateway_base() -> str | None:
+    """Where the agent reaches the egress gateway, once it listens."""
+    return _gateway_base
 
 
 def isolation_enabled() -> bool:
@@ -93,19 +109,26 @@ def _copy_atomic(src: Path, dst: Path) -> None:
         raise
 
 
-def publish_home(vibe_home: Path = VIBE_HOME, agent_home: Path = AGENT_HOME) -> None:
+def publish_home(
+    vibe_home: Path = VIBE_HOME, agent_home: Path = AGENT_HOME, config: JsonDict | None = None
+) -> None:
     """Mirror what the agent reads from *vibe_home* into *agent_home*.
 
     Runs after every config sync. Files are replaced atomically; a file gone from
     the source is removed from the copy, so an agent profile or prompt the core
     dropped does not linger where vibe would still find it. ``logs/`` is created
-    as the mount point for the session-log volume.
+    as the mount point for the session-log volume. *config*, when given, is
+    written as the agent's ``config.toml`` instead of a copy of the core's (the
+    gateway's view of it, see :func:`medmcp.gateway.agent_config`).
     """
     agent_home.mkdir(parents=True, exist_ok=True)
     (agent_home / "logs").mkdir(exist_ok=True)
     for name in _HOME_FILES:
         src = vibe_home / name
-        if src.is_file():
+        if name == "config.toml" and config is not None:
+            atomic_write_toml(agent_home / name, config)
+            os.chmod(agent_home / name, 0o644)
+        elif src.is_file():
             _copy_atomic(src, agent_home / name)
     trusted = agent_home / "trusted_folders.toml"
     if not trusted.exists():
@@ -134,6 +157,7 @@ class AgentContainer:
     owner: str
     image: str
     network: str
+    gateway_host: str
     mounts: tuple[str, ...]
 
 
@@ -144,12 +168,14 @@ def _mount_source(mount: JsonDict) -> str:
     return str(mount["Source"])
 
 
-def plan(core: JsonDict, workspace: str) -> AgentContainer:
+def plan(core: JsonDict, workspace: str, internal: set[str]) -> AgentContainer:
     """The agent container for the core described by *core* (``docker inspect``).
 
     The agent gets the core's image by id (so a pulled newer tag does not change
-    what runs), its first network, and four of its mounts: the workspace, the
-    agent home (read-only), the session logs, and ``stacks.d`` (read-only).
+    what runs), the core's network among *internal* (docker networks with no
+    route out), and four of its mounts: the workspace, the agent home
+    (read-only), the session logs, and ``stacks.d`` (read-only). The core's
+    address on that network is where the egress gateway listens.
     """
     by_dest = {str(m.get("Destination")): m for m in cast("list[JsonDict]", core.get("Mounts", []))}
     missing = [
@@ -162,9 +188,19 @@ def plan(core: JsonDict, workspace: str) -> AgentContainer:
             f"the core container has no mount at {', '.join(missing)}; "
             "agent isolation needs the compose file's vibe-agent and vibe-logs volumes"
         )
-    networks = cast("JsonDict", cast("JsonDict", core.get("NetworkSettings", {})).get("Networks"))
-    if not networks:
-        raise IsolationUnavailableError("the core container is on no network")
+    networks = cast(
+        "dict[str, JsonDict]",
+        cast("JsonDict", core.get("NetworkSettings", {})).get("Networks") or {},
+    )
+    shared = sorted(n for n in networks if n in internal)
+    if not shared:
+        raise IsolationUnavailableError(
+            "the core container is on no internal network; agent isolation needs the "
+            "compose file's agent network (internal: true)"
+        )
+    gateway_host = str(networks[shared[0]].get("IPAddress") or "")
+    if not gateway_host:
+        raise IsolationUnavailableError(f"the core has no address on {shared[0]}")
     mounts = [
         f"{_mount_source(by_dest[workspace])}:{workspace}",
         f"{_mount_source(by_dest[str(AGENT_HOME)])}:{AGENT_HOME}:ro",
@@ -177,7 +213,8 @@ def plan(core: JsonDict, workspace: str) -> AgentContainer:
     return AgentContainer(
         owner=name,
         image=str(core["Image"]),
-        network=sorted(networks)[0],
+        network=shared[0],
+        gateway_host=gateway_host,
         mounts=tuple(mounts),
     )
 
@@ -246,6 +283,22 @@ def inspect_self() -> JsonDict:
     return items[0]
 
 
+def internal_networks(names: list[str]) -> set[str]:
+    """Which of the docker networks *names* are internal (no route out)."""
+    if not names:
+        return set()
+    result = _docker("network", "inspect", *names)
+    if result.returncode != 0:
+        raise IsolationUnavailableError(f"cannot inspect networks: {result.stderr.strip()}")
+    import json
+
+    return {
+        str(n["Name"])
+        for n in cast("list[JsonDict]", json.loads(result.stdout))
+        if n.get("Internal")
+    }
+
+
 def remove_containers(owner: str) -> int:
     """Remove every agent container *owner* started; return how many there were."""
     try:
@@ -273,9 +326,17 @@ class ContainerLauncher:
         self._box: AgentContainer | None = None
         self._current: str | None = None
 
-    def _plan(self) -> AgentContainer:
+    def prepare(self) -> AgentContainer:
+        """Read the plan off the running core (once) and clear leftover agents."""
         if self._box is None:
-            self._box = plan(inspect_self(), self._workspace)
+            core = inspect_self()
+            networks = list(
+                cast(
+                    "JsonDict",
+                    cast("JsonDict", core.get("NetworkSettings", {})).get("Networks") or {},
+                )
+            )
+            self._box = plan(core, self._workspace, internal_networks(networks))
             removed = remove_containers(self._box.owner)
             if removed:
                 log.info("removed %d leftover agent container(s)", removed)
@@ -285,7 +346,7 @@ class ContainerLauncher:
         self, env: Mapping[str, str], owed: Mapping[str, str]
     ) -> tuple[list[str], dict[str, str]]:
         """The command that starts the agent, and the environment for it."""
-        box = self._plan()
+        box = self.prepare()
         self._current = f"{box.owner}-agent-{secrets.token_hex(3)}"
         argv = docker_argv(box, forwarded_names(env, owed), self._current)
         # The docker CLI itself needs the core's environment (DOCKER_HOST, its
@@ -304,42 +365,11 @@ class ContainerLauncher:
 # ── inside the agent container ───────────────────────────────────────────────
 
 
-def _shim_wanted(env: Mapping[str, str]) -> bool:
-    flag = env.get("MEDMCP_LLM_SHIM", "")
-    return bool(flag) and flag != "0"
-
-
-def _wait_for_port(port: int, timeout: float) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        with socket.socket() as s:
-            s.settimeout(0.2)
-            if s.connect_ex(("127.0.0.1", port)) == 0:
-                return True
-        time.sleep(0.2)
-    return False
-
-
 def main() -> None:
     """``medmcp-agent``: the agent container's entry point.
 
-    Starts the tool-call shim on the same loopback port the published
-    ``config.toml`` points vibe at (the core's entrypoint chose it), then becomes
-    vibe-acp, whose stdio is the ``docker run -i`` the core holds.
+    Becomes vibe-acp, whose stdio is the ``docker run -i`` the core holds. The
+    model is reached through the core's egress gateway, which forwards to the
+    core's tool-call shim, so nothing else runs here.
     """
-    env: dict[str, Any] = dict(os.environ)
-    if _shim_wanted(env):
-        port = env.get("MEDMCP_SHIM_PORT", "11435")
-        subprocess.Popen(
-            ["medmcp-llm-shim"],
-            env={
-                **env,
-                "MEDMCP_SHIM_UPSTREAM": env.get("OLLAMA_BASE_URL", "http://llm:11434"),
-                "MEDMCP_SHIM_HOST": "127.0.0.1",
-                "MEDMCP_SHIM_PORT": port,
-            },
-            stdout=sys.stderr,
-        )
-        if not _wait_for_port(int(port), 10.0):
-            sys.stderr.write("medmcp-agent: WARNING: the tool-call shim did not come up\n")
     os.execvp("vibe-acp", ["vibe-acp"])

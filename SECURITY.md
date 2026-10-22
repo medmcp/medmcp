@@ -78,6 +78,10 @@ user control:
   what you configured. A stack tool runs only when you approved that exact call. Run
   host-native (`just workspace`), the agent is you: an approved command can do
   whatever your account can, so read each one before you allow it.
+- **The workspace server cannot reach the host either.** It starts containers
+  through a guard that holds the Docker socket and refuses privileged
+  containers, host namespaces, added capabilities and mounts other than the
+  workspace and MedMCP's own volumes.
 - **The agent cannot loosen its own rules.** Its configuration is read-only in
   the container install, and every new chat restores the approval settings,
   hooks and stack definitions to their pinned values (audit-logged when it had

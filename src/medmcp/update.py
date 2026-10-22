@@ -625,8 +625,13 @@ def plan_apply(
             command=cmd,
         )
 
+    # Behind the docker guard the core holds only a filtered socket; compose
+    # tells it where the real one is, for the helper (the guard checks that only
+    # the helper gets it).
     sock = _mount_at(self_info, _SOCKET_TARGET)
-    if sock is None or not str(sock.get("Source") or ""):
+    socket_source = str(sock.get("Source") or "") if sock is not None else ""
+    socket_source = socket_source or _env(self_info).get("MEDMCP_DOCKER_SOCKET_SOURCE", "")
+    if not socket_source:
         raise UpdateNotApplicableError("The docker socket is not mounted; the update needs it.")
     state = _mount_at(self_info, _STATE_TARGET)
     if state is None or state.get("Type") != "volume" or not str(state.get("Name") or ""):
@@ -644,7 +649,6 @@ def plan_apply(
             env[key] = have[key]
     if "MEDMCP_WORKSPACE" not in env:
         raise UpdateNotApplicableError("MEDMCP_WORKSPACE is not set on this container.")
-    socket_source = str(sock["Source"])
     env["XDG_RUNTIME_DIR"] = os.path.dirname(socket_source)
     docker_config_source = str(docker_config.get("Source") or "") if docker_config else None
     if docker_config_source:

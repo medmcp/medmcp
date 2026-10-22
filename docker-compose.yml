@@ -80,6 +80,34 @@ services:
       - 'ollama run "$$MEDMCP_MODEL" "ok" </dev/null >/dev/null 2>&1 || true'
     restart: "no"
 
+  # Holds the real docker socket and gives the core a filtered one: no privileged
+  # containers, host namespaces, extra capabilities or foreign mounts, and only
+  # containers it created may be started, attached, stopped or removed (see
+  # src/medmcp/dockerguard.py). No network; nothing to write but its socket.
+  docker-guard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: "${MEDMCP_BASE_IMAGE:-medmcp-base:dev}"
+    image: medmcp-core:dev
+    entrypoint: ["medmcp-docker-guard"]
+    environment:
+      MEDMCP_WORKSPACE: "${MEDMCP_WORKSPACE:?set MEDMCP_WORKSPACE to an absolute host path}"
+      MEDMCP_DOCKER_SOCKET_SOURCE: "${XDG_RUNTIME_DIR}/docker.sock"
+    volumes:
+      - type: bind
+        source: "${XDG_RUNTIME_DIR}/docker.sock"
+        target: /var/run/docker.sock
+        bind:
+          create_host_path: false
+      - "docker-guard:/run/medmcp-guard"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
   medmcp:
     build:
       context: .
@@ -92,6 +120,8 @@ services:
         condition: service_healthy
       llm-init:
         condition: service_completed_successfully
+      docker-guard:
+        condition: service_started
     # Secrets for external MCP servers and a cloud model (Settings -> Advanced),
     # when they are named as environment variables rather than entered in the UI.
     # Only the variable's *name* is stored then, never its value, so the value has to
@@ -146,6 +176,10 @@ services:
       # Fixes the access token (default: generated once, kept in vibe-state).
       # Open the link `docker exec medmcp-medmcp-1 medmcp url` prints.
       MEDMCP_UI_TOKEN: "${MEDMCP_UI_TOKEN:-}"
+      # Containers are started through the docker guard; the real socket's host
+      # path is passed only so the update helper can be given it.
+      DOCKER_HOST: "unix:///run/medmcp-guard/docker.sock"
+      MEDMCP_DOCKER_SOCKET_SOURCE: "${XDG_RUNTIME_DIR}/docker.sock"
     healthcheck:
       test:
         - CMD
@@ -171,11 +205,8 @@ services:
       # default; rootful hosts set XDG_RUNTIME_DIR=/var/run. Long form so a wrong
       # path fails `up` instead of docker creating an empty directory there,
       # which leaves the core unable to start any stack ("Connection closed").
-      - type: bind
-        source: "${XDG_RUNTIME_DIR}/docker.sock"
-        target: /var/run/docker.sock
-        bind:
-          create_host_path: false
+      # The docker guard's filtered socket, not the daemon's (DOCKER_HOST).
+      - "docker-guard:/run/medmcp-guard"
       # Workspace at an identical absolute path (path parity for nested run -v).
       - "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}"
       # Container-stack manifests (read-write so UI install/uninstall can persist).
@@ -216,3 +247,4 @@ volumes:
   vibe-logs:
   vibe-state:
   vibe-agent:
+  docker-guard:

@@ -4,7 +4,6 @@ import { Chat } from './components/Chat'
 import { CloudModelBanner } from './components/CloudModelBanner'
 import { CloudModelWindow } from './components/CloudModelWindow'
 import { ExternalMcpBanner } from './components/ExternalMcpBanner'
-import { IsolationBanner } from './components/IsolationBanner'
 import { ExternalMcpWindow } from './components/ExternalMcpWindow'
 import { ModelsWindow } from './components/ModelsWindow'
 import { FileExplorer } from './components/FileExplorer'
@@ -212,7 +211,6 @@ export default function App() {
           </button>
         </span>
       </header>
-      <IsolationBanner />
       <CloudModelBanner refreshSignal={cloudVersion} onReview={() => setCloudOpen(true)} />
       <ExternalMcpBanner
         refreshSignal={externalVersion}

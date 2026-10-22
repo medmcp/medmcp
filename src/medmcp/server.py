@@ -473,12 +473,8 @@ def _tree_node(path: Path, depth: int) -> JsonDict:
 
 @app.get("/api/workspace")
 async def get_workspace() -> JsonDict:
-    """Return the workspace root shown in the explorer header, and whether the agent is isolated.
-
-    The page shows a standing notice when it is not: the agent then runs with
-    the rights of whoever started the server.
-    """
-    return {"root": str(WORKSPACE_ROOT), "agent_isolated": _agent_launcher is not None}
+    """Return the workspace root path shown in the explorer header."""
+    return {"root": str(WORKSPACE_ROOT)}
 
 
 @app.get("/api/tree")

@@ -64,12 +64,6 @@ export async function isPaired(): Promise<boolean> {
   return (await fetch('/api/access')).ok
 }
 
-/** Whether the agent runs in its own container (false: it has the server's rights). */
-export async function fetchAgentIsolated(): Promise<boolean> {
-  const res = await check(await fetch('/api/workspace'))
-  return ((await res.json()) as { agent_isolated?: boolean }).agent_isolated ?? false
-}
-
 /** The absolute on-disk workspace root, so absolute tool outputs can be shown
  *  and opened as workspace paths. */
 export async function fetchWorkspaceRoot(): Promise<string> {

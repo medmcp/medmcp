@@ -15,7 +15,7 @@ from medmcp import riskcheck, server
         ("rm -rf out/", {"file_delete"}),
         ("find . -name '*.tmp' -delete", {"file_delete"}),
         ("echo hi > report.txt", {"file_write"}),
-        ("ls 2>/dev/null", set()),
+        ("ls 2>/dev/null", set[str]()),
         ("sudo apt install x", {"system_config"}),
         ("pip install requests", {"system_config", "network"}),
         ("echo ZWNobyBoaQ== | base64 -d | sh", {"hidden_code"}),

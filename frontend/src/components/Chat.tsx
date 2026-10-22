@@ -381,12 +381,7 @@ function PermissionCard({
       </div>
       <div className="approval-title">{perm.toolCall.title ?? 'tool call'}</div>
       {perm.explanation ? (
-        // Written by the local model, which can be wrong or misled; the labels
-        // below and the arguments are what the server worked out itself.
-        <div className="approval-explanation">
-          <span className="approval-explanation-source">Model&rsquo;s summary · </span>
-          {perm.explanation}
-        </div>
+        <div className="approval-explanation">{perm.explanation}</div>
       ) : perm.explaining ? (
         <div className="approval-pending">Generating explanation…</div>
       ) : null}

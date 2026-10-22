@@ -4381,9 +4381,3 @@ textarea.wf-input {
 .confirm-dialog p.pairing-error {
   color: var(--red-tint);
 }
-
-/* The explanation is the model's; say so before it is read as a verdict. */
-.approval-explanation-source {
-  color: var(--muted);
-  font-weight: 500;
-}

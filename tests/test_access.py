@@ -101,3 +101,16 @@ class TestToken:
         assert access.pairing_url("http://localhost:8100/") == (
             f"http://localhost:8100/?token={TEST_TOKEN}"
         )
+
+
+def test_a_racing_second_creator_adopts_the_first_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`medmcp url` and the starting server must agree on the token they print."""
+    monkeypatch.delenv(access.TOKEN_ENV)
+    monkeypatch.setattr(access, "TOKEN_PATH", tmp_path / "ui_token.json")
+    first = access._create_token()  # pyright: ignore[reportPrivateUsage]
+    second = access._create_token()  # pyright: ignore[reportPrivateUsage]
+    assert first == second
+    assert access.TOKEN_PATH.stat().st_mode & 0o077 == 0
+    assert list(tmp_path.iterdir()) == [access.TOKEN_PATH]

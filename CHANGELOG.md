@@ -8,7 +8,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Security
 
-- Workspace: the API needs an access token. Open the pairing link once per browser (`medmcp url`, or the server log); `MEDMCP_UI_TOKEN` fixes it for scripts. Other accounts on the machine can no longer use a running workspace.
+- Workspace: the API needs an access token. The quick-start command now ends by printing the link to open once per browser (`medmcp url`); `MEDMCP_UI_TOKEN` fixes it for scripts. Other accounts on the machine can no longer use a running workspace.
 - Agent: in a `docker compose` install the agent runs in its own container, with no docker socket, no access to the state volume or credentials, its config read-only, no capabilities but `DAC_OVERRIDE` and a read-only root file system; stack tools reach the core's pool through the broker (`MEDMCP_AGENT_ISOLATION`, default `container`).
 - Agent: the isolated agent sits on an internal network with no route out; the model, a cloud model and external MCP servers are reached through an egress gateway in the core, which adds the credentials, so the agent holds none. Ollama's admin API is out of its reach.
 - Stacks: the broker runs a stack call only if the person approved that exact call (stack, tool, arguments), once; the agent's shell can no longer call stack tools through it.

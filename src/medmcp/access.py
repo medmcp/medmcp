@@ -16,16 +16,19 @@ link, and the server logs it at start.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import logging
 import os
 import secrets
+import tempfile
 from functools import lru_cache
 from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 from urllib.parse import quote
 
 from medmcp.acp import VIBE_HOME
-from medmcp.statefile import atomic_write_json, read_json
+from medmcp.statefile import read_json
 
 log: logging.Logger = logging.getLogger(__name__)
 
@@ -50,12 +53,36 @@ def token() -> str:
         return configured
     if configured:
         log.warning("%s is shorter than %d characters; ignoring it", TOKEN_ENV, _MIN_TOKEN_LEN)
-    stored = (read_json(TOKEN_PATH) or {}).get("token")
-    if isinstance(stored, str) and len(stored) >= _MIN_TOKEN_LEN:
+    stored = _stored_token()
+    if stored:
         return stored
-    fresh = secrets.token_urlsafe(32)
-    atomic_write_json(TOKEN_PATH, {"token": fresh})
-    return fresh
+    return _create_token()
+
+
+def _stored_token() -> str:
+    stored = (read_json(TOKEN_PATH) or {}).get("token")
+    return stored if isinstance(stored, str) and len(stored) >= _MIN_TOKEN_LEN else ""
+
+
+def _create_token() -> str:
+    """Write a new token unless one appeared meanwhile; return the one in force.
+
+    ``medmcp url`` can run while the server is still starting, so two processes
+    may get here at once. The file is written in full under a temporary name and
+    then hard-linked into place, which fails if the name is taken — the loser
+    reads the winner's token instead of printing a link that will not work.
+    """
+    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=TOKEN_PATH.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"token": secrets.token_urlsafe(32)}, fh)
+        with contextlib.suppress(FileExistsError):
+            os.link(tmp, TOKEN_PATH)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+    return _stored_token()
 
 
 def matches(candidate: str) -> bool:

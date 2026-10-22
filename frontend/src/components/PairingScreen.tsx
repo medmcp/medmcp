@@ -32,8 +32,8 @@ export default function PairingScreen() {
       <form className="modal confirm-dialog pairing-card" onSubmit={(e) => void submit(e)}>
         <h3>Open MedMCP with its link</h3>
         <p>
-          The link is in the server’s log at start, and <code>medmcp url</code> prints it. Open
-          it in this browser, or paste it here.
+          Run <code>docker exec medmcp-medmcp-1 medmcp url</code> and open the link it prints, or
+          paste it here.
         </p>
         <input
           className="pairing-input"

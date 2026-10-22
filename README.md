@@ -23,10 +23,10 @@ Set `MEDMCP_WORKSPACE` to the folder that holds your imaging data (any absolute 
 
 ```bash
 MEDMCP_WORKSPACE="$HOME/medmcp-data" \
-  docker compose -f oci://ghcr.io/medmcp/compose:latest up -d
+  docker compose -f oci://ghcr.io/medmcp/compose:latest up -d && docker exec medmcp-medmcp-1 medmcp url
 ```
 
-Then open the link `docker exec medmcp-medmcp-1 medmcp url` prints (once per browser; it is also in the container's log).
+Open the link it prints. Your browser remembers it; afterwards **http://localhost:8100** is enough.
 
 - **Requirements:** Linux, an NVIDIA GPU (≥ 24 GB VRAM recommended) with driver ≥ R570, and Docker with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/).
 - **Stop:** `docker compose -f oci://ghcr.io/medmcp/compose:latest down`

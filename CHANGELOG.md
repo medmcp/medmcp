@@ -19,6 +19,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - CI: an Isolation workflow builds the core image and runs the shipped compose file against it with a scripted model, checking the agent container, its network, the gateway, broker approvals and the docker guard (`just e2e-isolation`).
 - Supply chain: Ollama, the CUDA base and the Node build image are pinned by digest, workflow actions by commit; a Security workflow audits Python and npm dependencies on every PR and scans the published image weekly; Dependabot also tracks images and npm.
 - Dependencies: certifi 2026.10.19 (drops a root CA with compromised intermediates; overrides mistral-vibe's pin), fflate 0.8.3 (malformed-ZIP64 hang in the spreadsheet viewer).
+- Approvals: risk labels are worked out by rules from the call itself (network, deletion, writes, system changes, code assembled at run time, paths outside the workspace); the model's labels can only add to them, and its summary is captioned as the model's.
 - Stacks: `MEDMCP_REQUIRE_SIGNED_STACKS=1` refuses stack images the signing policy does not cover; a refused signature now answers 403 instead of 500.
 - Docs: SECURITY.md says what approving a command grants in each install, and describes the access token.
 - Workspace: the API needs an access token. Open the pairing link once per browser (`medmcp url`, or the server log); `MEDMCP_UI_TOKEN` fixes it for scripts. Other accounts on the machine can no longer use a running workspace.

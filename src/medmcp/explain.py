@@ -42,6 +42,9 @@ RISK_CATEGORIES: dict[str, tuple[str, str]] = {
     "system_config": ("Changes system or application settings", "medium"),
     "privacy": ("Accesses personal or sensitive information", "high"),
     "skill_load": ("Loads external instructions into the agent context", "medium"),
+    # Set only by the rules in medmcp.riskcheck, never asked of the model.
+    "hidden_code": ("Runs code it assembles at run time", "high"),
+    "outside_workspace": ("Reaches outside the workspace", "high"),
 }
 
 

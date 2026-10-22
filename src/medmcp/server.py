@@ -84,6 +84,7 @@ from medmcp import (
     pathguard,
     provenance,
     replay,
+    riskcheck,
     runs,
     sessions,
     settings,
@@ -3211,6 +3212,14 @@ class _ChatConnection:
                 ", ".join(f"{f['param']}={f['value']!r} ({f['status']})" for f in path_findings),
             )
 
+        # Rule-based labels from the call itself: shown whatever the model says,
+        # and the model's own labels can only add to them (see medmcp.riskcheck).
+        rule_keys = riskcheck.signals(
+            str(tool_call.get("toolName") or title),
+            pathcheck.coerce_arguments(tool_call.get("rawInput")),
+            path_findings,
+        )
+
         _audit.info("permission requested: %s", title)
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[str | None] = loop.create_future()
@@ -3223,12 +3232,14 @@ class _ChatConnection:
                 "options": options,
                 "explanation": explanation,
                 "explaining": explaining,
-                "risks": explain.resolve_risks(risk_keys),
+                "risks": explain.resolve_risks(_merge_keys(rule_keys, risk_keys)),
                 "paths": path_findings,
             }
         )
         if explaining:
-            task = asyncio.create_task(self._explain_permission(req_id_raw, tool_call, cached))
+            task = asyncio.create_task(
+                self._explain_permission(req_id_raw, tool_call, cached, rule_keys)
+            )
             self._explain_tasks.add(task)
             task.add_done_callback(self._explain_tasks.discard)
         try:
@@ -3265,7 +3276,9 @@ class _ChatConnection:
             return
         _approvals.grant(stack, tool, pathcheck.coerce_arguments(tool_call.get("rawInput")))
 
-    async def _explain_permission(self, req_id: int, tool_call: JsonDict, cached: JsonDict) -> None:
+    async def _explain_permission(
+        self, req_id: int, tool_call: JsonDict, cached: JsonDict, rule_keys: list[str]
+    ) -> None:
         """Generate the LLM explanation for an already-shown permission dialog.
 
         Runs concurrently with the open approval box; the result is pushed as
@@ -3291,7 +3304,7 @@ class _ChatConnection:
                     "type": "permission_update",
                     "requestId": req_id,
                     "explanation": explanation,
-                    "risks": explain.resolve_risks(risk_keys),
+                    "risks": explain.resolve_risks(_merge_keys(rule_keys, risk_keys)),
                 }
             )
 
@@ -3322,6 +3335,11 @@ class _ChatConnection:
 
 
 # ── Sessions API ───────────────────────────────────────────
+
+
+def _merge_keys(rules: list[str], model: list[str]) -> list[str]:
+    """Rule-based risk keys first, then any the model adds; the model removes none."""
+    return [*rules, *(k for k in model if k not in rules)]
 
 
 def _retrying_frame(msg: JsonDict) -> JsonDict:

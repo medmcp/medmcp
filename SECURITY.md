@@ -29,9 +29,17 @@ Out of scope:
 
 ## Network posture
 
-The workspace server listens on loopback and has **no authentication**. Do not
-expose the port. In a container it binds `0.0.0.0`, and compose publishes it only
-to the host's loopback (`127.0.0.1:8100:8100`) — keep it that way.
+The workspace server listens on loopback. Do not expose the port. In a container
+it binds `0.0.0.0`, and compose publishes it only to the host's loopback
+(`127.0.0.1:8100:8100`) — keep it that way.
+
+Loopback is shared by every account and process on the machine, so every API
+request and WebSocket also needs the workspace's **access token**. A browser
+receives it once, from the link the server logs at start and `medmcp url` prints
+(`docker exec medmcp-medmcp-1 medmcp url`), and keeps it as an `HttpOnly`,
+`SameSite=Strict` cookie; a script sends `Authorization: Bearer <token>`. The
+token is generated once and stored `0600` with the workspace state;
+`MEDMCP_UI_TOKEN` sets it instead.
 
 Binding loopback does not by itself keep a browser out: any page you visit can
 send requests to `127.0.0.1`, and a WebSocket upgrade is exempt from the
@@ -47,8 +55,7 @@ MEDMCP_ALLOWED_HOSTS=medmcp.example.internal
 MEDMCP_ALLOWED_ORIGINS=https://medmcp.example.internal
 ```
 
-Both default to empty — unlisted means refused. Neither replaces authentication,
-which the workspace does not have; they keep a browser from acting as one.
+Both default to empty — unlisted means refused. The token still applies.
 
 ## How the workspace protects your data
 
@@ -57,15 +64,27 @@ pasted from an untrusted document), so its safety model is built around explicit
 user control:
 
 - **Nothing is changed or sent without your approval.** Writing a file, editing
-  one, fetching a URL, or running a command with side effects each require an
-  explicit click. There is no "always allow" and no session-wide approval; each
-  call is approved on its own. Read-only shell commands (`ls`, `cat`, `grep`, …)
-  run without a prompt *inside your workspace*; pointed outside it, they ask
-  first, and `find -exec` is treated as execution, not reading.
+  one, fetching a URL, running a command or a tool each require an explicit
+  click. The one approval that lasts beyond a call is "Allow `ls` for this chat"
+  for a read-only command (`ls`, `cat`, `grep`, …) in your workspace; it ends
+  with the chat. Reading a file inside the workspace needs no approval; outside
+  it, it asks first.
+- **What approving a command grants.** A shell command runs with the agent's
+  rights. In a `docker compose` install the agent has its own container: the
+  workspace, its own configuration read-only, and nothing else — no Docker
+  socket, no credentials, no capabilities beyond writing your files. Run
+  host-native (`just workspace`), the agent is you: an approved command can do
+  whatever your account can, so read each one before you allow it.
+- **The agent cannot loosen its own rules.** Its configuration is read-only in
+  the container install, and every new chat restores the approval settings,
+  hooks and stack definitions to their pinned values (audit-logged when it had
+  to).
 - **No data egress by default.** `web_search` is disabled and `web_fetch`
   requires approval.
 - **Isolated tool stacks.** Stack containers run with `--network none`, all
-  capabilities dropped, and no privilege escalation. They bake their models at
+  capabilities dropped but writing your files, and no privilege escalation; a
+  stack definition that adds a mount, a host namespace or `--privileged` is
+  refused. They bake their models at
   build time, so a tool call cannot reach the network even if the agent is
   steered into making one. A stack that genuinely needs egress must declare it
   in its image label, and installing it asks for consent.

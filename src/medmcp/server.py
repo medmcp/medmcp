@@ -3776,6 +3776,10 @@ def main() -> None:
         level=logging.INFO, format="%(levelname)s %(name)s: %(message)s", force=True
     )
     WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+    # Chat transcripts, provenance and workflows live here and are written with
+    # the default umask; on a shared host the directory keeps other users out.
+    with contextlib.suppress(OSError):
+        provenance.VIBE_HOME.chmod(0o700)
     host = os.environ.get("MEDMCP_WORKSPACE_HOST", "127.0.0.1")
     port = int(os.environ.get("MEDMCP_WORKSPACE_PORT", str(DEFAULT_PORT)))
     uvicorn.run(app, host=host, port=port)

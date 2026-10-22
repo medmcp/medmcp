@@ -393,7 +393,8 @@ class TestStackIsolation:
         (stacks_dir / "medmcp-old.toml").write_text(
             'name = "medmcp-old"\n'
             'command = "docker"\n'
-            'args = ["run", "--rm", "-i", "-v", "/w:/w", "img:tag"]\n'
+            'args = ["run", "--rm", "-i", "-v", "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}", '
+            '"img:tag"]\n'
         )
         entry = next(m for m in settings._load_stack_manifests() if m["name"] == "medmcp-old")
         args = entry["args"]

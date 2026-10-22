@@ -11,6 +11,8 @@ Notable, user-visible changes to MedMCP. Format follows
 - Explorer: an upload never writes through a symlink, the tree does not list folders a link points to outside the workspace, and delete/rename act on a link itself.
 - Viewer: workspace HTML and SVG files are served under a CSP sandbox, so opening one in a tab cannot act as the app.
 - Workflows: a replay step naming a path outside the workspace is refused (recipe constants, defaults and step outputs included), and a workflow name can no longer reach a recipe outside the workflows folder.
+- Agent: every config sync restores the approval posture (`default_agent`, `auto_approve`, tool permissions, the agent profile, hooks, trusted folders) and audit-logs what it had to undo.
+- Stacks: a `stacks.d` manifest must launch `docker` with the hardening intact; extra mounts, `--privileged`, host namespaces and manifest `env` are refused.
 
 ## 0.7.1 — 2026-10-21
 

@@ -42,12 +42,13 @@ from urllib.parse import urlparse
 
 import httpx
 
-from medmcp import signing
+from medmcp import posture, signing
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict
 from medmcp.statefile import atomic_write_json, atomic_write_toml, read_json
 from medmcp.workflow import list_workflows
 
 log: logging.Logger = logging.getLogger(__name__)
+_audit: logging.Logger = logging.getLogger("medmcp.audit")
 
 # Ollama endpoint + model, used for the agent's auxiliary LLM calls
 # (tool-call explanations, chat titles) and the provenance manifest.
@@ -440,13 +441,23 @@ def _load_stack_manifests() -> list[JsonDict]:
             continue
         args = [os.path.expandvars(str(a)) for a in cast("list[Any]", raw.get("args", []))]
         expanded_command = os.path.expandvars(command)
-        if Path(expanded_command).name == "docker":
-            args = _harden_stack_run_args(args)
+        # The core runs a manifest as written, so it may only start a container,
+        # with the hardening in place and nothing that undoes it.
+        if Path(expanded_command).name != "docker":
+            reason = f"command {command!r} is not docker"
+        elif raw.get("env"):
+            reason = "env is not allowed (it would reach the docker CLI in the core)"
+        else:
+            args = _harden_stack_run_args(posture.split_flag_values(args))
+            reason = posture.unsafe_stack_args(args)
+        if reason is not None:
+            _audit.warning("stack manifest %s refused: %s", path.name, reason)
+            continue
         entry: JsonDict = {
             "name": name,
             "command": expanded_command,
             "args": args,
-            "env": dict(cast("dict[str, str]", raw.get("env", {}))),
+            "env": {},
         }
         if raw.get("skills_path"):
             entry["skills_path"] = os.path.expandvars(str(raw["skills_path"]))
@@ -2137,43 +2148,19 @@ _config_write_lock = threading.Lock()
 # model corrects itself before the call ever reaches the approval dialog (see
 # medmcp.pathguard). Registered here rather than left to hand-editing so it cannot
 # silently go missing from an install.
-PATHGUARD_HOOK_NAME = "medmcp-pathguard"
+PATHGUARD_HOOK_NAME = posture.PATHGUARD_HOOK_NAME
 
 
 def _ensure_pathguard_hook(vibe_home: Path) -> None:
-    """Register the path-guard ``pre_tool`` hook in ``<vibe_home>/hooks.toml``.
+    """Make ``<vibe_home>/hooks.toml`` hold the path-guard ``pre_tool`` hook, alone.
 
     Hooks live in their own file: vibe reads ``hooks.toml`` from each project root
     and from ``VIBE_HOME``, and never takes them from ``config.toml``. Since its
     file sources default to ``("user",)``, no project root is consulted at all and
-    ``VIBE_HOME`` is the one location that is always read.
-
-    Matched against every tool (no ``match``): ``write_file`` and ``edit`` take
-    paths just as the imaging stacks do. ``strict`` stays false so a hook that
-    fails to run is a passthrough — a broken guard must not be able to block work.
-    Any other hook in the file is preserved.
+    ``VIBE_HOME`` is the one location that is always read. Any other hook is
+    removed (see :func:`medmcp.posture.enforce_hooks`).
     """
-    path = vibe_home / "hooks.toml"
-    others: list[JsonDict] = []
-    if path.is_file():
-        try:
-            with path.open("rb") as fh:
-                raw = cast("list[JsonDict]", tomllib.load(fh).get("hooks", []))
-            others = [h for h in raw if h.get("name") != PATHGUARD_HOOK_NAME]
-        except (OSError, tomllib.TOMLDecodeError):
-            log.warning("could not read %s; rewriting it", path)
-    entry: JsonDict = {
-        "name": PATHGUARD_HOOK_NAME,
-        "type": "pre_tool",
-        "command": "medmcp-pathguard",
-        "timeout": 10.0,
-        "strict": False,
-        "description": (
-            "Refuse a tool call whose file paths do not resolve, handing the "
-            "reason back to the model so it can correct them."
-        ),
-    }
-    atomic_write_toml(path, {"hooks": [*others, entry]})
+    posture.enforce_hooks(vibe_home / "hooks.toml")
 
 
 def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
@@ -2193,9 +2180,12 @@ def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
       hand-set custom id is in place.
     - ``skill_paths`` — the active stacks' skills; ``disabled_skills`` keeps every
       non-workflow entry.
-    - ``<vibe_home>/hooks.toml`` — the pathguard ``pre_tool`` hook.
+    - ``<vibe_home>/hooks.toml`` — the pathguard ``pre_tool`` hook, alone.
+    - the approval posture — ``default_agent``, ``auto_approve``, ``[tools.*]``
+      permissions, the agent profile and vibe's trusted folders are put back to
+      their pinned values (see :mod:`medmcp.posture`).
 
-    Tool permissions and everything else in the file are left untouched.
+    Everything else in the file is left untouched.
     """
     with _config_write_lock:
         _sync_servers_to_vibe_config_locked(servers)
@@ -2315,6 +2305,7 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
     if str(cfg.get("system_prompt_id", "")) in OWNED_SYSTEM_PROMPT_IDS:
         cfg["system_prompt_id"] = prompt_id
     _sync_agent_profile_prompt(prompt_id)
+    posture.enforce_agent_profile(AGENT_PROFILE_PATH)
 
     # Collect skills_path values from discovered servers and write them to
     # skill_paths so vibe-acp loads the bundled skill docs automatically.
@@ -2337,5 +2328,7 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
 
     # Hooks live in their own file next to the config, not inside it.
     _ensure_pathguard_hook(VIBE_HOME)
+    posture.enforce_trusted_folders(VIBE_HOME / "trusted_folders.toml")
+    posture.enforce_config(cfg)
 
     atomic_write_toml(config_path, cfg)

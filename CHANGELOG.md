@@ -13,6 +13,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Workflows: a replay step naming a path outside the workspace is refused (recipe constants, defaults and step outputs included), and a workflow name can no longer reach a recipe outside the workflows folder.
 - Agent: every config sync restores the approval posture (`default_agent`, `auto_approve`, tool permissions, the agent profile, hooks, trusted folders) and audit-logs what it had to undo.
 - Stacks: a `stacks.d` manifest must launch `docker` with the hardening intact; extra mounts, `--privileged`, host namespaces and manifest `env` are refused.
+- Agent: the agent process no longer inherits credentials (registry tokens, update secrets, anything key- or token-shaped); it gets only the ones its active external servers and cloud model use.
 
 ## 0.7.1 — 2026-10-21
 

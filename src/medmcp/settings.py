@@ -1354,7 +1354,26 @@ def agent_secret_env() -> dict[str, str]:
     Read afresh on each agent spawn (the client takes it as a callable), so a
     change takes effect on the restart every such change already triggers.
     """
-    return {**external_secret_env(), **cloud_model_env()}
+    return {**external_secret_env(), **cloud_model_env(), **_named_secret_env()}
+
+
+def _named_secret_env() -> dict[str, str]:
+    """Deployment-managed credentials the agent is configured to use, by name.
+
+    An external server or cloud model may name a variable the deployment sets
+    itself rather than store a token here. The agent's environment is otherwise
+    scrubbed of anything that looks like a credential, so the ones it is told to
+    read are handed over explicitly — only while what uses them is in force.
+    """
+    names: set[str] = set()
+    if external_mcp_enabled():
+        for srv in cast("list[JsonDict]", load_external_mcp()["servers"]):
+            if srv.get("active") and srv.get("api_key_env"):
+                names.add(str(srv["api_key_env"]))
+    cloud = active_cloud_model()
+    if cloud is not None and cloud.get("api_key_env"):
+        names.add(str(cloud["api_key_env"]))
+    return {name: os.environ[name] for name in sorted(names) if os.environ.get(name)}
 
 
 # ── Local model choice ───────────────────────────────────────────────────────

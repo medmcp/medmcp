@@ -71,6 +71,7 @@ from medmcp import (
     __version__,
     access,
     agentbox,
+    approvals,
     batchplan,
     chat_export,
     distill,
@@ -146,6 +147,9 @@ _broker: BackendBroker | None = None
 # Replay runs in flight (see ``runs.py``). A run is a task in this process with a
 # record on disk; sockets attach to it and detach from it without affecting it.
 _runs: runs.RunManager = runs.RunManager()
+# Stack calls approved in a chat, each spendable once by the broker: anything
+# that reaches the broker socket without one is refused (see medmcp.approvals).
+_approvals: approvals.ApprovalLedger = approvals.ApprovalLedger()
 
 
 def _resolve_backend_spec(name: str) -> BackendSpec | None:
@@ -202,7 +206,7 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         # Proxy children read MEDMCP_WORKSPACE for their fallback cwd; export it.
         os.environ.setdefault("MEDMCP_WORKSPACE", str(WORKSPACE_ROOT))
         _pool = BackendPool(resolve_spec=_resolve_backend_spec, cwd=str(WORKSPACE_ROOT))
-        _broker = BackendBroker(_pool, settings.backend_socket_path())
+        _broker = BackendBroker(_pool, settings.backend_socket_path(), _approvals.consume)
         try:
             await _broker.start()
             # Proxied config + backends.json exist from boot, before any tool call.
@@ -3224,6 +3228,14 @@ class _ChatConnection:
             option_id = None
         await self._resolve_permission(req_id_raw, title, cached, option_id)
 
+    def _grant_stack_call(self, tool_call: JsonDict) -> None:
+        """Let the broker run the stack call just approved, once, as approved."""
+        name = str(tool_call.get("toolName") or tool_call.get("title") or "")
+        stack, tool = provenance.split_tool_name(name, self._server_names)
+        if stack == "builtin":
+            return
+        _approvals.grant(stack, tool, pathcheck.coerce_arguments(tool_call.get("rawInput")))
+
     async def _explain_permission(self, req_id: int, tool_call: JsonDict, cached: JsonDict) -> None:
         """Generate the LLM explanation for an already-shown permission dialog.
 
@@ -3266,6 +3278,8 @@ class _ChatConnection:
             _audit.info("permission decision: %s -> %s", title, option_id)
             decision = option_id
             outcome = {"outcome": "selected", "optionId": option_id}
+            if option_id.startswith("allow"):
+                self._grant_stack_call(cached)
         if cached:
             cached["decision"] = decision
 

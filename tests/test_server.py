@@ -1657,3 +1657,19 @@ class TestDisplayTitle:
         """No title and no name still gives the card something to say."""
         assert server._display_title(None, "", "") == "tool"
         assert server._display_title("", "x.y", "x_y") == "x_y"
+
+
+def test_an_approved_stack_call_is_granted_to_the_broker() -> None:
+    """Approving a stack call lets that exact call through the broker; a built-in grants none."""
+    queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    conn = server._ChatConnection(
+        cast("Any", _StubWs()), "sid", cast("Any", queue), [{"name": "medmcp-neuro-core"}]
+    )
+    conn._grant_stack_call(  # pyright: ignore[reportPrivateUsage]
+        {"toolName": "medmcp-neuro-core_skull_strip", "rawInput": '{"input_path": "/w/t1.nii"}'}
+    )
+    conn._grant_stack_call({"toolName": "bash", "rawInput": {"command": "ls"}})  # pyright: ignore[reportPrivateUsage]
+    ledger = server._approvals  # pyright: ignore[reportPrivateUsage]
+    assert ledger.consume("medmcp-neuro-core", "skull_strip", {"input_path": "/w/t1.nii"})
+    assert not ledger.consume("medmcp-neuro-core", "skull_strip", {"input_path": "/w/t1.nii"})
+    assert not ledger.consume("builtin", "bash", {"command": "ls"})

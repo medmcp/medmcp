@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any
 
 import mcp.types as mcp_types
@@ -232,6 +233,44 @@ async def test_replay_aborts_on_unresolved_placeholder() -> None:
     assert result.ok is False
     assert result.steps[1].ok is False
     assert "unresolved" in (result.steps[1].error or "")
+
+
+class TestPathsOutside:
+    """paths_outside finds argument strings that leave the workspace."""
+
+    def test_inside_relative_and_plain_values_pass(self, tmp_path: Path) -> None:
+        """Workspace paths, relative paths and non-path values are left alone."""
+        args = {"input_path": str(tmp_path / "a.nii"), "out": "sub/b.nii", "mode": "fast", "n": 3}
+        assert replay.paths_outside(args, tmp_path) == []
+
+    def test_absolute_dotdot_and_home_are_found(self, tmp_path: Path) -> None:
+        """Absolute, ``..`` and ``~`` escapes are reported, nested ones too; URLs are not."""
+        args = {
+            "output_dir": "/etc",
+            "nested": [{"p": f"{tmp_path}/../x"}],
+            "home": "~/.ssh/id_rsa",
+            "url": "https://example.org/a/../b",
+        }
+        found = replay.paths_outside(args, tmp_path)
+        assert found == ["/etc", f"{tmp_path}/../x", "~/.ssh/id_rsa"]
+
+
+async def test_replay_refuses_a_step_that_leaves_the_workspace(tmp_path: Path) -> None:
+    """A recipe constant pointing outside fails the step before the tool is called."""
+    called: list[str] = []
+
+    async def caller(server: str, tool: str, args: JsonDict) -> tuple[bool, JsonDict, str | None]:
+        called.append(tool)
+        return True, {"brain_path": str(tmp_path / "brain.nii")}, None
+
+    recipe = two_step_recipe()
+    recipe.steps[0].arguments["output_dir"] = "/home/someone/.ssh"
+    result = await replay.replay_with_caller(
+        recipe, {"in_1": str(tmp_path / "t1.nii")}, caller=caller, confine_to=tmp_path
+    )
+    assert result.ok is False
+    assert called == []
+    assert "outside the workspace: /home/someone/.ssh" in (result.error or "")
 
 
 async def test_on_step_callback_invoked_per_step() -> None:

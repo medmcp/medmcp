@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import importlib
 import io
 import json
@@ -127,6 +128,11 @@ _SKIP_DIRS: frozenset[str] = frozenset(
 )
 _TREE_MAX_DEPTH: int = 12
 _TREE_MAX_ENTRIES_PER_DIR: int = 500
+# Served by /api/raw under a CSP sandbox: these can carry script that would
+# otherwise run with this origin when opened directly.
+_SCRIPTABLE_SUFFIXES: frozenset[str] = frozenset(
+    {".html", ".htm", ".xhtml", ".shtml", ".svg", ".svgz", ".xml", ".xsl", ".xslt"}
+)
 
 # ── Persistent stack pool + broker (Layer 1; MEDMCP_STACK_POOL) ───────────────
 # Created at startup only when the pool is enabled; None otherwise (the legacy
@@ -327,13 +333,39 @@ def _safe_path(rel: str) -> Path:
     return resolved
 
 
+def _safe_entry(rel: str) -> Path:
+    """Like :func:`_safe_path`, but the last component is kept as it is.
+
+    For operations on the entry itself — delete, rename, upload — where following
+    a final symlink would act on whatever it points at, possibly outside the
+    workspace. The folder holding the entry is resolved and confined as usual.
+    """
+    name = Path(rel).name
+    if name in {"", ".", ".."}:
+        return _safe_path(rel)
+    return _safe_path(str(Path(rel).parent)) / name
+
+
+def _link_leaves_tree(path: Path) -> bool:
+    """Whether *path* is a symlink the explorer must not look through.
+
+    One pointing outside the workspace would list the host's files; one pointing
+    at its own ancestor would recurse to the depth limit.
+    """
+    if not path.is_symlink():
+        return False
+    real = path.resolve()
+    return not real.is_relative_to(WORKSPACE_ROOT) or path.parent.resolve().is_relative_to(real)
+
+
 def _tree_node(path: Path, depth: int) -> JsonDict:
     """Build one explorer-tree node (recursing into directories)."""
     rel = str(path.relative_to(WORKSPACE_ROOT))
     node: JsonDict = {"id": rel, "name": path.name}
+    leaves = _link_leaves_tree(path)
     if path.is_dir():
         children: list[JsonDict] = []
-        if depth < _TREE_MAX_DEPTH:
+        if depth < _TREE_MAX_DEPTH and not leaves:
             try:
                 entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
             except PermissionError:
@@ -342,7 +374,7 @@ def _tree_node(path: Path, depth: int) -> JsonDict:
             for child in shown[:_TREE_MAX_ENTRIES_PER_DIR]:
                 children.append(_tree_node(child, depth + 1))
         node["children"] = children
-    else:
+    elif not leaves:
         with contextlib.suppress(OSError):
             node["size"] = path.stat().st_size
     return node
@@ -376,7 +408,13 @@ async def get_raw(rel_path: str) -> FileResponse:
     path = _safe_path(rel_path)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="file not found")
-    return FileResponse(path, headers={"Cache-Control": "no-cache"})
+    headers = {"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"}
+    if path.suffix.lower() in _SCRIPTABLE_SUFFIXES:
+        # Opened directly in a tab, a workspace HTML or SVG file would otherwise
+        # run with this origin and could drive /ws/chat and /ws/replay. The
+        # viewer's iframe is sandboxed the same way, so nothing it shows changes.
+        headers["Content-Security-Policy"] = "sandbox allow-scripts"
+    return FileResponse(path, headers=headers)
 
 
 # The kernel writes a mount path's space, tab, newline and backslash as octal
@@ -535,12 +573,12 @@ class RenamePayload(BaseModel):
 @app.post("/api/files/rename")
 async def post_rename(payload: RenamePayload) -> JsonDict:
     """Rename or move a file/directory inside the workspace."""
-    src = _safe_path(payload.path)
-    dst = _safe_path(payload.new_path)
+    src = _safe_entry(payload.path)
+    dst = _safe_entry(payload.new_path)
     _refuse_mount_point(src)
-    if not src.exists():
+    if not (src.exists() or src.is_symlink()):
         raise HTTPException(status_code=404, detail="source not found")
-    if dst.exists():
+    if dst.exists() or dst.is_symlink():
         raise HTTPException(status_code=409, detail="target already exists")
     dst.parent.mkdir(parents=True, exist_ok=True)
     src.rename(dst)
@@ -550,13 +588,13 @@ async def post_rename(payload: RenamePayload) -> JsonDict:
 @app.delete("/api/files")
 async def delete_file(path: str) -> JsonDict:
     """Delete a file or directory (recursive). The UI confirms before calling."""
-    target = _safe_path(path)
+    target = _safe_entry(path)
     if target == WORKSPACE_ROOT:
         raise HTTPException(status_code=400, detail="refusing to delete the workspace root")
     _refuse_mount_point(target)
-    if not target.exists():
+    if not (target.exists() or target.is_symlink()):
         raise HTTPException(status_code=404, detail="not found")
-    if target.is_dir():
+    if target.is_dir() and not target.is_symlink():
         await asyncio.to_thread(shutil.rmtree, target)
     else:
         target.unlink()
@@ -572,7 +610,15 @@ async def post_upload(file: UploadFile, dir: str = "") -> JsonDict:
     if name in {"", ".", ".."}:
         raise HTTPException(status_code=400, detail="invalid file name")
     target = target_dir / name
-    with target.open("wb") as fh:
+    try:
+        # O_NOFOLLOW: a symlink under that name would take the upload wherever
+        # it points, outside the workspace included.
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o666)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise HTTPException(status_code=400, detail="a link with that name exists") from exc
+        raise
+    with os.fdopen(fd, "wb") as fh:
         while chunk := await file.read(1024 * 1024):
             await asyncio.to_thread(fh.write, chunk)
     return {"ok": True, "path": str(target.relative_to(WORKSPACE_ROOT))}
@@ -1747,6 +1793,15 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
             }
             for i, s in enumerate(recipe.steps, start=1)
         ]
+        # The run refuses these too (replay.paths_outside); saying so here keeps
+        # an imported recipe that writes outside the workspace from looking runnable.
+        for step in steps:
+            outside = replay.paths_outside(step["arguments"], WORKSPACE_ROOT)
+            if outside:
+                error = f"step {step['index']} names a path outside the workspace: " + ", ".join(
+                    outside
+                )
+                return {"ok": False, "error": error, "steps": steps, "items": items}
         ready = sum(1 for item in items if item["ok"])
         return {
             "ok": ready > 0,
@@ -1880,6 +1935,7 @@ async def ws_replay(ws: WebSocket) -> None:
                 runs=bindings,
                 servers=servers,
                 cwd=str(WORKSPACE_ROOT),
+                confine_to=WORKSPACE_ROOT,
                 on_finished=lambda r: _audit.info(
                     "replay finished: %s run=%s status=%s", r.workflow, r.id, r.status
                 ),

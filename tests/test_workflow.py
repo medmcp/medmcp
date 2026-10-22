@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from medmcp import workflow
@@ -135,6 +136,19 @@ def test_workflow_dir_requires_a_recipe(tmp_path: Path) -> None:
     assert workflow.workflow_dir(tmp_path, "strip") == tmp_path / "strip"
     assert workflow.workflow_dir(tmp_path, "junk") is None
     assert workflow.workflow_dir(tmp_path, "nope") is None
+
+
+def test_workflow_dir_refuses_a_name_that_leaves_the_root(tmp_path: Path) -> None:
+    """A name from the API cannot reach a recipe.yaml elsewhere on disk."""
+    root = tmp_path / "workflows"
+    root.mkdir()
+    workflow.write_recipe(tmp_path / "elsewhere", _recipe())
+    assert workflow.workflow_dir(root, "../elsewhere") is None
+    assert workflow.workflow_dir(root, str(tmp_path / "elsewhere")) is None
+    assert workflow.workflow_dir(root, "..") is None
+    with pytest.raises(FileNotFoundError):
+        workflow.delete_workflow("../elsewhere", workflows_root=root)
+    assert (tmp_path / "elsewhere" / "recipe.yaml").exists()
 
 
 def test_list_workflows_rows(tmp_path: Path) -> None:

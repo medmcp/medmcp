@@ -4,6 +4,14 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Security
+
+- Explorer: an upload never writes through a symlink, the tree does not list folders a link points to outside the workspace, and delete/rename act on a link itself.
+- Viewer: workspace HTML and SVG files are served under a CSP sandbox, so opening one in a tab cannot act as the app.
+- Workflows: a replay step naming a path outside the workspace is refused (recipe constants, defaults and step outputs included), and a workflow name can no longer reach a recipe outside the workflows folder.
+
 ## 0.7.1 — 2026-10-21
 
 ### Changed

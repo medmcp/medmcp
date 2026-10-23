@@ -23,6 +23,7 @@ import json
 import re
 import subprocess
 from pathlib import Path
+from typing import cast
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = REPO_ROOT / "frontend"
@@ -182,22 +183,25 @@ def _python_rows() -> list[tuple[str, str, str]]:
 # ── JavaScript ─────────────────────────────────────────────────────────────────
 
 
-def _collect_js(node: dict[str, object], acc: dict[str, str]) -> None:
-    """Recursively collect name -> version from an ``npm ls --json`` tree."""
+def _collect_js(node: dict[str, object], acc: dict[str, tuple[str, Path]]) -> None:
+    """Recursively collect name -> (version, install dir) from an ``npm ls --json --long`` tree."""
     deps = node.get("dependencies")
     if not isinstance(deps, dict):
         return
-    for name, meta in deps.items():
+    for name, meta in cast("dict[str, object]", deps).items():
         if isinstance(meta, dict):
+            meta = cast("dict[str, object]", meta)
             version = meta.get("version")
+            path = meta.get("path")
             if isinstance(version, str):
-                acc[name] = version
+                # A nested copy (node_modules/a/node_modules/b) has no top-level dir.
+                pkg_dir = Path(path) if isinstance(path, str) else FRONTEND / "node_modules" / name
+                acc[name] = (version, pkg_dir)
             _collect_js(meta, acc)
 
 
-def _js_license(name: str) -> str:
+def _js_license(pkg_dir: Path) -> str:
     """Resolve a frontend package's license from its package.json (+ LICENSE file)."""
-    pkg_dir = FRONTEND / "node_modules" / Path(name)
     pkg = pkg_dir / "package.json"
     raw = ""
     if pkg.is_file():
@@ -212,15 +216,15 @@ def _js_license(name: str) -> str:
 def _js_rows() -> list[tuple[str, str, str]]:
     """Return (name, version, license) for the production frontend closure."""
     proc = subprocess.run(
-        ["npm", "ls", "--omit=dev", "--all", "--json"],
+        ["npm", "ls", "--omit=dev", "--all", "--json", "--long"],
         cwd=FRONTEND,
         capture_output=True,
         text=True,
     )
     tree = json.loads(proc.stdout or "{}")
-    collected: dict[str, str] = {}
+    collected: dict[str, tuple[str, Path]] = {}
     _collect_js(tree, collected)
-    rows = [(name, version, _js_license(name)) for name, version in collected.items()]
+    rows = [(name, version, _js_license(pkg_dir)) for name, (version, pkg_dir) in collected.items()]
     return sorted(rows, key=lambda r: r[0].lower())
 
 

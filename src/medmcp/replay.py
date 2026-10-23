@@ -28,7 +28,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import timedelta
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 import mcp.types as mcp_types
@@ -299,6 +299,34 @@ async def mcp_caller(
 # ── Validation & execution ────────────────────────────────────────────────────
 
 
+def paths_outside(value: object, root: Path) -> list[str]:
+    """Strings in a resolved argument tree that name a path outside *root*.
+
+    A string counts as a path when it is absolute, starts with ``~``, or has a
+    ``..`` component; anything else is relative to the stack's working
+    directory, which replay sets to the workspace. Bound inputs are confined
+    before they get here, but a recipe's constants, an input default, a ``..``
+    appended to a placeholder and a value a previous step produced are not, and
+    a recipe can be imported from anyone.
+    """
+    found: list[str] = []
+    if isinstance(value, dict):
+        for item in cast("JsonDict", value).values():
+            found += paths_outside(item, root)
+    elif isinstance(value, list):
+        for item in cast("list[Any]", value):
+            found += paths_outside(item, root)
+    elif isinstance(value, str) and "://" not in value and "\n" not in value:
+        text = value.strip()
+        if not (text.startswith(("/", "~")) or ".." in PurePosixPath(text).parts):
+            return found
+        path = Path(text).expanduser()
+        resolved = (path if path.is_absolute() else root / path).resolve()
+        if not resolved.is_relative_to(root.resolve()):
+            found.append(text)
+    return found
+
+
 def _is_unset(value: object) -> bool:
     """Whether *value* counts as not supplied: absent, or whitespace-only text."""
     return value is None or (isinstance(value, str) and not value.strip())
@@ -376,13 +404,15 @@ async def replay_with_caller(
     caller: ToolCaller,
     on_step: Callable[[StepResult], Awaitable[None]] | None = None,
     on_step_start: StepStartHook | None = None,
+    confine_to: Path | None = None,
 ) -> ReplayResult:
     """Execute *recipe* step-by-step using *caller*; abort on the first failure.
 
     *inputs* maps placeholder names (``in_1`` …) to concrete values. Outputs a
     step produces are captured and bound as ``{{stepM.<key>}}`` for later steps.
     ``on_step_start`` fires just before each tool call, so a caller can show
-    which step is in flight.
+    which step is in flight. With *confine_to*, a step whose arguments name a
+    path outside it fails instead of running (see :func:`paths_outside`).
     """
     # Defaults are filled here, the one place every replay path funnels through
     # (single run and each batch item alike), so no caller can forget them.
@@ -392,14 +422,20 @@ async def replay_with_caller(
     for index, step in enumerate(recipe.steps, start=1):
         args = resolve_arguments(step.arguments, bindings)
         pending = unresolved_refs(args)
-        if pending:
+        outside = paths_outside(args, confine_to) if confine_to is not None else []
+        if pending or outside:
+            error = (
+                f"unresolved placeholders: {', '.join(sorted(pending))}"
+                if pending
+                else f"path outside the workspace: {', '.join(outside)}"
+            )
             step_result = StepResult(
                 index=index,
                 server=step.server,
                 tool=step.tool,
                 arguments=args,
                 ok=False,
-                error=f"unresolved placeholders: {', '.join(sorted(pending))}",
+                error=error,
             )
             result.steps.append(step_result)
             result.ok = False
@@ -454,6 +490,7 @@ async def run(
     cwd: str | None = None,
     tool_timeout_sec: float = DEFAULT_TOOL_TIMEOUT_SEC,
     on_step: Callable[[StepResult], Awaitable[None]] | None = None,
+    confine_to: Path | None = None,
 ) -> ReplayResult:
     """Validate and replay *recipe* on *inputs*, spawning the needed MCP stacks.
 
@@ -467,7 +504,9 @@ async def run(
 
     try:
         async with mcp_caller(servers, cwd=cwd, tool_timeout_sec=tool_timeout_sec) as caller:
-            return await replay_with_caller(recipe, inputs, caller=caller, on_step=on_step)
+            return await replay_with_caller(
+                recipe, inputs, caller=caller, on_step=on_step, confine_to=confine_to
+            )
     except ReplayError as exc:
         return ReplayResult(ok=False, error=str(exc))
 
@@ -482,6 +521,7 @@ async def run_batch(
     on_step: Callable[[int, StepResult], Awaitable[None]] | None = None,
     on_item: Callable[[int, ReplayResult], Awaitable[None]] | None = None,
     on_step_start: Callable[[int, int, str, str], Awaitable[None]] | None = None,
+    confine_to: Path | None = None,
 ) -> list[ReplayResult]:
     """Replay *recipe* once per input binding in *runs*, sharing one set of stacks.
 
@@ -536,6 +576,7 @@ async def run_batch(
                     caller=caller,
                     on_step=_step,
                     on_step_start=_start,
+                    confine_to=confine_to,
                 )
                 await _emit(item, res)
     except ReplayError as exc:

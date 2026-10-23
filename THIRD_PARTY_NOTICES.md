@@ -20,7 +20,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | attrs | 26.1.0 | MIT |
 | beautifulsoup4 | 4.14.3 | MIT |
 | cachetools | 7.0.6 | MIT |
-| certifi | 2026.7.22 | MPL-2.0 |
+| certifi | 2026.10.19 | MPL-2.0 |
 | cffi | 2.0.0 | MIT |
 | charset-normalizer | 3.4.7 | MIT |
 | click | 8.3.3 | BSD-3-Clause |
@@ -29,7 +29,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | eval-type-backport | 0.3.1 | MIT |
 | fastapi | 0.141.1 | MIT |
 | gitdb | 4.0.12 | BSD-3-Clause |
-| gitpython | 3.1.62 | BSD-3-Clause |
+| gitpython | 3.2.1 | BSD-3-Clause |
 | giturlparse | 0.15.0 | Apache-2.0 |
 | google-auth | 2.49.2 | Apache-2.0 |
 | googleapis-common-protos | 1.74.0 | Apache-2.0 |
@@ -160,7 +160,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | estree-util-is-identifier-name | 3.0.0 | MIT |
 | extend | 3.0.2 | MIT |
 | fast-deep-equal | 3.1.3 | MIT |
-| fflate | 0.8.2 | MIT |
+| fflate | 0.8.3 | MIT |
 | gl-matrix | 3.4.4 | MIT |
 | hast-util-from-dom | 5.0.1 | ISC |
 | hast-util-from-html | 2.0.3 | MIT |

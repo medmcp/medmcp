@@ -4,6 +4,28 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## 0.7.2 — 2026-10-22
+
+### Security
+
+- Agent: runs in its own container, with no Docker access, no saved credentials and read-only settings (`MEDMCP_AGENT_ISOLATION`, on by default with `docker compose`).
+- Agent: no internet access; it reaches the model and external servers only through MedMCP, which keeps the credentials.
+- Agent: cannot use the workspace's own API.
+- Agent: settings changed by an approved command are reset when the next chat starts.
+- Workspace: optional `MEDMCP_PASSWORD` keeps other users of a shared machine out.
+- Workspace: chats, provenance and workflows are readable only by their owner.
+- Stacks: a stack tool runs only for the exact call you approved.
+- Stacks: manifests must keep their safety flags; `MEDMCP_REQUIRE_SIGNED_STACKS=1` allows only signed images.
+- Approvals: risk labels come from fixed rules; the model can add labels but not remove them.
+- Files: uploads, the explorer and workflows stay inside the workspace, symlinks included.
+- Viewer: HTML and SVG files from the workspace open sandboxed.
+- Chats: chat logs the agent could have edited are no longer trusted.
+- Compose: MedMCP reaches Docker only through a guard service that allows just what it needs.
+- Compose: every container runs with minimal privileges.
+- Supply chain: images and CI actions are pinned; dependencies are audited on every PR.
+- Dependencies: certifi, fflate and gitpython updated for known vulnerabilities.
+- CI: the container isolation is tested end to end on every PR.
+
 ## 0.7.1 — 2026-10-21
 
 ### Changed

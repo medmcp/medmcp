@@ -15,7 +15,7 @@ services:
   llm:
     # The Ollama release this MedMCP release was tested with; bumped per release so
     # a pinned install stays put. Override with OLLAMA_IMAGE to try another.
-    image: ${OLLAMA_IMAGE:-ollama/ollama:0.40.7}
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.40.7@sha256:2e6cc92ffa43b4b1a2e70e315407e00ac97ec125afc71277d73c7efe01c4f31b}
     environment:
       # Keep the model resident in VRAM (-1) so it isn't evicted after the
       # 5-minute idle default and reloaded on the next prompt. Override with a
@@ -25,6 +25,9 @@ services:
       - "nvidia.com/gpu=${MEDMCP_GPU:-all}"
     volumes:
       - "${OLLAMA_MODELS_DIR:-ollama-models}:/root/.ollama"
+    # Nothing here needs a capability or a setuid binary.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 5s
@@ -33,7 +36,7 @@ services:
     restart: unless-stopped
 
   llm-init:
-    image: ${OLLAMA_IMAGE:-ollama/ollama:0.40.7}
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.40.7@sha256:2e6cc92ffa43b4b1a2e70e315407e00ac97ec125afc71277d73c7efe01c4f31b}
     depends_on:
       llm:
         condition: service_healthy
@@ -46,6 +49,9 @@ services:
       MEDMCP_MODELFILE: "${MEDMCP_MODELFILE:-/Modelfile.muse}"
     volumes:
       - "./Modelfile.muse:/Modelfile.muse:ro"
+    # Nothing here needs a capability or a setuid binary.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     entrypoint: ["/bin/sh", "-c"]
     # Idempotent: skipped when the model is already built. The base tag is read
     # from the Modelfile's FROM line so this stays correct for either model.
@@ -54,7 +60,7 @@ services:
     restart: "no"
 
   llm-warmup:
-    image: ${OLLAMA_IMAGE:-ollama/ollama:0.40.7}
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.40.7@sha256:2e6cc92ffa43b4b1a2e70e315407e00ac97ec125afc71277d73c7efe01c4f31b}
     depends_on:
       llm:
         condition: service_healthy
@@ -63,6 +69,9 @@ services:
     environment:
       OLLAMA_HOST: "http://llm:11434"
       MEDMCP_MODEL: "${OLLAMA_MODEL:-muse-medmcp}"
+    # Nothing here needs a capability or a setuid binary.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     entrypoint: ["/bin/sh", "-c"]
     # Preload the model into VRAM at startup so the first prompt is instant
     # instead of paying the cold-load latency. Nothing depends on this service,
@@ -70,6 +79,34 @@ services:
     command:
       - 'ollama run "$$MEDMCP_MODEL" "ok" </dev/null >/dev/null 2>&1 || true'
     restart: "no"
+
+  # Holds the real docker socket and gives the core a filtered one: no privileged
+  # containers, host namespaces, extra capabilities or foreign mounts, and only
+  # containers it created may be started, attached, stopped or removed (see
+  # src/medmcp/dockerguard.py). No network; nothing to write but its socket.
+  docker-guard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: "${MEDMCP_BASE_IMAGE:-medmcp-base:dev}"
+    image: medmcp-core:dev
+    entrypoint: ["medmcp-docker-guard"]
+    environment:
+      MEDMCP_WORKSPACE: "${MEDMCP_WORKSPACE:?set MEDMCP_WORKSPACE to an absolute host path}"
+      MEDMCP_DOCKER_SOCKET_SOURCE: "${XDG_RUNTIME_DIR}/docker.sock"
+    volumes:
+      - type: bind
+        source: "${XDG_RUNTIME_DIR}/docker.sock"
+        target: /var/run/docker.sock
+        bind:
+          create_host_path: false
+      - "docker-guard:/run/medmcp-guard"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
 
   medmcp:
     build:
@@ -83,6 +120,8 @@ services:
         condition: service_healthy
       llm-init:
         condition: service_completed_successfully
+      docker-guard:
+        condition: service_started
     # Secrets for external MCP servers and a cloud model (Settings -> Advanced),
     # when they are named as environment variables rather than entered in the UI.
     # Only the variable's *name* is stored then, never its value, so the value has to
@@ -130,6 +169,18 @@ services:
       MEDMCP_UPDATE_URL: "${MEDMCP_UPDATE_URL:-}"
       # Chat-long approval of read-only shell commands (ls, cat, …); off with 0.
       MEDMCP_READ_ONLY_APPROVAL: "${MEDMCP_READ_ONLY_APPROVAL:-}"
+      # The agent runs in its own container: no docker socket, no state volume,
+      # its config read-only, stack tools through the core (forces the stack
+      # pool on). Empty runs it inside this container, as before.
+      MEDMCP_AGENT_ISOLATION: "${MEDMCP_AGENT_ISOLATION:-container}"
+      # A password for the workspace, for a machine other accounts can log in to.
+      MEDMCP_PASSWORD: "${MEDMCP_PASSWORD:-}"
+      # 1 refuses stack images the signing policy does not cover (default: warn).
+      MEDMCP_REQUIRE_SIGNED_STACKS: "${MEDMCP_REQUIRE_SIGNED_STACKS:-}"
+      # Containers are started through the docker guard; the real socket's host
+      # path is passed only so the update helper can be given it.
+      DOCKER_HOST: "unix:///run/medmcp-guard/docker.sock"
+      MEDMCP_DOCKER_SOCKET_SOURCE: "${XDG_RUNTIME_DIR}/docker.sock"
     healthcheck:
       test:
         - CMD
@@ -142,16 +193,21 @@ services:
       start_period: 20s
     ports:
       - "127.0.0.1:8100:8100"
+    # DAC_OVERRIDE for a rootful host, where the workspace belongs to another uid.
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 4096
+    # The isolated agent's network: internal, so its only peer is this container
+    # (the API, the broker, and the egress gateway that reaches the model).
+    networks: [default, agent]
     volumes:
       # Docker socket → core spawns sibling stack containers. Rootless by
       # default; rootful hosts set XDG_RUNTIME_DIR=/var/run. Long form so a wrong
       # path fails `up` instead of docker creating an empty directory there,
       # which leaves the core unable to start any stack ("Connection closed").
-      - type: bind
-        source: "${XDG_RUNTIME_DIR}/docker.sock"
-        target: /var/run/docker.sock
-        bind:
-          create_host_path: false
+      # The docker guard's filtered socket, not the daemon's (DOCKER_HOST).
+      - "docker-guard:/run/medmcp-guard"
       # Workspace at an identical absolute path (path parity for nested run -v).
       - "${MEDMCP_WORKSPACE}:${MEDMCP_WORKSPACE}"
       # Container-stack manifests (read-write so UI install/uninstall can persist).
@@ -168,6 +224,9 @@ services:
       # External MCP servers and the consent that armed them. Losing these on an
       # image update would silently disconnect a configured setup.
       - "vibe-state:/app/.vibe/state"
+      # What the isolated agent container reads (config, profile, hooks,
+      # prompts), published here by the core and mounted read-only there.
+      - "vibe-agent:/app/.vibe/agent-home"
       # Host registry creds, read-only at a staging path — the entrypoint copies
       # only `auths` to /root/.docker/config.json, dropping the host's
       # `currentContext` (which would break every in-container stack pull/run).
@@ -177,6 +236,10 @@ services:
       - "${HOME}/.docker/config.json:/run/host-docker-config.json:ro"
     restart: unless-stopped
 
+networks:
+  agent:
+    internal: true
+
 volumes:
   ollama-models:
   vibe-workflows:
@@ -184,3 +247,5 @@ volumes:
   vibe-runs:
   vibe-logs:
   vibe-state:
+  vibe-agent:
+  docker-guard:

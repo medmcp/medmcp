@@ -17,10 +17,11 @@ import contextlib
 import json
 import logging
 import os
+import re
 import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 # A loose alias for parsed JSON-RPC payloads. The ACP protocol is too dynamic
 # to model exhaustively as TypedDicts, so we keep the wire format as
@@ -43,6 +44,54 @@ if not _audit.handlers:
 # ``VibeAcpClient`` constructor.
 PROJECT_ROOT: str = str(Path(__file__).resolve().parent.parent.parent)
 VIBE_HOME: Path = Path(PROJECT_ROOT) / ".vibe"
+
+
+# Variables never inherited by the agent: everything it starts — every approved
+# bash command included — sees its environment. A credential the agent does need
+# (an external server's token, the cloud model's key) comes back through the
+# client's ``extra_env`` provider, which names exactly those.
+_SECRET_ENV_RE: re.Pattern[str] = re.compile(
+    r"TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|API_?KEY|ACCESS_KEY|PRIVATE_KEY"
+    r"|_KEY$|^GHCR_|^MEDMCP_EXT_|^MEDMCP_UPDATE_|^MEDMCP_CLOUD_",
+    re.IGNORECASE,
+)
+
+
+def scrub_environment(env: Mapping[str, str]) -> dict[str, str]:
+    """*env* without the variables that look like credentials (see above)."""
+    return {k: v for k, v in env.items() if not _SECRET_ENV_RE.search(k)}
+
+
+class AgentLauncher(Protocol):
+    """How the agent process is started; see :class:`SubprocessLauncher`."""
+
+    def argv(
+        self, env: Mapping[str, str], owed: Mapping[str, str]
+    ) -> tuple[list[str], dict[str, str]]:
+        """The command to run and the environment to run it in.
+
+        *env* is the agent's environment (already scrubbed); *owed* the
+        credentials in it that it was explicitly given.
+        """
+        ...
+
+    async def cleanup(self) -> None:
+        """Release whatever the last start left behind, once the process is gone."""
+        ...
+
+
+class SubprocessLauncher:
+    """vibe-acp as a child of this process (host-native installs)."""
+
+    def argv(
+        self, env: Mapping[str, str], owed: Mapping[str, str]
+    ) -> tuple[list[str], dict[str, str]]:
+        """``uv run vibe-acp`` in the agent's environment."""
+        del owed
+        return ["uv", "run", "vibe-acp"], dict(env)
+
+    async def cleanup(self) -> None:
+        """Nothing outlives the child."""
 
 
 def _encode(msg: JsonDict) -> bytes:
@@ -101,20 +150,26 @@ class VibeAcpClient:
         cwd: str = PROJECT_ROOT,
         vibe_home: Path = VIBE_HOME,
         extra_env: Callable[[], Mapping[str, str]] | None = None,
+        launcher: AgentLauncher | None = None,
     ) -> None:
         """Build an unstarted client. Call :meth:`ensure_started` before use.
 
         *extra_env* supplies variables for the agent subprocess — credentials for
         external MCP servers, which the agent reads at request time and this
-        process must therefore hold. It is a callable, not a dict, because the
+        process must therefore hold. Everything else that looks like a credential
+        is withheld (:func:`scrub_environment`). It is a callable, not a dict, because the
         client outlives many spawns: whatever it returns is read afresh each time
         the process starts, so a changed credential takes effect on the restart
         that every such change already triggers. (A callable also keeps this
         module free of a settings import, which would be circular.)
+
+        *launcher* starts the process; the default runs it as a child of this
+        one (see :mod:`medmcp.agentbox` for the isolated alternative).
         """
         self._cwd: str = cwd
         self._vibe_home: Path = vibe_home
         self._extra_env: Callable[[], Mapping[str, str]] | None = extra_env
+        self._launcher: AgentLauncher = launcher or SubprocessLauncher()
         self.proc: asyncio.subprocess.Process | None = None
         self._next_id: int = 0
         self._pending: dict[int, asyncio.Future[JsonDict]] = {}
@@ -143,6 +198,8 @@ class VibeAcpClient:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self.proc.wait(), timeout=5.0)
             self.proc = None
+            with contextlib.suppress(Exception):
+                await self._launcher.cleanup()
         if self._reader_task is not None:
             self._reader_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -166,20 +223,16 @@ class VibeAcpClient:
             if self._initialized:
                 return
             try:
+                owed = dict(self._extra_env()) if self._extra_env else {}
+                argv, env = self._launcher.argv(self._agent_env(owed), owed)
                 self.proc = await asyncio.create_subprocess_exec(
-                    "uv",
-                    "run",
-                    "vibe-acp",
+                    *argv,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=None,  # inherit parent stderr so logs appear in terminal
                     limit=16 * 1024 * 1024,  # 16 MB; default 64 KB overflows with LLM responses
                     cwd=self._cwd,
-                    env={
-                        **os.environ,
-                        "VIBE_HOME": str(self._vibe_home),
-                        **(self._extra_env() if self._extra_env else {}),
-                    },
+                    env=env,
                 )
                 self._reader_task = asyncio.create_task(self._read_loop())
                 resp = await self.request(
@@ -195,6 +248,12 @@ class VibeAcpClient:
                 await self._stop_locked()
                 raise
             self._initialized = True
+
+    def _agent_env(self, owed: Mapping[str, str] | None = None) -> dict[str, str]:
+        """The agent's environment: this one, scrubbed, plus what it is *owed*."""
+        if owed is None:
+            owed = self._extra_env() if self._extra_env else {}
+        return {**scrub_environment(os.environ), "VIBE_HOME": str(self._vibe_home), **owed}
 
     async def _read_loop(self) -> None:
         """Read JSON-RPC frames forever and route them.

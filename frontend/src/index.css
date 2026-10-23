@@ -4360,3 +4360,24 @@ textarea.wf-input {
   padding: 1px 6px;
   font-size: 11px;
 }
+
+/* Login: the screen a browser sees until it presents the workspace password. */
+.login {
+  height: 100%;
+  background: var(--dark);
+}
+
+.login-input {
+  width: 100%;
+  margin-top: 14px;
+  padding: 8px 10px;
+  background: var(--dark2);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  color: var(--text);
+  font: 13px/16px var(--mono);
+}
+
+.confirm-dialog p.login-error {
+  color: var(--red-tint);
+}

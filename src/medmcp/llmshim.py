@@ -116,6 +116,8 @@ _SSE_KEEPALIVE = b": keepalive\n\n"
 # ATEM markers, as in Ollama's ``model/parsers/glimmer.go``.
 ATEM_CALLS_OPEN = "<atem:function_calls>"
 ATEM_CALLS_CLOSE = "</atem:function_calls>"
+# Ollama's model-management routes, which the passthrough refuses.
+_ADMIN_ROUTE = re.compile(r"api/(create|copy|pull|push|delete|blobs)\b")
 _ATEM_INVOKE_RE = re.compile(r'<atem:invoke name="([^"]*)">(.*?)</atem:invoke>', re.DOTALL)
 _ATEM_PARAM_RE = re.compile(r'<atem:parameter name="([^"]*)">(.*?)</atem:parameter>', re.DOTALL)
 
@@ -753,7 +755,14 @@ def create_app(
         "/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD"]
     )
     async def passthrough(request: Request, path: str) -> Response:  # pyright: ignore[reportUnusedFunction]
-        """Forward every other Ollama route untouched, so the shim is a drop-in."""
+        """Forward every other Ollama route untouched, so the shim is a drop-in.
+
+        Except Ollama's model-management API: only vibe talks to the shim, and
+        nothing it does creates, copies, pulls, pushes or deletes a model. The
+        Models window reaches Ollama directly.
+        """
+        if _ADMIN_ROUTE.match(path.lstrip("/")):
+            return JSONResponse({"error": "not through the tool-call shim"}, status_code=403)
         body = await request.body()
         headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
         async with httpx.AsyncClient(timeout=httpx.Timeout(900.0)) as client:

@@ -6,9 +6,12 @@ import sys
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from medmcp.backend_broker import BackendBroker
 from medmcp.backend_pool import BackendPool, BackendSpec
+
+JsonDict = dict[str, Any]
 
 FAKE_STACK_SERVER: Path = Path(__file__).parent / "fake_stack_server.py"
 
@@ -38,13 +41,15 @@ def resolver(specs: dict[str, BackendSpec]) -> Callable[[str], BackendSpec | Non
 
 @asynccontextmanager
 async def broker(
-    tmp_path: Path, specs: dict[str, BackendSpec] | None = None
+    tmp_path: Path,
+    specs: dict[str, BackendSpec] | None = None,
+    authorize: Callable[[str, str, JsonDict], bool] | None = None,
 ) -> AsyncGenerator[Path]:
     """Run a broker over a real socket against a pool (the fake stack by default)."""
     if specs is None:
         specs = {"fake": fake_spec("fake")}
     pool = BackendPool(resolve_spec=resolver(specs))
-    broker = BackendBroker(pool, tmp_path / "broker.sock")
+    broker = BackendBroker(pool, tmp_path / "broker.sock", authorize)
     await broker.start()
     try:
         yield broker.socket_path

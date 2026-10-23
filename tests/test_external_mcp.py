@@ -642,3 +642,17 @@ def test_shipped_prompt_still_contains_the_anchor() -> None:
     """
     shipped = Path(__file__).resolve().parents[1] / ".vibe" / "prompts" / "medmcp.md"
     assert settings.ONPREM_RULE in shipped.read_text()
+
+
+def test_a_named_variable_reaches_the_agent_only_while_in_force(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent's environment is scrubbed, so a deployment's own token is handed over by name."""
+    monkeypatch.setenv("PUBMED_TOKEN", "from-the-deployment")
+    settings.acknowledge_external_mcp()
+    _add(api_key_env="PUBMED_TOKEN")
+    assert "PUBMED_TOKEN" not in settings.agent_secret_env()
+    settings.set_external_mcp_enabled(True)
+    assert settings.agent_secret_env()["PUBMED_TOKEN"] == "from-the-deployment"
+    settings.set_external_server_active("pubmed", False)
+    assert "PUBMED_TOKEN" not in settings.agent_secret_env()

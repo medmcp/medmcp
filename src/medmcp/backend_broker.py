@@ -35,6 +35,7 @@ import contextlib
 import json
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -57,16 +58,25 @@ class BrokerRequestError(Exception):
 class BackendBroker:
     """Serves a :class:`BackendPool` to proxy shim processes over a unix socket."""
 
-    def __init__(self, pool: BackendPool, socket_path: Path) -> None:
+    def __init__(
+        self,
+        pool: BackendPool,
+        socket_path: Path,
+        authorize: Callable[[str, str, JsonDict], bool] | None = None,
+    ) -> None:
         """Create a broker; call :meth:`start` to begin listening.
 
         Args:
             pool: The persistent backend pool to dispatch to (owned elsewhere — the
                 broker does not close it).
             socket_path: Path to the unix domain socket to bind.
+            authorize: Asked before every ``call_tool`` with (stack, tool, args); a
+                call it refuses is answered with an error and never run (the
+                server passes :meth:`medmcp.approvals.ApprovalLedger.consume`).
         """
         self._pool = pool
         self._socket_path = socket_path
+        self._authorize = authorize
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -162,6 +172,9 @@ class BackendBroker:
             if not isinstance(raw_args, dict):
                 raise BrokerRequestError("'args' must be an object")
             args: JsonDict = cast("JsonDict", raw_args)
+            if self._authorize is not None and not self._authorize(stack, tool, args):
+                log.warning("broker refused unapproved call %s.%s", stack, tool)
+                raise BrokerRequestError(f"{stack}.{tool} was not approved for these arguments")
             result = await self._pool.call(stack, tool, args)
             return {"id": req_id, "ok": True, "result": result.model_dump(mode="json")}
 

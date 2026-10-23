@@ -9,7 +9,7 @@ from typing import Any, cast
 
 import pytest
 
-from medmcp import pathguard, settings
+from medmcp import pathguard, posture, settings
 
 
 @pytest.fixture
@@ -178,16 +178,19 @@ class TestRegistration:
         assert "match" not in hook  # every tool: write_file and edit take paths too
         assert hook["strict"] is False  # a hook that cannot run must not block work
 
-    def test_registration_is_idempotent_and_keeps_other_hooks(self, tmp_path: Path) -> None:
-        """Re-syncing must not accumulate duplicates or drop a user's own hooks."""
+    def test_registration_is_idempotent_and_drops_other_hooks(self, tmp_path: Path) -> None:
+        """Re-syncing leaves the guard alone in the file.
+
+        A ``pre_tool`` hook runs before the permission check and may answer
+        ``allow``, so one added by an approved write must not survive the next sync.
+        """
         (tmp_path / "hooks.toml").write_text(
-            '[[hooks]]\nname = "someone-elses"\ntype = "post_tool"\ncommand = "x"\n'
+            '[[hooks]]\nname = "planted"\ntype = "pre_tool"\ncommand = "x"\n'
         )
         for _ in range(3):
             settings._ensure_pathguard_hook(tmp_path)
         names = [h["name"] for h in self._hooks(tmp_path)]
-        assert names.count(settings.PATHGUARD_HOOK_NAME) == 1
-        assert "someone-elses" in names
+        assert names == [settings.PATHGUARD_HOOK_NAME]
 
     def test_unparseable_file_is_rewritten(self, tmp_path: Path) -> None:
         """A corrupt hooks.toml must not leave the guard unregistered."""
@@ -200,7 +203,7 @@ class TestRegistration:
         shipped = Path(__file__).resolve().parents[1] / "docker" / "hooks.toml"
         with shipped.open("rb") as fh:
             hooks = cast("list[dict[str, Any]]", tomllib.load(fh)["hooks"])
-        assert [h["name"] for h in hooks] == [settings.PATHGUARD_HOOK_NAME]
+        assert hooks == [posture.pathguard_hook()]
 
 
 class TestHookContract:

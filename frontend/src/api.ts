@@ -20,6 +20,9 @@ import type {
 /** Thin client for the workspace filesystem API. */
 
 async function check(res: Response): Promise<Response> {
+  // The login cookie is gone or the password changed: the reload lands on the
+  // login screen rather than leaving every panel failing on its own.
+  if (res.status === 401) window.location.reload()
   if (!res.ok) {
     let detail = res.statusText
     try {
@@ -49,6 +52,16 @@ async function sendJson(
 
 async function postJson(url: string, body: object): Promise<Response> {
   return sendJson('POST', url, body)
+}
+
+/** Trade the workspace password for this browser's login cookie. */
+export async function login(password: string): Promise<void> {
+  await postJson('/api/login', { password })
+}
+
+/** Whether this browser may use the API (no password set, or it is logged in). */
+export async function canUseApi(): Promise<boolean> {
+  return (await fetch('/api/access')).ok
 }
 
 /** The absolute on-disk workspace root, so absolute tool outputs can be shown

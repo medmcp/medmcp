@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import importlib
 import io
 import json
@@ -68,10 +69,14 @@ from tree_sitter import Language, Node, Parser
 
 from medmcp import (
     __version__,
+    access,
+    agentbox,
+    approvals,
     batchplan,
     chat_export,
     distill,
     explain,
+    gateway,
     harness,
     localmodels,
     origincheck,
@@ -79,6 +84,7 @@ from medmcp import (
     pathguard,
     provenance,
     replay,
+    riskcheck,
     runs,
     sessions,
     settings,
@@ -127,6 +133,11 @@ _SKIP_DIRS: frozenset[str] = frozenset(
 )
 _TREE_MAX_DEPTH: int = 12
 _TREE_MAX_ENTRIES_PER_DIR: int = 500
+# Served by /api/raw under a CSP sandbox: these can carry script that would
+# otherwise run with this origin when opened directly.
+_SCRIPTABLE_SUFFIXES: frozenset[str] = frozenset(
+    {".html", ".htm", ".xhtml", ".shtml", ".svg", ".svgz", ".xml", ".xsl", ".xslt"}
+)
 
 # ── Persistent stack pool + broker (Layer 1; MEDMCP_STACK_POOL) ───────────────
 # Created at startup only when the pool is enabled; None otherwise (the legacy
@@ -138,6 +149,9 @@ _broker: BackendBroker | None = None
 # Replay runs in flight (see ``runs.py``). A run is a task in this process with a
 # record on disk; sockets attach to it and detach from it without affecting it.
 _runs: runs.RunManager = runs.RunManager()
+# Stack calls approved in a chat, each spendable once by the broker: anything
+# that reaches the broker socket without one is refused (see medmcp.approvals).
+_approvals: approvals.ApprovalLedger = approvals.ApprovalLedger()
 
 
 def _resolve_backend_spec(name: str) -> BackendSpec | None:
@@ -160,7 +174,29 @@ def _resolve_backend_spec(name: str) -> BackendSpec | None:
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     """Start the stack pool + broker on boot (when enabled); tear them down on exit."""
-    global _pool, _broker
+    global _pool, _broker, _gateway
+    _audit.info("workspace password %s", "required" if access.required() else "not set")
+    _audit.info(
+        "agent runs %s",
+        "in its own container" if agentbox.isolation_enabled() else "as a child process",
+    )
+    # The isolated agent's only way out, listening before the agent can start;
+    # a core that cannot set it up leaves the agent unstartable, not unconfined.
+    if _agent_launcher is not None:
+        try:
+            box = await asyncio.to_thread(_agent_launcher.prepare)
+            # The agent's network reaches this server too; nothing on it may use the UI.
+            access.refuse_network(box.subnet)
+            _gateway = gateway.EgressGateway(box.gateway_host)
+            await _gateway.start()
+            agentbox.set_gateway_base(_gateway.base_url)
+        except Exception:
+            _audit.exception("agent isolation unavailable; the agent will not start")
+    # Before any agent can run: fingerprint the legacy transcripts, so one that
+    # appears in the agent-writable logs volume later is never replayed.
+    recorded = await asyncio.to_thread(provenance.record_legacy_transcripts)
+    if recorded:
+        _audit.info("recorded %d legacy transcript(s)", recorded)
     # A run record still marked "running" was cut off by the previous process.
     interrupted = await asyncio.to_thread(runs.reconcile_interrupted)
     if interrupted:
@@ -182,7 +218,7 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         # Proxy children read MEDMCP_WORKSPACE for their fallback cwd; export it.
         os.environ.setdefault("MEDMCP_WORKSPACE", str(WORKSPACE_ROOT))
         _pool = BackendPool(resolve_spec=_resolve_backend_spec, cwd=str(WORKSPACE_ROOT))
-        _broker = BackendBroker(_pool, settings.backend_socket_path())
+        _broker = BackendBroker(_pool, settings.backend_socket_path(), _approvals.consume)
         try:
             await _broker.start()
             # Proxied config + backends.json exist from boot, before any tool call.
@@ -199,12 +235,19 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
         await _runs.shutdown()
+        # An isolated agent is a sibling container, not part of the compose
+        # project: left running, it would outlive the core and hold its network.
+        with contextlib.suppress(Exception):
+            await _client.stop()
         if _broker is not None:
             await _broker.aclose()
         if _pool is not None:
             await _pool.aclose()
+        if _gateway is not None:
+            await _gateway.aclose()
         _broker = None
         _pool = None
+        _gateway = None
 
 
 async def _update_check_loop() -> None:
@@ -286,8 +329,54 @@ class OriginGuard:
         await response(scope, receive, send)
 
 
+class AccessGuard:
+    """Refuse the isolated agent's network outright, and requests without the password.
+
+    The origin check keeps other sites out, but lets a request with no ``Origin``
+    through — every non-browser client. The agent container can reach this port
+    over the network it shares with the core, and loopback is shared by every
+    account on the machine (the password, when set). See :mod:`medmcp.access`.
+    Pure ASGI for the same reason as :class:`OriginGuard`: the WebSocket upgrade
+    is refused before ``accept``.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        """Wrap *app*, checking the peer and the password on every request and upgrade."""
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Pass the request through, or refuse it without reaching the route."""
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        client = scope.get("client")
+        if access.peer_refused(client[0] if client else None):
+            await self._refuse(scope, receive, send, "agent network", 403)
+            return
+        if not access.needs_password(str(scope.get("path", ""))):
+            await self.app(scope, receive, send)
+            return
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
+        if access.authorized(headers):
+            await self.app(scope, receive, send)
+            return
+        await self._refuse(scope, receive, send, "no password", 401)
+
+    @staticmethod
+    async def _refuse(scope: Scope, receive: Receive, send: Send, reason: str, code: int) -> None:
+        _audit.warning("refused %s %s: %s", scope["type"], scope.get("path", ""), reason)
+        if scope["type"] == "websocket":
+            await receive()
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        response = JSONResponse({"detail": reason}, status_code=code)
+        await response(scope, receive, send)
+
+
 app = FastAPI(title="MedMCP Workspace", lifespan=_lifespan)
-# Outermost, so a refused request never reaches a route or a static file.
+# Outermost, so a refused request never reaches a route or a static file: the
+# origin check first, then the peer and the password.
+app.add_middleware(AccessGuard)
 app.add_middleware(OriginGuard)
 
 # One vibe-acp subprocess shared by every websocket connection. The subprocess
@@ -297,7 +386,25 @@ app.add_middleware(OriginGuard)
 # model's API key — is needed; this process holds them so the operator does not
 # have to plumb one into the deployment by hand. Passed as a provider, re-read
 # on every (re)start.
-_client: VibeAcpClient = VibeAcpClient(extra_env=settings.agent_secret_env)
+# With MEDMCP_AGENT_ISOLATION=container it runs in a sibling container that has
+# no docker socket, no state volume, a read-only view of its own config and no
+# route out but this process's egress gateway, which holds the credentials — so
+# the agent gets placeholders (see medmcp.agentbox, medmcp.gateway); otherwise as
+# a child of this process, with the credentials themselves.
+_agent_launcher: agentbox.ContainerLauncher | None = (
+    agentbox.ContainerLauncher(os.environ.get("MEDMCP_WORKSPACE") or str(WORKSPACE_ROOT))
+    if agentbox.isolation_enabled()
+    else None
+)
+_client: VibeAcpClient = VibeAcpClient(
+    extra_env=(
+        (lambda: gateway.placeholder_env(settings.agent_secret_env()))
+        if _agent_launcher is not None
+        else settings.agent_secret_env
+    ),
+    launcher=_agent_launcher,
+)
+_gateway: gateway.EgressGateway | None = None
 
 # Live websocket connections, so a settings-triggered vibe restart can close
 # them (each client auto-reconnects into a fresh session on the new process).
@@ -327,13 +434,39 @@ def _safe_path(rel: str) -> Path:
     return resolved
 
 
+def _safe_entry(rel: str) -> Path:
+    """Like :func:`_safe_path`, but the last component is kept as it is.
+
+    For operations on the entry itself — delete, rename, upload — where following
+    a final symlink would act on whatever it points at, possibly outside the
+    workspace. The folder holding the entry is resolved and confined as usual.
+    """
+    name = Path(rel).name
+    if name in {"", ".", ".."}:
+        return _safe_path(rel)
+    return _safe_path(str(Path(rel).parent)) / name
+
+
+def _link_leaves_tree(path: Path) -> bool:
+    """Whether *path* is a symlink the explorer must not look through.
+
+    One pointing outside the workspace would list the host's files; one pointing
+    at its own ancestor would recurse to the depth limit.
+    """
+    if not path.is_symlink():
+        return False
+    real = path.resolve()
+    return not real.is_relative_to(WORKSPACE_ROOT) or path.parent.resolve().is_relative_to(real)
+
+
 def _tree_node(path: Path, depth: int) -> JsonDict:
     """Build one explorer-tree node (recursing into directories)."""
     rel = str(path.relative_to(WORKSPACE_ROOT))
     node: JsonDict = {"id": rel, "name": path.name}
+    leaves = _link_leaves_tree(path)
     if path.is_dir():
         children: list[JsonDict] = []
-        if depth < _TREE_MAX_DEPTH:
+        if depth < _TREE_MAX_DEPTH and not leaves:
             try:
                 entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
             except PermissionError:
@@ -342,7 +475,7 @@ def _tree_node(path: Path, depth: int) -> JsonDict:
             for child in shown[:_TREE_MAX_ENTRIES_PER_DIR]:
                 children.append(_tree_node(child, depth + 1))
         node["children"] = children
-    else:
+    elif not leaves:
         with contextlib.suppress(OSError):
             node["size"] = path.stat().st_size
     return node
@@ -376,7 +509,13 @@ async def get_raw(rel_path: str) -> FileResponse:
     path = _safe_path(rel_path)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="file not found")
-    return FileResponse(path, headers={"Cache-Control": "no-cache"})
+    headers = {"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"}
+    if path.suffix.lower() in _SCRIPTABLE_SUFFIXES:
+        # Opened directly in a tab, a workspace HTML or SVG file would otherwise
+        # run with this origin and could drive /ws/chat and /ws/replay. The
+        # viewer's iframe is sandboxed the same way, so nothing it shows changes.
+        headers["Content-Security-Policy"] = "sandbox allow-scripts"
+    return FileResponse(path, headers=headers)
 
 
 # The kernel writes a mount path's space, tab, newline and backslash as octal
@@ -535,12 +674,12 @@ class RenamePayload(BaseModel):
 @app.post("/api/files/rename")
 async def post_rename(payload: RenamePayload) -> JsonDict:
     """Rename or move a file/directory inside the workspace."""
-    src = _safe_path(payload.path)
-    dst = _safe_path(payload.new_path)
+    src = _safe_entry(payload.path)
+    dst = _safe_entry(payload.new_path)
     _refuse_mount_point(src)
-    if not src.exists():
+    if not (src.exists() or src.is_symlink()):
         raise HTTPException(status_code=404, detail="source not found")
-    if dst.exists():
+    if dst.exists() or dst.is_symlink():
         raise HTTPException(status_code=409, detail="target already exists")
     dst.parent.mkdir(parents=True, exist_ok=True)
     src.rename(dst)
@@ -550,13 +689,13 @@ async def post_rename(payload: RenamePayload) -> JsonDict:
 @app.delete("/api/files")
 async def delete_file(path: str) -> JsonDict:
     """Delete a file or directory (recursive). The UI confirms before calling."""
-    target = _safe_path(path)
+    target = _safe_entry(path)
     if target == WORKSPACE_ROOT:
         raise HTTPException(status_code=400, detail="refusing to delete the workspace root")
     _refuse_mount_point(target)
-    if not target.exists():
+    if not (target.exists() or target.is_symlink()):
         raise HTTPException(status_code=404, detail="not found")
-    if target.is_dir():
+    if target.is_dir() and not target.is_symlink():
         await asyncio.to_thread(shutil.rmtree, target)
     else:
         target.unlink()
@@ -572,7 +711,15 @@ async def post_upload(file: UploadFile, dir: str = "") -> JsonDict:
     if name in {"", ".", ".."}:
         raise HTTPException(status_code=400, detail="invalid file name")
     target = target_dir / name
-    with target.open("wb") as fh:
+    try:
+        # O_NOFOLLOW: a symlink under that name would take the upload wherever
+        # it points, outside the workspace included.
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o666)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise HTTPException(status_code=400, detail="a link with that name exists") from exc
+        raise
+    with os.fdopen(fd, "wb") as fh:
         while chunk := await file.read(1024 * 1024):
             await asyncio.to_thread(fh.write, chunk)
     return {"ok": True, "path": str(target.relative_to(WORKSPACE_ROOT))}
@@ -702,6 +849,44 @@ def _apply_stack_change() -> None:
     """Re-discover stacks and re-sync vibe-acp config after an install/uninstall."""
     settings.load_mcp_servers.cache_clear()
     settings.sync_servers_to_vibe_config(settings.active_servers())
+
+
+class LoginPayload(BaseModel):
+    """Request body: the workspace password."""
+
+    password: str
+
+
+@app.post("/api/login")
+async def post_login(payload: LoginPayload, response: Response) -> JsonDict:
+    """Log this browser in: trade the password for a cookie.
+
+    The one ``/api`` route that answers without the password (see
+    :mod:`medmcp.access`). The cookie holds a value derived from the password,
+    is ``HttpOnly`` so page script never holds it, and ``SameSite=Strict`` so no
+    other site's request carries it.
+    """
+    if not access.required():
+        return {"ok": True}
+    if not access.password_matches(payload.password.strip()):
+        _audit.warning("login refused: wrong password")
+        raise HTTPException(status_code=403, detail="wrong password")
+    response.set_cookie(
+        access.COOKIE_NAME,
+        access.cookie_value(),
+        max_age=access.COOKIE_MAX_AGE_SEC,
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+    _audit.info("browser logged in")
+    return {"ok": True}
+
+
+@app.get("/api/access")
+async def get_access() -> JsonDict:
+    """Answer 200 when the request may use the API (the guard refuses it otherwise)."""
+    return {"ok": True}
 
 
 @app.get("/healthz")
@@ -928,6 +1113,9 @@ async def post_stack_install(payload: StackInstallPayload) -> JsonDict:
             status_code=409,
             detail={"needs_network_consent": True, "name": exc.name, "image": exc.image},
         ) from exc
+    except signing.SignatureError as exc:
+        _audit.warning("stack install refused: %s", exc)
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -1747,6 +1935,15 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
             }
             for i, s in enumerate(recipe.steps, start=1)
         ]
+        # The run refuses these too (replay.paths_outside); saying so here keeps
+        # an imported recipe that writes outside the workspace from looking runnable.
+        for step in steps:
+            outside = replay.paths_outside(step["arguments"], WORKSPACE_ROOT)
+            if outside:
+                error = f"step {step['index']} names a path outside the workspace: " + ", ".join(
+                    outside
+                )
+                return {"ok": False, "error": error, "steps": steps, "items": items}
         ready = sum(1 for item in items if item["ok"])
         return {
             "ok": ready > 0,
@@ -1880,6 +2077,7 @@ async def ws_replay(ws: WebSocket) -> None:
                 runs=bindings,
                 servers=servers,
                 cwd=str(WORKSPACE_ROOT),
+                confine_to=WORKSPACE_ROOT,
                 on_finished=lambda r: _audit.info(
                     "replay finished: %s run=%s status=%s", r.workflow, r.id, r.status
                 ),
@@ -3023,6 +3221,14 @@ class _ChatConnection:
                 ", ".join(f"{f['param']}={f['value']!r} ({f['status']})" for f in path_findings),
             )
 
+        # Rule-based labels from the call itself: shown whatever the model says,
+        # and the model's own labels can only add to them (see medmcp.riskcheck).
+        rule_keys = riskcheck.signals(
+            str(tool_call.get("toolName") or title),
+            pathcheck.coerce_arguments(tool_call.get("rawInput")),
+            path_findings,
+        )
+
         _audit.info("permission requested: %s", title)
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[str | None] = loop.create_future()
@@ -3035,12 +3241,14 @@ class _ChatConnection:
                 "options": options,
                 "explanation": explanation,
                 "explaining": explaining,
-                "risks": explain.resolve_risks(risk_keys),
+                "risks": explain.resolve_risks(_merge_keys(rule_keys, risk_keys)),
                 "paths": path_findings,
             }
         )
         if explaining:
-            task = asyncio.create_task(self._explain_permission(req_id_raw, tool_call, cached))
+            task = asyncio.create_task(
+                self._explain_permission(req_id_raw, tool_call, cached, rule_keys)
+            )
             self._explain_tasks.add(task)
             task.add_done_callback(self._explain_tasks.discard)
         try:
@@ -3069,7 +3277,17 @@ class _ChatConnection:
             option_id = None
         await self._resolve_permission(req_id_raw, title, cached, option_id)
 
-    async def _explain_permission(self, req_id: int, tool_call: JsonDict, cached: JsonDict) -> None:
+    def _grant_stack_call(self, tool_call: JsonDict) -> None:
+        """Let the broker run the stack call just approved, once, as approved."""
+        name = str(tool_call.get("toolName") or tool_call.get("title") or "")
+        stack, tool = provenance.split_tool_name(name, self._server_names)
+        if stack == "builtin":
+            return
+        _approvals.grant(stack, tool, pathcheck.coerce_arguments(tool_call.get("rawInput")))
+
+    async def _explain_permission(
+        self, req_id: int, tool_call: JsonDict, cached: JsonDict, rule_keys: list[str]
+    ) -> None:
         """Generate the LLM explanation for an already-shown permission dialog.
 
         Runs concurrently with the open approval box; the result is pushed as
@@ -3095,7 +3313,7 @@ class _ChatConnection:
                     "type": "permission_update",
                     "requestId": req_id,
                     "explanation": explanation,
-                    "risks": explain.resolve_risks(risk_keys),
+                    "risks": explain.resolve_risks(_merge_keys(rule_keys, risk_keys)),
                 }
             )
 
@@ -3111,6 +3329,8 @@ class _ChatConnection:
             _audit.info("permission decision: %s -> %s", title, option_id)
             decision = option_id
             outcome = {"outcome": "selected", "optionId": option_id}
+            if option_id.startswith("allow"):
+                self._grant_stack_call(cached)
         if cached:
             cached["decision"] = decision
 
@@ -3124,6 +3344,11 @@ class _ChatConnection:
 
 
 # ── Sessions API ───────────────────────────────────────────
+
+
+def _merge_keys(rules: list[str], model: list[str]) -> list[str]:
+    """Rule-based risk keys first, then any the model adds; the model removes none."""
+    return [*rules, *(k for k in model if k not in rules)]
 
 
 def _retrying_frame(msg: JsonDict) -> JsonDict:
@@ -3613,11 +3838,11 @@ else:
 
 
 def main() -> None:
-    """Run the workspace server on localhost (no auth — do not expose).
+    """Run the workspace server on localhost (token-gated — do not expose).
 
     Binds 127.0.0.1 by default. In a container set ``MEDMCP_WORKSPACE_HOST=0.0.0.0``
-    so the published port is reachable — the no-auth posture is preserved by
-    publishing the port only to the host's loopback (``127.0.0.1:8100:8100``).
+    so the published port is reachable — publish it only to the host's loopback
+    (``127.0.0.1:8100:8100``); the password is not a reason to widen that.
     """
     # The medmcp.* loggers (title and explanation outcomes, settings warnings)
     # are otherwise dropped at the root logger's default WARNING level; uvicorn
@@ -3626,6 +3851,10 @@ def main() -> None:
         level=logging.INFO, format="%(levelname)s %(name)s: %(message)s", force=True
     )
     WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+    # Chat transcripts, provenance and workflows live here and are written with
+    # the default umask; on a shared host the directory keeps other users out.
+    with contextlib.suppress(OSError):
+        provenance.VIBE_HOME.chmod(0o700)
     host = os.environ.get("MEDMCP_WORKSPACE_HOST", "127.0.0.1")
     port = int(os.environ.get("MEDMCP_WORKSPACE_PORT", str(DEFAULT_PORT)))
     uvicorn.run(app, host=host, port=port)

@@ -29,6 +29,7 @@ MEDMCP_WORKSPACE="$HOME/medmcp-data" \
 Then open **http://localhost:8100**.
 
 - **Requirements:** Linux, an NVIDIA GPU (≥ 24 GB VRAM recommended) with driver ≥ R570, and Docker with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/).
+- **Shared machine:** add `MEDMCP_PASSWORD=…` to the start command so other accounts on it can't open the workspace.
 - **Stop:** `docker compose -f oci://ghcr.io/medmcp/compose:latest down`
 - **Update:** click *Update now* when the workspace announces a new release, or re-run the start command with `--pull always`.
 - **Pin a version:** replace `latest` with a release tag such as `v0.3.0`. Release tags are never moved.

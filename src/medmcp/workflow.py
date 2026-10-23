@@ -320,7 +320,13 @@ def migrate_layout(root: Path) -> None:
 
 
 def workflow_dir(root: Path, name: str) -> Path | None:
-    """Return ``<root>/<name>`` if it holds a recipe, else ``None``."""
+    """Return ``<root>/<name>`` if it holds a recipe, else ``None``.
+
+    *name* must be one path component: it arrives from the API, and ``../x``
+    would otherwise load, replay or delete a ``recipe.yaml`` anywhere on disk.
+    """
+    if name in {"", ".", ".."} or Path(name).name != name or "\\" in name:
+        return None
     migrate_layout(root)
     candidate = root / name
     return candidate if (candidate / RECIPE_FILE).is_file() else None

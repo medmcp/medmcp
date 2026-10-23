@@ -496,6 +496,24 @@ class TestAtemParse:
         calls = llmshim.parse_atem_block(block, _FUNCTIONS)
         assert json.loads(calls[0]["function"]["arguments"]) == {"n": "7", "o": {"k": 1}}
 
+    def test_a_namespaced_name_is_mapped_to_the_offered_tool(self) -> None:
+        """Muse copies the section's ``tool.function`` example: ``bash.action``."""
+        block = (
+            '<atem:function_calls><atem:invoke name="bash.action">'
+            '<atem:parameter name="command">ls</atem:parameter>'
+            "</atem:invoke></atem:function_calls>"
+        )
+        call = llmshim.parse_atem_block(block, _FUNCTIONS)[0]["function"]
+        assert call["name"] == "bash" and json.loads(call["arguments"]) == {"command": "ls"}
+        assert llmshim.resolve_tool_name("file_system.bash", _FUNCTIONS) == "bash"
+
+    def test_an_ambiguous_or_unmatched_name_is_kept(self) -> None:
+        """No guessing: two offered halves, or none, leave the name to vibe's error."""
+        both = {"bash": _BASH["function"], "todo": _BASH["function"]}
+        assert llmshim.resolve_tool_name("bash.todo", both) == "bash.todo"
+        assert llmshim.resolve_tool_name("shell.run", _FUNCTIONS) == "shell.run"
+        assert llmshim.resolve_tool_name("mystery", _FUNCTIONS) == "mystery"
+
     def test_two_invokes_are_two_calls(self) -> None:
         """One block may carry several calls; indices count up."""
         block = (
@@ -704,3 +722,12 @@ async def test_keepalive_comment_while_a_block_is_held() -> None:
     assert ": keepalive\n\n" in out
     assert '"finish_reason": "tool_calls"' in out
     assert (await run(0)).count(": keepalive") == 0
+
+
+@pytest.mark.parametrize("path", ["api/create", "api/copy", "api/pull", "api/push", "api/delete"])
+def test_the_shim_refuses_ollamas_model_management(path: str) -> None:
+    """Only vibe talks to the shim, and it never needs to change the models."""
+    from starlette.testclient import TestClient
+
+    client = TestClient(llmshim.create_app("http://upstream.invalid"))
+    assert client.post(f"/{path}", json={}).status_code == 403

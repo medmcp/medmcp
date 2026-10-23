@@ -54,7 +54,14 @@ _LEDGER_KEEP = 250
 
 
 def _ledger_path() -> Path:
-    """Location of the denial ledger, beside the rest of the run-time state."""
+    """Location of the denial ledger, beside the rest of the run-time state.
+
+    ``MEDMCP_PATHGUARD_LEDGER`` moves it: an isolated agent's home is read-only,
+    and a ledger that cannot be written would deny the same call forever.
+    """
+    override = os.environ.get("MEDMCP_PATHGUARD_LEDGER", "").strip()
+    if override:
+        return Path(override)
     home = os.environ.get("VIBE_HOME")
     base = Path(home) if home else Path(__file__).resolve().parents[2] / ".vibe"
     return base / "pathguard_retries.json"

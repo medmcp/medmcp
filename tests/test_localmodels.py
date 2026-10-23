@@ -177,6 +177,14 @@ async def test_selecting_downloads_prepares_and_records(ollama: FakeOllama) -> N
     assert (await localmodels.list_models())["active"] == "gemma4"
 
 
+async def test_a_mistral_model_is_prepared_with_its_parser(ollama: FakeOllama) -> None:
+    """Without the ministral parser Ollama drops some of its tool calls (empty turns)."""
+    await localmodels.select("devstral-small-2")
+    assert ollama.created["medmcp-devstral-small-2"]["parser"] == "ministral"
+    await localmodels.select("gemma4")
+    assert "parser" not in ollama.created["medmcp-gemma4"]
+
+
 async def test_a_downloaded_model_is_not_pulled_again(ollama: FakeOllama) -> None:
     """Switching back to a model already on disk makes no download request."""
     ollama.installed["qwen3.8:27b"] = _info()

@@ -10,7 +10,7 @@ the failure mode differs by transport, and the streaming one is silent:
   no client can tell the turn failed. vibe records an empty assistant message and
   the chat appears frozen.
 
-This shim sits between vibe and Ollama and applies three repairs:
+This shim sits between vibe and Ollama and applies these repairs:
 
 1. **Tool renaming.** The dominant trigger is the tool literally named ``skill``,
    which collides in Glimmer's ATEM recipient namespace (hence the sibling error
@@ -36,6 +36,13 @@ This shim sits between vibe and Ollama and applies three repairs:
    ``<atem:function_calls>`` block in the content stream — and parses that block
    itself into OpenAI ``tool_calls``. Values are typed from the tool's JSON schema.
    ``MEDMCP_SHIM_TOOLS=ollama`` restores Ollama's parser (repairs 1-3 still apply).
+5. **Tool-name repair** (glimmer mode). The rendered tool section — Ollama's and
+   the publisher's template alike — shows ``example_tool_name.example_function_name``
+   as its example, and Muse copies the shape: ``bash.action``, ``todo.action``
+   (32 of 100 replayed agent requests, measured 2026-10-21). A name that is not
+   offered but whose part before the dot (``bash.action``) or after it
+   (``file_system.bash``) is exactly one offered tool is mapped to that tool; any
+   other unknown name is kept, and vibe answers it with its own error.
 
 **Relay mode** (``MEDMCP_SHIM_RELAY``). ``live`` (default): reasoning and
 ``content`` deltas stream straight through, so the answer appears as it is
@@ -109,6 +116,8 @@ _SSE_KEEPALIVE = b": keepalive\n\n"
 # ATEM markers, as in Ollama's ``model/parsers/glimmer.go``.
 ATEM_CALLS_OPEN = "<atem:function_calls>"
 ATEM_CALLS_CLOSE = "</atem:function_calls>"
+# Ollama's model-management routes, which the passthrough refuses.
+_ADMIN_ROUTE = re.compile(r"api/(create|copy|pull|push|delete|blobs)\b")
 _ATEM_INVOKE_RE = re.compile(r'<atem:invoke name="([^"]*)">(.*?)</atem:invoke>', re.DOTALL)
 _ATEM_PARAM_RE = re.compile(r'<atem:parameter name="([^"]*)">(.*?)</atem:parameter>', re.DOTALL)
 
@@ -397,20 +406,39 @@ def coerce_value(raw: str, types: set[str]) -> object:
     return text
 
 
+def resolve_tool_name(name: str, functions: Mapping[str, JsonDict]) -> str:
+    """The offered tool a namespaced name means (repair 5), else *name* unchanged.
+
+    ``bash.action`` -> ``bash`` and ``file_system.bash`` -> ``bash`` when ``bash``
+    is offered. A name whose two halves are both offered tools is ambiguous and
+    kept, like any name that matches nothing.
+    """
+    if name in functions or "." not in name:
+        return name
+    first, last = name.partition(".")[0], name.rpartition(".")[2]
+    candidates = {part for part in (first, last) if part in functions}
+    if len(candidates) != 1:
+        return name
+    (resolved,) = candidates
+    log.info("tool name %r repaired to %r", name, resolved)
+    return resolved
+
+
 def parse_atem_block(
     block: str, functions: Mapping[str, JsonDict], *, first_index: int = 0
 ) -> list[JsonDict]:
     """Parse one ``<atem:function_calls>`` block into OpenAI tool-call objects.
 
     Lenient where Ollama's parser is not: whitespace between tags is ignored and
-    an invoke with no parameters is a call with ``{}``. Unknown tool names are
-    kept — vibe answers the model with its own error, which is better than a
-    dropped call. ``first_index`` numbers the calls after those of an earlier
-    block in the same turn: clients merge streamed deltas by index.
+    an invoke with no parameters is a call with ``{}``. A namespaced name is
+    mapped to the offered tool it means (:func:`resolve_tool_name`); other unknown
+    names are kept — vibe answers the model with its own error, which is better
+    than a dropped call. ``first_index`` numbers the calls after those of an
+    earlier block in the same turn: clients merge streamed deltas by index.
     """
     calls: list[JsonDict] = []
     for index, invoke in enumerate(_ATEM_INVOKE_RE.finditer(block), start=first_index):
-        name = invoke.group(1).strip()
+        name = resolve_tool_name(invoke.group(1).strip(), functions)
         fn = functions.get(name)
         arguments: JsonDict = {}
         for param in _ATEM_PARAM_RE.finditer(invoke.group(2)):
@@ -727,7 +755,14 @@ def create_app(
         "/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD"]
     )
     async def passthrough(request: Request, path: str) -> Response:  # pyright: ignore[reportUnusedFunction]
-        """Forward every other Ollama route untouched, so the shim is a drop-in."""
+        """Forward every other Ollama route untouched, so the shim is a drop-in.
+
+        Except Ollama's model-management API: only vibe talks to the shim, and
+        nothing it does creates, copies, pulls, pushes or deletes a model. The
+        Models window reaches Ollama directly.
+        """
+        if _ADMIN_ROUTE.match(path.lstrip("/")):
+            return JSONResponse({"error": "not through the tool-call shim"}, status_code=403)
         body = await request.body()
         headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
         async with httpx.AsyncClient(timeout=httpx.Timeout(900.0)) as client:

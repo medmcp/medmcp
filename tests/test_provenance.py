@@ -503,3 +503,39 @@ def test_rewind_truncates_the_transcript(tmp_path: Path, monkeypatch: pytest.Mon
     assert provenance.truncate_transcript("s", "m2") is True
     assert [m["content"] for m in provenance.read_transcript("s")] == ["one", "a1"]
     assert provenance.truncate_transcript("missing", "m1") is False
+
+
+class TestAgentWritableLogs:
+    """With agent isolation the logs volume is the agent's: nothing there is taken on trust."""
+
+    @pytest.fixture
+    def home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """An isolated VIBE_HOME."""
+        monkeypatch.setattr(provenance, "VIBE_HOME", tmp_path)
+        return tmp_path
+
+    def test_a_legacy_transcript_planted_later_is_not_replayed(self, home: Path) -> None:
+        """Only files fingerprinted before the agent ran are read, and only unchanged."""
+        sid_old, sid_new = "a" * 8 + "-old", "b" * 8 + "-new"
+        old = make_vibe_session(home, sid_old, messages=[{"role": "user", "content": "real"}])
+        assert provenance.record_legacy_transcripts() == 1
+        make_vibe_session(home, sid_new, messages=[{"role": "user", "content": "planted"}])
+        assert provenance.read_transcript(sid_new) == []
+        assert provenance.read_transcript(sid_old) == [{"role": "user", "content": "real"}]
+        (old / "messages.jsonl").write_text('{"role": "user", "content": "edited"}\n')
+        assert provenance.read_transcript(sid_old) == []
+
+    def test_symlinked_session_dirs_and_meta_are_ignored(
+        self, home: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """A link in the logs volume resolves in the core's file system, onto its secrets."""
+        secrets = tmp_path_factory.mktemp("state")
+        (secrets / "meta.json").write_text('{"session_id": "s" }')
+        sessions = home / "logs" / "session" / "unified"
+        sessions.mkdir(parents=True)
+        (sessions / "s").symlink_to(secrets)
+        assert provenance.find_vibe_session_dir("s") is None
+        real = make_vibe_session(home, "c" * 8 + "-x")
+        (real / "meta.json").unlink()
+        (real / "meta.json").symlink_to(secrets / "meta.json")
+        assert provenance.vibe_session_parents() == {}

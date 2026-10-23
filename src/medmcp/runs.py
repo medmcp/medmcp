@@ -433,8 +433,13 @@ class RunManager:
         cwd: str | None,
         tool_timeout_sec: float = replay.DEFAULT_TOOL_TIMEOUT_SEC,
         on_finished: Callable[[RunRecord], None] | None = None,
+        confine_to: Path | None = None,
     ) -> RunRecord:
-        """Begin a run as a background task and return its (already saved) record."""
+        """Begin a run as a background task and return its (already saved) record.
+
+        *confine_to* is handed to :func:`medmcp.replay.run_batch`: a step naming a
+        path outside it fails instead of running.
+        """
         record = RunRecord(
             id=new_run_id(),
             workflow=recipe.name,
@@ -446,7 +451,9 @@ class RunManager:
         live.frames.append(record.frames()[0])  # the "started" frame
         self._live[record.id] = live
         live.task = asyncio.create_task(
-            self._execute(live, recipe, runs, servers, cwd, tool_timeout_sec, on_finished),
+            self._execute(
+                live, recipe, runs, servers, cwd, tool_timeout_sec, on_finished, confine_to
+            ),
             name=f"replay-run-{record.id}",
         )
         return record
@@ -460,6 +467,7 @@ class RunManager:
         cwd: str | None,
         tool_timeout_sec: float,
         on_finished: Callable[[RunRecord], None] | None,
+        confine_to: Path | None,
     ) -> None:
         record = live.record
 
@@ -502,6 +510,7 @@ class RunManager:
                 on_step=_on_step,
                 on_item=_on_item,
                 on_step_start=_on_step_start,
+                confine_to=confine_to,
             )
             failed = sum(1 for r in results if not r.ok)
             record.status = "done" if failed == 0 else "failed"

@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 
 from medmcp import provenance, server, sessions, settings
 
-from .conftest import WS_HEADERS
+from .conftest import AUTH_HEADERS, WS_HEADERS
 
 
 @pytest.fixture
@@ -55,6 +55,17 @@ class TestRawFiles:
         assert head.headers["etag"] == got.headers["etag"]
         (workspace_root / "seg.nii.gz").write_bytes(b"v2-longer")
         assert client.head("/api/raw/seg.nii.gz").headers["etag"] != got.headers["etag"]
+
+    def test_raw_html_and_svg_are_sandboxed(self, workspace_root: Path, client: TestClient) -> None:
+        """Opened directly, a workspace page must not run with the app's origin."""
+        (workspace_root / "qc.html").write_text("<script>1</script>")
+        (workspace_root / "seg.nii.gz").write_bytes(b"x")
+        page = client.get("/api/raw/qc.html")
+        assert page.headers["content-security-policy"] == "sandbox allow-scripts"
+        assert page.headers["x-content-type-options"] == "nosniff"
+        volume = client.get("/api/raw/seg.nii.gz")
+        assert "content-security-policy" not in volume.headers
+        assert volume.headers["x-content-type-options"] == "nosniff"
 
     def test_raw_missing_file_is_404_for_head_too(
         self, workspace_root: Path, client: TestClient
@@ -126,6 +137,82 @@ class TestSafePath:
             server._safe_path("link/secret.txt")
         assert exc.value.status_code == 400
         assert "escapes" in str(exc.value.detail)
+
+
+class TestSymlinksInTheWorkspace:
+    """A symlink is acted on as itself, and never a way to see or write outside."""
+
+    @pytest.fixture
+    def outside(self, workspace_root: Path) -> Path:
+        """A folder next to the workspace holding a file."""
+        outside = workspace_root.parent / f"{workspace_root.name}-outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("s")
+        return outside
+
+    def test_upload_does_not_write_through_a_link(
+        self, workspace_root: Path, outside: Path, client: TestClient
+    ) -> None:
+        """An upload named like an existing link must not land where the link points."""
+        (workspace_root / "notes.txt").symlink_to(outside / "secret.txt")
+        resp = client.post("/api/files/upload", files={"file": ("notes.txt", io.BytesIO(b"pwned"))})
+        assert resp.status_code == 400
+        assert (outside / "secret.txt").read_text() == "s"
+
+    def test_upload_does_not_follow_a_dangling_link(
+        self, workspace_root: Path, outside: Path, client: TestClient
+    ) -> None:
+        """A dangling link would otherwise create its target outside the workspace."""
+        (workspace_root / "new.txt").symlink_to(outside / "planted.txt")
+        resp = client.post("/api/files/upload", files={"file": ("new.txt", io.BytesIO(b"x"))})
+        assert resp.status_code == 400
+        assert not (outside / "planted.txt").exists()
+
+    def test_tree_does_not_list_through_an_outside_link(
+        self, workspace_root: Path, outside: Path, client: TestClient
+    ) -> None:
+        """The explorer shows the link, but not the host folder behind it."""
+        (workspace_root / "host").symlink_to(outside)
+        (workspace_root / "secret").symlink_to(outside / "secret.txt")
+        tree = {n["name"]: n for n in client.get("/api/tree").json()["tree"]}
+        assert tree["host"]["children"] == []
+        assert "size" not in tree["secret"]
+
+    def test_tree_lists_through_an_inside_link_but_not_a_cycle(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """A link to another workspace folder is browsable; one to an ancestor is not walked."""
+        (workspace_root / "data").mkdir()
+        (workspace_root / "data" / "a.nii").write_bytes(b"x")
+        (workspace_root / "alias").symlink_to(workspace_root / "data")
+        (workspace_root / "data" / "loop").symlink_to(workspace_root)
+        tree = {n["name"]: n for n in client.get("/api/tree").json()["tree"]}
+        assert [c["name"] for c in tree["alias"]["children"]] == ["loop", "a.nii"]
+        loop = next(c for c in tree["data"]["children"] if c["name"] == "loop")
+        assert loop["children"] == []
+
+    def test_deleting_a_link_keeps_its_target(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """Deleting a link to a folder removes the link, not the folder's contents."""
+        (workspace_root / "data").mkdir()
+        (workspace_root / "data" / "a.nii").write_bytes(b"x")
+        (workspace_root / "alias").symlink_to(workspace_root / "data")
+        assert client.delete("/api/files", params={"path": "alias"}).status_code == 200
+        assert not (workspace_root / "alias").is_symlink()
+        assert (workspace_root / "data" / "a.nii").exists()
+
+    def test_renaming_a_link_moves_the_link(
+        self, workspace_root: Path, outside: Path, client: TestClient
+    ) -> None:
+        """A link pointing out can be renamed or removed, but its target is never touched."""
+        (workspace_root / "host").symlink_to(outside)
+        resp = client.post("/api/files/rename", json={"path": "host", "new_path": "renamed"})
+        assert resp.status_code == 200
+        assert (workspace_root / "renamed").is_symlink()
+        assert (outside / "secret.txt").exists()
+        assert client.delete("/api/files", params={"path": "renamed"}).status_code == 200
+        assert (outside / "secret.txt").exists()
 
 
 class TestMountPointGuard:
@@ -1355,7 +1442,7 @@ class TestFolderTransfer:
     def client(self, root: Path) -> TestClient:
         """A same-origin client for the real routes."""
         del root
-        return TestClient(server.app, base_url="http://127.0.0.1:8100")
+        return TestClient(server.app, base_url="http://127.0.0.1:8100", headers=AUTH_HEADERS)
 
     def test_upload_recreates_nested_folders(self, root: Path, client: TestClient) -> None:
         """A folder upload sends each file with its relative folder as ``dir``."""
@@ -1570,3 +1657,19 @@ class TestDisplayTitle:
         """No title and no name still gives the card something to say."""
         assert server._display_title(None, "", "") == "tool"
         assert server._display_title("", "x.y", "x_y") == "x_y"
+
+
+def test_an_approved_stack_call_is_granted_to_the_broker() -> None:
+    """Approving a stack call lets that exact call through the broker; a built-in grants none."""
+    queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    conn = server._ChatConnection(
+        cast("Any", _StubWs()), "sid", cast("Any", queue), [{"name": "medmcp-neuro-core"}]
+    )
+    conn._grant_stack_call(  # pyright: ignore[reportPrivateUsage]
+        {"toolName": "medmcp-neuro-core_skull_strip", "rawInput": '{"input_path": "/w/t1.nii"}'}
+    )
+    conn._grant_stack_call({"toolName": "bash", "rawInput": {"command": "ls"}})  # pyright: ignore[reportPrivateUsage]
+    ledger = server._approvals  # pyright: ignore[reportPrivateUsage]
+    assert ledger.consume("medmcp-neuro-core", "skull_strip", {"input_path": "/w/t1.nii"})
+    assert not ledger.consume("medmcp-neuro-core", "skull_strip", {"input_path": "/w/t1.nii"})
+    assert not ledger.consume("builtin", "bash", {"command": "ls"})

@@ -4,6 +4,12 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Added
+
+- Tool stacks: `medmcp-tptbox` (BIDS dataset queries, NIfTI geometry and label reports, chained image and mask operations, vertebra centroids, STL surface export) in both install catalogs. CPU only.
+
 ## 0.7.0 — 2026-10-19
 
 ### Changed

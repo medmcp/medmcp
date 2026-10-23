@@ -30,6 +30,12 @@
       "image": "ghcr.io/medmcp/cardiac:main",
       "description": "Cardiac MRI and CT: ventricle segmentation on short- and long-axis cines (CineMA), ejection fraction, volumes, LV mass and cardiac output, AHA 16-segment wall analysis, Agatston calcium score.",
       "gpu": true
+    },
+    {
+      "name": "medmcp-tptbox",
+      "image": "ghcr.io/medmcp/tptbox:main",
+      "description": "BIDS datasets and NIfTI processing (TPTBox): query a dataset for the scans a question is about, report geometry and label content, apply chained image and mask operations (reorient, resample, crop, pad, N4 bias correction, morphology, relabelling), derive vertebra centroids, export STL surfaces.",
+      "gpu": false
     }
   ]
 }

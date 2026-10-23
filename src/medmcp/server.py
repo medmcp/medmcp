@@ -3842,7 +3842,7 @@ def main() -> None:
 
     Binds 127.0.0.1 by default. In a container set ``MEDMCP_WORKSPACE_HOST=0.0.0.0``
     so the published port is reachable — publish it only to the host's loopback
-    (``127.0.0.1:8100:8100``); the access token is not a reason to widen that.
+    (``127.0.0.1:8100:8100``); the password is not a reason to widen that.
     """
     # The medmcp.* loggers (title and explanation outcomes, settings warnings)
     # are otherwise dropped at the root logger's default WARNING level; uvicorn

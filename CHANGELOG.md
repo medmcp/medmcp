@@ -4,6 +4,12 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Fixed
+
+- Docs: SECURITY.md no longer mentions the removed access token.
+
 ## 0.7.2 — 2026-10-22
 
 ### Security

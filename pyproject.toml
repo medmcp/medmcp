@@ -59,7 +59,7 @@ medmcp-update = "medmcp.updater:main"
 test = [
     # Provides the `httpx` module the TestClient tests type-check against
     # (httpx 2.x, published under this name); not imported by that name anywhere.
-    "httpx2>=2.12.0",
+    "httpx2>=2.15.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
 ]

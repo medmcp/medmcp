@@ -4,13 +4,17 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
-## Unreleased
+## 0.7.3 — 2026-10-23
 
-### Fixed
+### Changed
 
-- Docs: SECURITY.md no longer mentions the removed access token.
+- Frontend: React 19.3, react-arborist 4, Vite 8.3 and other frontend updates.
 
-## 0.7.2 — 2026-10-22
+### Security
+
+- Frontend: KaTeX 0.19 everywhere math is rendered, plus patched build tools (brace-expansion, browserslist).
+
+## 0.7.2 — 2026-10-23
 
 ### Security
 

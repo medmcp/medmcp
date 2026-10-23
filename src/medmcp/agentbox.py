@@ -2,7 +2,7 @@
 
 In the core container everything ran as one user: the server, the agent and
 every command the agent was allowed to run. That user holds the docker socket,
-the state volume (external-MCP and cloud-model secrets, the access token) and the
+the state volume (external-MCP and cloud-model secrets) and the
 files that decide what the agent may do without asking. One approved ``bash``
 call could therefore reach all of it.
 

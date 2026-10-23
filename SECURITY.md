@@ -55,7 +55,7 @@ MEDMCP_ALLOWED_HOSTS=medmcp.example.internal
 MEDMCP_ALLOWED_ORIGINS=https://medmcp.example.internal
 ```
 
-Both default to empty — unlisted means refused. The token still applies.
+Both default to empty — unlisted means refused. The password, if set, still applies.
 
 ## How the workspace protects your data
 

@@ -27,6 +27,10 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    ignore:
+      # The frontend build stays on a Node LTS line; moving to the next LTS is done by hand.
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "docker-compose"
     directory: "/"
@@ -43,3 +47,10 @@ updates:
       frontend-dependencies:
         patterns:
           - "*"
+    ignore:
+      # @types/node follows the Node LTS the build uses (see the docker entry).
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # typescript-eslint supports TypeScript below 6.1; lift once it supports 7.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]

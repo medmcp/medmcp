@@ -29,7 +29,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | eval-type-backport | 0.3.1 | MIT |
 | fastapi | 0.141.1 | MIT |
 | gitdb | 4.0.12 | BSD-3-Clause |
-| gitpython | 3.1.62 | BSD-3-Clause |
+| gitpython | 3.2.1 | BSD-3-Clause |
 | giturlparse | 0.15.0 | Apache-2.0 |
 | google-auth | 2.49.2 | Apache-2.0 |
 | googleapis-common-protos | 1.74.0 | Apache-2.0 |

@@ -24,8 +24,13 @@ jobs:
           # CVE-2026-59951 (mcp 1.28.1, pinned by mistral-vibe): unbounded session
           # state in Streamable HTTP *servers*. MedMCP only runs stdio servers and
           # vibe's HTTP client; drop the exception when vibe's pin moves.
+          # CVE-2026-114603 (opentelemetry-api 1.39.1, pinned by mistral-vibe with
+          # the whole OpenTelemetry set): slow parsing of an inbound tracestate
+          # header on an instrumented server. Nothing here parses inbound trace
+          # headers (vibe only exports), and the fix needs a version mistralai's
+          # range excludes; drop it when vibe's pin moves.
           uvx pip-audit==2.10.1 --strict --require-hashes --disable-pip \
-            --ignore-vuln CVE-2026-59951 -r requirements.txt
+            --ignore-vuln CVE-2026-59951 --ignore-vuln CVE-2026-114603 -r requirements.txt
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "24"

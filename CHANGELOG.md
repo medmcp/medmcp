@@ -8,27 +8,23 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Security
 
-- Workspace: the isolated agent cannot reach the workspace's own API.
-- Workspace: `MEDMCP_PASSWORD` keeps other accounts on a shared machine out; the browser asks for it once.
-- Agent: in a `docker compose` install the agent runs in its own container, with no docker socket, no access to the state volume or credentials, its config read-only, no capabilities but `DAC_OVERRIDE` and a read-only root file system; stack tools reach the core's pool through the broker (`MEDMCP_AGENT_ISOLATION`, default `container`).
-- Agent: the isolated agent sits on an internal network with no route out; the model, a cloud model and external MCP servers are reached through an egress gateway in the core, which adds the credentials, so the agent holds none. Ollama's admin API is out of its reach.
-- Stacks: the broker runs a stack call only if the person approved that exact call (stack, tool, arguments), once; the agent's shell can no longer call stack tools through it.
-- Compose: the core no longer holds the docker socket; a `docker-guard` service does, and forwards only what the core needs — containers without `--privileged`, host namespaces, extra capabilities or foreign mounts, and lifecycle calls only on containers it created.
-- Compose: every service drops all capabilities and privilege escalation; the core keeps `DAC_OVERRIDE` and a pids limit.
-- Agent: every config sync restores the approval posture (`default_agent`, `auto_approve`, tool permissions, the agent profile, hooks, trusted folders) and audit-logs what it had to undo.
-- Agent: the agent process no longer inherits credentials (registry tokens, update secrets, anything key- or token-shaped); it gets only the ones its active external servers and cloud model use.
-- Approvals: risk labels are worked out by rules from the call itself (network, deletion, writes, system changes, code assembled at run time, paths outside the workspace); the model's labels can only add to them.
-- Explorer: an upload never writes through a symlink, the tree does not list folders a link points to outside the workspace, and delete/rename act on a link itself.
-- Viewer: workspace HTML and SVG files are served under a CSP sandbox, so opening one in a tab cannot act as the app.
-- Workflows: a replay step naming a path outside the workspace is refused (recipe constants, defaults and step outputs included), and a workflow name can no longer reach a recipe outside the workflows folder.
-- Chats: the core no longer trusts the agent-writable session logs: a pre-2.26 transcript is replayed only if it was there, unchanged, before this version first ran, and links in the logs volume are never followed.
-- Stacks: a `stacks.d` manifest must launch `docker` with the hardening intact; extra mounts, `--privileged`, host namespaces and manifest `env` are refused.
-- Stacks: `MEDMCP_REQUIRE_SIGNED_STACKS=1` refuses stack images the signing policy does not cover; a refused signature now answers 403 instead of 500.
-- Workspace: `.vibe` (transcripts, provenance, workflows) is private to its owner on a shared host, and the updater writes its recovered env file `0600` from the start.
-- Supply chain: Ollama, the CUDA base and the Node build image are pinned by digest, workflow actions by commit; a Security workflow audits Python and npm dependencies on every PR and scans the published image weekly; Dependabot also tracks images and npm.
-- Dependencies: certifi 2026.10.19 (drops a root CA with compromised intermediates; overrides mistral-vibe's pin), fflate 0.8.3 (malformed-ZIP64 hang in the spreadsheet viewer).
-- CI: an Isolation workflow builds the core image and runs the shipped compose file against it with a scripted model, checking the agent container, its network, the gateway, broker approvals and the docker guard (`just e2e-isolation`).
-- Docs: SECURITY.md says what approving a command grants in each install, and describes the password.
+- Agent: runs in its own container, with no Docker access, no saved credentials and read-only settings (`MEDMCP_AGENT_ISOLATION`, on by default with `docker compose`).
+- Agent: no internet access; it reaches the model and external servers only through MedMCP, which keeps the credentials.
+- Agent: cannot use the workspace's own API.
+- Agent: settings changed by an approved command are reset when the next chat starts.
+- Workspace: optional `MEDMCP_PASSWORD` keeps other users of a shared machine out.
+- Workspace: chats, provenance and workflows are readable only by their owner.
+- Stacks: a stack tool runs only for the exact call you approved.
+- Stacks: manifests must keep their safety flags; `MEDMCP_REQUIRE_SIGNED_STACKS=1` allows only signed images.
+- Approvals: risk labels come from fixed rules; the model can add labels but not remove them.
+- Files: uploads, the explorer and workflows stay inside the workspace, symlinks included.
+- Viewer: HTML and SVG files from the workspace open sandboxed.
+- Chats: chat logs the agent could have edited are no longer trusted.
+- Compose: MedMCP reaches Docker only through a guard service that allows just what it needs.
+- Compose: every container runs with minimal privileges.
+- Supply chain: images and CI actions are pinned; dependencies are audited on every PR.
+- Dependencies: certifi, fflate and gitpython updated for known vulnerabilities.
+- CI: the container isolation is tested end to end on every PR.
 
 ## 0.7.1 — 2026-10-21
 

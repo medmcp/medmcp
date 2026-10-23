@@ -79,7 +79,9 @@ default-groups = ["dev"]
 # mistral-vibe pins certifi exactly; its pinned bundle still trusts the emSign ECC
 # Root CA - G3, whose intermediates' keys were compromised (PYSEC-2026-4320).
 # The CA bundle is data, so overriding it cannot break vibe.
-override-dependencies = ["certifi>=2026.10.19"]
+# gitpython likewise (CVE-2026-114145, submodule clone into .git/hooks); vibe
+# only reads repos and fetches, which 3.2 leaves as it was.
+override-dependencies = ["certifi>=2026.10.19", "gitpython>=3.2.1"]
 
 
 [tool.ruff]

@@ -11,31 +11,22 @@ import '@fontsource/jetbrains-mono/500.css'
 import 'katex/dist/katex.min.css'
 import './index.css'
 import App from './App.tsx'
-import { isPaired, pair } from './api.ts'
+import { canUseApi } from './api.ts'
 import { ConfirmProvider } from './components/ConfirmDialog.tsx'
-import PairingScreen from './components/PairingScreen.tsx'
+import LoginScreen from './components/LoginScreen.tsx'
 
-/** Pair from a `?token=` link, then show the workspace or the pairing screen. */
+/** Show the workspace, or the login screen when it has a password this browser lacks. */
 async function boot() {
-  const url = new URL(window.location.href)
-  const token = url.searchParams.get('token')
-  if (token) {
-    // Out of the address bar and history either way; a wrong one just leaves
-    // the browser unpaired.
-    url.searchParams.delete('token')
-    window.history.replaceState(null, '', url)
-    await pair(token).catch(() => undefined)
-  }
-  const paired = await isPaired()
+  const allowed = await canUseApi()
   // No StrictMode: its dev-only double-mount would open two chat WebSockets and
   // hence two vibe-acp sessions per page load.
   createRoot(document.getElementById('root')!).render(
-    paired ? (
+    allowed ? (
       <ConfirmProvider>
         <App />
       </ConfirmProvider>
     ) : (
-      <PairingScreen />
+      <LoginScreen />
     ),
   )
 }

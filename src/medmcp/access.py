@@ -1,118 +1,98 @@
-"""The workspace's access token: who may use the API on this machine.
+"""Who may use the workspace's API: an optional password and the agent's network.
 
 Binding to loopback keeps the network out, but not the other accounts on the
-same machine, nor anything else running locally — a request with no ``Origin``
-is a non-browser client, which the origin check lets through by design. So every
-``/api`` and ``/ws`` request must also carry this token: as the cookie a browser
-receives when it is paired (``POST /api/pair``), or as ``Authorization: Bearer``
-for a script.
+same machine: any of them can open ``127.0.0.1:8100``. On a shared machine,
+``MEDMCP_PASSWORD`` closes that — every ``/api`` and ``/ws`` request must then
+carry it, as the cookie a browser receives from ``POST /api/login`` or as
+``Authorization: Bearer`` for a script. Unset, the API is open to whoever can
+reach the port, which on a single-user machine is only its owner.
 
-The token is random, generated once and kept in ``.vibe/state/ui_token.json``
-(0600, on the persisted state volume in a container), so a restart or an update
-does not unpair a browser. ``MEDMCP_UI_TOKEN`` sets it instead, for a deployment
-or a harness that needs to know it up front. ``medmcp url`` prints the pairing
-link, and the server logs it at start.
+The isolated agent is a different matter and never depends on a password: it
+shares a docker network with the core, so it could reach the UI port and drive
+the server that is meant to confine it (replay runs stack tools without asking).
+Requests from that network are refused outright (:func:`refuse_network`).
 """
 
 from __future__ import annotations
 
-import contextlib
-import json
+import hashlib
+import hmac
+import ipaddress
 import logging
 import os
-import secrets
-import tempfile
 from functools import lru_cache
 from http.cookies import CookieError, SimpleCookie
-from pathlib import Path
-from urllib.parse import quote
-
-from medmcp.acp import VIBE_HOME
-from medmcp.statefile import read_json
 
 log: logging.Logger = logging.getLogger(__name__)
 
-TOKEN_PATH: Path = VIBE_HOME / "state" / "ui_token.json"
-TOKEN_ENV = "MEDMCP_UI_TOKEN"
+PASSWORD_ENV = "MEDMCP_PASSWORD"
 COOKIE_NAME = "medmcp_access"
-# Browsers cap a cookie's lifetime at 400 days; re-pairing after that is fine.
+# Browsers cap a cookie's lifetime at 400 days; logging in again after that is fine.
 COOKIE_MAX_AGE_SEC = 400 * 24 * 3600
-# A shorter value from the environment is a configuration mistake, not a secret.
-_MIN_TOKEN_LEN = 16
+_SHORT_PASSWORD = 12
 
-# Paths that answer without a token: the pairing call itself. Everything outside
+# Paths that answer without the password: logging in itself. Everything outside
 # /api and /ws (the page, its bundle, /healthz) carries nothing to protect.
-_OPEN_API_PATHS: frozenset[str] = frozenset({"/api/pair"})
+_OPEN_API_PATHS: frozenset[str] = frozenset({"/api/login"})
+
+_refused: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
 
 
 @lru_cache(maxsize=1)
-def token() -> str:
-    """The access token: from the environment, else the state file, else new."""
-    configured = os.environ.get(TOKEN_ENV, "").strip()
-    if len(configured) >= _MIN_TOKEN_LEN:
-        return configured
-    if configured:
-        log.warning("%s is shorter than %d characters; ignoring it", TOKEN_ENV, _MIN_TOKEN_LEN)
-    stored = _stored_token()
-    if stored:
-        return stored
-    return _create_token()
+def password() -> str:
+    """The configured password, or ``""`` when the workspace has none."""
+    value = os.environ.get(PASSWORD_ENV, "").strip()
+    if value and len(value) < _SHORT_PASSWORD:
+        log.warning("%s is shorter than %d characters", PASSWORD_ENV, _SHORT_PASSWORD)
+    return value
 
 
-def _stored_token() -> str:
-    stored = (read_json(TOKEN_PATH) or {}).get("token")
-    return stored if isinstance(stored, str) and len(stored) >= _MIN_TOKEN_LEN else ""
+def required() -> bool:
+    """Whether API requests must carry the password."""
+    return bool(password())
 
 
-def _create_token() -> str:
-    """Write a new token unless one appeared meanwhile; return the one in force.
-
-    ``medmcp url`` can run while the server is still starting, so two processes
-    may get here at once. The file is written in full under a temporary name and
-    then hard-linked into place, which fails if the name is taken — the loser
-    reads the winner's token instead of printing a link that will not work.
-    """
-    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=TOKEN_PATH.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({"token": secrets.token_urlsafe(32)}, fh)
-        with contextlib.suppress(FileExistsError):
-            os.link(tmp, TOKEN_PATH)
-    finally:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-    return _stored_token()
+def cookie_value() -> str:
+    """What a logged-in browser's cookie holds: derived from the password, not the password."""
+    return hmac.new(password().encode(), b"medmcp-access-cookie", hashlib.sha256).hexdigest()
 
 
-def matches(candidate: str) -> bool:
-    """Whether *candidate* is the token (constant-time)."""
-    return bool(candidate) and secrets.compare_digest(candidate.encode(), token().encode())
+def password_matches(candidate: str) -> bool:
+    """Whether *candidate* is the password (constant-time)."""
+    return bool(candidate) and hmac.compare_digest(candidate.encode(), password().encode())
 
 
-def needs_token(path: str) -> bool:
-    """Whether a request to *path* must carry the token."""
-    return path.startswith(("/api/", "/ws/")) and path not in _OPEN_API_PATHS
+def needs_password(path: str) -> bool:
+    """Whether a request to *path* must carry the password."""
+    return required() and path.startswith(("/api/", "/ws/")) and path not in _OPEN_API_PATHS
 
 
-def presented(headers: dict[str, str]) -> str:
-    """The token a request carries — bearer header first, then the cookie — or ``""``."""
+def authorized(headers: dict[str, str]) -> bool:
+    """Whether a request carries the password: as a bearer header or the login cookie."""
     auth = headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
+        return password_matches(auth[7:].strip())
     try:
         jar = SimpleCookie(headers.get("cookie", ""))
     except CookieError:
-        return ""
+        return False
     morsel = jar.get(COOKIE_NAME)
-    return morsel.value if morsel is not None else ""
+    return morsel is not None and hmac.compare_digest(
+        morsel.value.encode(), cookie_value().encode()
+    )
 
 
-def pairing_url(base: str) -> str:
-    """The link that pairs a browser: *base* (``http://localhost:8100``) with the token."""
-    return f"{base.rstrip('/')}/?token={quote(token())}"
+def refuse_network(cidr: str) -> None:
+    """Refuse every request from *cidr* (the isolated agent's network)."""
+    _refused.append(ipaddress.ip_network(cidr, strict=False))
 
 
-def public_base_url(port: int) -> str:
-    """Where people open the workspace (``MEDMCP_PUBLIC_URL``, else localhost:*port*)."""
-    return os.environ.get("MEDMCP_PUBLIC_URL", "").strip() or f"http://localhost:{port}"
+def peer_refused(host: str | None) -> bool:
+    """Whether a request from *host* comes from a refused network."""
+    if not host or not _refused:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(address in net for net in _refused)

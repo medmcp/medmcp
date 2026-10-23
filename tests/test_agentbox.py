@@ -20,8 +20,8 @@ CORE: dict[str, Any] = {
     "Image": "sha256:core",
     "NetworkSettings": {
         "Networks": {
-            "medmcp_default": {"IPAddress": "172.18.0.5"},
-            "medmcp_agent": {"IPAddress": "172.19.0.2"},
+            "medmcp_default": {"IPAddress": "172.18.0.5", "IPPrefixLen": 16},
+            "medmcp_agent": {"IPAddress": "172.19.0.2", "IPPrefixLen": 16},
         }
     },
     "Mounts": [
@@ -53,6 +53,7 @@ class TestPlan:
         assert box.image == "sha256:core"
         assert box.network == "medmcp_agent"
         assert box.gateway_host == "172.19.0.2"
+        assert box.subnet == "172.19.0.0/16"
         assert box.mounts == (
             f"{WS}:{WS}",
             f"medmcp_vibe-agent:{agentbox.AGENT_HOME}:ro",

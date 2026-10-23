@@ -32,6 +32,7 @@ the subprocess; :mod:`medmcp.posture` is what guards it.
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import logging
 import os
 import secrets
@@ -158,6 +159,7 @@ class AgentContainer:
     image: str
     network: str
     gateway_host: str
+    subnet: str
     mounts: tuple[str, ...]
 
 
@@ -199,7 +201,8 @@ def plan(core: JsonDict, workspace: str, internal: set[str]) -> AgentContainer:
             "compose file's agent network (internal: true)"
         )
     gateway_host = str(networks[shared[0]].get("IPAddress") or "")
-    if not gateway_host:
+    prefix = networks[shared[0]].get("IPPrefixLen")
+    if not gateway_host or not isinstance(prefix, int) or not prefix:
         raise IsolationUnavailableError(f"the core has no address on {shared[0]}")
     mounts = [
         f"{_mount_source(by_dest[workspace])}:{workspace}",
@@ -215,6 +218,7 @@ def plan(core: JsonDict, workspace: str, internal: set[str]) -> AgentContainer:
         image=str(core["Image"]),
         network=shared[0],
         gateway_host=gateway_host,
+        subnet=str(ipaddress.ip_network(f"{gateway_host}/{prefix}", strict=False)),
         mounts=tuple(mounts),
     )
 

@@ -33,13 +33,13 @@ The workspace server listens on loopback. Do not expose the port. In a container
 it binds `0.0.0.0`, and compose publishes it only to the host's loopback
 (`127.0.0.1:8100:8100`) — keep it that way.
 
-Loopback is shared by every account and process on the machine, so every API
-request and WebSocket also needs the workspace's **access token**. A browser
-receives it once, from the link the server logs at start and `medmcp url` prints
-(`docker exec medmcp-medmcp-1 medmcp url`), and keeps it as an `HttpOnly`,
-`SameSite=Strict` cookie; a script sends `Authorization: Bearer <token>`. The
-token is generated once and stored `0600` with the workspace state;
-`MEDMCP_UI_TOKEN` sets it instead.
+Loopback is shared by every account on the machine. On a machine others can log
+in to, set `MEDMCP_PASSWORD`: every API request and WebSocket then needs it. A
+browser asks for it once and keeps a cookie derived from it (`HttpOnly`,
+`SameSite=Strict`); a script sends `Authorization: Bearer <password>`.
+
+The isolated agent shares a docker network with the core, so it could reach the
+workspace port. Every request from that network is refused, password or not.
 
 Binding loopback does not by itself keep a browser out: any page you visit can
 send requests to `127.0.0.1`, and a WebSocket upgrade is exempt from the

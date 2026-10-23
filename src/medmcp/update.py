@@ -85,7 +85,7 @@ CORE_ENV_VARS: tuple[str, ...] = (
     "MEDMCP_UPDATE_CHECK",
     "MEDMCP_UPDATE_URL",
     "MEDMCP_AGENT_ISOLATION",
-    "MEDMCP_UI_TOKEN",
+    "MEDMCP_PASSWORD",
     "MEDMCP_REQUIRE_SIGNED_STACKS",
 )
 _DEFAULT_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}")

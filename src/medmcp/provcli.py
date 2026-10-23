@@ -196,21 +196,11 @@ def _import(path: str) -> int:
     return 0
 
 
-def _url() -> int:
-    """Print the link that pairs a browser with this workspace."""
-    from medmcp import access
-
-    port = int(os.environ.get("MEDMCP_WORKSPACE_PORT", "8100"))
-    print(access.pairing_url(access.public_base_url(port)))
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``medmcp`` console script."""
     parser = argparse.ArgumentParser(prog="medmcp", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("url", help="print the link that pairs a browser with this workspace")
     sub.add_parser("list", help="list sessions with a provenance record")
 
     report_p = sub.add_parser("report", help="render report.md for a session")
@@ -258,8 +248,6 @@ def main(argv: list[str] | None = None) -> int:
     import_p.add_argument("file")
 
     args = parser.parse_args(argv)
-    if args.command == "url":
-        return _url()
     if args.command == "list":
         return _list_sessions()
     if args.command == "report":

@@ -60,7 +60,7 @@ container the normal recipes work:
 ```bash
 just check            # lint + format + typecheck + tests
 just workspace-build  # build the frontend bundle
-just workspace        # run the workspace UI; open the link it logs (or `uv run medmcp url`)
+just workspace        # run the workspace UI (forwarded to http://localhost:8100)
 ```
 
 What the dev container wires up for you:
@@ -124,7 +124,7 @@ CDI spec for GPU; host driver ≥ R570):
 just docker-base                                    # shared base image (medmcp-base)
 just docker-build                                   # core image (medmcp-core:dev)
 just docker-build-stack ../medmcp-dicom-dev medmcp-dicom:dev   # a stack image
-just compose-up                                     # core + bundled Ollama; link: docker exec medmcp-medmcp-1 medmcp url
+just compose-up                                     # core + bundled Ollama; http://localhost:8100
 just e2e-isolation                                  # isolation check of the compose install against medmcp-core:dev
 just compose-down                                   # tear it down
 ```

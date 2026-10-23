@@ -182,9 +182,8 @@ services:
       # its config read-only, stack tools through the core (forces the stack
       # pool on). Empty runs it inside this container, as before.
       MEDMCP_AGENT_ISOLATION: "${MEDMCP_AGENT_ISOLATION:-container}"
-      # Fixes the access token (default: generated once, kept in vibe-state).
-      # Open the link `docker exec medmcp-medmcp-1 medmcp url` prints.
-      MEDMCP_UI_TOKEN: "${MEDMCP_UI_TOKEN:-}"
+      # A password for the workspace, for a machine other accounts can log in to.
+      MEDMCP_PASSWORD: "${MEDMCP_PASSWORD:-}"
       # 1 refuses stack images the signing policy does not cover (default: warn).
       MEDMCP_REQUIRE_SIGNED_STACKS: "${MEDMCP_REQUIRE_SIGNED_STACKS:-}"
       # Containers are started through the docker guard; the real socket's host

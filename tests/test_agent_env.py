@@ -25,6 +25,7 @@ def test_credentials_are_scrubbed_and_the_rest_kept() -> None:
         "AWS_SECRET_ACCESS_KEY": "k",
         "HF_TOKEN": "t",
         "DB_PASSWORD": "p",
+        "MEDMCP_PASSWORD": "p",
         "SITE_KEY": "k",
     }
     assert acp.scrub_environment(env) == {

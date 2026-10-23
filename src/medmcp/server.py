@@ -175,9 +175,7 @@ def _resolve_backend_spec(name: str) -> BackendSpec | None:
 async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     """Start the stack pool + broker on boot (when enabled); tear them down on exit."""
     global _pool, _broker, _gateway
-    port = int(os.environ.get("MEDMCP_WORKSPACE_PORT", str(DEFAULT_PORT)))
-    link = access.pairing_url(access.public_base_url(port))
-    log.info("open %s to use MedMCP in this browser (once per browser)", link)
+    _audit.info("workspace password %s", "required" if access.required() else "not set")
     _audit.info(
         "agent runs %s",
         "in its own container" if agentbox.isolation_enabled() else "as a child process",
@@ -187,6 +185,8 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     if _agent_launcher is not None:
         try:
             box = await asyncio.to_thread(_agent_launcher.prepare)
+            # The agent's network reaches this server too; nothing on it may use the UI.
+            access.refuse_network(box.subnet)
             _gateway = gateway.EgressGateway(box.gateway_host)
             await _gateway.start()
             agentbox.set_gateway_base(_gateway.base_url)
@@ -330,42 +330,52 @@ class OriginGuard:
 
 
 class AccessGuard:
-    """Refuse an ``/api`` or ``/ws`` request that does not carry the access token.
+    """Refuse the isolated agent's network outright, and requests without the password.
 
     The origin check keeps other sites out, but lets a request with no ``Origin``
-    through — every non-browser client — and loopback is shared by every account
-    and process on the machine. See :mod:`medmcp.access`. Pure ASGI for the same
-    reason as :class:`OriginGuard`: the WebSocket upgrade is refused before
-    ``accept``.
+    through — every non-browser client. The agent container can reach this port
+    over the network it shares with the core, and loopback is shared by every
+    account on the machine (the password, when set). See :mod:`medmcp.access`.
+    Pure ASGI for the same reason as :class:`OriginGuard`: the WebSocket upgrade
+    is refused before ``accept``.
     """
 
     def __init__(self, app: ASGIApp) -> None:
-        """Wrap *app*, checking the token on every API request and upgrade."""
+        """Wrap *app*, checking the peer and the password on every request and upgrade."""
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Pass the request through, or refuse it without reaching the route."""
-        if scope["type"] not in ("http", "websocket") or not access.needs_token(
-            str(scope.get("path", ""))
-        ):
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        client = scope.get("client")
+        if access.peer_refused(client[0] if client else None):
+            await self._refuse(scope, receive, send, "agent network", 403)
+            return
+        if not access.needs_password(str(scope.get("path", ""))):
             await self.app(scope, receive, send)
             return
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
-        if access.matches(access.presented(headers)):
+        if access.authorized(headers):
             await self.app(scope, receive, send)
             return
-        _audit.warning("refused %s %s: no access token", scope["type"], scope.get("path", ""))
+        await self._refuse(scope, receive, send, "no password", 401)
+
+    @staticmethod
+    async def _refuse(scope: Scope, receive: Receive, send: Send, reason: str, code: int) -> None:
+        _audit.warning("refused %s %s: %s", scope["type"], scope.get("path", ""), reason)
         if scope["type"] == "websocket":
             await receive()
             await send({"type": "websocket.close", "code": 1008})
             return
-        response = JSONResponse({"detail": "not paired"}, status_code=401)
+        response = JSONResponse({"detail": reason}, status_code=code)
         await response(scope, receive, send)
 
 
 app = FastAPI(title="MedMCP Workspace", lifespan=_lifespan)
 # Outermost, so a refused request never reaches a route or a static file: the
-# origin check first, then the token.
+# origin check first, then the peer and the password.
 app.add_middleware(AccessGuard)
 app.add_middleware(OriginGuard)
 
@@ -841,38 +851,41 @@ def _apply_stack_change() -> None:
     settings.sync_servers_to_vibe_config(settings.active_servers())
 
 
-class PairPayload(BaseModel):
-    """Request body: the token from the pairing link."""
+class LoginPayload(BaseModel):
+    """Request body: the workspace password."""
 
-    token: str
+    password: str
 
 
-@app.post("/api/pair")
-async def post_pair(payload: PairPayload, response: Response) -> JsonDict:
-    """Pair this browser: trade the token from the pairing link for a cookie.
+@app.post("/api/login")
+async def post_login(payload: LoginPayload, response: Response) -> JsonDict:
+    """Log this browser in: trade the password for a cookie.
 
-    The one ``/api`` route that answers without the token (see
-    :mod:`medmcp.access`). The cookie is ``HttpOnly`` so page script never holds
-    it, and ``SameSite=Strict`` so no other site's request carries it.
+    The one ``/api`` route that answers without the password (see
+    :mod:`medmcp.access`). The cookie holds a value derived from the password,
+    is ``HttpOnly`` so page script never holds it, and ``SameSite=Strict`` so no
+    other site's request carries it.
     """
-    if not access.matches(payload.token.strip()):
-        _audit.warning("pairing refused: wrong token")
-        raise HTTPException(status_code=403, detail="wrong token")
+    if not access.required():
+        return {"ok": True}
+    if not access.password_matches(payload.password.strip()):
+        _audit.warning("login refused: wrong password")
+        raise HTTPException(status_code=403, detail="wrong password")
     response.set_cookie(
         access.COOKIE_NAME,
-        access.token(),
+        access.cookie_value(),
         max_age=access.COOKIE_MAX_AGE_SEC,
         httponly=True,
         samesite="strict",
         path="/",
     )
-    _audit.info("browser paired")
+    _audit.info("browser logged in")
     return {"ok": True}
 
 
 @app.get("/api/access")
 async def get_access() -> JsonDict:
-    """Answer 200 when the request carries the token (the guard refuses it otherwise)."""
+    """Answer 200 when the request may use the API (the guard refuses it otherwise)."""
     return {"ok": True}
 
 

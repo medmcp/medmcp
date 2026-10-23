@@ -16,10 +16,10 @@ from medmcp import access, provenance, server, settings
 
 JsonDict = dict[str, Any]
 
-# Every /api and /ws request carries the access token (see medmcp.access); the
-# tests pin it so a client can present it as a bearer header.
-TEST_TOKEN = "test-access-token-0123456789"
-AUTH_HEADERS = {"authorization": f"Bearer {TEST_TOKEN}"}
+# The suite runs with a workspace password set (see medmcp.access), the stricter
+# of the two postures, so a client presents it as a bearer header.
+TEST_PASSWORD = "test-password-0123456789"
+AUTH_HEADERS = {"authorization": f"Bearer {TEST_PASSWORD}"}
 
 # The server's OriginGuard admits only a loopback Host + Origin pair: the client's
 # base_url and these WebSocket headers exist to satisfy it.
@@ -27,14 +27,15 @@ WS_HEADERS = {"host": "127.0.0.1:8100", "origin": "http://127.0.0.1:8100", **AUT
 
 
 @pytest.fixture(autouse=True)
-def _pin_access_token(  # pyright: ignore[reportUnusedFunction]  # autouse fixture, invoked by pytest
+def _pin_password(  # pyright: ignore[reportUnusedFunction]  # autouse fixture, invoked by pytest
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[None]:
-    """Use :data:`TEST_TOKEN`, never this checkout's real token file."""
-    monkeypatch.setenv(access.TOKEN_ENV, TEST_TOKEN)
-    access.token.cache_clear()
+    """Require :data:`TEST_PASSWORD`, and refuse no network until a test says so."""
+    monkeypatch.setenv(access.PASSWORD_ENV, TEST_PASSWORD)
+    monkeypatch.setattr(access, "_refused", [])
+    access.password.cache_clear()
     yield
-    access.token.cache_clear()
+    access.password.cache_clear()
 
 
 # A local-only vibe config.toml, the starting point for the model-switch tests.

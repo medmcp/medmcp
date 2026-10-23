@@ -4361,13 +4361,13 @@ textarea.wf-input {
   font-size: 11px;
 }
 
-/* Pairing: the screen a browser sees until it presents the access token. */
-.pairing {
+/* Login: the screen a browser sees until it presents the workspace password. */
+.login {
   height: 100%;
   background: var(--dark);
 }
 
-.pairing-input {
+.login-input {
   width: 100%;
   margin-top: 14px;
   padding: 8px 10px;
@@ -4378,6 +4378,6 @@ textarea.wf-input {
   font: 13px/16px var(--mono);
 }
 
-.confirm-dialog p.pairing-error {
+.confirm-dialog p.login-error {
   color: var(--red-tint);
 }

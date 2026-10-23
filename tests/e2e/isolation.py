@@ -13,7 +13,8 @@ from outside and inside that:
 - the agent cannot rewrite its own config;
 - the core's docker access goes through the guard, which refuses a privileged
   container, a host mount and exec into another container;
-- the API refuses a request without the access token.
+- the API refuses a request without the password, and the agent's network even
+  with it.
 
 Needs docker with compose ≥ 2.24 and the image to test (built, e.g. by
 ``just docker-build``). Exit status 0 when every check holds.
@@ -43,10 +44,10 @@ JsonDict = dict[str, Any]
 REPO = Path(__file__).resolve().parents[2]
 PROJECT = "medmcp-e2e"
 PORT = 18100
-TOKEN = "e2e-access-token-0123456789abcdef"
+PASSWORD = "e2e-password-0123456789abcdef"
 STACK_IMAGE = "medmcp-e2e-stack:latest"
 BASE = f"http://127.0.0.1:{PORT}"
-AUTH = {"Authorization": f"Bearer {TOKEN}"}
+AUTH = {"Authorization": f"Bearer {PASSWORD}"}
 
 OVERRIDE = """\
 services:
@@ -84,7 +85,7 @@ services:
       MEDMCP_LLM_SHIM: "0"
       MEDMCP_UPDATE_CHECK: "0"
       MEDMCP_AUTO_TITLES: "0"
-      MEDMCP_UI_TOKEN: "{token}"
+      MEDMCP_PASSWORD: "{password}"
       MEDMCP_CATALOG_URL: "/app/catalog.ghcr.json"
       GHCR_TOKEN: "e2e-registry-token-must-not-reach-the-agent"
     ports: !override
@@ -165,7 +166,9 @@ async def _chat() -> list[str]:
 
 def _checks(env: dict[str, str]) -> None:
     core = f"{PROJECT}-medmcp-1"
-    _check(httpx.get(f"{BASE}/api/workspace", timeout=10).status_code == 401, "API needs the token")
+    _check(
+        httpx.get(f"{BASE}/api/workspace", timeout=10).status_code == 401, "API needs the password"
+    )
 
     resp = httpx.post(
         f"{BASE}/api/stacks/install", json={"image": STACK_IMAGE}, headers=AUTH, timeout=300
@@ -202,6 +205,24 @@ def _checks(env: dict[str, str]) -> None:
     mounts = [m["Destination"] for m in info["Mounts"]]
     _check(not any("docker" in m for m in mounts), "agent container: no socket mount (inspect)")
 
+    networks: JsonDict = json.loads(_run("docker", "inspect", core, env=env))[0]["NetworkSettings"][
+        "Networks"
+    ]
+    core_ip = networks[f"{PROJECT}_agent"]["IPAddress"]
+    # A loopback Host and the password, so only the agent-network refusal can stop it.
+    probe_ui = (
+        "import urllib.request, urllib.error\n"
+        f"req = urllib.request.Request('http://{core_ip}:8100/api/access', headers={{"
+        f"'Host': 'localhost:8100', 'Authorization': 'Bearer {PASSWORD}'}})\n"
+        "try:\n    print(urllib.request.urlopen(req, timeout=5).status)\n"
+        "except urllib.error.HTTPError as e:\n    print(e.code, e.read().decode())\n"
+    )
+    status = _run("docker", "exec", agents[0], "python3", "-c", probe_ui, env=env, check=False)
+    _check(
+        status.startswith("403") and "agent network" in status,
+        f"agent cannot use the workspace API ({status.strip()})",
+    )
+
     for args, what in (
         (["run", "--rm", "--privileged", STACK_IMAGE], "a privileged container"),
         (["run", "--rm", "-v", "/:/host", STACK_IMAGE], "a host root mount"),
@@ -232,7 +253,9 @@ def main() -> int:
     (stack / "Dockerfile").write_text(STACK_DOCKERFILE.format(image=args.image))
     override = tmp / "override.yml"
     override.write_text(
-        OVERRIDE.format(image=args.image, fake_llm=tmp / "fake_llm.py", token=TOKEN, port=PORT)
+        OVERRIDE.format(
+            image=args.image, fake_llm=tmp / "fake_llm.py", password=PASSWORD, port=PORT
+        )
     )
     env = {
         **os.environ,

@@ -4,6 +4,12 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Added
+
+- LLM shim: `MEDMCP_SHIM_SEED` seeds sampling per conversation, so a chat can be rerun with the same draws.
+
 ## 0.7.3 — 2026-10-23
 
 ### Changed

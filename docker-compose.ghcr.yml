@@ -18,7 +18,7 @@ services:
   llm:
     # The Ollama release this MedMCP release was tested with; bumped per release so
     # a pinned install stays put. Override with OLLAMA_IMAGE to try another.
-    image: ${OLLAMA_IMAGE:-ollama/ollama:0.40.7@sha256:2e6cc92ffa43b4b1a2e70e315407e00ac97ec125afc71277d73c7efe01c4f31b}
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.40.11@sha256:dea72d1e22270fe095b68fdf756d2b489d615643c5a2eaebbc5f569181e322d8}
     environment:
       # Keep the model resident in VRAM (-1) so it isn't evicted after the
       # 5-minute idle default and reloaded on the next prompt. Override with a
@@ -39,7 +39,7 @@ services:
     restart: unless-stopped
 
   llm-init:
-    image: ${OLLAMA_IMAGE:-ollama/ollama:0.40.7@sha256:2e6cc92ffa43b4b1a2e70e315407e00ac97ec125afc71277d73c7efe01c4f31b}
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.40.11@sha256:dea72d1e22270fe095b68fdf756d2b489d615643c5a2eaebbc5f569181e322d8}
     depends_on:
       llm:
         condition: service_healthy
@@ -76,7 +76,7 @@ services:
     restart: "no"
 
   llm-warmup:
-    image: ${OLLAMA_IMAGE:-ollama/ollama:0.40.7@sha256:2e6cc92ffa43b4b1a2e70e315407e00ac97ec125afc71277d73c7efe01c4f31b}
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.40.11@sha256:dea72d1e22270fe095b68fdf756d2b489d615643c5a2eaebbc5f569181e322d8}
     depends_on:
       llm:
         condition: service_healthy

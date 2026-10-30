@@ -25,6 +25,10 @@ export interface ToolCallState {
   /** The path guard turned this call back before it ran: the agent corrects the
    *  path and retries, so it renders as a quiet note rather than a failure. */
   pathGuardRetry?: boolean
+  /** When the call began (ISO), so a late attach shows the real elapsed time. */
+  startedAt?: string | null
+  /** The stack's per-call budget in seconds; absent for a built-in tool. */
+  timeoutSec?: number | null
 }
 
 /** A risk tag resolved by the server from the fixed taxonomy. */
@@ -316,6 +320,8 @@ export type ServerFrame =
       /** A settled call replayed on resume carries its output here. */
       output?: string | null
       pathGuardRetry?: boolean
+      startedAt?: string | null
+      timeoutSec?: number | null
     }
   | {
       type: 'tool_call_update'

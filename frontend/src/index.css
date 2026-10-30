@@ -4381,3 +4381,31 @@ textarea.wf-input {
 .confirm-dialog p.login-error {
   color: var(--red-tint);
 }
+
+/* A running call's age, right-aligned after its status. */
+.tool-elapsed {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Offered only once the reader has scrolled away from the bottom. Sticky rather
+ * than absolute so it pins to the foot of the transcript without the panel
+ * needing a positioned wrapper. */
+.chat-jump {
+  position: sticky;
+  bottom: 0;
+  align-self: center;
+  padding: 5px 12px;
+  border: 1px solid var(--border2);
+  border-radius: 999px;
+  background: var(--card2);
+  color: var(--muted2);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.chat-jump:hover {
+  color: var(--text);
+  border-color: var(--blue-l);
+}

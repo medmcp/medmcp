@@ -385,9 +385,9 @@ def record_tool_event(session_id: str, tc_id: str, info: JsonDict, server_names:
 
     ``info`` is the UI's accumulated tool-call state (title, rawInput, status,
     rawOutput/outputText, decision, risks, humanReadable, ``_started`` monotonic
-    timestamp). Idempotent per call via the ``_logged`` marker, since
-    ``tool_call_update`` can fire more than once. Never raises — provenance
-    must not break a chat.
+    timestamp and ``_started_at`` wall clock). Idempotent per call via the
+    ``_logged`` marker, since ``tool_call_update`` can fire more than once. Never
+    raises — provenance must not break a chat.
     """
     if info.get("_logged"):
         return

@@ -12,7 +12,7 @@ import { StackMarketplace } from './components/StackMarketplace'
 import { SettingsDrawer } from './components/SettingsDrawer'
 import { UpdateWindow } from './components/UpdateWindow'
 import { Viewer } from './components/Viewer'
-import { EMPTY_OVERLAY, type OverlayState } from './components/viewerData'
+import { EMPTY_OVERLAY, overlayFor, type OverlayState } from './components/viewerData'
 import { WorkflowPanel } from './components/WorkflowPanel'
 import { GearIcon, StoreIcon, XIcon } from './components/icons'
 import {
@@ -280,6 +280,10 @@ export default function App() {
                 refreshSignal={fsVersion}
                 onSelectionChange={setSelectedPaths}
                 isResizing={resizing}
+                overlayBase={openPath}
+                onOverlay={(p) => {
+                  if (openPath) setOverlay(overlayFor(openPath, p))
+                }}
               />
             </Panel>
             <Separator className="sep sep-v" />

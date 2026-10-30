@@ -1,15 +1,16 @@
 import { memo, useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import { Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import type { NVImage, NiiVueLocation } from '@niivue/niivue'
-import { rawUrl } from '../api'
+import { fetchTree, rawUrl } from '../api'
 import { getDraggedFilePath } from '../dragState'
 import { classify, isVolumePath } from '../fileKinds'
-import { DRAG_PATH_MIME } from '../types'
+import { DRAG_PATH_MIME, type TreeNode } from '../types'
 import {
   CameraIcon,
   EyeIcon,
   EyeOffIcon,
   GearIcon,
+  LayersIcon,
   ListIcon,
   PauseIcon,
   PlayIcon,
@@ -20,6 +21,7 @@ import {
   CONTINUOUS_COLORMAPS,
   CT_WINDOW_PRESETS,
   EMPTY_OVERLAY,
+  LABEL_WARN_COUNT,
   VOLUME_EXT_I,
   buildLabelColormap,
   classifyOverlayData,
@@ -34,6 +36,7 @@ import {
   looksLikeCT,
   parseLabelNames,
   overlayFor,
+  segmentationRefusal,
   voxelsToMl,
   volumeUnit,
   type LabelStat,
@@ -172,6 +175,8 @@ async function loadVolume(nv: Niivue, path: string, opts: { opacity?: number; re
 /** What the loaded overlay turned out to be — derived from its data once. */
 interface OverlayInfo {
   kind: OverlayKind
+  /** What to say out loud about this overlay, or null when there is nothing. */
+  warning: string | null
   maxLabel: number
   stats: LabelStat[]
   names: Map<number, string>
@@ -307,18 +312,31 @@ async function describeOverlay(vol: NVImage, path: string, forcedKind: OverlayKi
     hdr?.pixDims[2] ?? 1,
     hdr?.pixDims[3] ?? 1,
   ]
-  const dt = hdr?.datatypeCode ?? 0
-  const isColor = dt === DT_RGB24 || dt === DT_RGBA32
+  const facts = {
+    datatypeCode: hdr?.datatypeCode ?? 0,
+    sclSlope: hdr?.scl_slope ?? 1,
+    sclInter: hdr?.scl_inter ?? 0,
+  }
   const kind =
     forcedKind ??
-    (isColor
-      ? 'continuous'
-      : classifyOverlayData(img, hdr?.scl_slope ?? 1, hdr?.scl_inter ?? 0, hdr?.intent_code ?? 0))
+    classifyOverlayData(
+      img,
+      facts.datatypeCode,
+      facts.sclSlope,
+      facts.sclInter,
+      hdr?.intent_code ?? 0,
+    )
   let stats: LabelStat[] = []
   let names = new Map<number, string>()
   let maxLabel = 0
   let exactColors = true
+  let warning: string | null = null
   if (kind === 'label') {
+    // Why this file is not a segmentation, if it is not one. Only ever non-null
+    // for a kind forced by hand — the datatype gate in classifyOverlayData keeps
+    // anything else out — and read here, before routeThroughAtlasShader below
+    // rewrites both the voxels and the datatype in place.
+    const refusal = segmentationRefusal(facts, img)
     stats = labelStats(img, dims)
     maxLabel = stats.length ? stats[stats.length - 1].id : Math.ceil(vol.global_max ?? 1)
     // A 4D label map (a cine segmentation) is counted one frame at a time, but
@@ -330,9 +348,15 @@ async function describeOverlay(vol: NVImage, path: string, forcedKind: OverlayKi
     }
     exactColors = routeThroughAtlasShader(vol, maxLabel)
     names = await fetchLabelNames(path)
+    warning = refusal
+      ? `Drawn as labels although ${refusal}.`
+      : stats.length > LABEL_WARN_COUNT
+        ? `${stats.length} label ids, more than a segmentation usually has — check this is a label map and not an image.`
+        : null
   }
   return {
     kind,
+    warning,
     maxLabel,
     stats,
     names,
@@ -1147,6 +1171,7 @@ function VolumeView({
           </button>
         </div>
       )}
+      {overlay.path && info?.warning && <div className="overlay-note">{info.warning}</div>}
       {loadError && <div className="panel-error">{loadError}</div>}
       <div className="niivue-sizer" ref={sizerRef}>
         <div
@@ -1548,6 +1573,96 @@ function WindowPopover({
 // Memoized so a separator drag doesn't re-render the viewer (and its WebGL/React
 // subtree) every frame; props from App are stable except when the open file
 // actually changes.
+/** Every volume in the workspace, deepest-first, as the tree gives them. */
+function volumePaths(nodes: TreeNode[], out: string[] = []): string[] {
+  for (const n of nodes) {
+    if (n.children) volumePaths(n.children, out)
+    else if (isVolumePath(n.id)) out.push(n.id)
+  }
+  return out
+}
+
+/** Pick a file to overlay on the open volume.
+ *
+ *  Dragging one in from the explorer is the quick way when it is already on
+ *  screen; this is for one that is not, and it is the affordance that says the
+ *  viewer can overlay at all — a drag target nothing advertises is a feature
+ *  only its author knows about. */
+function OverlayPicker({
+  base,
+  onPick,
+  onClose,
+}: {
+  base: string
+  onPick: (path: string) => void
+  onClose: () => void
+}) {
+  const [paths, setPaths] = useState<string[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
+  useEffect(() => {
+    let cancelled = false
+    fetchTree()
+      .then((tree) => {
+        if (!cancelled) setPaths(volumePaths(tree).filter((p) => p !== base))
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(String(e))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [base])
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return (paths ?? []).filter((p) => !q || p.toLowerCase().includes(q))
+  }, [paths, query])
+  return (
+    <>
+      <div className="vs-backdrop" onClick={onClose} />
+      <div className="vs-popover overlay-picker" role="dialog">
+        <input
+          className="overlay-picker-search"
+          type="search"
+          placeholder="Filter by name"
+          aria-label="Filter the workspace's volumes by name"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        {error !== null && <span className="vs-label">{error}</span>}
+        {error === null && paths === null && <span className="vs-label">Reading the workspace…</span>}
+        {error === null && paths !== null && shown.length === 0 && (
+          <span className="vs-label">
+            {paths.length === 0 ? 'No other volume in the workspace.' : 'No match.'}
+          </span>
+        )}
+        <div className="overlay-picker-list">
+          {shown.map((p) => (
+            <button
+              key={p}
+              className="overlay-picker-item"
+              title={p}
+              onClick={() => {
+                onPick(p)
+                onClose()
+              }}
+            >
+              {p}
+            </button>
+          ))}
+        </div>
+      </div>
+    </>
+  )
+}
+
 export const Viewer = memo(function Viewer({
   path,
   isResizing,
@@ -1575,6 +1690,7 @@ export const Viewer = memo(function Viewer({
   const didResizeRef = useRef(false)
   const [settings, setSettings] = useState<ViewerSettings>(loadViewerSettings)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [pickerOpen, setPickerOpen] = useState(false)
   const [resetToken, setResetToken] = useState(0)
   const [snapshotToken, setSnapshotToken] = useState(0)
   // The overlay is tagged with the base file it belongs to, so it's transparently
@@ -1633,6 +1749,24 @@ export const Viewer = memo(function Viewer({
           {path}
         </span>
         <span className="panel-actions">
+          {kind === 'volume' && (
+            <span className="viewer-settings-anchor">
+              <button
+                className={pickerOpen ? 'btn-icon active' : 'btn-icon'}
+                aria-label="Overlay a segmentation or map on this image"
+                onClick={() => setPickerOpen((v) => !v)}
+              >
+                <LayersIcon />
+              </button>
+              {pickerOpen && (
+                <OverlayPicker
+                  base={path}
+                  onPick={(p) => onOverlayChange(overlayFor(path, p))}
+                  onClose={() => setPickerOpen(false)}
+                />
+              )}
+            </span>
+          )}
           {kind === 'volume' && (
             <button
               className="btn-icon"

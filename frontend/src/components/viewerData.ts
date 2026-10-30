@@ -131,21 +131,87 @@ export function overlayFor(base: string, path: string): OverlayState {
 /** NIfTI intent code marking a label image. */
 export const NII_INTENT_LABEL = 1002
 
+/** NIfTI datatype codes that hold integers: uint8, int16, int32, int8, uint16,
+ *  uint32, int64, uint64. Everything else a volume can be — float32, float64,
+ *  float128, RGB24, RGBA32, complex — holds no label ids. */
+const INTEGER_DATATYPES = new Set([2, 4, 8, 256, 512, 768, 1024, 1280])
+
+/** The NIfTI datatypes worth naming in a refusal, plus a readable fallback. */
+const DATATYPE_NAMES = new Map([
+  [16, '32-bit floats'],
+  [64, '64-bit floats'],
+  [128, 'RGB colour'],
+  [256, 'signed 8-bit integers'],
+  [1536, '128-bit floats'],
+  [1792, 'complex numbers'],
+  [2304, 'RGBA colour'],
+])
+
+export function isIntegerDatatype(datatypeCode: number): boolean {
+  return INTEGER_DATATYPES.has(datatypeCode)
+}
+
+/** A label map above this many ids is still drawn, but said out loud: a
+ *  segmentation of a body has tens of structures and the largest atlas in
+ *  circulation has a few hundred, so a count in the thousands is the signature
+ *  of an integer *image* that slipped through the tests below. 256 is also
+ *  where the ids stop fitting in the uint8 texture the atlas shader prefers. */
+export const LABEL_WARN_COUNT = 256
+
+/** What a segmentation's header and voxels have to look like. */
+export interface SegmentationFacts {
+  datatypeCode: number
+  sclSlope: number
+  sclInter: number
+}
+
+/** Why *img* cannot be read as a segmentation, phrased for the viewer to show,
+ *  or null when it can.
+ *
+ *  A segmentation holds integer label ids and nothing else, so the file's
+ *  datatype has to be an integer one — a float image whose voxels happen to be
+ *  whole numbers (a resampled template, a thresholded map) is not a label map —
+ *  the header must not rescale those integers into something else, and no voxel
+ *  may be negative, which is what keeps an int16 CT in Hounsfield units out. */
+export function segmentationRefusal(
+  facts: SegmentationFacts,
+  img: ArrayLike<number>,
+): string | null {
+  if (!isIntegerDatatype(facts.datatypeCode)) {
+    const name = DATATYPE_NAMES.get(facts.datatypeCode) ?? `datatype ${facts.datatypeCode}`
+    return `it stores ${name}, not integer label ids`
+  }
+  if ((facts.sclSlope !== 0 && facts.sclSlope !== 1) || facts.sclInter !== 0) {
+    return 'its header rescales the stored integers into other values'
+  }
+  for (let i = 0; i < img.length; i++) {
+    if (img[i] < 0) return 'it contains negative values'
+  }
+  return null
+}
+
 /** Decide whether an overlay is a label map (integer ids) or a continuous map
- *  (probabilities, intensities, deformation magnitudes). A header that says
- *  label is believed; otherwise the data decides, sampled so a large volume
- *  costs the same as a small one: any non-integer or negative value, more
- *  than 1024 distinct values or an id above MAX_LABELS means continuous. An
- *  integer anatomical image (a uint8 template, an int16 T1) can pass all of
- *  those, so the last test is what sets a label map apart from any image of
- *  anatomy: it is piecewise constant, so most neighbouring voxels are equal
- *  (measured ~1.0 for a segmentation, below 0.03 for MR). */
+ *  (probabilities, intensities, deformation magnitudes). The datatype is the
+ *  first word: only an integer file can hold label ids, so no float image can
+ *  be coloured as anatomy by accident, whatever its values look like and
+ *  whatever its intent code claims. (The bar's kind select still overrides this
+ *  by hand, which is a decision rather than an accident, and says why.)
+ *
+ *  Past that the data decides, sampled so a large volume costs the same as a
+ *  small one: any non-integer or negative value, more than 1024 distinct values
+ *  or an id above MAX_LABELS means continuous. An integer anatomical image (a
+ *  uint8 template, an int16 T1) can pass all of those, so the last test is what
+ *  sets a label map apart from any image of anatomy: it is piecewise constant,
+ *  so most neighbouring voxels are equal (measured ~1.0 for a segmentation,
+ *  below 0.03 for MR). */
 export function classifyOverlayData(
   img: ArrayLike<number>,
+  datatypeCode: number,
   sclSlope = 1,
   sclInter = 0,
   intentCode = 0,
 ): OverlayKind {
+  if (!isIntegerDatatype(datatypeCode)) return 'continuous'
   if (intentCode === NII_INTENT_LABEL) return 'label'
   const n = img.length
   if (n === 0) return 'continuous'

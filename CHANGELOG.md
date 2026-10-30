@@ -4,6 +4,16 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Added
+
+- Viewer: an overlay button in the panel header and an "Overlay on image" item in the explorer's right-click menu, so a segmentation can be laid over the open image without knowing that it can be dragged there.
+
+### Changed
+
+- Viewer: only a volume that stores integers is read as a segmentation, so an image is never coloured as if it were one — a float file goes on as a continuous map instead, and forcing it to labels by hand says what is wrong with it. A label map with more than 256 ids is drawn and flagged.
+
 ## 0.7.3 — 2026-10-23
 
 ### Changed

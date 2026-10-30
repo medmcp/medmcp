@@ -4,6 +4,14 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Added
+
+- Chat: the browser tab says when the agent is waiting on your approval and when a turn
+  has finished, and sends a desktop notification if you are on another tab. The
+  notification names no file — only that something needs you.
+
 ## 0.7.3 — 2026-10-23
 
 ### Changed

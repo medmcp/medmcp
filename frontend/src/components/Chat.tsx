@@ -45,6 +45,40 @@ const TODO_TOOL = 'todo'
 // tool, not a step of the work. Noted, not carded.
 const TOOL_SEARCH = 'search_tool_functions'
 
+// Captured before anything prefixes it, so the badge can always be taken back off.
+const BASE_TITLE = document.title
+const NOTIFY_ASKED_KEY = 'medmcp.notifyAsked'
+
+/** Tell the reader something happened while they were on another tab.
+ *
+ * The text stays generic — never a file name, path or identifier. The OS draws a
+ * notification outside the app and may keep it in a notification centre, which is
+ * not somewhere a workspace path belongs.
+ *
+ * `Notification` needs a secure context: it is there on 127.0.0.1 and localhost
+ * and simply absent on a plain-http hostname deployment, which is supported
+ * (`MEDMCP_ALLOWED_HOSTS`). The tab title carries that case on its own. Browser
+ * permission is asked for once, on the first turn that actually goes off-tab — a
+ * prompt at page load would come before any reason for it.
+ */
+function notifyOffTab(text: string): void {
+  if (typeof Notification === 'undefined') return
+  if (Notification.permission === 'granted') {
+    new Notification(text)
+    return
+  }
+  if (Notification.permission !== 'default') return
+  try {
+    if (localStorage.getItem(NOTIFY_ASKED_KEY)) return
+    localStorage.setItem(NOTIFY_ASKED_KEY, '1')
+  } catch {
+    // Blocked site data (private window): ask this once per page instead.
+  }
+  void Notification.requestPermission().then((state) => {
+    if (state === 'granted') new Notification(text)
+  })
+}
+
 const TODO_MARK: Record<string, string> = {
   completed: '✓',
   in_progress: '▸',
@@ -774,6 +808,37 @@ export const Chat = memo(function Chat({
     // Smooth scrolling per streamed flush is janky; only ease when idle.
     bottomRef.current?.scrollIntoView({ behavior: busy ? 'auto' : 'smooth' })
   }, [items, permission, busy])
+
+  // What the chat needs, in the tab title and — when the reader is elsewhere — as
+  // a desktop notification. Approvals are deliberately per-call and cannot be
+  // batched away, so a turn blocked on one waits exactly as long as it takes
+  // somebody to look back at this tab; that wait is the thing worth shortening.
+  const wasBusy = useRef(busy)
+  useEffect(() => {
+    const finished = wasBusy.current && !busy
+    wasBusy.current = busy
+    document.title = permission
+      ? `(!) ${BASE_TITLE} — approval needed`
+      : finished
+        ? `(✓) ${BASE_TITLE}`
+        : BASE_TITLE
+    if (!document.hidden) return
+    if (permission) notifyOffTab('MedMCP needs your approval')
+    else if (finished) notifyOffTab('MedMCP finished a step')
+  }, [permission, busy])
+
+  useEffect(() => {
+    // Coming back to the tab is the answer to "done", so the tick clears; an
+    // approval is still outstanding until it is decided.
+    const onVisible = () => {
+      if (!document.hidden && !permission) document.title = BASE_TITLE
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      document.title = BASE_TITLE
+    }
+  }, [permission])
 
   // Stable so the memoized ChatInput doesn't re-render on every streaming flush;
   // the trim/empty + open-socket guards live in ChatInput.

@@ -47,6 +47,7 @@ import shutil
 import time
 import zipfile
 from collections.abc import AsyncGenerator, Coroutine, Iterator
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, cast
@@ -2193,7 +2194,10 @@ async def delete_run(run_id: str) -> JsonDict:
 #     {"type": "retrying", "category": str, "detail": str}  # vibe is retrying the model
 #     {"type": "notice", "text": str}            # non-error note, e.g. the turn limit
 #     {"type": "tool_call", "toolCallId": str, "title": str, "status": str,
-#      "kind": str | None, "rawInput": object}
+#      "kind": str | None, "rawInput": object,
+#      "startedAt": str | None,          # when the call began, so a late attach
+#                                        # shows the real elapsed time
+#      "timeoutSec": float | None}       # the stack's per-call budget (stacks only)
 #     {"type": "tool_call_update", "toolCallId": str, "status": str | None,
 #      "output": str | None, "rawInput": object | None}
 #     {"type": "usage", "used": int}
@@ -2976,6 +2980,27 @@ class _ChatConnection:
     def _server_names(self) -> list[str]:
         return [str(s["name"]) for s in self.servers]
 
+    def _tool_timeout_sec(self, tool_name: str) -> float | None:
+        """The stack's per-call budget for *tool_name*, or ``None`` for a built-in.
+
+        A stack tool can legitimately run for hours (``medmcp-neuro`` allows two),
+        so the browser shows a call's elapsed time against this budget; built-ins
+        have none and show the elapsed time alone. A stack whose manifest sets no
+        timeout runs on :data:`settings.DEFAULT_TOOL_TIMEOUT_SEC`, which is what
+        the proxy and the pool enforce.
+        """
+        if not tool_name:
+            return None
+        stack, _ = provenance.split_tool_name(tool_name, self._server_names)
+        for srv in self.servers:
+            if str(srv["name"]) != stack:
+                continue
+            raw = srv.get("tool_timeout_sec")
+            if isinstance(raw, (int, float)):
+                return float(raw)
+            return settings.DEFAULT_TOOL_TIMEOUT_SEC
+        return None
+
     def _record(self, record: JsonDict) -> None:
         """Append one message to the chat's own transcript (never raises)."""
         provenance.append_transcript(self.canonical_id, record)
@@ -3049,7 +3074,13 @@ class _ChatConnection:
             elif update_type == "tool_call":
                 tc_id = str(update.get("toolCallId") or "")
                 status = str(update.get("status") or "pending")
-                info = self._tool_calls.setdefault(tc_id, {"_started": time.monotonic()})
+                info = self._tool_calls.setdefault(
+                    tc_id,
+                    {
+                        "_started": time.monotonic(),
+                        "_started_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                    },
+                )
                 route = _tool_name(update)
                 tool_name = harness.canonical_tool_name(route, self._server_names)
                 title = _display_title(update.get("title"), route, tool_name)
@@ -3077,6 +3108,8 @@ class _ChatConnection:
                         "rawInput": update.get("rawInput"),
                         "output": _clip_output(output) if output else None,
                         "pathGuardRetry": _is_pathguard_denial(output),
+                        "startedAt": info.get("_started_at"),
+                        "timeoutSec": self._tool_timeout_sec(tool_name),
                     }
                 )
             elif update_type == "tool_call_update":

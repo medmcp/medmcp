@@ -13,6 +13,7 @@ import importlib
 import io
 import zipfile
 from collections.abc import Callable, Iterable
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -634,10 +635,14 @@ class _StubWs:
         self.sent.append(msg)
 
 
-def _connection() -> tuple[server._ChatConnection, asyncio.Queue[dict[str, object]]]:
+def _connection(
+    servers: list[dict[str, object]] | None = None,
+) -> tuple[server._ChatConnection, asyncio.Queue[dict[str, object]]]:
     """A chat connection over a stub socket, with the vibe frame queue it drains."""
     queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-    conn = server._ChatConnection(cast("Any", _StubWs()), "sid", cast("Any", queue), [])
+    conn = server._ChatConnection(
+        cast("Any", _StubWs()), "sid", cast("Any", queue), cast("Any", servers or [])
+    )
     return conn, queue
 
 
@@ -790,6 +795,65 @@ class TestToolCallRawInput:
         await conn._stop_idle_pump()
 
         assert conn._tool_calls["call_1"]["rawInput"] == {"command": "ls"}
+
+
+class TestToolCallElapsed:
+    """A running call carries when it began and what budget it runs against.
+
+    Without both, a half-hour segmentation and a hung stack look identical in
+    the chat: one blinking dot and the word "running".
+    """
+
+    @staticmethod
+    def _call(tool: str) -> dict[str, object]:
+        return {
+            "method": "session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_1",
+                    "title": tool,
+                    "status": "pending",
+                    "rawInput": {},
+                    "_meta": {"tool_name": tool},
+                }
+            },
+        }
+
+    @staticmethod
+    async def _frame(
+        conn: server._ChatConnection, queue: asyncio.Queue[dict[str, object]]
+    ) -> dict[str, object]:
+        conn.start_idle_pump()
+        await asyncio.sleep(0.05)
+        await conn._stop_idle_pump()
+        return next(m for m in cast("_StubWs", conn.ws).sent if m.get("type") == "tool_call")
+
+    async def test_start_time_is_a_wall_clock(self) -> None:
+        """The monotonic clock has no shared origin, so a late attach needs this one."""
+        conn, queue = _connection()
+        await queue.put(self._call("bash"))
+        frame = await self._frame(conn, queue)
+        assert datetime.fromisoformat(str(frame["startedAt"])).tzinfo is not None
+
+    async def test_builtin_has_no_budget(self) -> None:
+        """Only a stack enforces a per-call timeout; a built-in shows elapsed alone."""
+        conn, queue = _connection()
+        await queue.put(self._call("bash"))
+        assert (await self._frame(conn, queue))["timeoutSec"] is None
+
+    async def test_stack_call_carries_its_manifest_timeout(self) -> None:
+        """The budget shown is the one the proxy and the pool actually enforce."""
+        conn, queue = _connection([{"name": "medmcp-tptbox", "tool_timeout_sec": 1800.0}])
+        await queue.put(self._call("medmcp-tptbox_process_nifti"))
+        assert (await self._frame(conn, queue))["timeoutSec"] == 1800.0
+
+    async def test_stack_without_a_manifest_timeout_gets_the_default(self) -> None:
+        """A manifest that sets none runs on the default, so that is what is shown."""
+        conn, queue = _connection([{"name": "medmcp-dicom"}])
+        await queue.put(self._call("medmcp-dicom_convert_series"))
+        frame = await self._frame(conn, queue)
+        assert frame["timeoutSec"] == settings.DEFAULT_TOOL_TIMEOUT_SEC
 
 
 class TestUsageWindow:

@@ -4,6 +4,21 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Added
+
+- Chat: a running tool call shows how long it has been going, against the stack's own
+  per-call budget where it has one ("6m 20s of 30m"), so a long segmentation no longer
+  looks like a hung one. A call stopped at its approval box says so instead.
+
+### Fixed
+
+- Chat: scrolling up to re-read a result no longer drags you back to the bottom on the
+  next streamed word. The transcript follows along only while you are already at the
+  bottom, and offers a "jump to latest" button when you are not; an approval request
+  still comes to you.
+
 ## 0.7.3 — 2026-10-23
 
 ### Changed

@@ -6,6 +6,7 @@ import rehypeKatex from 'rehype-katex'
 import { ChatSocket } from '../chatSocket'
 import type { ChatSocketStatus } from '../chatSocket'
 import { previewRewind, rewindTo } from '../api'
+import { formatDuration } from '../format'
 import type {
   ChatItem,
   PermissionRequest,
@@ -96,9 +97,49 @@ const PlanCard = memo(function PlanCard({ items }: { items: TodoItem[] }) {
   )
 })
 
+function settled(tc: ToolCallState): boolean {
+  return tc.status === 'completed' || tc.status === 'failed'
+}
+
+// How long a running call has been going, against the stack's own budget when it
+// has one ("6m 20s of 30m"). A segmentation legitimately runs for half an hour,
+// so without this a long run and a hung one look identical.
+//
+// The clock ticks here rather than in Chat: the transcript re-renders on every
+// 50 ms stream flush as it is, and a second-by-second clock in the parent would
+// re-render (and re-parse the markdown of) every earlier row with it.
+const ToolElapsed = memo(function ToolElapsed({ tc, held }: { tc: ToolCallState; held: boolean }) {
+  const done = settled(tc)
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (done || held || !tc.startedAt) return
+    const id = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [done, held, tc.startedAt])
+  // A call stopped at its approval box is not working, it is waiting on the
+  // reader; a clock on it would be counting their own thinking time back at them.
+  if (held) return <span className="tool-elapsed">waiting for your approval</span>
+  if (done || !tc.startedAt) return null
+  const started = Date.parse(tc.startedAt)
+  if (Number.isNaN(started)) return null
+  const budget = tc.timeoutSec != null ? ` of ${formatDuration(tc.timeoutSec * 1000)}` : ''
+  return (
+    <span className="tool-elapsed">
+      {formatDuration(Math.max(0, now - started))}
+      {budget}
+    </span>
+  )
+})
+
 // Memoized so a streaming update to the newest message doesn't re-render
 // (and re-parse the markdown of) every earlier row in the transcript.
-const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
+const ToolCard = memo(function ToolCard({
+  tc,
+  heldId,
+}: {
+  tc: ToolCallState
+  heldId: string | null
+}) {
   // A stack tool's output names the files it produced; a shell listing names
   // every file it saw, and a chip per file is a wall rather than a result.
   // The path guard turned this call back before it ran, and the agent corrects
@@ -130,6 +171,7 @@ const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
         <span className={`status-dot ${statusClass}`} />
         <span className="tool-title">{tc.title}</span>
         <span className="tool-status">{tc.status}</span>
+        <ToolElapsed tc={tc} held={heldId === tc.toolCallId} />
       </div>
       {tc.rawInput != null && (
         <details>
@@ -163,20 +205,23 @@ function callStatusClass(status: string): string {
 // tool name and a count in the head, one collapsed row per call below. Each
 // row opens to that call's input and output.
 const ToolGroup = memo(
-  function ToolGroup({ calls }: { calls: ToolCallState[] }) {
+  function ToolGroup({ calls, heldId }: { calls: ToolCallState[]; heldId: string | null }) {
     const tool = calls[0].toolName ?? 'tool'
-    const running = calls.filter((c) => c.status !== 'completed' && c.status !== 'failed').length
+    const running = calls.filter((c) => !settled(c)).length
     const failed = calls.filter((c) => c.status === 'failed').length
     const statusClass = running > 0 ? 'busy' : failed > 0 ? 'fail' : 'ok'
     const status =
       `${calls.length} calls` +
       (running > 0 ? ', running' : failed > 0 ? `, ${failed} failed` : '')
+    // A group runs its calls one after another, so at most one is unsettled.
+    const live = calls.find((c) => !settled(c))
     return (
       <div className="tool-card tool-group">
         <div className="tool-card-head">
           <span className={`status-dot ${statusClass}`} />
           <span className="tool-title">{tool}</span>
           <span className="tool-status">{status}</span>
+          {live && <ToolElapsed tc={live} held={heldId === live.toolCallId} />}
         </div>
         {calls.map((tc) => {
           // The row's title repeats the tool the head already names.
@@ -210,6 +255,7 @@ const ToolGroup = memo(
   // The calls array is rebuilt on every render; compare its members instead so
   // a streaming chunk elsewhere in the transcript doesn't re-render the group.
   (a, b) =>
+    a.heldId === b.heldId &&
     a.calls.length === b.calls.length &&
     a.calls.every((c, i) => c === b.calls[i]),
 )
@@ -552,6 +598,10 @@ export const Chat = memo(function Chat({
   const socketRef = useRef<ChatSocket | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  // The reader has scrolled away from the bottom, so new output no longer
+  // follows them down and a way back is offered instead.
+  const [detached, setDetached] = useState(false)
   // The frame handler below is a mount-once closure; route the callback
   // through a ref so it always sees the latest prop.
   const onToolActivityRef = useRef(onToolActivity)
@@ -640,6 +690,8 @@ export const Chat = memo(function Chat({
               rawInput: frame.rawInput,
               output: frame.output ?? prev[frame.toolCallId]?.output,
               pathGuardRetry: frame.pathGuardRetry || prev[frame.toolCallId]?.pathGuardRetry,
+              startedAt: frame.startedAt ?? prev[frame.toolCallId]?.startedAt,
+              timeoutSec: frame.timeoutSec ?? prev[frame.toolCallId]?.timeoutSec,
             },
           }))
           break
@@ -770,10 +822,30 @@ export const Chat = memo(function Chat({
     }
   }, [])
 
+  // Whether the reader is parked at the bottom. `content-visibility: auto` on
+  // the transcript rows makes scrollHeight an estimate for the ones off screen,
+  // so the threshold has to be generous rather than exact.
+  const atBottom = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return true
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 120
+  }, [])
   useEffect(() => {
+    // A flush lands every 50 ms while the agent streams, so scrolling on each
+    // one would drag the transcript back down as it is being read. Follow along
+    // only from the bottom; an approval request comes to the reader regardless.
+    if (!permission && !atBottom()) {
+      setDetached(true)
+      return
+    }
+    setDetached(false)
     // Smooth scrolling per streamed flush is janky; only ease when idle.
     bottomRef.current?.scrollIntoView({ behavior: busy ? 'auto' : 'smooth' })
-  }, [items, permission, busy])
+  }, [items, permission, busy, atBottom])
+
+  // The call the approval box is parked on; its card says so rather than
+  // running a clock over the reader's own thinking time.
+  const heldToolCallId = permission?.toolCall.toolCallId ?? null
 
   // Stable so the memoized ChatInput doesn't re-render on every streaming flush;
   // the trim/empty + open-socket guards live in ChatInput.
@@ -880,7 +952,13 @@ export const Chat = memo(function Chat({
           </span>
         </span>
       </div>
-      <div className="panel-body chat-scroll">
+      <div
+        className="panel-body chat-scroll"
+        ref={scrollRef}
+        onScroll={() => {
+          if (atBottom()) setDetached(false)
+        }}
+      >
         {items.length === 0 && (
           <div className="viewer-message">Ask the MedMCP agent anything about your workspace.</div>
         )}
@@ -890,11 +968,13 @@ export const Chat = memo(function Chat({
               <ToolGroup
                 key={row.id}
                 calls={row.calls}
+                heldId={heldToolCallId}
               />
             ) : (
               <ToolCard
                 key={row.id}
                 tc={row.calls[0]}
+                heldId={heldToolCallId}
               />
             )
           }
@@ -905,6 +985,7 @@ export const Chat = memo(function Chat({
               <ToolCard
                 key={item.id}
                 tc={tc}
+                heldId={heldToolCallId}
               />
             ) : null
           }
@@ -984,6 +1065,17 @@ export const Chat = memo(function Chat({
         })}
         {permission && <PermissionCard perm={permission} onDecide={decide} />}
         {busy && !permission && <div className="thinking">●●●</div>}
+        {detached && (
+          <button
+            className="chat-jump"
+            onClick={() => {
+              setDetached(false)
+              bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+            }}
+          >
+            ↓ jump to latest
+          </button>
+        )}
         <div ref={bottomRef} />
       </div>
       <ChatInput busy={busy} canSend={status === 'open'} onSend={send} onCancel={cancel} />

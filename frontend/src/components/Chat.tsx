@@ -452,13 +452,17 @@ function PermissionCard({
 const ChatInput = memo(function ChatInput({
   busy,
   canSend,
+  contextPath,
   onSend,
   onCancel,
+  onClearContext,
 }: {
   busy: boolean
   canSend: boolean
+  contextPath: string | null
   onSend: (text: string) => void
   onCancel: () => void
+  onClearContext: () => void
 }) {
   const [input, setInput] = useState('')
   const submit = () => {
@@ -469,6 +473,26 @@ const ChatInput = memo(function ChatInput({
   }
   return (
     <div className="chat-input-row">
+      {/* What "this image" will resolve to. The server appends the open file to
+          the prompt as a workspace-context note and strips it from the
+          transcript, so without this the pointer is invisible — "segment this"
+          would act on whatever happened to be open. ✕ sends the prompt without
+          it; opening another file arms it again. */}
+      {contextPath && (
+        <div className="chat-context">
+          <span>context</span>
+          <span className="chat-context-path" title={contextPath}>
+            {contextPath}
+          </span>
+          <button
+            className="btn-icon"
+            aria-label="Ask without the open file as context"
+            onClick={onClearContext}
+          >
+            ✕
+          </button>
+        </div>
+      )}
       <textarea
         value={input}
         placeholder="Message the agent… (Enter to send, Shift+Enter for newline)"
@@ -511,7 +535,8 @@ export const Chat = memo(function Chat({
 }: {
   /** Called with the vibe session id whenever a prompt is sent into it. */
   onPromptedSession?: (id: string) => void
-  /** Workspace-relative file open in the viewer, sent as prompt context. */
+  /** Workspace-relative file open in the viewer, offered as prompt context
+   *  (shown as a chip above the composer, which the reader can clear). */
   viewedPath?: string | null
   /** Called when a tool call completes / a turn ends (may have written files). */
   onToolActivity?: () => void
@@ -549,6 +574,12 @@ export const Chat = memo(function Chat({
     paths: string[]
     busy: boolean
   } | null>(null)
+  // The file the next prompt resolves "this image" to. Mirrors the viewer, and
+  // the reader can drop it for a question that is not about the open file.
+  const [contextPath, setContextPath] = useState<string | null>(viewedPath ?? null)
+  useEffect(() => {
+    setContextPath(viewedPath ?? null)
+  }, [viewedPath])
   const socketRef = useRef<ChatSocket | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -781,10 +812,10 @@ export const Chat = memo(function Chat({
     (text: string) => {
       setItems((prev) => [...prev, { id: nextItemId(), kind: 'user', text }])
       setBusy(true)
-      socketRef.current?.sendPrompt(text, viewedPath)
+      socketRef.current?.sendPrompt(text, contextPath)
       if (sessionIdRef.current) onPromptedSession?.(sessionIdRef.current)
     },
-    [viewedPath, onPromptedSession],
+    [contextPath, onPromptedSession],
   )
 
   const cancel = useCallback(() => socketRef.current?.cancel(), [])
@@ -986,7 +1017,14 @@ export const Chat = memo(function Chat({
         {busy && !permission && <div className="thinking">●●●</div>}
         <div ref={bottomRef} />
       </div>
-      <ChatInput busy={busy} canSend={status === 'open'} onSend={send} onCancel={cancel} />
+      <ChatInput
+        busy={busy}
+        canSend={status === 'open'}
+        contextPath={contextPath}
+        onSend={send}
+        onCancel={cancel}
+        onClearContext={() => setContextPath(null)}
+      />
     </div>
   )
 })

@@ -4,6 +4,14 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Added
+
+- Chat: the file the agent will resolve "this image" to is named in a chip above the
+  message box, and can be cleared so a question that is not about the open file is sent
+  without it. The pointer was previously invisible.
+
 ## 0.7.3 — 2026-10-23
 
 ### Changed

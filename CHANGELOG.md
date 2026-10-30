@@ -4,6 +4,12 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Added
+
+- Viewer: zoom into the open image — ctrl/⌘ + wheel or a trackpad pinch zooms about the crosshair, `+`/`-`/`0` do it from the keyboard, and shift/ctrl-drag or the middle button pans. The zoom survives a panel resize, and the status bar reads it out while it is not 1×.
+
 ## 0.7.3 — 2026-10-23
 
 ### Changed

@@ -1,10 +1,18 @@
+import { canUseApi } from './api'
 import type { ServerFrame } from './types'
 
 /** Callbacks the UI registers for socket lifecycle + frames. */
 export interface ChatSocketHandlers {
   onFrame: (frame: ServerFrame) => void
   onStatusChange: (status: ChatSocketStatus) => void
+  /** The server is refusing this browser outright, with its reason. Reconnecting
+   *  will not fix it, so the reason belongs on screen instead of "closed". */
+  onRefused?: (detail: string) => void
 }
+
+// Two failed connections in a row is late enough not to fire on an ordinary
+// restart and early enough to beat the backoff reaching its 15 s ceiling.
+const REFUSAL_PROBE_AFTER = 2
 
 export type ChatSocketStatus = 'connecting' | 'open' | 'closed'
 
@@ -23,6 +31,7 @@ export class ChatSocket {
   private closedByUser = false
   private retryDelay = 1000
   private retryTimer: number | null = null
+  private failures = 0
   private resumeId: string | null
 
   constructor(handlers: ChatSocketHandlers, resumeId?: string | null) {
@@ -52,6 +61,7 @@ export class ChatSocket {
         // when setup is about to fail and would otherwise defeat the backoff.
         if (frame.type === 'ready') {
           this.retryDelay = 1000
+          this.failures = 0
           // Reattach to this exact session if the socket later drops.
           this.resumeId = frame.sessionId
         }
@@ -62,11 +72,26 @@ export class ChatSocket {
     }
     ws.onclose = () => {
       this.handlers.onStatusChange('closed')
-      if (!this.closedByUser) {
-        this.retryTimer = window.setTimeout(() => this.connect(), this.retryDelay)
-        this.retryDelay = Math.min(this.retryDelay * 2, 15000)
-      }
+      if (this.closedByUser) return
+      this.failures += 1
+      if (this.failures === REFUSAL_PROBE_AFTER) void this.probeRefusal()
+      this.retryTimer = window.setTimeout(() => this.connect(), this.retryDelay)
+      this.retryDelay = Math.min(this.retryDelay * 2, 15000)
     }
+  }
+
+  /** Ask over HTTP why the socket will not stay up.
+   *
+   * The upgrade is refused *before* `accept` (OriginGuard / AccessGuard are pure
+   * ASGI for that reason), so the browser is handed a close event with code 1006
+   * and no reason at all — there is nothing to read off the socket. The same
+   * refusal over HTTP carries the server's own wording. A 401 is left alone: that
+   * is the login path, and `api.ts` already reloads onto the login screen.
+   */
+  private async probeRefusal(): Promise<void> {
+    const access = await canUseApi()
+    if (access.allowed || access.status === 401 || !access.detail) return
+    this.handlers.onRefused?.(access.detail)
   }
 
   private send(msg: object): void {

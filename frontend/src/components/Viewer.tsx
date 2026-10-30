@@ -89,23 +89,33 @@ function routeThroughAtlasShader(vol: NVImage, maxId: number): boolean {
   return true
 }
 
-// ── Volume bytes cache ───────────────────────────────────────────
+// ── Volume cache ─────────────────────────────────────────────────
 //
 // Every file open, panel resize and overlay restore remounts the Niivue view,
-// which would re-download the volume each time. The bytes are kept per URL (a
-// handful of compressed files) and revalidated with a HEAD request against the
-// server's Last-Modified/Content-Length, so a file the agent rewrote in place is
-// fetched again rather than shown stale.
+// which would re-download and re-inflate the volume each time. What is kept per
+// URL is therefore the volume as Niivue will read it — inflated, for a `.nii.gz`
+// — so a remount is a buffer handoff rather than a quarter of a gigabyte of
+// gzip. Each entry is revalidated against the server, so a file the agent
+// rewrote in place is fetched again rather than shown stale.
 
 interface CachedVolume {
+  /** The bytes to hand Niivue, inflated when `inflated` says so. */
   buffer: ArrayBuffer
+  /** The server's ETag for the file these bytes came from. */
   etag: string
+  /** True once the gzip stream has been inflated, which also means Niivue must
+   *  be told the name without its `.gz`. */
+  inflated: boolean
 }
 
 const volumeCache = new Map<string, CachedVolume>()
-/** Byte budget for the cache: a few compressed volumes, not a few of whatever
- *  size the server sends — four uncompressed 512³ int16 scans would be a GB. */
-const VOLUME_CACHE_BYTES = 256 * 1024 * 1024
+/** Byte budget for the cache beyond what the viewer is showing. The entries are
+ *  inflated volumes, not compressed files — the 235 MB test CT is 515 MB of
+ *  int16 — so this bounds the history, not the open file: the two most recently
+ *  used entries are never evicted, which is exactly the base volume and its
+ *  overlay. Without that, a pair of large volumes would evict each other and an
+ *  overlay change would re-fetch and re-inflate the image under it. */
+const VOLUME_CACHE_BYTES = 1024 * 1024 * 1024
 
 function cachedBytes(): number {
   let n = 0
@@ -113,44 +123,93 @@ function cachedBytes(): number {
   return n
 }
 
-function headerStamp(r: Response): string {
-  return `${r.headers.get('last-modified') ?? ''}|${r.headers.get('content-length') ?? ''}|${r.headers.get('etag') ?? ''}`
+/** Inflate a gzip stream with the browser's own decompressor, or null when
+ *  these bytes are not one.
+ *
+ *  Niivue inflates `.nii.gz` itself, with the same `DecompressionStream`, but it
+ *  does so on every load — and the viewer reloads the same file on each resize
+ *  and overlay change. Doing it here puts the result in the cache instead.
+ *  Restricted to `.nii.gz` by the caller: Niivue picks its reader from the file
+ *  name, so inflated bytes need a name to present them under, and `.mgz` or
+ *  `.nrrd.gz` have none.
+ *
+ *  The chunks go into one buffer sized from gzip's own ISIZE footer rather than
+ *  through `new Response(stream).arrayBuffer()`, which concatenates them: for
+ *  the 515 MB test volume that measured 3.1 s against 4.0 s, same bytes out.
+ *  ISIZE is only the true size modulo 4 GiB, so a mismatch falls back to the
+ *  compressed bytes rather than to a half-filled buffer. */
+async function inflateGzip(bytes: ArrayBuffer): Promise<ArrayBuffer | null> {
+  if (typeof DecompressionStream === 'undefined' || bytes.byteLength < 18) return null
+  try {
+    const size = new DataView(bytes, bytes.byteLength - 4).getUint32(0, true)
+    const out = new Uint8Array(size)
+    const gz = new Response(bytes).body?.pipeThrough(new DecompressionStream('gzip'))
+    if (!gz) return null
+    const reader = gz.getReader()
+    let at = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value || at + value.length > size) {
+        await reader.cancel()
+        return null
+      }
+      out.set(value, at)
+      at += value.length
+    }
+    return at === size ? out.buffer : null
+  } catch {
+    // Truncated, or not gzip after all: leave the bytes alone and let Niivue
+    // fail on them with its own message.
+    return null
+  }
 }
 
-async function fetchVolumeBytes(url: string): Promise<ArrayBuffer> {
+/** The volume at *url*, from the cache when the server says it is still current.
+ *
+ *  One conditional GET does the revalidation and the download together: the
+ *  server answers 304 while the ETag holds, where this used to cost a HEAD and
+ *  then a second, full round trip. `no-store` because the bytes are kept here —
+ *  a browser cache holding a second copy of a 450 MB volume is the wrong use of
+ *  the disk. */
+async function fetchVolume(url: string, gzipped: boolean): Promise<CachedVolume> {
   const hit = volumeCache.get(url)
-  if (hit) {
-    try {
-      const head = await fetch(url, { method: 'HEAD', cache: 'no-cache' })
-      if (head.ok && headerStamp(head) === hit.etag) {
-        volumeCache.delete(url)
-        volumeCache.set(url, hit)
-        return hit.buffer
-      }
-    } catch {
-      // revalidation failed — fall through to a full fetch
-    }
+  const r = await fetch(url, {
+    cache: 'no-store',
+    headers: hit ? { 'If-None-Match': hit.etag } : undefined,
+  })
+  if (hit && r.status === 304) {
+    volumeCache.delete(url)
+    volumeCache.set(url, hit)
+    return hit
   }
-  // Always revalidate with the server: a tool rewrites files in place, and a
-  // browser otherwise treats a days-old file's response as fresh for hours.
-  const r = await fetch(url, { cache: 'no-cache' })
   if (!r.ok) throw new Error(`could not load volume (HTTP ${r.status})`)
-  const buffer = await r.arrayBuffer()
-  volumeCache.set(url, { buffer, etag: headerStamp(r) })
-  // Evict least recently used until under budget; the newest entry always stays.
-  while (volumeCache.size > 1 && cachedBytes() > VOLUME_CACHE_BYTES) {
+  const raw = await r.arrayBuffer()
+  // Niivue reads the bytes from the buffer only while it has some; an empty one
+  // would send it back to the network for a name that is not a URL.
+  if (raw.byteLength === 0) throw new Error('could not load volume (the file is empty)')
+  const plain = gzipped ? await inflateGzip(raw) : null
+  const entry: CachedVolume = {
+    buffer: plain ?? raw,
+    etag: r.headers.get('etag') ?? '',
+    inflated: plain !== null,
+  }
+  volumeCache.set(url, entry)
+  // Evict least recently used until under budget, keeping the two the viewer is
+  // showing (see VOLUME_CACHE_BYTES).
+  while (volumeCache.size > 2 && cachedBytes() > VOLUME_CACHE_BYTES) {
     const oldest = volumeCache.keys().next().value
     if (oldest === undefined) break
     volumeCache.delete(oldest)
   }
-  return buffer
+  return entry
 }
 
 /** Load *path* into `nv` as the base volume (replace = true) or as an added
- *  overlay, from the bytes cache. Niivue takes the file type from `name`.
+ *  overlay, from the volume cache. Niivue takes the file type from `name`.
  *
  *  Analyze pairs (`.hdr` + `.img`) bypass the cache: Niivue finds the sibling
- *  by rewriting the URL's extension, which a blob URL has none of. */
+ *  by rewriting the URL's extension, which a buffer has none of. */
 async function loadVolume(nv: Niivue, path: string, opts: { opacity?: number; replace: boolean }) {
   const name = path.split('/').pop() ?? path
   if (/\.(hdr|img)$/i.test(name)) {
@@ -159,14 +218,16 @@ async function loadVolume(nv: Niivue, path: string, opts: { opacity?: number; re
     else await nv.addVolumeFromUrl({ url, name, opacity: opts.opacity ?? 1 })
     return
   }
-  const bytes = await fetchVolumeBytes(rawUrl(path))
-  const blobUrl = URL.createObjectURL(new Blob([bytes]))
-  try {
-    if (opts.replace) await nv.loadVolumes([{ url: blobUrl, name }])
-    else await nv.addVolumeFromUrl({ url: blobUrl, name, opacity: opts.opacity ?? 1 })
-  } finally {
-    URL.revokeObjectURL(blobUrl)
-  }
+  const entry = await fetchVolume(rawUrl(path), /\.nii\.gz$/i.test(name))
+  // Niivue reads `buffer` straight through and takes the format from `name`,
+  // leaving `url` as a label — no Blob copy, no object URL, and no fetch of it.
+  // `loadVolumes` cannot be used for this: it rebuilds its own options object
+  // and drops `buffer` on the way (Niivue 0.69), so the base volume is cleared
+  // and added instead. On this path the instance is always a fresh one with no
+  // volumes, but the contract should not depend on that.
+  const as = entry.inflated ? name.replace(/\.gz$/i, '') : name
+  if (opts.replace) nv.volumes = []
+  await nv.addVolumeFromUrl({ url: as, name: as, buffer: entry.buffer, opacity: opts.opacity ?? 1 })
 }
 
 /** What the loaded overlay turned out to be — derived from its data once. */

@@ -57,6 +57,7 @@ from fastapi import (
     FastAPI,
     HTTPException,
     Query,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -496,15 +497,47 @@ async def get_tree() -> JsonDict:
     return {"tree": root.get("children", [])}
 
 
+class _VolumeFileResponse(FileResponse):
+    """``FileResponse`` reading in chunks sized for a volume, not a web page.
+
+    Starlette's default is 64 KiB, which makes 3,600 read/await/send rounds of a
+    225 MB CT, each one an anyio worker-thread hop. 1 MiB is what the upload and
+    zip paths in this module already use.
+    """
+
+    chunk_size = 1024 * 1024
+
+
+def _if_none_match(header: str | None, etag: str) -> bool:
+    """Whether an ``If-None-Match`` value matches *etag*.
+
+    Weak comparison, which is what RFC 9110 prescribes for this header: the
+    ``W/`` prefix is ignored on both sides and ``*`` matches any representation
+    we hold. Splitting the list on commas is safe for the tags we issue (a
+    quoted md5 of mtime and size, with no comma in it).
+    """
+    if not header or not etag:
+        return False
+    if header.strip() == "*":
+        return True
+    want = etag.removeprefix("W/")
+    return any(tag.strip().removeprefix("W/") == want for tag in header.split(","))
+
+
 @app.api_route("/api/raw/{rel_path:path}", methods=["GET", "HEAD"])
-async def get_raw(rel_path: str) -> FileResponse:
+async def get_raw(rel_path: str, request: Request) -> Response:
     """Serve a file's raw bytes (viewer content, downloads).
 
     ``no-cache`` because a tool rewrites files in place: without it a browser
     treats a response for a days-old file as fresh for hours (heuristic
     freshness off ``Last-Modified``) and keeps showing the overlay from before
-    the segmentation ran. HEAD is answered so the viewer's own volume cache can
-    revalidate with headers instead of refetching a 24 MB volume.
+    the segmentation ran. ``no-cache`` means "revalidate", not "do not store",
+    so an ``If-None-Match`` round trip is the whole cost of being sure a cached
+    volume is still current — provided we answer it. Starlette's
+    ``FileResponse`` reads only ``If-Range``, so without the branch below every
+    revalidation re-sent the entire file, which for a 225 MB CT is the
+    difference between a reload that is instant and one that is not. HEAD is
+    answered too, as it was before conditional requests worked here.
     """
     path = _safe_path(rel_path)
     if not path.is_file():
@@ -515,7 +548,21 @@ async def get_raw(rel_path: str) -> FileResponse:
         # run with this origin and could drive /ws/chat and /ws/replay. The
         # viewer's iframe is sandboxed the same way, so nothing it shows changes.
         headers["Content-Security-Policy"] = "sandbox allow-scripts"
-    return FileResponse(path, headers=headers)
+    # Stat once, here: it gives the validators before the response is sent (so
+    # they can be compared) and spares Starlette its own stat in a worker thread.
+    response = _VolumeFileResponse(path, headers=headers, stat_result=path.stat())
+    etag = response.headers.get("etag", "")
+    if _if_none_match(request.headers.get("if-none-match"), etag):
+        # The client's copy is current. A 304 carries the validators and no body.
+        return Response(
+            status_code=304,
+            headers={
+                "Cache-Control": headers["Cache-Control"],
+                "ETag": etag,
+                "Last-Modified": response.headers.get("last-modified", ""),
+            },
+        )
+    return response
 
 
 # The kernel writes a mount path's space, tab, newline and backslash as octal

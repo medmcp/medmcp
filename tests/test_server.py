@@ -56,6 +56,61 @@ class TestRawFiles:
         (workspace_root / "seg.nii.gz").write_bytes(b"v2-longer")
         assert client.head("/api/raw/seg.nii.gz").headers["etag"] != got.headers["etag"]
 
+    def test_raw_answers_a_revalidation_with_304(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """A client that already holds the bytes gets the validators back, not the file."""
+        (workspace_root / "seg.nii.gz").write_bytes(b"v1")
+        first = client.get("/api/raw/seg.nii.gz")
+        etag = first.headers["etag"]
+        again = client.get("/api/raw/seg.nii.gz", headers={"If-None-Match": etag})
+        assert again.status_code == 304
+        assert again.content == b""
+        assert again.headers["etag"] == etag
+        assert again.headers["cache-control"] == "no-cache"
+        assert again.headers["last-modified"] == first.headers["last-modified"]
+        head = client.head("/api/raw/seg.nii.gz", headers={"If-None-Match": etag})
+        assert head.status_code == 304
+
+    def test_raw_resends_the_file_once_the_etag_stops_matching(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """The point of revalidating: a file a tool rewrote is sent again, not withheld."""
+        (workspace_root / "seg.nii.gz").write_bytes(b"v1")
+        stale = client.get("/api/raw/seg.nii.gz").headers["etag"]
+        (workspace_root / "seg.nii.gz").write_bytes(b"v2-longer")
+        fresh = client.get("/api/raw/seg.nii.gz", headers={"If-None-Match": stale})
+        assert fresh.status_code == 200
+        assert fresh.content == b"v2-longer"
+        assert fresh.headers["etag"] != stale
+
+    def test_raw_reads_every_spelling_of_if_none_match(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """Clients send a list, a weak tag or ``*``; each is a valid revalidation."""
+        (workspace_root / "seg.nii.gz").write_bytes(b"v1")
+        etag = client.get("/api/raw/seg.nii.gz").headers["etag"]
+        for header in (f'"other", {etag}', f"W/{etag}", "*"):
+            assert (
+                client.get("/api/raw/seg.nii.gz", headers={"If-None-Match": header}).status_code
+                == 304
+            )
+        assert (
+            client.get("/api/raw/seg.nii.gz", headers={"If-None-Match": '"nope"'}).status_code
+            == 200
+        )
+
+    def test_raw_streams_a_file_larger_than_one_chunk(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """A volume spans several reads; no byte may be dropped or doubled at a seam."""
+        blob = bytes(range(256)) * 12_000  # ~3 MB: three reads at the 1 MiB chunk size
+        (workspace_root / "big.nii.gz").write_bytes(blob)
+        got = client.get("/api/raw/big.nii.gz")
+        assert got.status_code == 200
+        assert got.content == blob
+        assert got.headers["content-length"] == str(len(blob))
+
     def test_raw_html_and_svg_are_sandboxed(self, workspace_root: Path, client: TestClient) -> None:
         """Opened directly, a workspace page must not run with the app's origin."""
         (workspace_root / "qc.html").write_text("<script>1</script>")

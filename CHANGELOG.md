@@ -4,6 +4,12 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Changed
+
+- Viewer: volumes load faster. A `.nii.gz` is inflated once and kept that way, so a panel resize or an overlay change no longer repeats it (1–4 s on a 515 MB volume, depending on its content); the bytes go to the renderer directly instead of through a copy; and `/api/raw` answers a revalidation with `304` rather than re-sending the file, reading it in 1 MiB chunks (235 MB in 0.28 s against 0.61 s).
+
 ## 0.7.3 — 2026-10-23
 
 ### Changed

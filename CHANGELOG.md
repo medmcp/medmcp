@@ -4,6 +4,15 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Fixed
+
+- Reaching the workspace by a hostname that is not in `MEDMCP_ALLOWED_HOSTS` no longer
+  asks for a password and then rejects the correct one. The page now says which `Host`
+  or `Origin` was refused and which setting allows it, and the chat's connection
+  indicator carries that reason instead of reading `closed` forever.
+
 ## 0.7.3 — 2026-10-23
 
 ### Changed

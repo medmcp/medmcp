@@ -121,3 +121,40 @@ class TestGuardOnTheApp:
             client.websocket_connect("/ws/replay", headers={"Origin": "https://evil.example"}),
         ):
             pass  # pragma: no cover — the connect itself raises
+
+
+class TestRefusalIsExplainable:
+    """A refused browser can be told what to change, and not to try a password.
+
+    The page boots on ``/api/access``. The guard's 403 and the password's 401 have
+    to stay distinguishable there, and the 403 has to carry its reason: the only
+    thing that tells the reader to set ``MEDMCP_ALLOWED_HOSTS`` is the server's own
+    wording, and the WebSocket cannot carry it (the upgrade is refused before
+    ``accept``, so the browser gets close code 1006 with the reason discarded).
+    """
+
+    @staticmethod
+    def _client() -> TestClient:
+        return TestClient(server.app, base_url="http://127.0.0.1:8100", headers=AUTH_HEADERS)
+
+    def test_access_probe_names_the_host_it_refused(self) -> None:
+        """Without the name in the body there is nothing actionable to show."""
+        resp = self._client().get("/api/access", headers={"Host": "medmcp.lan:8100"})
+        assert resp.status_code == 403
+        assert "medmcp.lan:8100" in resp.json()["detail"]
+
+    def test_login_is_refused_by_the_same_guard(self) -> None:
+        """So no password can answer a 403 — the page must not offer the login box.
+
+        Treating the 403 as "needs a password" is what made a correct password
+        come back as "Wrong password." on a hostname deployment.
+        """
+        resp = self._client().post(
+            "/api/login", json={"password": "anything"}, headers={"Host": "medmcp.lan:8100"}
+        )
+        assert resp.status_code == 403
+
+    def test_a_missing_password_keeps_its_own_status(self) -> None:
+        """401, so the page can still tell the password case apart from the guard."""
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        assert client.get("/api/access").status_code == 401

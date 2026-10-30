@@ -542,6 +542,9 @@ export const Chat = memo(function Chat({
   const [retrying, setRetrying] = useState<{ category: string; detail: string } | null>(null)
   const [usage, setUsage] = useState<{ used: number; size: number | null } | null>(null)
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
+  // Why the socket will not stay up, when the server refuses this browser
+  // outright. Reconnecting cannot fix that, so "closed" on its own is a dead end.
+  const [refused, setRefused] = useState<string | null>(null)
   // Pending rewind confirmation: set after the preview call, cleared on
   // confirm/cancel/reconnect. `paths` are the workspace files a rewind restores.
   const [rewind, setRewind] = useState<{
@@ -747,6 +750,7 @@ export const Chat = memo(function Chat({
           setCloud(frame.cloud === true)
           setTitle(frame.title ?? null)
           setRetrying(null)
+          setRefused(null)
           onSessionEstablishedRef.current?.(frame.sessionId)
           break
       }
@@ -762,7 +766,10 @@ export const Chat = memo(function Chat({
         setPermission(null)
       }
     }
-    const socket = new ChatSocket({ onFrame, onStatusChange }, resumeIdRef.current)
+    const socket = new ChatSocket(
+      { onFrame, onStatusChange, onRefused: setRefused },
+      resumeIdRef.current,
+    )
     socketRef.current = socket
     return () => {
       socket.close()
@@ -872,11 +879,13 @@ export const Chat = memo(function Chat({
           <span
             className={`conn conn-${retrying ? 'retrying' : status}`}
           >
-            {retrying
-              ? `retrying… ${retrying.category.replace(/_/g, ' ')}`
-              : status === 'open'
-                ? 'running'
-                : status}
+            {refused
+              ? `cannot connect — ${refused}`
+              : retrying
+                ? `retrying… ${retrying.category.replace(/_/g, ' ')}`
+                : status === 'open'
+                  ? 'running'
+                  : status}
           </span>
         </span>
       </div>

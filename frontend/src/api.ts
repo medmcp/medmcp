@@ -19,20 +19,22 @@ import type {
 
 /** Thin client for the workspace filesystem API. */
 
+/** The server's own reason for a failed response, or its status text. */
+async function errorDetail(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as { detail?: string }
+    if (body.detail) return body.detail
+  } catch {
+    /* non-JSON error body */
+  }
+  return res.statusText
+}
+
 async function check(res: Response): Promise<Response> {
   // The login cookie is gone or the password changed: the reload lands on the
   // login screen rather than leaving every panel failing on its own.
   if (res.status === 401) window.location.reload()
-  if (!res.ok) {
-    let detail = res.statusText
-    try {
-      const body = (await res.json()) as { detail?: string }
-      if (body.detail) detail = body.detail
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new Error(detail)
-  }
+  if (!res.ok) throw new Error(await errorDetail(res))
   return res
 }
 
@@ -59,9 +61,29 @@ export async function login(password: string): Promise<void> {
   await postJson('/api/login', { password })
 }
 
-/** Whether this browser may use the API (no password set, or it is logged in). */
-export async function canUseApi(): Promise<boolean> {
-  return (await fetch('/api/access')).ok
+/** Whether this browser may use the API, and the server's reason when it may not.
+ *
+ * The two refusals are not interchangeable: a **401** is a missing or stale login,
+ * which a password answers, while a **403** is the origin guard (an unexpected
+ * ``Host`` or ``Origin``) or the agent's own network, which no password can answer
+ * — ``/api/login`` is refused by the same guard. ``status`` is 0 when the server
+ * did not answer at all.
+ */
+export interface ApiAccess {
+  allowed: boolean
+  status: number
+  detail: string
+}
+
+export async function canUseApi(): Promise<ApiAccess> {
+  let res: Response
+  try {
+    res = await fetch('/api/access')
+  } catch {
+    return { allowed: false, status: 0, detail: '' }
+  }
+  if (res.ok) return { allowed: true, status: res.status, detail: '' }
+  return { allowed: false, status: res.status, detail: await errorDetail(res) }
 }
 
 /** The absolute on-disk workspace root, so absolute tool outputs can be shown

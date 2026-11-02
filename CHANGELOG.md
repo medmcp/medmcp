@@ -10,6 +10,10 @@ Notable, user-visible changes to MedMCP. Format follows
 
 - LLM shim: `MEDMCP_SHIM_SEED` seeds sampling per conversation, so a chat can be rerun with the same draws.
 
+### Fixed
+
+- Replay: a workflow that uses two stacks no longer ends in an error after its last step.
+
 ## 0.7.3 — 2026-10-23
 
 ### Changed

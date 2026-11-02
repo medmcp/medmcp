@@ -250,7 +250,9 @@ async def mcp_caller(
                     await sstack.aclose()
 
         async def _evict_all() -> None:
-            for server in list(server_stacks):
+            # Newest first: each stdio client holds an anyio cancel scope, and closing
+            # an older one while a newer one is open raises CancelledError.
+            for server in reversed(list(server_stacks)):
                 await _evict(server)
 
         # Shut every live server down on exit (normal or cancellation/Stop).

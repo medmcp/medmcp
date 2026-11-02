@@ -4,6 +4,12 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Changed
+
+- Workflows: a live batch run no longer rebuilds its item labels and per-item step lists on every one-second clock tick. The per-item log scan was `O(items × log)` and ran for queued items that are never drawn; it is now one grouping pass. Measured on a 1000-item cohort it drops from ~13 ms of main-thread work per tick to ~0.01 ms, and a 200-item one from ~0.65 ms to ~0.002 ms.
+
 ## 0.7.3 — 2026-10-23
 
 ### Changed

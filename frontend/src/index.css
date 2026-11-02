@@ -679,6 +679,15 @@ button:hover {
   display: flex;
 }
 
+/* The viewer's keys (slice stepping, `o`, space, zoom) only fire while this
+   dropzone holds focus, and clicking the chat or the tree silently takes it
+   away. Nothing said so before, which made the shortcut list look broken.
+   Inset so the ring sits inside the pane instead of over its neighbours. */
+.niivue-dropzone:focus-visible {
+  outline: 1px solid var(--blue-xl);
+  outline-offset: -1px;
+}
+
 .niivue-dropzone.drag-over::after {
   content: '';
   position: absolute;
@@ -4380,4 +4389,67 @@ textarea.wf-input {
 
 .confirm-dialog p.login-error {
   color: var(--red-tint);
+}
+
+/* ── Shortcuts and controls window ───────────────────────────────────────── */
+
+/* A dense reference list, so the rows are tighter than `.settings-row`: at ~40
+   bindings that spacing would double the window's height for no gain. The
+   section headings are shared with the settings drawer. */
+.sc-body .settings-section:first-child {
+  margin-top: 2px;
+}
+
+.sc-group-hint {
+  font-size: 11.5px;
+  color: var(--muted2);
+  line-height: 16px;
+  margin: 0 0 2px;
+}
+
+.sc-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.sc-row:last-child {
+  border-bottom: none;
+}
+
+.sc-action {
+  font-size: 13px;
+  line-height: 17px;
+}
+
+/* Caveats belong on their own line under the action: several of these bindings
+   are conditional, and a reader who misses that reads the row as wrong. */
+.sc-note {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 15px;
+}
+
+.sc-keys {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 15px;
+  white-space: nowrap;
+  padding: 1px 6px;
+  color: var(--muted2);
+  background: var(--card2);
+  border: 1px solid var(--border2);
+  border-radius: 4px;
 }

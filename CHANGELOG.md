@@ -9,6 +9,7 @@ Notable, user-visible changes to MedMCP. Format follows
 ### Added
 
 - Viewer: zoom into the open image — ctrl/⌘ + wheel or a trackpad pinch zooms about the crosshair, `+`/`-`/`0` do it from the keyboard, and shift/ctrl-drag or the middle button pans. The zoom survives a panel resize, and the status bar reads it out while it is not 1×.
+- A keyboard button in the header opens every shortcut and mouse control the app has, grouped by what has to have focus for it to work; `?` or F1 opens it too. Most of the list was undiscoverable: the file tree's keymap and the viewer's mouse controls come from libraries and were documented nowhere, and the viewer now shows a focus ring so it is clear when its keys apply.
 
 ## 0.7.3 — 2026-10-23
 

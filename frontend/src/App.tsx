@@ -9,11 +9,12 @@ import { ModelsWindow } from './components/ModelsWindow'
 import { FileExplorer } from './components/FileExplorer'
 import { StackMarketplace } from './components/StackMarketplace'
 import { SettingsDrawer } from './components/SettingsDrawer'
+import { ShortcutsWindow } from './components/ShortcutsWindow'
 import { UpdateWindow } from './components/UpdateWindow'
 import { Viewer } from './components/Viewer'
 import { EMPTY_OVERLAY, type OverlayState } from './components/viewerData'
 import { WorkflowPanel } from './components/WorkflowPanel'
-import { GearIcon, StoreIcon, XIcon } from './components/icons'
+import { GearIcon, KeyboardIcon, StoreIcon, XIcon } from './components/icons'
 import {
   ackUpdateResult,
   checkForUpdate,
@@ -68,6 +69,28 @@ export default function App() {
   const [modelsOpen, setModelsOpen] = useState(false)
   const openModels = useCallback(() => setModelsOpen(true), [])
   const [marketOpen, setMarketOpen] = useState(false)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const closeShortcuts = useCallback(() => setShortcutsOpen(false), [])
+  // `?` and F1 open the shortcut list. The app's only standing hotkey — every
+  // other window listener here is mounted with the thing it closes — so the
+  // guard is the whole of it: a `?` belongs to whatever field is being typed
+  // in, and a modified key belongs to the browser. F1's preventDefault is
+  // best-effort; some browsers keep their own help, and the button remains.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      if (e.key !== '?' && e.key !== 'F1') return
+      e.preventDefault()
+      // Capture-phase and stopped, so the key cannot also land in the file
+      // tree's 600 ms type-ahead buffer and corrupt the next search.
+      e.stopPropagation()
+      setShortcutsOpen(true)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [])
   // The release record the server keeps (checked daily there); the header
   // notice and the Settings row both read it, the window applies it.
   const [updateState, setUpdateState] = useState<UpdateState | null>(null)
@@ -206,6 +229,13 @@ export default function App() {
           <button className="btn-icon" aria-label="Tool stacks" onClick={() => setMarketOpen(true)}>
             <StoreIcon />
           </button>
+          <button
+            className="btn-icon"
+            aria-label="Shortcuts and controls"
+            onClick={() => setShortcutsOpen(true)}
+          >
+            <KeyboardIcon />
+          </button>
           <button className="btn-icon" aria-label="Settings" onClick={() => setSettingsOpen(true)}>
             <GearIcon />
           </button>
@@ -260,6 +290,7 @@ export default function App() {
       />
       <ModelsWindow open={modelsOpen} onClose={() => setModelsOpen(false)} />
       <StackMarketplace open={marketOpen} onClose={() => setMarketOpen(false)} />
+      <ShortcutsWindow open={shortcutsOpen} onClose={closeShortcuts} />
       <Group
         orientation="vertical"
         className="app-main"

@@ -315,3 +315,14 @@ export function ListIcon(props: IconProps) {
     </Icon>
   )
 }
+
+/** A keyboard — the list of shortcuts and controls. */
+export function KeyboardIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="2" y="6" width="20" height="12" rx="2" />
+      <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M18 14h.01" />
+      <line x1="9.5" y1="14" x2="14.5" y2="14" />
+    </Icon>
+  )
+}

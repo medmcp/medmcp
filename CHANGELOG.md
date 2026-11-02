@@ -4,6 +4,12 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Fixed
+
+- Replay: a workflow that uses two stacks no longer ends in an error after its last step.
+
 ## 0.7.3 — 2026-10-23
 
 ### Changed

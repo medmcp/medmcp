@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import sys
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ import pytest
 from medmcp import replay
 from medmcp.workflow import Recipe, RecipeStep, StackRequirement, WorkflowInput
 
+from ._pool import FAKE_STACK_SERVER
 from ._recipes import McpCallerFactory, neuro_servers, two_step_recipe
 
 JsonDict = dict[str, Any]
@@ -422,6 +424,18 @@ async def test_mcp_caller_respawns_after_transport_crash(monkeypatch: pytest.Mon
 
     assert spawns[0] == 2  # the dead server was re-spawned, not reused
     assert outcome == (True, {"brain_path": "/b"}, None)
+
+
+async def test_mcp_caller_shuts_down_two_live_servers() -> None:
+    """Two real stdio servers in one run close without a stray CancelledError."""
+    servers: list[JsonDict] = [
+        {"name": name, "command": sys.executable, "args": [str(FAKE_STACK_SERVER)]}
+        for name in ("first", "second")
+    ]
+    async with replay.mcp_caller(servers) as call:
+        for name in ("first", "second"):
+            ok, _, error = await call(name, "echo", {"text": name})
+            assert ok, error
 
 
 # ── derived {{dir(...)}} references ──────────────────────────────────────────

@@ -18,6 +18,7 @@ analysis pipelines through natural-language instructions.
 - `web_fetch` is for retrieving public references only — never put patient data, identifiers, or image contents in a web request.
 - Always confirm before executing destructive operations on imaging data.
 - When a tool is unavailable, explain what is missing and how to install it.
+- If it is unclear which data a request refers to — several scans, subjects or series could match — ask before processing any of them.
 - Prefer composing small, tested tool invocations over monolithic scripts.
 
 **Honesty about capabilities**

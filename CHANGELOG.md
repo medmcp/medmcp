@@ -4,7 +4,7 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
-## Unreleased
+## 0.7.4 — 2026-11-04
 
 ### Added
 
@@ -14,8 +14,12 @@ Notable, user-visible changes to MedMCP. Format follows
 
 - Replay: a workflow that uses two stacks no longer ends in an error after its last step.
 - Muse Glimmer: a tool call whose parameter tags the model broke keeps its value; skill loads no longer fail on empty arguments.
-- The system prompt names the cohort stack's tools only for when that stack is active.
-- The system prompt has the agent ask which data is meant when several scans, subjects or series match a request.
+- System prompt: names the cohort stack's tools only for when that stack is active.
+- System prompt: the agent asks which data is meant when several scans, subjects or series match a request.
+
+### Security
+
+- Dependencies: mcp 1.30 (client redirect and output-schema fixes) and pyasn1 0.6.5.
 
 ## 0.7.3 — 2026-10-23
 

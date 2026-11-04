@@ -22,7 +22,7 @@ FROM ${BASE_IMAGE} AS runtime
 COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
 # compose plugin (multi-arch static binary) so the update helper can bring the
 # operator's compose project up on the new release from inside a container.
-COPY --from=docker/compose-bin:v5.0.2 /docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+COPY --from=docker/compose-bin:v5.7.0 /docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
 # cosign verifies the signature on every image the core pulls to run (the next
 # release, a stack) against signing-policy.json. The Sigstore trust root is
 # fetched here, at build time, so verification needs no Sigstore access at run

@@ -13,6 +13,8 @@ Notable, user-visible changes to MedMCP. Format follows
 ### Fixed
 
 - Replay: a workflow that uses two stacks no longer ends in an error after its last step.
+- Muse Glimmer: a tool call whose parameter tags the model broke keeps its value; skill loads no longer fail on empty arguments.
+- The system prompt names the cohort stack's tools only for when that stack is active.
 
 ## 0.7.3 — 2026-10-23
 

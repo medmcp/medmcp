@@ -43,6 +43,15 @@ This shim sits between vibe and Ollama and applies these repairs:
    offered but whose part before the dot (``bash.action``) or after it
    (``file_system.bash``) is exactly one offered tool is mapped to that tool; any
    other unknown name is kept, and vibe answers it with its own error.
+6. **Parameter repair** (glimmer mode). Muse also breaks a parameter's tags: it
+   closes one with its own name (``<atem:parameter name="name">x</name>``, the
+   shape of the XML skill list beside the section), leaves one unclosed, or folds
+   the parameter into the invoke name (``<atem:invoke name="skill.name">x``).
+   Each loses the value and leaves ``{}``, which the tool's schema then rejects
+   (132 of 296 skill calls in a benchmark sweep, 2026-11). The parameter's own
+   closing tag ends it as ``</atem:parameter>`` does; an unclosed one runs to the
+   next parameter or the end of the invoke; and a ``tool.parameter`` invoke with
+   no parameters gives its text to that parameter when the tool declares it.
 
 **Relay mode** (``MEDMCP_SHIM_RELAY``). ``live`` (default): reasoning and
 ``content`` deltas stream straight through, so the answer appears as it is
@@ -128,7 +137,14 @@ ATEM_CALLS_CLOSE = "</atem:function_calls>"
 # Ollama's model-management routes, which the passthrough refuses.
 _ADMIN_ROUTE = re.compile(r"api/(create|copy|pull|push|delete|blobs)\b")
 _ATEM_INVOKE_RE = re.compile(r'<atem:invoke name="([^"]*)">(.*?)</atem:invoke>', re.DOTALL)
-_ATEM_PARAM_RE = re.compile(r'<atem:parameter name="([^"]*)">(.*?)</atem:parameter>', re.DOTALL)
+# A parameter ends at ``</atem:parameter>`` or at its own name's closing tag (repair 6).
+_ATEM_PARAM_RE = re.compile(
+    r'<atem:parameter name="([^"]*)">((?:(?!<atem:parameter ).)*?)</(?:atem:parameter|\1)>',
+    re.DOTALL,
+)
+_ATEM_PARAM_OPEN_RE = re.compile(r'<atem:parameter name="([^"]*)">')
+# Closing tags left at the end of a value whose own were missing (repair 6).
+_TRAILING_TAGS_RE = re.compile(r"(?:\s*</[\w:.-]+>)+\s*$")
 
 # The tool section Ollama's Glimmer renderer writes into the system message
 # (``model/renderers/glimmer.go``); reproduced verbatim so the model sees what it
@@ -457,6 +473,18 @@ def resolve_tool_name(name: str, functions: Mapping[str, JsonDict]) -> str:
     return resolved
 
 
+def _atem_parameters(body: str) -> dict[str, str]:
+    """An invoke's parameters as text: closed ones, then any opened and never closed."""
+    found = {m.group(1): m.group(2) for m in _ATEM_PARAM_RE.finditer(body)}
+    opens = list(_ATEM_PARAM_OPEN_RE.finditer(body))
+    for i, opening in enumerate(opens):
+        if opening.group(1) in found:
+            continue
+        end = opens[i + 1].start() if i + 1 < len(opens) else len(body)
+        found[opening.group(1)] = _TRAILING_TAGS_RE.sub("", body[opening.end() : end])
+    return found
+
+
 def parse_atem_block(
     block: str, functions: Mapping[str, JsonDict], *, first_index: int = 0
 ) -> list[JsonDict]:
@@ -471,13 +499,20 @@ def parse_atem_block(
     """
     calls: list[JsonDict] = []
     for index, invoke in enumerate(_ATEM_INVOKE_RE.finditer(block), start=first_index):
-        name = resolve_tool_name(invoke.group(1).strip(), functions)
+        written = invoke.group(1).strip()
+        name = resolve_tool_name(written, functions)
         fn = functions.get(name)
-        arguments: JsonDict = {}
-        for param in _ATEM_PARAM_RE.finditer(invoke.group(2)):
-            arguments[param.group(1)] = coerce_value(
-                param.group(2), _schema_types(fn, param.group(1))
-            )
+        body = invoke.group(2)
+        raw = _atem_parameters(body)
+        folded = written.rpartition(".")[2]
+        if not raw and name != written and _schema_types(fn, folded):
+            # ``<atem:invoke name="skill.name">x``: the parameter folded into the name.
+            raw[folded] = _TRAILING_TAGS_RE.sub("", body).strip()
+        if raw and not _ATEM_PARAM_RE.search(body):
+            log.info("tool call %r: parameters repaired (%s)", name, ", ".join(raw))
+        arguments: JsonDict = {
+            key: coerce_value(value, _schema_types(fn, key)) for key, value in raw.items()
+        }
         calls.append(
             {
                 "index": index,

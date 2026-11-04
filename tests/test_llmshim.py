@@ -514,6 +514,46 @@ class TestAtemParse:
         assert llmshim.resolve_tool_name("shell.run", _FUNCTIONS) == "shell.run"
         assert llmshim.resolve_tool_name("mystery", _FUNCTIONS) == "mystery"
 
+    def test_muses_broken_parameter_tags_keep_their_value(self) -> None:
+        """Repair 6: the three ways Muse loses a parameter, as written in a sweep."""
+        skill = {
+            "name": "skill",
+            "parameters": {"type": "object", "properties": {"name": {"type": "string"}}},
+        }
+        functions = {"skill": skill, "bash": _BASH["function"]}
+        for invoke in (
+            '<atem:invoke name="skill"><atem:parameter name="name">cardiac-function</name>'
+            "</atem:invoke>",
+            '<atem:invoke name="skill">\n<atem:parameter name="name">cardiac-function</name>\n'
+            "</atem:parameter>\n</atem:invoke>",
+            '<atem:invoke name="skill.name">cardiac-function</atem:parameter>\n</atem:invoke>',
+            '<atem:invoke name="skill"><atem:parameter name="name">cardiac-function</atem:invoke>',
+        ):
+            block = f"<atem:function_calls>\n{invoke}\n</atem:function_calls>"
+            call = llmshim.parse_atem_block(block, functions)[0]["function"]
+            assert call["name"] == "skill", invoke
+            assert json.loads(call["arguments"]) == {"name": "cardiac-function"}, invoke
+
+    def test_an_unclosed_parameter_ends_at_the_next(self) -> None:
+        """Repair 6 keeps the following parameter apart."""
+        block = (
+            '<atem:function_calls><atem:invoke name="bash">'
+            '<atem:parameter name="command">ls'
+            '<atem:parameter name="timeout_seconds">30</atem:parameter>'
+            "</atem:invoke></atem:function_calls>"
+        )
+        args = json.loads(llmshim.parse_atem_block(block, _FUNCTIONS)[0]["function"]["arguments"])
+        assert args == {"command": "ls", "timeout_seconds": 30}
+
+    def test_a_folded_name_that_is_no_parameter_stays_empty(self) -> None:
+        """``bash.action`` names no parameter of bash: no value is invented."""
+        block = (
+            '<atem:function_calls><atem:invoke name="bash.action">ls'
+            "</atem:invoke></atem:function_calls>"
+        )
+        call = llmshim.parse_atem_block(block, _FUNCTIONS)[0]["function"]
+        assert call["name"] == "bash" and json.loads(call["arguments"]) == {}
+
     def test_two_invokes_are_two_calls(self) -> None:
         """One block may carry several calls; indices count up."""
         block = (

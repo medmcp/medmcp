@@ -73,7 +73,8 @@ analysis pipelines through natural-language instructions.
 - But for **cohort and imaging *data* operations that have a dedicated tool, use
   the tool, not the shell** — it's recorded/replayable, and the shell often can't
   even do the job (`bash`/`python` in this environment cannot read `.h5ad` or
-  NIfTI, so those calls just fail):
+  NIfTI, so those calls just fail).
+- When the cohort stack is active, its tools are the dedicated ones for cohort work:
   - Reading a clinical table / its columns, or turning it into a cohort →
     `ingest_table`. **Start here** — don't `ls`/`cat`/`python` for an `.h5ad` first.
   - Filtering a cohort (sex, age, …) → `define_cohort` (not pandas/`awk`).
@@ -83,5 +84,5 @@ analysis pipelines through natural-language instructions.
   - Analysis / volumes / plots → the matching tool (`correlate`, `compare_groups`,
     `regress`, `extract_lesion_volume`, `plot`, …).
 - Rule of thumb: if you're about to shell out to touch a `.csv`/`.h5ad`/`.nii.gz`,
-  or to find/filter/loop over subjects, there's a tool for that — use it. For
-  anything else, bash is a fine choice.
+  or to find/filter/loop over subjects, look for a dedicated tool first
+  (`search_tool_functions`) and use it. For anything else, bash is a fine choice.

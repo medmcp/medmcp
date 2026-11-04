@@ -53,7 +53,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | linkify-it-py | 2.1.0 | MIT |
 | markdown-it-py | 4.0.0 | MIT |
 | markdownify | 1.2.3 | MIT |
-| mcp | 1.28.1 | MIT |
+| mcp | 1.30.0 | MIT |
 | mdit-py-plugins | 0.5.0 | MIT |
 | mdurl | 0.1.2 | MIT |
 | miniaudio | 1.71 | MIT |
@@ -71,7 +71,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | platformdirs | 4.9.6 | MIT |
 | protobuf | 6.33.6 | BSD-3-Clause |
 | ptyprocess | 0.7.0 | ISC |
-| pyasn1 | 0.6.4 | BSD-2-Clause |
+| pyasn1 | 0.6.5 | BSD-2-Clause |
 | pyasn1-modules | 0.4.2 | BSD-2-Clause |
 | pycparser | 3.0 | BSD-3-Clause |
 | pydantic | 2.13.4 | MIT |

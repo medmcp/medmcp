@@ -81,7 +81,16 @@ default-groups = ["dev"]
 # The CA bundle is data, so overriding it cannot break vibe.
 # gitpython likewise (CVE-2026-114145, submodule clone into .git/hooks); vibe
 # only reads repos and fetches, which 3.2 leaves as it was.
-override-dependencies = ["certifi>=2026.10.19", "gitpython>=3.2.1"]
+# mcp likewise (CVE-2026-116685, client headers follow a redirect to another host;
+# CVE-2026-116686, a tool's output schema makes the client fetch URLs and files);
+# 1.30 is a minor release of the same API. pyasn1 likewise (CVE-2026-119194..7,
+# quadratic decoding), a bug-fix release.
+override-dependencies = [
+    "certifi>=2026.10.19",
+    "gitpython>=3.2.1",
+    "mcp>=1.30.0,<2",
+    "pyasn1>=0.6.5",
+]
 
 
 [tool.ruff]

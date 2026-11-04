@@ -43,6 +43,15 @@ This shim sits between vibe and Ollama and applies these repairs:
    offered but whose part before the dot (``bash.action``) or after it
    (``file_system.bash``) is exactly one offered tool is mapped to that tool; any
    other unknown name is kept, and vibe answers it with its own error.
+6. **Parameter repair** (glimmer mode). Muse also breaks a parameter's tags: it
+   closes one with its own name (``<atem:parameter name="name">x</name>``, the
+   shape of the XML skill list beside the section), leaves one unclosed, or folds
+   the parameter into the invoke name (``<atem:invoke name="skill.name">x``).
+   Each loses the value and leaves ``{}``, which the tool's schema then rejects
+   (132 of 296 skill calls in a benchmark sweep, 2026-11). The parameter's own
+   closing tag ends it as ``</atem:parameter>`` does; an unclosed one runs to the
+   next parameter or the end of the invoke; and a ``tool.parameter`` invoke with
+   no parameters gives its text to that parameter when the tool declares it.
 
 **Relay mode** (``MEDMCP_SHIM_RELAY``). ``live`` (default): reasoning and
 ``content`` deltas stream straight through, so the answer appears as it is
@@ -58,12 +67,19 @@ truncation is retried invisibly, at the cost of the answer arriving all at once.
 If every attempt fails the shim emits an explicit, clearly-labelled error message
 rather than an empty turn — a visible failure beats a silent one.
 
+**Seeded sampling** (``MEDMCP_SHIM_SEED``, off when unset). Every request carries a
+sampling seed derived from this value and the conversation's first user message, so
+a conversation can be run again with the same draws; a retry moves the seed on by
+one, so it is a new draw rather than the same failure. The draws repeat exactly only
+while Ollama serves nothing else: requests batched together change the arithmetic.
+
 Inert until ``api_base`` in ``.vibe/config.toml`` points at it.
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -113,13 +129,22 @@ DEFAULT_KEEPALIVE_SEC: float = 15.0
 _KEEPALIVE_ENV = "MEDMCP_SHIM_KEEPALIVE"
 _SSE_KEEPALIVE = b": keepalive\n\n"
 
+_SEED_ENV = "MEDMCP_SHIM_SEED"
+
 # ATEM markers, as in Ollama's ``model/parsers/glimmer.go``.
 ATEM_CALLS_OPEN = "<atem:function_calls>"
 ATEM_CALLS_CLOSE = "</atem:function_calls>"
 # Ollama's model-management routes, which the passthrough refuses.
 _ADMIN_ROUTE = re.compile(r"api/(create|copy|pull|push|delete|blobs)\b")
 _ATEM_INVOKE_RE = re.compile(r'<atem:invoke name="([^"]*)">(.*?)</atem:invoke>', re.DOTALL)
-_ATEM_PARAM_RE = re.compile(r'<atem:parameter name="([^"]*)">(.*?)</atem:parameter>', re.DOTALL)
+# A parameter ends at ``</atem:parameter>`` or at its own name's closing tag (repair 6).
+_ATEM_PARAM_RE = re.compile(
+    r'<atem:parameter name="([^"]*)">((?:(?!<atem:parameter ).)*?)</(?:atem:parameter|\1)>',
+    re.DOTALL,
+)
+_ATEM_PARAM_OPEN_RE = re.compile(r'<atem:parameter name="([^"]*)">')
+# Closing tags left at the end of a value whose own were missing (repair 6).
+_TRAILING_TAGS_RE = re.compile(r"(?:\s*</[\w:.-]+>)+\s*$")
 
 # The tool section Ollama's Glimmer renderer writes into the system message
 # (``model/renderers/glimmer.go``); reproduced verbatim so the model sees what it
@@ -166,6 +191,30 @@ _GLIMMER_TOOLS_SUFFIX = (
 
 
 # ── request repair (pure) ──────────────────────────────────
+
+
+def _first_user_text(payload: JsonDict) -> str:
+    """The text of the conversation's first user message ("" when there is none)."""
+    for raw in cast("list[object]", payload.get("messages") or []):
+        if not isinstance(raw, dict) or cast("JsonDict", raw).get("role") != "user":
+            continue
+        content = cast("JsonDict", raw).get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                str(cast("JsonDict", part).get("text") or "")
+                for part in cast("list[object]", content)
+                if isinstance(part, dict)
+            )
+        return ""
+    return ""
+
+
+def conversation_seed(payload: JsonDict, base: int) -> int:
+    """The sampling seed for a conversation: ``base`` and its first user message, hashed."""
+    digest = hashlib.sha256(f"{base}\n{_first_user_text(payload)}".encode()).hexdigest()
+    return int(digest[:8], 16) % (2**31)
 
 
 def sanitize_arguments(raw: object) -> str:
@@ -424,6 +473,18 @@ def resolve_tool_name(name: str, functions: Mapping[str, JsonDict]) -> str:
     return resolved
 
 
+def _atem_parameters(body: str) -> dict[str, str]:
+    """An invoke's parameters as text: closed ones, then any opened and never closed."""
+    found = {m.group(1): m.group(2) for m in _ATEM_PARAM_RE.finditer(body)}
+    opens = list(_ATEM_PARAM_OPEN_RE.finditer(body))
+    for i, opening in enumerate(opens):
+        if opening.group(1) in found:
+            continue
+        end = opens[i + 1].start() if i + 1 < len(opens) else len(body)
+        found[opening.group(1)] = _TRAILING_TAGS_RE.sub("", body[opening.end() : end])
+    return found
+
+
 def parse_atem_block(
     block: str, functions: Mapping[str, JsonDict], *, first_index: int = 0
 ) -> list[JsonDict]:
@@ -438,13 +499,20 @@ def parse_atem_block(
     """
     calls: list[JsonDict] = []
     for index, invoke in enumerate(_ATEM_INVOKE_RE.finditer(block), start=first_index):
-        name = resolve_tool_name(invoke.group(1).strip(), functions)
+        written = invoke.group(1).strip()
+        name = resolve_tool_name(written, functions)
         fn = functions.get(name)
-        arguments: JsonDict = {}
-        for param in _ATEM_PARAM_RE.finditer(invoke.group(2)):
-            arguments[param.group(1)] = coerce_value(
-                param.group(2), _schema_types(fn, param.group(1))
-            )
+        body = invoke.group(2)
+        raw = _atem_parameters(body)
+        folded = written.rpartition(".")[2]
+        if not raw and name != written and _schema_types(fn, folded):
+            # ``<atem:invoke name="skill.name">x``: the parameter folded into the name.
+            raw[folded] = _TRAILING_TAGS_RE.sub("", body).strip()
+        if raw and not _ATEM_PARAM_RE.search(body):
+            log.info("tool call %r: parameters repaired (%s)", name, ", ".join(raw))
+        arguments: JsonDict = {
+            key: coerce_value(value, _schema_types(fn, key)) for key, value in raw.items()
+        }
         calls.append(
             {
                 "index": index,
@@ -702,8 +770,9 @@ def create_app(
     relay: str = DEFAULT_RELAY,
     tool_mode: str = DEFAULT_TOOL_MODE,
     keepalive_sec: float = DEFAULT_KEEPALIVE_SEC,
+    seed: int | None = None,
 ) -> FastAPI:
-    """Build the shim ASGI app forwarding to ``upstream``."""
+    """Build the shim ASGI app forwarding to ``upstream``; ``seed`` turns on seeded sampling."""
     if relay not in RELAY_MODES:
         raise ValueError(f"unknown relay mode {relay!r}; expected one of {RELAY_MODES}")
     if tool_mode not in TOOL_MODES:
@@ -727,6 +796,7 @@ def create_app(
             return JSONResponse({"error": {"message": "invalid payload"}}, status_code=400)
 
         payload = repair_request(cast("JsonDict", raw), mapping)
+        sampling_seed = None if seed is None else conversation_seed(payload, seed)
         model = str(payload.get("model") or "")
         url = f"{base}/v1/chat/completions"
         functions: dict[str, JsonDict] | None = None
@@ -746,10 +816,13 @@ def create_app(
                     relay=relay,
                     functions=functions,
                     keepalive_sec=keepalive_sec,
+                    seed=sampling_seed,
                 ),
                 media_type="text/event-stream",
             )
-        return await _complete_with_retry(url, payload, inverse, attempts, functions=functions)
+        return await _complete_with_retry(
+            url, payload, inverse, attempts, functions=functions, seed=sampling_seed
+        )
 
     @app.api_route(  # pyright: ignore[reportUntypedFunctionDecorator]
         "/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD"]
@@ -816,12 +889,13 @@ async def _complete_with_retry(
     *,
     client: httpx.AsyncClient | None = None,
     functions: Mapping[str, JsonDict] | None = None,
+    seed: int | None = None,
 ) -> Response:
     """Run a non-streaming completion, retrying parse failures and empty turns.
 
     A 4xx is the upstream rejecting the request itself; it is passed through at
     once, since re-sending the same request can only produce the same answer.
-    ``client`` lets tests inject a transport.
+    ``client`` lets tests inject a transport; ``seed`` is attempt 1's sampling seed.
     """
     detail = "unknown error"
     async with (
@@ -830,7 +904,7 @@ async def _complete_with_retry(
         else contextlib.nullcontext(client)
     ) as client:
         for attempt in range(1, attempts + 1):
-            resp = await client.post(url, json=payload)
+            resp = await client.post(url, json=_seeded(payload, seed, attempt))
             if 400 <= resp.status_code < 500:
                 log.warning("shim: upstream %s — a client error, not retried", resp.status_code)
                 return Response(
@@ -871,6 +945,13 @@ async def _complete_with_retry(
     )
 
 
+def _seeded(payload: JsonDict, seed: int | None, attempt: int) -> JsonDict:
+    """The request for ``attempt``: a retry samples with the next seed, not the same draw."""
+    if seed is None:
+        return payload
+    return {**payload, "seed": (seed + attempt - 1) % (2**31)}
+
+
 def _has_usable_choice(body: JsonDict) -> bool:
     raw_choices = body.get("choices")
     if not isinstance(raw_choices, list):
@@ -899,6 +980,7 @@ async def _stream_with_retry(
     client: httpx.AsyncClient | None = None,
     functions: Mapping[str, JsonDict] | None = None,
     keepalive_sec: float = DEFAULT_KEEPALIVE_SEC,
+    seed: int | None = None,
 ) -> AsyncIterator[bytes]:
     """Relay a streaming completion, retrying attempts that truncate silently.
 
@@ -907,7 +989,8 @@ async def _stream_with_retry(
     ``[DONE]``) so the caller sees an incomplete stream rather than a silent or a
     duplicated answer. ``client`` lets tests inject a transport. While upstream
     chunks arrive but nothing is forwarded for ``keepalive_sec``, an SSE comment
-    goes out so the caller's idle timer does not fire on a held block.
+    goes out so the caller's idle timer does not fire on a held block. ``seed`` is
+    attempt 1's sampling seed.
     """
     detail = "unknown error"
     async with (
@@ -918,7 +1001,8 @@ async def _stream_with_retry(
         for attempt in range(1, attempts + 1):
             outcome = StreamOutcome(relay, functions=functions)
             try:
-                async with client.stream("POST", url, json=payload) as resp:
+                body = _seeded(payload, seed, attempt)
+                async with client.stream("POST", url, json=body) as resp:
                     if resp.status_code != 200:
                         await resp.aread()
                         detail = f"HTTP {resp.status_code}"
@@ -1011,13 +1095,20 @@ def main() -> None:
     except ValueError:
         log.warning("shim: unreadable %s, using %s", _KEEPALIVE_ENV, DEFAULT_KEEPALIVE_SEC)
         keepalive_sec = DEFAULT_KEEPALIVE_SEC
+    seed: int | None = None
+    if raw_seed := os.environ.get(_SEED_ENV, "").strip():
+        try:
+            seed = int(raw_seed)
+        except ValueError:
+            log.warning("shim: unreadable %s=%r, sampling unseeded", _SEED_ENV, raw_seed)
     log.info(
-        "medmcp-llm-shim -> %s (tools=%s, renames=%s, attempts=%d, relay=%s)",
+        "medmcp-llm-shim -> %s (tools=%s, renames=%s, attempts=%d, relay=%s, seed=%s)",
         upstream,
         tool_mode,
         renames or "none",
         attempts,
         relay,
+        "off" if seed is None else seed,
     )
     uvicorn.run(
         create_app(
@@ -1027,6 +1118,7 @@ def main() -> None:
             relay=relay,
             tool_mode=tool_mode,
             keepalive_sec=keepalive_sec,
+            seed=seed,
         ),
         host=host,
         port=port,

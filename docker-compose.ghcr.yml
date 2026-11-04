@@ -172,6 +172,8 @@ services:
       # every truncation can be retried invisibly).
       MEDMCP_SHIM_RELAY: "${MEDMCP_SHIM_RELAY:-live}"
       MEDMCP_SHIM_TOOLS: "${MEDMCP_SHIM_TOOLS:-glimmer}"
+      # Seed for the model's sampling, so a chat can be rerun with the same draws.
+      MEDMCP_SHIM_SEED: "${MEDMCP_SHIM_SEED:-}"
       # Release check (one anonymous request to GitHub a day; off with 0) and
       # where to read the newest release from (a mirror serving the same JSON).
       MEDMCP_UPDATE_CHECK: "${MEDMCP_UPDATE_CHECK:-}"

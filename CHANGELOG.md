@@ -4,6 +4,13 @@ Notable, user-visible changes to MedMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/); entries land under
 **Unreleased** as PRs merge and move under a version heading at release time.
 
+## Unreleased
+
+### Fixed
+
+- Muse Glimmer: a tool call whose parameter tags the model broke keeps its value; skill loads no longer fail on empty arguments.
+- The system prompt names the cohort stack's tools only for when that stack is active.
+
 ## 0.7.3 — 2026-10-23
 
 ### Changed

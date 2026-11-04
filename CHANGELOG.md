@@ -16,6 +16,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Muse Glimmer: a tool call whose parameter tags the model broke keeps its value; skill loads no longer fail on empty arguments.
 - System prompt: names the cohort stack's tools only for when that stack is active.
 - System prompt: the agent asks which data is meant when several scans, subjects or series match a request.
+- Release: the compose artifact publishes again (the runner image moved to Docker Compose 5).
 
 ### Security
 

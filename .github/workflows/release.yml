@@ -191,7 +191,9 @@ jobs:
 
   publish:
     needs: [verify, build]
-    runs-on: ubuntu-latest
+    # Compose 5 (ubuntu-26.04) refuses to publish a file with env_file unless
+    # --with-env, which would ship an env file in the artifact.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Log in to GHCR

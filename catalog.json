@@ -30,6 +30,12 @@
       "image": "medmcp-cardiac:dev",
       "description": "Cardiac MRI and CT: ventricle segmentation on short- and long-axis cines (CineMA), ejection fraction, volumes, LV mass and cardiac output, AHA 16-segment wall analysis, Agatston calcium score.",
       "gpu": true
+    },
+    {
+      "name": "medmcp-spine",
+      "image": "medmcp-spine:dev",
+      "description": "Whole-spine segmentation (SPINEPS): semantic structures, vertebra and disc instances, named levels, centroids and volumes for sagittal T2w MR and CT.",
+      "gpu": true
     }
   ]
 }

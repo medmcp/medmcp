@@ -2493,7 +2493,7 @@ def _read_only_session_label(option: JsonDict, command: str | None = None) -> st
             return None
         patterns.append(str(pattern))
     commands = ", ".join(p.removesuffix(" *") for p in patterns)
-    return f"Allow {commands} for this chat"
+    return f"Allow looking at files for the rest of this chat ({commands})"
 
 
 def _visible_permission_options(
@@ -2599,6 +2599,10 @@ class _ChatConnection:
         # Relays unsolicited frames before the first prompt (see start_idle_pump).
         self._idle_pump: asyncio.Task[None] | None = None
         self._pending_perms: dict[int, asyncio.Future[str | None]] = {}
+        # Set once the user allows a read-only command for the rest of the chat:
+        # from then on every read-only command (any of _READ_ONLY_SESSION_PATTERNS,
+        # with the same redirect rules) is allowed without asking again.
+        self._read_only_granted = False
         self._prompt_task: asyncio.Task[None] | None = None
         # The session/prompt RPC of the current turn. It outlives a cancelled
         # prompt task: vibe-acp ends the turn only after it handles session/cancel,
@@ -3183,6 +3187,15 @@ class _ChatConnection:
             await _client.respond(req_id_raw, {"outcome": {"outcome": "cancelled"}})
             return
 
+        # One "allow looking at files" covers every read-only command in this chat.
+        # The session option is only offered when the call qualifies (see
+        # _read_only_session_label), so its presence is the read-only test.
+        if self._read_only_granted and any(
+            o.get("optionId") == _SESSION_APPROVE_OPTION for o in options
+        ):
+            await self._resolve_permission(req_id_raw, title, cached, _SESSION_APPROVE_OPTION)
+            return
+
         # Reuse a previously generated explanation (vibe-acp can re-request
         # permission for the same tool call); otherwise generate one
         # concurrently after showing the dialog — the approval box must never
@@ -3275,6 +3288,8 @@ class _ChatConnection:
                 "permission decision %r was not offered; cancelling: %s", option_id, title
             )
             option_id = None
+        if option_id == _SESSION_APPROVE_OPTION:
+            self._read_only_granted = True
         await self._resolve_permission(req_id_raw, title, cached, option_id)
 
     def _grant_stack_call(self, tool_call: JsonDict) -> None:

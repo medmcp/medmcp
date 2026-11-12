@@ -1044,12 +1044,16 @@ class TestReadOnlyGrantForTheChat:
         return sent
 
     @staticmethod
-    def _request(req_id: int, *rules: tuple[str, str]) -> dict[str, object]:
+    def _request(req_id: int, command: str, *rules: tuple[str, str]) -> dict[str, object]:
         return {
             "id": req_id,
             "method": "session/request_permission",
             "params": {
-                "toolCall": {"toolCallId": f"c{req_id}", "title": "bash"},
+                "toolCall": {
+                    "toolCallId": f"c{req_id}",
+                    "title": "bash",
+                    "rawInput": {"command": command},
+                },
                 "options": TestReadOnlySessionApproval._bash_options(*rules),
             },
         }
@@ -1068,8 +1072,12 @@ class TestReadOnlyGrantForTheChat:
     ) -> None:
         """After approving ``ls`` for the chat, a ``grep`` goes through unasked."""
         conn, _ = _connection()
-        await self._answer(conn, self._request(1, ("command_pattern", "ls *")), "allow_always")
-        await conn._handle_permission(self._request(2, ("command_pattern", "grep *")))
+        await self._answer(
+            conn, self._request(1, "ls", ("command_pattern", "ls *")), "allow_always"
+        )
+        await conn._handle_permission(
+            self._request(2, "grep -c x a.csv", ("command_pattern", "grep *"))
+        )
         assert responses[-1] == (
             2,
             {"outcome": {"outcome": "selected", "optionId": "allow_always"}},
@@ -1079,12 +1087,57 @@ class TestReadOnlyGrantForTheChat:
         ]
         assert len(dialogs) == 1
 
+    async def test_a_path_scoped_read_is_allowed_once(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """``wc -l <file>`` comes with path-scoped options only; it is allowed once."""
+        conn, _ = _connection()
+        await self._answer(
+            conn, self._request(1, "ls", ("command_pattern", "ls *")), "allow_always"
+        )
+        req = self._request(2, f"wc -l {server.WORKSPACE_ROOT}/a.csv")
+        cast("Any", req["params"])["options"] = [
+            {"optionId": "allow_once", "name": "Allow once"},
+            {"optionId": "allow_session_exact", "name": "Allow a.csv", "kind": "allow_always"},
+            {"optionId": "reject_once", "name": "Deny"},
+        ]
+        await conn._handle_permission(req)
+        assert responses[-1] == (2, {"outcome": {"outcome": "selected", "optionId": "allow_once"}})
+
+    @pytest.mark.parametrize(
+        ("command", "read_only"),
+        [
+            ("ls -1 {ws}/x | wc -l", True),
+            ("ls -la {ws} 2>&1 | head -n 5", True),
+            ("head -n 5 a.csv; grep -c x b.csv", True),
+            ('cat "{ws}/a b.csv"', True),
+            ("cat /etc/passwd", False),
+            ('cat /etc/"passwd"', False),
+            ("cat ../../etc/passwd", False),
+            ("ls {ws}/../secret", False),
+            ("ls ~", False),
+            ("ls $HOME", False),
+            ("ls > out.txt", False),
+            ("ls $(rm -rf x)", False),
+            ("ls `rm x`", False),
+            ("cat <(rm x)", False),
+            ("ls | xargs rm", False),
+            ("ls && rm x", False),
+            ("echo hi", False),
+        ],
+    )
+    def test_read_only_command(self, command: str, read_only: bool, tmp_path: Path) -> None:
+        """Only read-only commands on workspace paths, with nothing executed inside."""
+        assert server._is_read_only_command(command.format(ws=tmp_path), tmp_path) is read_only
+
     async def test_a_write_still_asks(self, responses: list[tuple[int, object]]) -> None:
         """The grant never covers a command outside the read-only set."""
         conn, _ = _connection()
-        await self._answer(conn, self._request(1, ("command_pattern", "ls *")), "allow_always")
+        await self._answer(
+            conn, self._request(1, "ls", ("command_pattern", "ls *")), "allow_always"
+        )
         task = asyncio.create_task(
-            conn._handle_permission(self._request(2, ("command_pattern", "rm *")))
+            conn._handle_permission(self._request(2, "rm a.csv", ("command_pattern", "rm *")))
         )
         await asyncio.sleep(0.05)
         dialogs = [
@@ -1100,9 +1153,9 @@ class TestReadOnlyGrantForTheChat:
     ) -> None:
         """Plain "Allow" on a read-only command leaves the next one asking."""
         conn, _ = _connection()
-        await self._answer(conn, self._request(1, ("command_pattern", "ls *")), "allow_once")
+        await self._answer(conn, self._request(1, "ls", ("command_pattern", "ls *")), "allow_once")
         task = asyncio.create_task(
-            conn._handle_permission(self._request(2, ("command_pattern", "ls *")))
+            conn._handle_permission(self._request(2, "ls", ("command_pattern", "ls *")))
         )
         await asyncio.sleep(0.05)
         dialogs = [

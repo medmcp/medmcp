@@ -884,13 +884,13 @@ class TestReadOnlySessionApproval:
             self._bash_options(("command_pattern", "ls *"))
         )
         assert [o["optionId"] for o in visible] == ["allow_once", "allow_always", "reject_once"]
-        assert visible[1]["name"] == "Allow ls for this chat"
+        assert visible[1]["name"] == "Allow looking at files for the rest of this chat (ls)"
 
     def test_names_every_command_of_a_compound(self) -> None:
         """``ls; wc -l x`` needs two rules; both are read-only, so both are named."""
         options = self._bash_options(("command_pattern", "ls *"), ("command_pattern", "wc *"))
         visible = server._visible_permission_options(options)
-        assert visible[1]["name"] == "Allow ls, wc for this chat"
+        assert visible[1]["name"] == "Allow looking at files for the rest of this chat (ls, wc)"
 
     @pytest.mark.parametrize(
         "rules",

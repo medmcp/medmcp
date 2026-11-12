@@ -1026,6 +1026,94 @@ def _prov_dir_in(tmp_path: Path) -> Callable[[str], Path]:
     return _prov_dir
 
 
+class TestReadOnlyGrantForTheChat:
+    """One "allow looking at files" covers every later read-only command in the chat."""
+
+    @pytest.fixture
+    def responses(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, object]]:
+        """Capture what is answered to vibe; provenance and explanations off."""
+        sent: list[tuple[int, object]] = []
+
+        async def _respond(req_id: int, result: object) -> None:
+            sent.append((req_id, result))
+
+        monkeypatch.setattr(server._client, "respond", _respond)
+        monkeypatch.setattr(settings, "load_provenance_enabled", lambda: False)
+        monkeypatch.setattr(settings, "load_explain_enabled", lambda: False)
+        monkeypatch.delenv(server.READ_ONLY_APPROVAL_ENV_VAR, raising=False)
+        return sent
+
+    @staticmethod
+    def _request(req_id: int, *rules: tuple[str, str]) -> dict[str, object]:
+        return {
+            "id": req_id,
+            "method": "session/request_permission",
+            "params": {
+                "toolCall": {"toolCallId": f"c{req_id}", "title": "bash"},
+                "options": TestReadOnlySessionApproval._bash_options(*rules),
+            },
+        }
+
+    async def _answer(
+        self, conn: server._ChatConnection, req: dict[str, object], option: str
+    ) -> None:
+        """Run the handler until its dialog is shown, then choose *option*."""
+        task = asyncio.create_task(conn._handle_permission(req))
+        await asyncio.sleep(0.05)
+        conn._pending_perms[cast("int", req["id"])].set_result(option)
+        await task
+
+    async def test_later_read_only_commands_are_allowed_without_a_dialog(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """After approving ``ls`` for the chat, a ``grep`` goes through unasked."""
+        conn, _ = _connection()
+        await self._answer(conn, self._request(1, ("command_pattern", "ls *")), "allow_always")
+        await conn._handle_permission(self._request(2, ("command_pattern", "grep *")))
+        assert responses[-1] == (
+            2,
+            {"outcome": {"outcome": "selected", "optionId": "allow_always"}},
+        )
+        dialogs = [
+            m for m in cast("_StubWs", conn.ws).sent if m.get("type") == "permission_request"
+        ]
+        assert len(dialogs) == 1
+
+    async def test_a_write_still_asks(self, responses: list[tuple[int, object]]) -> None:
+        """The grant never covers a command outside the read-only set."""
+        conn, _ = _connection()
+        await self._answer(conn, self._request(1, ("command_pattern", "ls *")), "allow_always")
+        task = asyncio.create_task(
+            conn._handle_permission(self._request(2, ("command_pattern", "rm *")))
+        )
+        await asyncio.sleep(0.05)
+        dialogs = [
+            m for m in cast("_StubWs", conn.ws).sent if m.get("type") == "permission_request"
+        ]
+        assert len(dialogs) == 2
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    async def test_allow_once_grants_nothing_more(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """Plain "Allow" on a read-only command leaves the next one asking."""
+        conn, _ = _connection()
+        await self._answer(conn, self._request(1, ("command_pattern", "ls *")), "allow_once")
+        task = asyncio.create_task(
+            conn._handle_permission(self._request(2, ("command_pattern", "ls *")))
+        )
+        await asyncio.sleep(0.05)
+        dialogs = [
+            m for m in cast("_StubWs", conn.ws).sent if m.get("type") == "permission_request"
+        ]
+        assert len(dialogs) == 2
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
 class TestSessionsApi:
     """GET /api/sessions maps vibe-acp's session/list to the UI shape."""
 

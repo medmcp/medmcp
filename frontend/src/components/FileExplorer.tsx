@@ -497,9 +497,18 @@ export const FileExplorer = memo(function FileExplorer({
           <button
             className="btn-icon"
             aria-label="Upload files"
+            title="Upload files into the selected folder"
             onClick={() => pickFiles(selectedDir())}
           >
             <UploadIcon />
+          </button>
+          <button
+            className="btn-icon"
+            aria-label="Upload folder"
+            title="Upload a folder into the selected folder"
+            onClick={() => pickFolder(selectedDir())}
+          >
+            <FolderIcon />
           </button>
           <button className="btn-icon" aria-label="Refresh" onClick={reload}>
             <RefreshIcon />
@@ -645,6 +654,22 @@ export const FileExplorer = memo(function FileExplorer({
                       }}
                     >
                       New folder inside
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMenu(null)
+                        pickFiles(menuNode.data.id)
+                      }}
+                    >
+                      Upload files here…
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMenu(null)
+                        pickFolder(menuNode.data.id)
+                      }}
+                    >
+                      Upload folder here…
                     </button>
                     <button onClick={menuAction(() => downloadPath(menuNode.data.id))}>
                       Download as .zip

@@ -2070,9 +2070,9 @@ def discover_workflows() -> list[JsonDict]:
     return list_workflows(VIBE_HOME / "workflows")
 
 
-def _load_flag(path: Path) -> bool:
-    """Read an ``{"enabled": bool}`` preference file (default ``True`` when unset)."""
-    return bool((read_json(path) or {}).get("enabled", True))
+def _load_flag(path: Path, default: bool = True) -> bool:
+    """Read an ``{"enabled": bool}`` preference file (*default* when unset)."""
+    return bool((read_json(path) or {}).get("enabled", default))
 
 
 def _save_flag(path: Path, enabled: bool) -> None:
@@ -2091,8 +2091,12 @@ def save_provenance_enabled(enabled: bool) -> None:
 
 
 def load_explain_enabled() -> bool:
-    """Return whether tool-call explanations are enabled (default ``True``)."""
-    return _load_flag(EXPLAIN_ENABLED_PATH)
+    """Return whether tool-call explanations are enabled (default ``False``).
+
+    Off by default: the explanation comes from the same local model as the agent,
+    so it competes with the chat for it, and clinicians found the wait too long.
+    """
+    return _load_flag(EXPLAIN_ENABLED_PATH, default=False)
 
 
 def save_explain_enabled(enabled: bool) -> None:

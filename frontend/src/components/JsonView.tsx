@@ -6,18 +6,33 @@ const MAX_CHILDREN = 500
 /** A JSON document as a collapsible tree; objects and arrays open to two levels. */
 export function JsonView({ text }: { text: string }) {
   let value: unknown
+  let lenient = false
   try {
     value = JSON.parse(text)
   } catch (e) {
-    return (
-      <div className="data-view">
-        <div className="viewer-message">Not valid JSON: {(e as Error).message}</div>
-        <pre className="text-view">{text}</pre>
-      </div>
-    )
+    // Python's json.dump writes NaN and Infinity by default; show them as null
+    // rather than refusing the whole file. Strings are matched first so a
+    // "NaN" inside a string stays as it is.
+    try {
+      value = JSON.parse(
+        text.replace(
+          /("(?:\\.|[^"\\])*")|-?\bInfinity\b|\bNaN\b/g,
+          (_m: string, str?: string) => str ?? 'null',
+        ),
+      )
+      lenient = true
+    } catch {
+      return (
+        <div className="data-view">
+          <div className="viewer-message">Not valid JSON: {(e as Error).message}</div>
+          <pre className="text-view">{text}</pre>
+        </div>
+      )
+    }
   }
   return (
     <div className="data-view">
+      {lenient && <div className="viewer-message">NaN and Infinity values are shown as null.</div>}
       <div className="json-view">
         <Node value={value} depth={0} />
       </div>

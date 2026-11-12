@@ -2458,6 +2458,78 @@ def _redirects_are_harmless(command: str) -> bool:
     return not root.has_error and harmless(root)
 
 
+# Node types a granted read-only command may consist of. Anything else —
+# command or process substitution, subshells, variable expansion, functions,
+# heredocs — makes the core ask again.
+_PLAIN_COMMAND_NODES = frozenset(
+    {
+        "program",
+        "pipeline",
+        "list",
+        "redirected_statement",
+        "command",
+        "command_name",
+        "word",
+        "string",
+        "string_content",
+        "raw_string",
+        "number",
+        "concatenation",
+        "file_redirect",
+        "|",
+        "&&",
+        "||",
+        ";",
+        '"',
+    }
+)
+
+
+def _is_read_only_command(command: str, workspace: Path) -> bool:
+    """Whether *command* only reads files inside *workspace*.
+
+    Every simple command in it (across pipes, ``;``, ``&&`` and ``||``) must be one
+    of :data:`_READ_ONLY_SESSION_PATTERNS`, every redirect harmless (see
+    :func:`_redirects_are_harmless`), and every absolute path argument inside the
+    workspace; ``..``, ``~`` and anything but plain words disqualify it. Parsed with
+    the same bash grammar vibe uses; a command that does not parse is not read-only.
+    """
+    if not command.strip() or not _redirects_are_harmless(command):
+        return False
+    try:
+        tsbash: Any = importlib.import_module("tree_sitter_bash")
+        parser = Parser(Language(cast("object", tsbash.language())))
+        root = parser.parse(command.encode("utf-8")).root_node
+    except Exception:
+        return False
+    if root.has_error:
+        return False
+    allowed = {p.removesuffix(" *") for p in _READ_ONLY_SESSION_PATTERNS}
+    root_dir = workspace.resolve()
+
+    def ok(node: Node) -> bool:
+        if node.type not in _PLAIN_COMMAND_NODES:
+            return False
+        if node.type == "file_redirect":
+            return True  # already vetted by _redirects_are_harmless
+        if node.type == "command":
+            name = node.child_by_field_name("name")
+            if name is None or (name.text or b"").decode("utf-8") not in allowed:
+                return False
+            for arg in node.children:
+                if arg == name or arg.type == "file_redirect":
+                    continue
+                # Quotes only group; '/etc/"passwd"' is the path /etc/passwd.
+                word = (arg.text or b"").decode("utf-8").replace('"', "").replace("'", "")
+                if word.startswith("~") or ".." in word.split("/"):
+                    return False
+                if word.startswith("/") and not Path(word).resolve().is_relative_to(root_dir):
+                    return False
+        return all(ok(child) for child in node.children)
+
+    return ok(root)
+
+
 def _read_only_session_label(option: JsonDict, command: str | None = None) -> str | None:
     """Label for a session approval of *option*, or None if it is not read-only.
 
@@ -3188,13 +3260,20 @@ class _ChatConnection:
             return
 
         # One "allow looking at files" covers every read-only command in this chat.
-        # The session option is only offered when the call qualifies (see
-        # _read_only_session_label), so its presence is the read-only test.
-        if self._read_only_granted and any(
-            o.get("optionId") == _SESSION_APPROVE_OPTION for o in options
+        # vibe offers its session option only for some of them (a file argument
+        # gets path-scoped options, which are never shown), so the core reads the
+        # command itself; the session option, when offered, is chosen so vibe
+        # stops asking for that pattern too.
+        if (
+            self._read_only_granted
+            and isinstance(command, str)
+            and _is_read_only_command(command, WORKSPACE_ROOT)
         ):
-            await self._resolve_permission(req_id_raw, title, cached, _SESSION_APPROVE_OPTION)
-            return
+            ids = {o.get("optionId") for o in options}
+            choice = _SESSION_APPROVE_OPTION if _SESSION_APPROVE_OPTION in ids else "allow_once"
+            if choice in ids:
+                await self._resolve_permission(req_id_raw, title, cached, choice)
+                return
 
         # Reuse a previously generated explanation (vibe-acp can re-request
         # permission for the same tool call); otherwise generate one

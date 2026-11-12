@@ -1652,7 +1652,7 @@ def write_prompt_variant(prompt_id: str, rule: str) -> bool:
 # ── Container-stack install / uninstall (UI-driven) ──────────────────────────
 # An installed container stack is just a stacks.d/<name>.toml manifest plus its
 # extracted skills. Metadata comes from the image's OCI label (read via
-# `docker inspect` — the image is never executed to introspect it).
+# `docker image inspect` — the image is never executed to introspect it).
 
 # Label carrying a stack's launch metadata. JSON value, e.g.:
 #   {"name": "medmcp-neuro", "gpu": true, "tool_timeout_sec": 7200,
@@ -1739,7 +1739,9 @@ def read_stack_label(image: str) -> JsonDict:
     except RuntimeError:
         _run_docker(["pull", image])
     fmt = '{{ index .Config.Labels "' + STACK_LABEL + '" }}'
-    raw = _run_docker(["inspect", "--format", fmt, image], timeout=30).stdout.strip()
+    # `image inspect`, not `inspect`: the generic form asks for a container of that
+    # name first, which the docker guard refuses rather than answering 404.
+    raw = _run_docker(["image", "inspect", "--format", fmt, image], timeout=30).stdout.strip()
     if not raw or raw == "<no value>":
         raise FileNotFoundError(f"{image} has no {STACK_LABEL} label (not a medmcp stack)")
     try:
@@ -1763,7 +1765,9 @@ def resolve_image_digest(image: str) -> str | None:
     if not image or any(c.isspace() for c in image) or not _image_present(image):
         return None
     try:
-        raw = _run_docker(["inspect", "--format", "{{json .RepoDigests}}", image], timeout=30)
+        raw = _run_docker(
+            ["image", "inspect", "--format", "{{json .RepoDigests}}", image], timeout=30
+        )
     except RuntimeError:
         return None
     try:

@@ -27,11 +27,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _fake_docker(label: str | None) -> Callable[..., subprocess.CompletedProcess[str]]:
-    """Return a `_run_docker` stub: `inspect --format` yields *label* (or <no value>)."""
+    """Return a `_run_docker` stub: `image inspect --format` yields *label* (or <no value>)."""
 
     def fake(args: list[str], *, timeout: float = 600.0) -> subprocess.CompletedProcess[str]:
         out = ""
-        if args[0] == "inspect" and "--format" in args:
+        if args[:2] == ["image", "inspect"] and any(settings.STACK_LABEL in a for a in args):
             out = label if label is not None else "<no value>"
         elif args[0] == "create":
             out = "deadbeef"
@@ -491,7 +491,7 @@ class TestImageArchitecture:
             out = ""
             if "--format" in args and "{{.Architecture}}" in args:
                 out = arch
-            elif args[0] == "inspect" and "--format" in args:
+            elif args[:2] == ["image", "inspect"] and any(settings.STACK_LABEL in a for a in args):
                 out = LABEL
             elif args[0] == "create":
                 out = "deadbeef"
@@ -544,6 +544,7 @@ def test_resolve_image_digest_matches_a_registry_with_a_port(
     digests = ["ghcr.io/other/x@sha256:" + "a" * 64, f"localhost:5000/medmcp-neuro@{want}"]
 
     def inspect(args: list[str], *, timeout: float = 0) -> subprocess.CompletedProcess[str]:
+        assert args[:2] == ["image", "inspect"]  # the docker guard refuses a bare inspect
         return subprocess.CompletedProcess(args, 0, json.dumps(digests), "")
 
     def present(_image: str) -> bool:

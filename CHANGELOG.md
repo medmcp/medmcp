@@ -6,6 +6,10 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Fixed
+
+- Stacks: installing a stack from the catalog or by image works again with `docker compose`; since 0.7.2 the docker guard refused the image lookup.
+
 ### Security
 
 - Images: uv 0.13.7 and Docker Compose 5.7.0, for critical advisories in their bundled zip and gRPC libraries.

@@ -1550,6 +1550,120 @@ class TestReplayRuns:
         assert client.delete(f"/api/runs/{run_id}").status_code == 200
         assert client.get(f"/api/runs/{run_id}").status_code == 404
 
+    def _import_reorient(self, client: TestClient) -> None:
+        """A workflow that reads ``in_1`` and writes the file ``in_2``."""
+        envelope = yaml.safe_dump(
+            {
+                "medmcp_workflow": 1,
+                "name": "reorient",
+                "description": "demo",
+                "inputs": [
+                    {"name": "in_1", "example": "/d/p1/consensus_gt.nii.gz"},
+                    {"name": "in_2", "example": "/d/out/consensus_gt_RAS.nii.gz"},
+                ],
+                "steps": [
+                    {
+                        "server": "medmcp-neuro",
+                        "tool": "reorient",
+                        "arguments": {"input_path": "{{in_1}}", "output_path": "{{in_2}}"},
+                    }
+                ],
+            }
+        )
+        assert client.post("/api/workflows/import", json={"content": envelope}).status_code == 200
+
+    def test_preview_refuses_an_output_on_its_input(self, env: Path, client: TestClient) -> None:
+        """Output bound to the input file: the item is refused with the reason."""
+        self._import_reorient(client)
+        (env / "b.nii.gz").write_bytes(b"x")
+        resp = client.post(
+            "/api/workflows/reorient/replay-preview",
+            json={
+                "runs": [
+                    {"in_1": "t1.nii.gz", "in_2": "t1.nii.gz"},
+                    {"in_1": "b.nii.gz", "in_2": "new/deep/b_RAS.nii.gz"},
+                ]
+            },
+        )
+        items = resp.json()["items"]
+        assert [i["ok"] for i in items] == [False, True]
+        assert "overwrite its own input" in items[0]["error"]
+        # The output folder does not exist yet: that is the run's job, not an error.
+        out = next(f for f in items[1]["findings"] if f["role"] == "output")
+        assert out["severity"] == "info" and "created" in out["note"]
+
+    def test_preview_refuses_two_items_with_one_output(self, env: Path, client: TestClient) -> None:
+        """Both rows that would write the same file are refused, each naming the other."""
+        self._import_reorient(client)
+        (env / "b.nii.gz").write_bytes(b"x")
+        resp = client.post(
+            "/api/workflows/reorient/replay-preview",
+            json={
+                "runs": [
+                    {"in_1": "t1.nii.gz", "in_2": "out/r.nii.gz"},
+                    {"in_1": "b.nii.gz", "in_2": "out/r.nii.gz"},
+                ]
+            },
+        )
+        body = resp.json()
+        assert body["ok"] is False
+        assert "item 2" in body["items"][0]["error"] and "item 1" in body["items"][1]["error"]
+
+    def test_batch_from_plan_places_outputs_under_a_root(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """The plan's file column feeds the input; the output gets a folder per subject."""
+        self._import_reorient(client)
+        for subject in ("p1", "p2"):
+            (env / subject).mkdir()
+            (env / subject / "consensus_gt.nii.gz").write_bytes(b"x")
+        plan = env / "batch_plan.csv"
+        plan.write_text(
+            "subject,consensus_gt,status,reason\n"
+            f"1,{env}/p1/consensus_gt.nii.gz,ok,\n"
+            f"2,{env}/p2/consensus_gt.nii.gz,ok,\n"
+        )
+        body = client.post(
+            "/api/workflows/reorient/batch-from-plan", json={"plan_csv": "batch_plan.csv"}
+        ).json()
+        assert body["ok"] is True
+        assert body["column_map"] == {"in_1": "consensus_gt"}
+        assert body["labels"] == ["1", "2"]
+        assert body["output_root"] == str(env / "results" / "reorient")
+        assert [r["in_2"] for r in body["runs"]] == [
+            str(env / "results" / "reorient" / s / "consensus_gt_RAS.nii.gz") for s in ("1", "2")
+        ]
+        chosen = client.post(
+            "/api/workflows/reorient/batch-from-plan",
+            json={"plan_csv": "batch_plan.csv", "output_root": "mine"},
+        ).json()
+        assert chosen["runs"][0]["in_2"] == str(env / "mine" / "1" / "consensus_gt_RAS.nii.gz")
+        outside = client.post(
+            "/api/workflows/reorient/batch-from-plan",
+            json={"plan_csv": "batch_plan.csv", "output_root": "/etc"},
+        )
+        assert outside.status_code == 400
+
+    def test_batch_from_plan_names_the_columns_when_it_cannot_map(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """An unmatched input comes back with the columns to choose from, and a map fixes it."""
+        self._import_reorient(client)
+        plan = env / "batch_plan.csv"
+        plan.write_text(
+            f"subject,mask,lesions,status,reason\n1,{env}/t1.nii.gz,{env}/x.nii.gz,ok,\n"
+        )
+        body = client.post(
+            "/api/workflows/reorient/batch-from-plan", json={"plan_csv": "batch_plan.csv"}
+        ).json()
+        assert body["ok"] is False
+        assert body["columns"] == ["mask", "lesions"] and body["unmapped"] == ["in_1"]
+        fixed = client.post(
+            "/api/workflows/reorient/batch-from-plan",
+            json={"plan_csv": "batch_plan.csv", "column_map": {"in_1": "mask"}},
+        ).json()
+        assert fixed["ok"] is True and fixed["runs"][0]["in_1"] == str(env / "t1.nii.gz")
+
     def test_bad_first_message_is_refused(self, env: Path, client: TestClient) -> None:
         """Neither a start nor an attach: the socket answers with an error and closes."""
         with client.websocket_connect("/ws/replay", headers=WS_HEADERS) as ws:

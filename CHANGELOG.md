@@ -6,9 +6,18 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Added
+
+- Catalog: medmcp-stats (statistical tests and publication figures) and medmcp-cohort.
+- Workflows: a cohort roll-out writes each subject's results to its own folder under an output folder (`results/<workflow>/<subject>` unless you choose another) and creates missing folders itself.
+- Workflows: `batch-from-plan` and `medmcp replay --batch` take an explicit input-to-column mapping and an output folder.
+
 ### Fixed
 
 - Stacks: installing a stack from the catalog or by image works again with `docker compose`; since 0.7.2 the docker guard refused the image lookup.
+- Workflows: a cohort roll-out no longer binds a tool's output file to the subject's input file. A plan column whose name appeared in the output's file name was taken for it, so every subject's output pointed at its own scan.
+- Workflows: a run whose output would overwrite one of its inputs, and two rows that would write the same file, are refused in the preview and by the engine, with the reason per row. They were shown with a warning before.
+- Workflows: a plan no longer fails to load for a workflow whose output folder has a default.
 
 ### Security
 

@@ -82,7 +82,11 @@ def _workflow_dir(name: str) -> Path | None:
 
 
 def _replay(
-    name: str, inputs: dict[str, str], batch: str | None, column_map: dict[str, str]
+    name: str,
+    inputs: dict[str, str],
+    batch: str | None,
+    column_map: dict[str, str],
+    output_root: str | None = None,
 ) -> int:
     """Replay a workflow deterministically — a single input set or a batch manifest.
 
@@ -105,7 +109,9 @@ def _replay(
     if batch is not None:
         rows = batchplan.read_manifest(batch)
         try:
-            binding = batchplan.runs_from_manifest(recipe, rows, column_map=column_map or None)
+            binding = batchplan.runs_from_manifest(
+                recipe, rows, column_map=column_map or None, output_root=output_root
+            )
         except batchplan.BatchPlanError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
@@ -234,6 +240,11 @@ def main(argv: list[str] | None = None) -> int:
         metavar="in_N=COLUMN",
         help="explicit recipe-input -> manifest-column mapping (repeatable)",
     )
+    replay_p.add_argument(
+        "--output-root",
+        metavar="DIR",
+        help="with --batch: write each item's results to DIR/<subject>[/<session>]",
+    )
 
     sub.add_parser("workflows", help="list personal workflows")
 
@@ -260,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
             column_map = _parse_bindings(args.map)
         except ValueError as exc:
             parser.error(str(exc))
-        return _replay(args.name, inputs, args.batch, column_map)
+        return _replay(args.name, inputs, args.batch, column_map, args.output_root)
     if args.command == "workflows":
         return _list_workflows()
     if args.command == "delete":

@@ -136,6 +136,10 @@ class Recipe:
     inputs: list[WorkflowInput] = field(default_factory=list[WorkflowInput])
     steps: list[RecipeStep] = field(default_factory=list[RecipeStep])
     requires: list[StackRequirement] = field(default_factory=list[StackRequirement])
+    source: dict[str, str] = field(default_factory=dict[str, str])
+    """Where the recipe came from: ``session_id`` and ``model`` of the chat it was
+    distilled from, when known. Links a run of the workflow back to the chat's
+    own provenance record; never used by the replay engine."""
     manual_steps: list[str] = field(default_factory=list[str])
     """Built-in (non-MCP) steps dropped from the replayable recipe, kept as a note.
 
@@ -156,6 +160,8 @@ class Recipe:
             out["requires"] = [r.to_dict() for r in self.requires]
         if self.manual_steps:
             out["manual_steps"] = list(self.manual_steps)
+        if self.source:
+            out["source"] = dict(self.source)
         return out
 
     @classmethod
@@ -194,6 +200,12 @@ class Recipe:
             for r in cast("list[JsonDict]", data.get("requires") or [])
         ]
         manual_steps = [str(m) for m in cast("list[Any]", data.get("manual_steps") or [])]
+        raw_source = data.get("source")
+        source = (
+            {str(k): str(v) for k, v in cast("JsonDict", raw_source).items()}
+            if isinstance(raw_source, dict)
+            else {}
+        )
         return cls(
             name=str(data.get("name", "")),
             description=str(data.get("description", "")),
@@ -201,6 +213,7 @@ class Recipe:
             steps=steps,
             requires=requires,
             manual_steps=manual_steps,
+            source=source,
         )
 
 

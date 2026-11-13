@@ -1787,6 +1787,41 @@ def resolve_image_digest(image: str) -> str | None:
     return digests[0].partition("@")[2] if digests else None
 
 
+def image_identity(image: str) -> JsonDict:
+    """The digest and id of the local image *image*: ``{"digest": ..., "id": ...}``.
+
+    ``digest`` is the registry digest (``sha256:…``) of the repository *image*
+    names, ``None`` for an image that was built here and never pushed; ``id`` is
+    the content id every image has, which still tells two local builds apart.
+    Offline and best-effort like :func:`resolve_image_digest` (one ``docker image
+    inspect``, never a pull): both are ``None`` when the image is not present.
+    """
+    image = image.strip()
+    empty: JsonDict = {"digest": None, "id": None}
+    if not image or any(c.isspace() for c in image):
+        return empty
+    try:
+        raw = _run_docker(
+            ["image", "inspect", "--format", "{{json .RepoDigests}} {{.Id}}", image], timeout=30
+        )
+    except RuntimeError:
+        return empty
+    listing, _, image_id = raw.stdout.strip().rpartition(" ")
+    try:
+        parsed: object = json.loads(listing) if listing else []
+    except json.JSONDecodeError:
+        parsed = []
+    repo = signing.split_reference(image)[0]
+    digests = [
+        rd
+        for rd in cast("list[Any]", parsed if isinstance(parsed, list) else [])
+        if isinstance(rd, str) and "@sha256:" in rd
+    ]
+    matching = [rd for rd in digests if rd.partition("@")[0] == repo]
+    chosen = (matching or digests or [""])[0].partition("@")[2]
+    return {"digest": chosen or None, "id": image_id if image_id.startswith("sha256:") else None}
+
+
 def _extract_image_skills(image: str, in_image_path: str, into_dir: Path) -> None:
     """Copy ``<image>:<in_image_path>`` into *into_dir* via a throwaway container.
 

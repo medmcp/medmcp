@@ -8,6 +8,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Added
 
+- Jobs: a pill in the header shows running background jobs with their progress (e.g. "nnunet · start_training · epoch 41/100 · pseudo-Dice 0.88 · ~30 min left"), and a finished or failed job until it has been looked at; click for the list with Stop. A job may report progress by writing `{"fraction", "text"}` to the file named in `MEDMCP_JOB_PROGRESS`; the core keeps only a clamped fraction and one short line.
 - Approvals: code the assistant wrote itself (a Python heredoc or `-c`, `Rscript`, `node`, an awk program, a shell on a string, a `.py`/`.R`/`.sh` file it writes) is labelled as such in the approval dialog and is never covered by a chat-long approval. `MEDMCP_ASSISTANT_CODE=deny` refuses it outright, so only tools run.
 - Approvals: a stack tool can be allowed for the rest of the chat ("Allow index_dataset for the rest of this chat"). Later calls of that tool run without a dialog; a call that would overwrite a file or touch a path outside the workspace is still shown, and the shell keeps its own rules. `MEDMCP_STACK_TOOL_APPROVAL=0` restores a dialog for every call.
 - Chat: when a message names a workspace folder (a path, the folder's name the way people type it, or the file open in the viewer), the assistant is told what the cohort stack's table of scans already says about it — subjects, sessions, scans, sequences, orientation, date coverage — or that the folder has no table yet and `index_dataset` comes first. It no longer has to list the folder to find out.

@@ -211,6 +211,169 @@ button:hover {
   box-shadow: 0 0 0 3px rgba(58, 99, 204, 0.25);
 }
 
+/* Background jobs pill (JobPill.tsx): pulses while a job runs, stays green or
+ * red after one ends until it has been looked at. */
+.job-pill-box {
+  position: relative;
+}
+
+.job-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 420px;
+  padding: 3px 10px 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: rgba(127, 168, 245, 0.1);
+  border: 1px solid rgba(127, 168, 245, 0.3);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.job-pill-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.job-pill-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--blue-l);
+}
+
+.job-pill-running .job-pill-dot {
+  animation: job-pulse 1.6s ease-in-out infinite;
+}
+
+.job-pill-done {
+  border-color: rgba(74, 222, 128, 0.45);
+}
+
+.job-pill-done .job-pill-dot {
+  background: var(--ok);
+}
+
+.job-pill-failed {
+  border-color: rgba(230, 100, 100, 0.55);
+}
+
+.job-pill-failed .job-pill-dot {
+  background: var(--red-tint);
+}
+
+.job-pill-bar {
+  flex: none;
+  width: 48px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(127, 168, 245, 0.2);
+}
+
+.job-pill-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--blue-l);
+}
+
+@keyframes job-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(58, 99, 204, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(58, 99, 204, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .job-pill-running .job-pill-dot {
+    animation: none;
+  }
+}
+
+.job-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 50;
+  width: 360px;
+  padding: 8px;
+  background: var(--card2);
+  border: 1px solid rgba(127, 168, 245, 0.25);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.job-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 8px;
+  padding: 6px;
+  border-radius: 6px;
+  background: rgba(127, 168, 245, 0.06);
+}
+
+.job-row-main {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.job-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-row-detail {
+  grid-column: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 11px;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
+.job-row .btn-text {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+}
+
+.job-status {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.8;
+}
+
+.job-status-failed {
+  color: var(--red-tint);
+}
+
+.job-status-finished {
+  color: var(--ok);
+}
+
+.job-pop-note {
+  font-size: 11px;
+  opacity: 0.6;
+  padding: 2px 4px;
+}
+
 .app-main {
   flex: 1;
   min-height: 0;

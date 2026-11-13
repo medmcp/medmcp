@@ -101,6 +101,10 @@ export interface JobInfo {
   name: string
   status: 'running' | 'finished' | 'stopped' | 'failed'
   started_at: string | null
+  /** Title of the chat that started it (may be empty). */
+  session?: string
+  /** What the job last reported about itself (running jobs only). */
+  progress?: { fraction?: number; text?: string; updated_at?: number } | null
 }
 
 /** A container-installed stack (from GET /api/stacks); uninstallable via the UI. */

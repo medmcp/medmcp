@@ -229,6 +229,8 @@ export type ReplayFrame =
       steps_per_item: number
       started_at: string
       runs: Record<string, string>[]
+      /** Who each item is (subject/session), "" where the rows were picked by hand. */
+      labels?: string[]
     }
   | {
       type: 'step_started'

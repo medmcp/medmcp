@@ -1501,6 +1501,16 @@ class TestReplayRuns:
             yield _call
 
         monkeypatch.setattr(replay, "mcp_caller", fake_caller)
+
+        # The test client's loop ends with the socket; keep record-keeping on it.
+        async def inline(fn: Callable[[], object]) -> object:
+            return fn()
+
+        def no_image(image: str) -> dict[str, Any]:
+            return {"digest": "sha256:" + "ab" * 32, "id": None}
+
+        monkeypatch.setattr(runs, "_to_thread", inline)
+        monkeypatch.setattr(settings, "image_identity", no_image)
         return workspace
 
     def test_preview_flags_a_missing_input_per_item(self, env: Path, client: TestClient) -> None:
@@ -1663,6 +1673,53 @@ class TestReplayRuns:
             json={"plan_csv": "batch_plan.csv", "column_map": {"in_1": "mask"}},
         ).json()
         assert fixed["ok"] is True and fixed["runs"][0]["in_1"] == str(env / "t1.nii.gz")
+
+    def test_run_record_is_self_contained_and_exportable(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """Labels, manifest copy, environment, results and confirmation reach the record."""
+        (env / "sel.csv").write_text("subject_id,path\nP1,t1.nii.gz\n")
+        (env / "brain.nii.gz").write_bytes(b"brain")
+        bindings = [{"in_1": "t1.nii.gz"}]
+        assert (
+            client.post("/api/workflows/strip/replay-preview", json={"runs": bindings}).status_code
+            == 200
+        )
+        with client.websocket_connect("/ws/replay", headers=WS_HEADERS) as ws:
+            ws.send_json(
+                {"name": "strip", "runs": bindings, "labels": ["P1/ses-1"], "manifest": "sel.csv"}
+            )
+            frames: list[dict[str, Any]] = []
+            while not frames or frames[-1]["type"] != "result":
+                frames.append(ws.receive_json())
+        assert frames[0]["labels"] == ["P1/ses-1"]
+        run_id = frames[0]["run_id"]
+
+        record = client.get(f"/api/runs/{run_id}").json()
+        assert record["items"][0]["label"] == "P1/ses-1"
+        step = record["items"][0]["steps"][0]
+        assert step["result"] == {"brain_path": str(env / "brain.nii.gz")}
+        assert record["recipe"]["steps"][0]["tool"] == "skull_strip"
+        assert record["confirmation"]["previewed"] is True
+        assert record["manifest"]["copy"] == "manifest.csv"
+        assert record["environment"]["medmcp"]["version"]
+
+        exported = client.get(f"/api/runs/{run_id}/export")
+        assert exported.headers["content-disposition"].endswith(f'run-{run_id}.json"')
+        assert exported.json()["manifest"]["text"].startswith("subject_id,path")
+        report = client.get(f"/api/runs/{run_id}/export", params={"format": "md"})
+        assert "# MedMCP run report" in report.text and "P1/ses-1" in report.text
+        assert client.get("/api/runs/nope/export").status_code == 404
+
+    def test_a_start_that_was_never_previewed_says_so(self, env: Path, client: TestClient) -> None:
+        """The record does not claim a confirmation that did not happen."""
+        with client.websocket_connect("/ws/replay", headers=WS_HEADERS) as ws:
+            ws.send_json({"name": "strip", "runs": [{"in_1": "t1.nii.gz"}]})
+            frames: list[dict[str, Any]] = []
+            while not frames or frames[-1]["type"] != "result":
+                frames.append(ws.receive_json())
+        record = client.get(f"/api/runs/{frames[0]['run_id']}").json()
+        assert record["confirmation"]["previewed"] is False
 
     def test_bad_first_message_is_refused(self, env: Path, client: TestClient) -> None:
         """Neither a start nor an attach: the socket answers with an error and closes."""

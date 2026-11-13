@@ -12,6 +12,9 @@ Notable, user-visible changes to MedMCP. Format follows
 - Catalog: medmcp-stats (statistical tests and publication figures) and medmcp-cohort.
 - Workflows: a cohort roll-out writes each subject's results to its own folder under an output folder (`results/<workflow>/<subject>` unless you choose another) and creates missing folders itself.
 - Workflows: `batch-from-plan` and `medmcp replay --batch` take an explicit input-to-column mapping and an output folder.
+- Workflows: every run keeps a self-contained record in `.vibe/runs/<id>/`: the workflow as it ran, the plan it came from, and per subject the inputs, each step's arguments, duration, error and result, with SHA-256 checksums of the files read and written. It also names the MedMCP build and each stack's image digest, and says whether the run was started from the preview.
+- Workflows: a workflow lists its past runs; each can be reopened and downloaded as one JSON file or a Markdown report (`GET /api/runs/{id}/export`).
+- Provenance: a chat's record names each stack's image digest and the MedMCP version.
 
 ### Fixed
 
@@ -19,6 +22,8 @@ Notable, user-visible changes to MedMCP. Format follows
 - Workflows: a cohort roll-out no longer binds a tool's output file to the subject's input file. A plan column whose name appeared in the output's file name was taken for it, so every subject's output pointed at its own scan.
 - Workflows: a run whose output would overwrite one of its inputs, and two rows that would write the same file, are refused in the preview and by the engine, with the reason per row. They were shown with a warning before.
 - Workflows: a plan no longer fails to load for a workflow whose output folder has a default.
+- Workflows: a run lists the files it wrote when the output path was chosen by the caller; it showed none before.
+- Provenance: the record of a chat run from an image names the commit the image was built from; it was empty. Images must be built with `MEDMCP_REVISION`, as the release and `:main` builds are.
 
 ### Security
 

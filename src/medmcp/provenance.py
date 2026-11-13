@@ -31,7 +31,7 @@ import subprocess
 import sys
 import time
 import tomllib
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -40,6 +40,10 @@ from medmcp.statefile import atomic_write_json, read_json, read_jsonl
 from medmcp.toolresult import parse_structured_blob
 
 JsonDict = dict[str, Any]
+
+# Resolves an image reference to ``{"digest": ..., "id": ...}``; injected by the
+# caller so this module stays free of the stack machinery.
+ImageIdentity = Callable[[str], JsonDict]
 
 # Resolve the repo root from this file: src/medmcp/provenance.py →
 # src/medmcp → src → <root>. VIBE_HOME is module-level so tests can monkeypatch
@@ -126,8 +130,43 @@ def docker_image_ref(server: JsonDict) -> str | None:
     return None
 
 
-def _stack_manifest_entry(server: JsonDict) -> JsonDict:
-    """Build one stack entry for the manifest (name/version/command + image)."""
+def core_identity() -> JsonDict:
+    """Which MedMCP this is: package version, image build, and commit.
+
+    A source checkout answers from git. An image has no checkout, so the commit
+    comes from what the image build baked in (``MEDMCP_REVISION``; ``MEDMCP_BUILD``
+    is the release tag, or the commit for a rolling build). A local
+    ``docker build`` without those arguments leaves both empty, and the record
+    says so rather than guessing.
+    """
+    from medmcp import __version__
+
+    return {
+        "version": __version__,
+        "build": os.environ.get("MEDMCP_BUILD") or None,
+        "git_commit": _git(["rev-parse", "HEAD"]) or os.environ.get("MEDMCP_REVISION") or None,
+        "git_branch": _git(["rev-parse", "--abbrev-ref", "HEAD"]),
+    }
+
+
+def platform_identity() -> JsonDict:
+    """The interpreter and operating system the core runs on."""
+    return {
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+        "system": platform.system(),
+    }
+
+
+def _stack_manifest_entry(
+    server: JsonDict, image_identity: ImageIdentity | None = None
+) -> JsonDict:
+    """Build one stack entry for the manifest (name/version/command + image).
+
+    With *image_identity*, the entry also carries the digest and id of the image
+    installed under that reference — a tag such as ``:main`` moves, the digest is
+    what ran.
+    """
     entry: JsonDict = {
         "name": server.get("name"),
         "version": server.get("version"),
@@ -136,32 +175,44 @@ def _stack_manifest_entry(server: JsonDict) -> JsonDict:
     image = docker_image_ref(server)
     if image:
         entry["image"] = image
+        if image_identity is not None:
+            with contextlib.suppress(Exception):
+                identity = image_identity(image)
+                entry["digest"] = identity.get("digest")
+                entry["image_id"] = identity.get("id")
     return entry
 
 
-def build_manifest(session_id: str, *, servers: list[JsonDict], model_name: str) -> JsonDict:
+def build_manifest(
+    session_id: str,
+    *,
+    servers: list[JsonDict],
+    model_name: str,
+    image_identity: ImageIdentity | None = None,
+) -> JsonDict:
     """Assemble (but do not write) the environment manifest for a session."""
     return {
         "session_id": session_id,
         "created_at": _utc_now_iso(),
-        "medmcp": {
-            "git_commit": _git(["rev-parse", "HEAD"]),
-            "git_branch": _git(["rev-parse", "--abbrev-ref", "HEAD"]),
-        },
-        "stacks": [_stack_manifest_entry(s) for s in servers],
+        "medmcp": core_identity(),
+        "stacks": [_stack_manifest_entry(s, image_identity) for s in servers],
         "model": {"name": model_name, **_read_model_config(model_name)},
-        "platform": {
-            "python": sys.version.split()[0],
-            "platform": platform.platform(),
-            "system": platform.system(),
-        },
+        "platform": platform_identity(),
     }
 
 
-def write_manifest(session_id: str, *, servers: list[JsonDict], model_name: str) -> Path:
+def write_manifest(
+    session_id: str,
+    *,
+    servers: list[JsonDict],
+    model_name: str,
+    image_identity: ImageIdentity | None = None,
+) -> Path:
     """Write ``manifest.json`` for *session_id* and return its path."""
     d = _ensure_dir(session_id)
-    manifest = build_manifest(session_id, servers=servers, model_name=model_name)
+    manifest = build_manifest(
+        session_id, servers=servers, model_name=model_name, image_identity=image_identity
+    )
     path = d / "manifest.json"
     path.write_text(json.dumps(manifest, indent=2))
     return path

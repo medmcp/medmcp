@@ -2297,11 +2297,13 @@ def _ensure_pathguard_hook(vibe_home: Path) -> None:
     posture.enforce_hooks(vibe_home / "hooks.toml")
 
 
-# vibe caches each server's tool list under a hash of its whole launch entry, for
-# a day. A stack reinstalled or pulled under the same tag (or launched through the
-# proxy shim, whose entry never names the image) would keep its old tool list, and
-# the model would never see a new tool. The content id of the image goes into the
-# entry's env so the hash, and with it the cache key, changes with the image.
+# vibe caches each server's tool list for a day under a fingerprint of its launch
+# entry: command, args and the *names* of its env keys (values are left out). A
+# stack reinstalled or pulled under the same tag, or launched through the proxy
+# shim (whose entry never names the image), would keep its old tool list, and the
+# model would never see a new tool. So the image's content id goes into the name
+# of an env key, ``MEDMCP_STACK_REVISION_<12 hex>``, and the fingerprint changes
+# with the image. The value holds the full id.
 STACK_REVISION_ENV: str = "MEDMCP_STACK_REVISION"
 
 
@@ -2315,17 +2317,24 @@ def _stack_revision(entry: JsonDict) -> str | None:
     return cast("str | None", image_identity(args[-1]).get("id"))
 
 
+def stack_revision_key(revision: str) -> str:
+    """The env key name that carries *revision* (``sha256:…``) into vibe's fingerprint."""
+    return f"{STACK_REVISION_ENV}_{revision.removeprefix('sha256:')[:12]}"
+
+
 def _stamp_stack_revisions(entries: list[JsonDict], revisions: dict[str, str | None]) -> None:
-    """Set or clear ``MEDMCP_STACK_REVISION`` in each entry's env (see above)."""
+    """Replace any revision key in each entry's env with the current one (see above)."""
     for entry in entries:
         if entry.get("url"):
             continue
         revision = revisions.get(str(entry.get("name", "")))
-        env = dict(cast("dict[str, str]", entry.get("env") or {}))
+        env = {
+            k: v
+            for k, v in cast("dict[str, str]", entry.get("env") or {}).items()
+            if not k.startswith(STACK_REVISION_ENV)
+        }
         if revision:
-            env[STACK_REVISION_ENV] = revision
-        else:
-            env.pop(STACK_REVISION_ENV, None)
+            env[stack_revision_key(revision)] = revision
         if env:
             entry["env"] = env
         else:

@@ -2,11 +2,13 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   fetchCatalog,
   fetchInstalledStacks,
+  fetchJobs,
   fetchSettings,
   saveSettings,
+  stopJob,
   uninstallStack,
 } from '../api'
-import type { CatalogEntry, SettingsState } from '../types'
+import type { CatalogEntry, JobInfo, SettingsState } from '../types'
 import { XIcon } from './icons'
 import { Toggle } from './SettingsControls'
 
@@ -65,6 +67,39 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
     after?: () => void
   } | null>(null)
   const [manualImage, setManualImage] = useState('')
+  // Background jobs (a training, say) that are running right now. They outlive
+  // the chat that started them, so this is where they can be seen and stopped.
+  const [jobs, setJobs] = useState<JobInfo[]>([])
+
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    const load = () => {
+      fetchJobs()
+        .then((all) => {
+          if (!cancelled) setJobs(all.filter((j) => j.status === 'running'))
+        })
+        .catch(() => {
+          /* the list is a convenience; the window works without it */
+        })
+    }
+    load()
+    const timer = window.setInterval(load, 10000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [open])
+
+  const onStopJob = async (job: JobInfo) => {
+    try {
+      await stopJob(job.id)
+      setJobs((current) => current.filter((j) => j.id !== job.id))
+      setNotice(`Stopped the background job of ${job.stack}.`)
+    } catch (e) {
+      setError(String(e))
+    }
+  }
 
   const reload = async () => {
     const [s, inst, cat] = await Promise.all([
@@ -302,6 +337,18 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
         </div>
 
         {error && <div className="panel-error market-msg">{error}</div>}
+
+        {jobs.map((job) => (
+          <div className="panel-status market-msg market-job" key={job.id}>
+            <span>
+              Running in the background: <strong>{job.stack}</strong> {job.name || job.tool}
+              {job.started_at ? ` · since ${new Date(job.started_at).toLocaleString()}` : ''}
+            </span>
+            <button className="btn-text" onClick={() => void onStopJob(job)}>
+              Stop
+            </button>
+          </div>
+        ))}
 
         <div className="market-body">
           {!state ? (

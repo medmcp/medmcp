@@ -19,6 +19,7 @@ import type {
   BatchPlanSkip,
   ReplayFrame,
   ReplayPreviewResult,
+  RunSummary,
   RunStatus,
     StackRequirement,
   WorkflowDetail,
@@ -74,6 +75,8 @@ type RunState = {
   runId: string
   workflow: string
   runs: Record<string, string>[]
+  /** Subject/session per item when the rows came from a plan or selection. */
+  labels: string[]
   total: number
   stepsPerItem: number
   startedAt: number
@@ -368,7 +371,8 @@ function StepRows({
  *  one with its step, the rest folded into a count. Click a line for its steps. */
 function ItemRows({ r, now, root }: { r: RunState; now: number; root: string }) {
   const [open, setOpen] = useState<number | null>(null)
-  const labels = itemLabels(r.runs, root)
+  const paths = itemLabels(r.runs, root)
+  const labels = paths.map((p, i) => r.labels[i] || p)
   const rows: ReactNode[] = []
   let queued = 0
   for (let i = 0; i < r.total; i++) {
@@ -426,6 +430,80 @@ function ItemRows({ r, now, root }: { r: RunState; now: number; root: string }) 
     )
   }
   return <div className="wf-itemrows">{rows}</div>
+}
+
+/** "13 Nov, 14:02" from an ISO timestamp. */
+function shortDate(iso: string): string {
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return iso
+  return new Date(t).toLocaleString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+/** The workflow's past runs, newest first: open one to see its items again, or
+ *  download its record (everything the run did, as one JSON file, or a report). */
+function RunHistory({
+  name,
+  refresh,
+  onOpen,
+}: {
+  name: string
+  /** Changes whenever a followed run starts or ends, to refetch the list. */
+  refresh: string
+  onOpen: (runId: string) => void
+}) {
+  const [runs, setRuns] = useState<RunSummary[]>([])
+  useEffect(() => {
+    let stale = false
+    fetchRuns(name, 8)
+      .then((r) => {
+        if (!stale) setRuns(r.runs)
+      })
+      .catch(() => undefined)
+    return () => {
+      stale = true
+    }
+  }, [name, refresh])
+  if (runs.length === 0) return null
+  return (
+    <div className="wf-requires">
+      <span className="wf-requires-title">Past runs</span>
+      <div className="wf-itemrows">
+        {runs.map((r) => {
+          const dot = r.status === 'done' ? 'ok' : r.status === 'running' ? 'busy' : 'fail'
+          return (
+            <div key={r.id} className="wf-itemrow-wrap">
+              <button type="button" className={`wf-itemrow ${dot}`} onClick={() => onOpen(r.id)}>
+                <span className={`status-dot ${dot}`} />
+                <span className="wf-itemrow-label">{shortDate(r.started_at)}</span>
+                <span className="wf-recent-muted wf-itemrow-note">
+                  {r.succeeded} of {r.total} done
+                  {r.failed > 0 ? ` · ${r.failed} failed` : ''}
+                  {r.status === 'cancelled' ? ' · stopped' : ''}
+                </span>
+              </button>
+              <span className="wf-actions-secondary">
+                <a className="btn-text" href={`/api/runs/${encodeURIComponent(r.id)}/export`} download>
+                  Record
+                </a>
+                <a
+                  className="btn-text"
+                  href={`/api/runs/${encodeURIComponent(r.id)}/export?format=md`}
+                  download
+                >
+                  Report
+                </a>
+              </span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
 }
 
 function ProgressBar({ frac, label, active }: { frac: number; label: string; active?: boolean }) {
@@ -575,6 +653,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             runId: frame.run_id,
             workflow: frame.workflow,
             runs: frame.runs,
+            labels: frame.labels ?? [],
             total: frame.total,
             stepsPerItem: frame.steps_per_item,
             startedAt,
@@ -1339,6 +1418,11 @@ export const WorkflowPanel = memo(function WorkflowPanel({
               </button>
             </span>
           </div>
+          <RunHistory
+            name={d.name}
+            refresh={`${run?.runId ?? ''}:${run?.status ?? ''}`}
+            onOpen={(id) => followRun({ attach: id })}
+          />
         </>
       )}
 

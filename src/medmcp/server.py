@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import hashlib
 import importlib
 import io
 import json
@@ -47,9 +48,10 @@ import shutil
 import time
 import zipfile
 from collections.abc import AsyncGenerator, Coroutine, Iterator
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from urllib.parse import quote
 
 import uvicorn
@@ -85,6 +87,7 @@ from medmcp import (
     provenance,
     replay,
     riskcheck,
+    runrecord,
     runs,
     sessions,
     settings,
@@ -1844,6 +1847,26 @@ def _confined_input_paths(inputs: dict[str, str]) -> dict[str, str]:
     return {key: _confined_input_path(value) for key, value in inputs.items()}
 
 
+# Bindings the run screen has previewed, keyed by a hash of the workflow and the
+# exact rows, with when. A run records whether what it was asked to start is what
+# a preview showed; bounded, in memory, and never a gate (the engine's own checks
+# are) — it is the record's answer to "was this confirmed?".
+_previewed: dict[str, str] = {}
+_PREVIEWED_MAX = 256
+
+
+def _binding_key(name: str, bindings: list[dict[str, str]]) -> str:
+    """A stable fingerprint of one workflow run over these exact bindings."""
+    blob = json.dumps([name, bindings], sort_keys=True).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _remember_preview(name: str, bindings: list[dict[str, str]]) -> None:
+    _previewed[_binding_key(name, bindings)] = datetime.now(UTC).isoformat(timespec="seconds")
+    while len(_previewed) > _PREVIEWED_MAX:
+        _previewed.pop(next(iter(_previewed)))
+
+
 class ReplayPreviewPayload(BaseModel):
     """Request body for previewing a replay's resolved steps.
 
@@ -1942,6 +1965,12 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
                 )
                 return {"ok": False, "error": error, "steps": steps, "items": items}
         ready = sum(1 for item in items if item["ok"])
+        # What the Run button sends is the rows that passed, so that is what a
+        # start is compared against (see _binding_key).
+        _remember_preview(
+            name, [b for b, item in zip(bindings_list, items, strict=True) if item["ok"]]
+        )
+        _remember_preview(name, bindings_list)
         return {
             "ok": ready > 0,
             "error": None if ready > 0 else "no item can run",
@@ -2062,6 +2091,11 @@ class ReplayStartRequest(BaseModel):
     name: str = ""
     runs: list[dict[str, str]] = Field(default_factory=list[dict[str, str]])
     attach: str = ""
+    labels: list[str] = Field(default_factory=list[str])
+    """Who each item is (``subject[/session]``), aligned with ``runs``."""
+    manifest: str = ""
+    """The workspace path of the plan or selection the rows came from, if any."""
+    output_root: str = ""
 
 
 @app.websocket("/ws/replay")
@@ -2125,12 +2159,32 @@ async def ws_replay(ws: WebSocket) -> None:
                 await ws.send_json({"type": "result", "ok": False, "error": str(exc)})
                 return
             servers = await asyncio.to_thread(settings.active_servers)
+            manifest_path: Path | None = None
+            if first.manifest.strip():
+                with contextlib.suppress(ValueError):
+                    manifest_path = Path(_confined_input_path(first.manifest.strip()))
+            previewed_at = _previewed.get(_binding_key(first.name, bindings))
             record = _runs.start(
                 recipe=recipe,
                 runs=bindings,
                 servers=servers,
                 cwd=str(WORKSPACE_ROOT),
                 confine_to=WORKSPACE_ROOT,
+                labels=first.labels,
+                manifest_path=manifest_path,
+                output_root=first.output_root,
+                image_identity=settings.image_identity,
+                confirmation={
+                    # One person owns a workspace; there is no account to name.
+                    # What can be said is how the start reached the server and
+                    # whether these exact rows had been shown in the preview.
+                    "by": "workspace user",
+                    "authenticated": access.required(),
+                    "client": ws.client.host if ws.client is not None else None,
+                    "previewed": previewed_at is not None,
+                    "previewed_at": previewed_at,
+                    "confirmed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                },
                 on_finished=lambda r: _audit.info(
                     "replay finished: %s run=%s status=%s", r.workflow, r.id, r.status
                 ),
@@ -2210,10 +2264,43 @@ async def get_runs(
 @app.get("/api/runs/{run_id}")
 async def get_run(run_id: str) -> JsonDict:
     """One run's full record: every item, every step, what each produced."""
-    record = await asyncio.to_thread(runs.load_run, run_id)
+    record = await asyncio.to_thread(_runs.full, run_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"no run {run_id!r}")
-    return {**record.to_dict(), "live": _runs.is_live(run_id)}
+    return {**record.to_dict(full=True), "live": _runs.is_live(run_id)}
+
+
+@app.get("/api/runs/{run_id}/export")
+async def export_run(run_id: str, format: Literal["json", "md"] = "json") -> Response:
+    """One run as a single file: the full record as JSON, or as a Markdown report.
+
+    The JSON is the run folder's ``run.json`` with the manifest's text inlined,
+    so the one file carries the recipe, the environment, every item's steps,
+    results and checksums, and the plan or selection the items came from.
+    """
+
+    def _export() -> tuple[str, str] | None:
+        record = _runs.full(run_id)
+        if record is None:
+            return None
+        payload = record.to_dict(full=True)
+        if format == "md":
+            return runrecord.render_report(payload), "text/markdown; charset=utf-8"
+        copy = runs.run_folder(run_id) / runs.MANIFEST_FILE
+        if payload.get("manifest") and copy.is_file():
+            with contextlib.suppress(OSError, UnicodeDecodeError):
+                payload["manifest"] = {**payload["manifest"], "text": copy.read_text("utf-8")}
+        return json.dumps(payload, indent=1), "application/json"
+
+    result = await asyncio.to_thread(_export)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"no run {run_id!r}")
+    body, media_type = result
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="run-{run_id}.{format}"'},
+    )
 
 
 @app.post("/api/runs/{run_id}/cancel")
@@ -2933,6 +3020,7 @@ class _ChatConnection:
                             self.canonical_id,
                             servers=self.servers,
                             model_name=self.model_name,
+                            image_identity=settings.image_identity,
                         )
                     )
         # Frames can still trickle in between a cancel and this prompt

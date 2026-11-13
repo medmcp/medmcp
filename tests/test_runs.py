@@ -219,3 +219,151 @@ async def test_manager_cancel_stops_the_run_and_marks_the_record(
     saved = runs.load_run(record.id, root=tmp_path)
     assert saved is not None and saved.status == "cancelled"
     assert await manager.cancel(record.id) is False
+
+
+# ── the run folder ────────────────────────────────────────────────────────────
+
+
+def test_a_chosen_output_path_counts_as_an_output(tmp_path: Path) -> None:
+    """A file the caller told the tool to write is listed even though it is an argument."""
+    scan = tmp_path / "scan.nii.gz"
+    scan.write_bytes(b"x")
+    out = tmp_path / "scan_RAS.nii.gz"
+    out.write_bytes(b"y")
+    item = runs.ItemRecord(inputs={"in_1": str(scan), "in_2": str(out)})
+    item.steps.append(
+        runs.StepRecord(
+            1,
+            "s",
+            "reorient",
+            {"input_path": str(scan), "output_path": str(out)},
+            True,
+            produced={"step1.output_path": str(out)},
+        )
+    )
+    assert item.files() == [str(out)]
+    assert item.read_files() == [str(scan)]
+
+
+def test_an_output_folder_lists_what_the_step_wrote(tmp_path: Path) -> None:
+    """Only files that appeared during the step are claimed from a shared folder."""
+    import os
+
+    folder = tmp_path / "out"
+    folder.mkdir()
+    old = folder / "old.nii.gz"
+    old.write_bytes(b"o")
+    os.utime(old, (1_000_000_000, 1_000_000_000))
+    new = folder / "mask.nii.gz"
+    new.write_bytes(b"n")
+    item = runs.ItemRecord(inputs={})
+    item.steps.append(
+        runs.StepRecord(
+            1,
+            "s",
+            "segment",
+            {"output_dir": str(folder)},
+            True,
+            started_at="2020-01-01T00:00:00+00:00",
+        )
+    )
+    assert item.files() == [str(new)]
+
+
+async def test_run_folder_is_a_self_contained_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recipe, manifest copy, environment, labels, results and checksums are all on disk."""
+    import hashlib
+
+    import yaml
+
+    scan = tmp_path / "scan.nii.gz"
+    scan.write_bytes(b"scan-bytes")
+    brain = tmp_path / "brain.nii.gz"
+    registered = tmp_path / "registered.nii.gz"
+    brain.write_bytes(b"brain-bytes")
+    registered.write_bytes(b"registered-bytes")
+    manifest = tmp_path / "selection.csv"
+    manifest.write_text("subject_id,path\nP1,scan.nii.gz\n")
+    calls: list[tuple[str, str, JsonDict]] = []
+    monkeypatch.setattr(
+        replay,
+        "mcp_caller",
+        _fake_caller(calls, {"brain": str(brain), "registered": str(registered)}),
+    )
+
+    def identity(image: str) -> JsonDict:
+        return {"digest": "sha256:feed", "id": "sha256:beef"}
+
+    servers: list[JsonDict] = [
+        {"name": "medmcp-neuro", "command": "docker", "args": ["run", "-i", "neuro:main"]}
+    ]
+    root = tmp_path / "runs"
+    manager = runs.RunManager(root=root)
+    record = manager.start(
+        recipe=two_step_recipe(),
+        runs=[{"in_1": str(scan)}],
+        servers=servers,
+        cwd=None,
+        labels=["P1/ses-1"],
+        manifest_path=manifest,
+        confirmation={"by": "workspace user", "previewed": True},
+        output_root="/ws/results/wf",
+        image_identity=identity,
+    )
+    await manager.wait(record.id)
+
+    folder = runs.run_folder(record.id, root=root)
+    assert sorted(p.name for p in folder.iterdir()) == ["manifest.csv", "recipe.yaml", "run.json"]
+    assert yaml.safe_load((folder / "recipe.yaml").read_text())["steps"][0]["tool"] == "skull_strip"
+    assert (folder / "manifest.csv").read_text() == manifest.read_text()
+
+    full = runs.load_full(record.id, root=root)
+    assert full is not None
+    data = full.to_dict(full=True)
+    assert data["status"] == "done" and data["record_version"] == runs.RECORD_VERSION
+    assert data["manifest"]["sha256"] == hashlib.sha256(manifest.read_bytes()).hexdigest()
+    assert data["confirmation"]["previewed"] is True
+    assert data["output_root"] == "/ws/results/wf"
+    stack = data["environment"]["stacks"][0]
+    assert stack["image"] == "neuro:main" and stack["digest"] == "sha256:feed"
+    item = data["items"][0]
+    assert item["label"] == "P1/ses-1"
+    assert item["steps"][0]["result"] == {"brain_path": str(brain)}
+    assert item["steps"][0]["duration_sec"] is not None
+    assert item["input_files"] == [
+        {
+            "path": str(scan),
+            "kind": "file",
+            "bytes": 10,
+            "sha256": hashlib.sha256(b"scan-bytes").hexdigest(),
+        }
+    ]
+    assert {e["path"]: e["sha256"] for e in item["output_files"]} == {
+        str(brain): hashlib.sha256(b"brain-bytes").hexdigest(),
+        str(registered): hashlib.sha256(b"registered-bytes").hexdigest(),
+    }
+    # The index entry stays small: no results, no checksums.
+    index = runs.load_run(record.id, root=root)
+    assert index is not None
+    assert "result" not in index.to_dict()["items"][0]["steps"][0]
+    assert index.items[0].label == "P1/ses-1"
+
+    assert runs.delete_run(record.id, root=root)
+    assert not folder.exists()
+
+
+def test_load_full_falls_back_to_the_index_for_an_old_run(tmp_path: Path) -> None:
+    """A run recorded before folders existed still loads, with what the index knows."""
+    record = runs.RunRecord(
+        id="20260101-000000-abc123",
+        workflow="w",
+        steps_per_item=1,
+        items=[runs.ItemRecord(inputs={"in_1": "/a"}, ok=True)],
+        status="done",
+    )
+    runs.save_run(record, root=tmp_path)
+    full = runs.load_full(record.id, root=tmp_path)
+    assert full is not None and full.to_dict(full=True)["environment"] == {}
+    assert runs.load_full("nope", root=tmp_path) is None

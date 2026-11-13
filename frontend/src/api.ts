@@ -5,6 +5,7 @@ import type {
   ExternalMcpState,
   GpuInfo,
   InstalledStack,
+  JobInfo,
   LocalModelsState,
   ReplayPreviewResult,
   RunSummary,
@@ -180,6 +181,18 @@ export async function fetchInstalledStacks(): Promise<InstalledStack[]> {
   const res = await check(await fetch('/api/stacks'))
   const body = (await res.json()) as { stacks: InstalledStack[] }
   return body.stacks
+}
+
+/** Background jobs of this workspace, newest first (empty when jobs are off). */
+export async function fetchJobs(): Promise<JobInfo[]> {
+  const res = await check(await fetch('/api/jobs'))
+  const body = (await res.json()) as { jobs: JobInfo[] }
+  return body.jobs
+}
+
+/** Stop a running background job. */
+export async function stopJob(id: string): Promise<void> {
+  await postJson(`/api/jobs/${encodeURIComponent(id)}/stop`, {})
 }
 
 /** Fetch the curated install catalog (each entry flagged whether it's installed). */

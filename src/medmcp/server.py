@@ -2732,6 +2732,10 @@ STACK_TOOL_APPROVAL_ENV_VAR = "MEDMCP_STACK_TOOL_APPROVAL"
 
 # Kill switch: ``MEDMCP_READ_ONLY_APPROVAL=0`` restores strict per-call approval.
 READ_ONLY_APPROVAL_ENV_VAR = "MEDMCP_READ_ONLY_APPROVAL"
+# Code the assistant wrote itself (a Python heredoc, ``Rscript``, a ``.py`` it
+# writes): ``ask`` (default) shows every such call on its own, never covered by a
+# chat-long approval; ``deny`` refuses it without asking, so only tools run.
+ASSISTANT_CODE_ENV_VAR = "MEDMCP_ASSISTANT_CODE"
 
 # Session patterns (as vibe's bash tool builds them) for commands that only read.
 # Each is ``<command> *``: vibe splits a compound command into its parts and asks
@@ -2768,6 +2772,11 @@ def _read_only_approval_enabled() -> bool:
     """Whether read-only shell commands may be approved for the rest of a chat (default on)."""
     value = os.environ.get(READ_ONLY_APPROVAL_ENV_VAR, "").strip().lower()
     return value not in {"0", "false", "no", "off"}
+
+
+def _assistant_code_denied() -> bool:
+    """Whether code the assistant wrote itself is refused outright (default: asked)."""
+    return os.environ.get(ASSISTANT_CODE_ENV_VAR, "").strip().lower() in {"deny", "off", "0", "no"}
 
 
 def _stack_tool_approval_enabled() -> bool:
@@ -3655,6 +3664,7 @@ class _ChatConnection:
             self._read_only_granted
             and isinstance(command, str)
             and _is_read_only_command(command, WORKSPACE_ROOT)
+            and not riskcheck.runs_assistant_code("bash", {"command": command})
         ):
             ids = {o.get("optionId") for o in options}
             choice = _SESSION_APPROVE_OPTION if _SESSION_APPROVE_OPTION in ids else "allow_once"
@@ -3707,6 +3717,18 @@ class _ChatConnection:
             pathcheck.coerce_arguments(tool_call.get("rawInput")),
             path_findings,
         )
+        # Code the assistant wrote itself is never run on a standing approval: with
+        # MEDMCP_ASSISTANT_CODE=deny it is refused here, otherwise it is put to the
+        # user on its own, labelled as such.
+        if "assistant_code" in rule_keys and _assistant_code_denied():
+            _audit.warning(
+                "assistant-written code refused (%s=deny): %s", ASSISTANT_CODE_ENV_VAR, title
+            )
+            offered = {o.get("optionId") for o in options}
+            await self._resolve_permission(
+                req_id_raw, title, cached, "reject_once" if "reject_once" in offered else None
+            )
+            return
         # A call that starts a background job says so, whatever the model says.
         job_stack, job_tool = provenance.split_tool_name(
             str(tool_call.get("toolName") or title), self._server_names

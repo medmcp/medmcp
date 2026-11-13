@@ -1192,7 +1192,9 @@ async def post_stack_install(payload: StackInstallPayload) -> JsonDict:
     await asyncio.to_thread(_apply_stack_change)
     _audit.info("stack installed: %s (%s)", name, payload.image)
     await _restart_vibe()
-    await _apply_pool_changes({name}, set())
+    # A reinstall replaces the image under a running backend: drop it, so the
+    # next start runs the new image instead of the pool serving the old one.
+    await _apply_pool_changes({name}, {name})
     return {"name": name, "restarted": True}
 
 
@@ -1250,7 +1252,7 @@ async def ws_stack_install(ws: WebSocket) -> None:
             await asyncio.to_thread(_apply_stack_change)
             _audit.info("stack installed: %s (%s)", name, image)
             await _restart_vibe()
-            await _apply_pool_changes({name}, set())
+            await _apply_pool_changes({name}, {name})  # drop a backend on the old image
             await queue.put({"type": "done", "name": name})
         except settings.NetworkConsentRequiredError as exc:
             await queue.put({"type": "needs_network_consent", "name": exc.name, "image": exc.image})

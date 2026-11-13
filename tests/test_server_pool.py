@@ -89,6 +89,26 @@ async def test_apply_pool_changes_prewarms_and_evicts(monkeypatch: pytest.Monkey
         await pool.aclose()
 
 
+async def test_reinstall_replaces_a_running_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reinstall drops the backend on the old image before warming the new one."""
+    pool = BackendPool(resolve_spec=resolver({"fake": fake_spec("fake")}))
+    monkeypatch.setattr(server, "_pool", pool)
+    try:
+        before = set(server._background_tasks)
+        await server._apply_pool_changes({"fake"}, set())
+        await asyncio.gather(*(set(server._background_tasks) - before))
+        old = pool._backends["fake"]
+
+        before = set(server._background_tasks)
+        await server._apply_pool_changes({"fake"}, {"fake"})
+        await asyncio.gather(*(set(server._background_tasks) - before))
+        assert "fake" in pool.warm_names()
+        assert pool._backends["fake"] is not old
+        assert not old.alive
+    finally:
+        await pool.aclose()
+
+
 # ── background jobs ──────────────────────────────────────────────────────────
 
 

@@ -45,6 +45,11 @@ RISK_CATEGORIES: dict[str, tuple[str, str]] = {
     # Set only by the rules in medmcp.riskcheck, never asked of the model.
     "hidden_code": ("Runs code it assembles at run time", "high"),
     "outside_workspace": ("Reaches outside the workspace", "high"),
+    "assistant_code": (
+        "Runs code the assistant wrote itself: no tool covers this step, and the "
+        "result is not checked or replayable",
+        "high",
+    ),
     # Set by the server for a stack tool whose call becomes a job (medmcp.jobs).
     "background_job": ("Starts a job that keeps running after this chat", "medium"),
 }

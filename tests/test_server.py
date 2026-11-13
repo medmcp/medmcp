@@ -2224,3 +2224,69 @@ class TestStackToolGrantForTheChat:
         assert server._STACK_TOOL_CHAT_OPTION not in {
             o["optionId"] for o in self._dialogs(conn)[0]["options"]
         }
+
+
+class TestAssistantCode:
+    """Code the assistant wrote itself is always put to the user, or refused."""
+
+    @pytest.fixture
+    def responses(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, object]]:
+        """Capture what is answered to vibe; provenance and explanations off."""
+        sent: list[tuple[int, object]] = []
+
+        async def _respond(req_id: int, result: object) -> None:
+            sent.append((req_id, result))
+
+        monkeypatch.setattr(server._client, "respond", _respond)
+        monkeypatch.setattr(settings, "load_provenance_enabled", lambda: False)
+        monkeypatch.setattr(settings, "load_explain_enabled", lambda: False)
+        monkeypatch.delenv(server.READ_ONLY_APPROVAL_ENV_VAR, raising=False)
+        monkeypatch.delenv(server.ASSISTANT_CODE_ENV_VAR, raising=False)
+        return sent
+
+    @staticmethod
+    def _dialogs(conn: server._ChatConnection) -> list[dict[str, Any]]:
+        return [m for m in cast("_StubWs", conn.ws).sent if m.get("type") == "permission_request"]
+
+    async def test_script_is_labelled_in_the_dialog(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """A Python heredoc is shown with the assistant_code label."""
+        conn, _ = _connection()
+        req = TestReadOnlyGrantForTheChat._request(1, "python3 - <<'PY'\nprint(1)\nPY")
+        task = asyncio.create_task(conn._handle_permission(req))
+        await asyncio.sleep(0.05)
+        dialog = self._dialogs(conn)[-1]
+        assert "assistant_code" in {r["key"] for r in dialog["risks"]}
+        assert [o["optionId"] for o in dialog["options"]] == ["allow_once", "reject_once"]
+        conn._pending_perms[1].set_result("reject_once")
+        await task
+
+    async def test_deny_mode_refuses_without_a_dialog(
+        self, responses: list[tuple[int, object]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MEDMCP_ASSISTANT_CODE=deny answers reject at once; nothing is shown."""
+        monkeypatch.setenv(server.ASSISTANT_CODE_ENV_VAR, "deny")
+        conn, _ = _connection()
+        await conn._handle_permission(TestReadOnlyGrantForTheChat._request(1, "Rscript analysis.R"))
+        assert responses[-1] == (1, {"outcome": {"outcome": "selected", "optionId": "reject_once"}})
+        assert self._dialogs(conn) == []
+
+    async def test_read_only_grant_never_covers_code(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """After "allow looking at files", an awk program still asks."""
+        conn, _ = _connection()
+        await TestReadOnlyGrantForTheChat()._answer(
+            conn,
+            TestReadOnlyGrantForTheChat._request(1, "ls", ("command_pattern", "ls *")),
+            "allow_always",
+        )
+        req = TestReadOnlyGrantForTheChat._request(
+            2, "awk -F, '{s+=$2} END {print s}' a.csv", ("command_pattern", "awk *")
+        )
+        task = asyncio.create_task(conn._handle_permission(req))
+        await asyncio.sleep(0.05)
+        assert len(self._dialogs(conn)) == 2
+        conn._pending_perms[2].set_result("reject_once")
+        await task

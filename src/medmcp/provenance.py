@@ -425,6 +425,50 @@ def record_tool_event(session_id: str, tc_id: str, info: JsonDict, server_names:
         append_run_event(session_id, event)
 
 
+JOB_STARTED = "job_started"
+
+
+def record_job_started(
+    session_id: str,
+    *,
+    job_id: str,
+    server: str,
+    tool: str,
+    arguments: JsonDict,
+    image: str,
+    image_id: str,
+    image_digest: str | None,
+    command: list[str],
+    container: str,
+    gpu: bool,
+) -> None:
+    """Append a background job's start to the run log of the chat that approved it.
+
+    A job outlives its chat, so its record says what would otherwise be lost:
+    the exact image it runs (the id the daemon ran, and the registry digest
+    when the image was pulled), the command line and the arguments.
+    """
+    append_run_event(
+        session_id,
+        {
+            "event": JOB_STARTED,
+            "server": server,
+            "tool": tool,
+            "status": "started",
+            "arguments": arguments,
+            "job": {
+                "id": job_id,
+                "container": container,
+                "image": image,
+                "image_id": image_id,
+                "image_digest": image_digest,
+                "command": command,
+                "gpu": gpu,
+            },
+        },
+    )
+
+
 # ── Vibe session lookup ──────────────────────────────────────────────────────
 #
 # Everything under logs/ is written by the agent, which with agent isolation is
@@ -762,6 +806,23 @@ def render_report(session_id: str) -> str:
         lines.append(
             f"- **Platform:** {plat.get('platform', '?')}, Python {plat.get('python', '?')}\n"
         )
+
+    started_jobs = [e for e in events if e.get("event") == JOB_STARTED]
+    events = [e for e in events if e.get("event") != JOB_STARTED]
+    if started_jobs:
+        lines.append(f"## Background jobs ({len(started_jobs)})\n")
+        for event in started_jobs:
+            job = cast("JsonDict", event.get("job") or {})
+            lines.append(
+                f"### `{event.get('server', '?')}:{event.get('tool', '?')}` — job "
+                f"`{job.get('id', '?')}` started {event.get('ts', '')}"
+            )
+            lines.append(f"- **Image:** `{job.get('image') or '?'}` (`{job.get('image_id')}`)")
+            if job.get("image_digest"):
+                lines.append(f"- **Registry digest:** `{job['image_digest']}`")
+            lines.append(f"- **Container:** `{job.get('container')}`")
+            rendered_job_args = json.dumps(event.get("arguments"), indent=2, default=str)
+            lines.append(f"```json\n{rendered_job_args}\n```\n")
 
     lines.append(f"## Tool calls ({len(events)})\n")
     if not events:

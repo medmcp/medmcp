@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from pathlib import Path
 import logging
 import re
 import secrets
@@ -71,6 +72,11 @@ OFFER_ENV = "MEDMCP_JOBS"
 RESULT_KEY = "medmcp_job"
 # Told to the job which job it is.
 JOB_ID_ENV = "MEDMCP_JOB_ID"
+# Where the job may write its progress: a small JSON file in the workspace,
+# ``{"fraction": 0.41, "text": "epoch 41/100"}``. Optional for a job; read by
+# the core for the jobs list, and treated as untrusted (see read_progress).
+PROGRESS_ENV = "MEDMCP_JOB_PROGRESS"
+_PROGRESS_TEXT_MAX = 120
 
 # Largest /dev/shm a stack's declaration can ask for (a tmpfs cap, counted
 # against the host's memory once used).
@@ -128,6 +134,7 @@ def build_run_args(
     job_id: str,
     tool: str,
     arguments: str,
+    progress_file: str | None = None,
 ) -> list[str]:
     """The ``docker run`` that starts a job, from the stack's own (hardened) args.
 
@@ -166,8 +173,45 @@ def build_run_args(
     out = ["run", "-d", "--network", "none", "--name", jobspec.container_name(job_id)]
     for key in sorted(labels):
         out += ["--label", f"{key}={labels[key]}"]
-    out += ["-e", f"{JOB_ID_ENV}={job_id}", *kept, image, *runner.command, tool, arguments]
+    out += ["-e", f"{JOB_ID_ENV}={job_id}"]
+    if progress_file:
+        out += ["-e", f"{PROGRESS_ENV}={progress_file}"]
+    out += [*kept, image, *runner.command, tool, arguments]
     return out
+
+
+def progress_path(workspace: str, job_id: str) -> Path:
+    """The progress file a job may write: ``<workspace>/.medmcp/jobs/<id>.json``."""
+    return Path(workspace) / ".medmcp" / "jobs" / f"{job_id}.json"
+
+
+def read_progress(workspace: str, job_id: str) -> JsonDict | None:
+    """A job's last progress report, reduced to what the UI shows.
+
+    The file is written by the stack, so nothing is taken on trust: only a
+    fraction clamped to 0..1 and a single line of text, cut to a short length,
+    survive; anything else, or a file that does not parse, is ignored.
+    """
+    path = progress_path(workspace, job_id)
+    try:
+        if path.stat().st_size > 4096:
+            return None
+        raw: object = json.loads(path.read_text(encoding="utf-8"))
+        updated = path.stat().st_mtime
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    data = cast("JsonDict", raw)
+    out: JsonDict = {"updated_at": updated}
+    fraction = data.get("fraction")
+    if isinstance(fraction, int | float) and not isinstance(fraction, bool):
+        out["fraction"] = min(1.0, max(0.0, float(fraction)))
+    text = data.get("text")
+    if isinstance(text, str):
+        line = " ".join(text.split())
+        out["text"] = line[:_PROGRESS_TEXT_MAX]
+    return out if len(out) > 1 else None
 
 
 @dataclass(frozen=True)
@@ -312,6 +356,11 @@ class JobManager:
         self._docker = docker
         self._sleep = sleep
         self._lock = threading.Lock()
+
+    @property
+    def workspace(self) -> str:
+        """The workspace these jobs belong to."""
+        return self._workspace
 
     # ── reading ──────────────────────────────────────────────────────────────
 
@@ -458,6 +507,12 @@ class JobManager:
             }
             # By id: the image that was just read is the image that runs, even if
             # the tag is moved in between.
+            progress = progress_path(self._workspace, job_id)
+            try:
+                progress.parent.mkdir(parents=True, exist_ok=True)
+                progress_file: str | None = str(progress)
+            except OSError:
+                progress_file = None  # no progress, but the job still runs
             run_args = build_run_args(
                 server_args,
                 runner,
@@ -466,6 +521,7 @@ class JobManager:
                 job_id=job_id,
                 tool=tool,
                 arguments=encoded,
+                progress_file=progress_file,
             )
             self._docker(run_args, 120)
             _audit.info(

@@ -72,6 +72,12 @@ The protocol:
    no stdin, and nobody reading its stdout except `docker logs`. Keep status and
    stop in files in the workspace, so the stack's ordinary tools can follow and
    stop the job from any pooled container. Handle SIGTERM: that is what Stop sends.
+
+   It also gets `MEDMCP_JOB_PROGRESS`, a path in the workspace
+   (`<workspace>/.medmcp/jobs/<id>.json`). A job that wants a progress line in the
+   header writes `{"fraction": 0.41, "text": "epoch 41/100"}` there now and then
+   (atomically: write a temporary file, then rename). Optional; the core keeps only
+   the fraction, clamped to 0..1, and one line of at most 120 characters.
 5. Validate the arguments again in the job: they are the approved ones, but the
    workspace may have changed since the tool looked.
 

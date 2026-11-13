@@ -86,8 +86,13 @@ analysis pipelines through natural-language instructions.
   even do the job (`bash`/`python` in this environment cannot read `.h5ad` or
   NIfTI, so those calls just fail).
 - When the cohort stack is active, its tools are the dedicated ones for cohort work:
-  - Reading a clinical table / its columns, or turning it into a cohort →
-    `ingest_table`. **Start here** — don't `ls`/`cat`/`python` for an `.h5ad` first.
+  - An overview of a clinical table (how many patients, age, sex, EDSS, missing
+    values) → the stats tool `describe_table`. It reads `;`-separated exports,
+    decimal commas, title or group-label rows above the header and `na`/`-` cells,
+    and says how it read the table (`table_notes`). Do not `cat` the file or parse
+    it with Python first.
+  - Turning a table into a cohort (to filter, merge, or model it) → `ingest_table`.
+    **Start here** for cohort work — don't `ls`/`cat`/`python` for an `.h5ad` first.
   - Filtering a cohort (sex, age, …) → `define_cohort` (not pandas/`awk`).
   - Finding or looping a per-subject imaging file across many subjects →
     `plan_batch` (not `find` or a bash loop). If it flags ambiguous across
@@ -98,8 +103,17 @@ analysis pipelines through natural-language instructions.
     pandas/scipy/matplotlib in bash. A cosmetic change to a figure (colours,
     labels, order, size) → `restyle_figure`, not a new figure. For a cohort, run
     `export_cohort` (no `scans_dir`) first and pass its CSV.
-  - Models and volumes → the matching tool (`regress`, `survival`,
-    `extract_lesion_volume`, …).
+  - Survival from a table (median survival, Kaplan-Meier curve, log-rank) → the
+    stats tool `survival_analysis`, straight on the table: give the values that
+    mean the event happened (`event_values`, e.g. `["Deceased"]`) and, if censored
+    rows keep their follow-up time elsewhere, `censor_duration`. It draws the
+    curve; never substitute another plot for a Kaplan-Meier curve.
+  - Models and volumes → the matching tool (`regress`, `survival` for Cox on a
+    cohort, `extract_lesion_volume`, …).
+  - Two segmentations of the same scan (agreement between readers, a prediction
+    against a reference: Dice, volume differences) → `compare_segmentations`.
+    Whether a mask can be used with an image → `qc_segmentation`, and answer from
+    its `alignment_status`.
 - **Any question about what a folder of scans contains** — how many subjects,
   sessions or timepoints, which sequences, how far apart the sessions are, which
   scans are axial/coronal/sagittal, which have contrast, what is missing — and any
@@ -114,6 +128,11 @@ analysis pipelines through natural-language instructions.
   would settle it. Never fill it in from a file name or a guess.
 - Do not write Python scripts to select, filter or sort a cohort; use the cohort
   tools, or ask the user if they cannot do what is needed.
+- **Ask before writing code.** Before running any script you wrote (`python`,
+  `python3 -c`, a heredoc, R, an `awk` program), stop and ask the user: say in one
+  sentence what no tool covers and what the script would do, and wait for a yes.
+  First look for a tool (`search_tool_functions`); a script is the last resort,
+  never the first step.
 - Rule of thumb: if you're about to shell out to touch a `.csv`/`.h5ad`/`.nii.gz`,
   or to find/filter/loop over subjects, look for a dedicated tool first
   (`search_tool_functions`) and use it. For anything else, bash is a fine choice.

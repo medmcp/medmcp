@@ -95,6 +95,18 @@ user control:
   build time, so a tool call cannot reach the network even if the agent is
   steered into making one. A stack that genuinely needs egress must declare it
   in its image label, and installing it asks for consent.
+- **Background jobs are approved calls, nothing more.** Work that takes hours
+  (an nnU-Net training) runs as a job: a container of the same stack image
+  that keeps running when the chat is idle or closed and when MedMCP restarts.
+  A job is only ever started for a tool call you approved, by the entrypoint
+  the stack's image names for it, with exactly the arguments you approved;
+  neither the model nor the tool's answer supplies a command line. It has no
+  network (even for a stack that was granted egress), the workspace as its
+  only mount, and the same isolation as any stack; the Docker guard refuses a
+  job container in any other shape. The approval dialog marks such a call
+  "Starts a job that keeps running after this chat". One job runs at a time by
+  default; running jobs are listed, and can be stopped, in the Tool stacks
+  window and at `/api/jobs`. See [docs/stack-jobs.md](docs/stack-jobs.md).
 
 ## What contacts the internet
 

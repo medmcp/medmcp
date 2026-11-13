@@ -1997,6 +1997,9 @@ class BatchFromPlanPayload(BaseModel):
 
     plan_csv: str
     column_map: dict[str, str] = Field(default_factory=dict[str, str])
+    role_map: dict[str, str] = Field(default_factory=dict[str, str])
+    """For a ``select_series`` manifest: which series feeds which input, e.g.
+    ``{"in_1": "FLAIR", "in_2": "T1+contrast"}``."""
     output_root: str = ""
 
 
@@ -2018,6 +2021,64 @@ def _confined_output_root(value: str) -> Path:
     return resolved
 
 
+def _bind_selection(
+    recipe: workflow.Recipe, rows: list[dict[str, str]], payload: BatchFromPlanPayload
+) -> JsonDict:
+    """Bind a ``select_series`` manifest: one run per series, or per subject-session.
+
+    When the workflow reads several files and the roles are not all known, the
+    answer carries the roles the selection offers (``roles``) and the inputs
+    still to assign (``unmapped``), so the editor can ask instead of guessing.
+    """
+    root: Path | None = None
+    if payload.output_root.strip():
+        root = _confined_output_root(payload.output_root.strip())
+    elif batchplan.output_inputs(recipe):
+        root = _default_output_root(recipe)
+    offered = batchplan.selection_roles(rows)
+    plan_path = Path(_confined_input_path(payload.plan_csv))
+    try:
+        binding = batchplan.runs_from_selection(
+            recipe,
+            rows,
+            role_map=payload.role_map or None,
+            output_root=root,
+            base_dir=batchplan.dataset_dir(plan_path),
+        )
+    except batchplan.NeedsRolesError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "kind": "selection",
+            "runs": [],
+            "skipped": [],
+            "roles": offered,
+            "unmapped": exc.unmapped,
+            "role_map": exc.role_map,
+        }
+    except batchplan.BatchPlanError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "kind": "selection",
+            "runs": [],
+            "skipped": [],
+            "roles": offered,
+        }
+    return {
+        "ok": True,
+        "error": None,
+        "kind": "selection",
+        "runs": [_confined_input_paths(r) for r in binding.runs],
+        "labels": binding.labels,
+        "skipped": binding.skipped,
+        "roles": offered,
+        "role_map": binding.role_map,
+        "output_inputs": binding.output_inputs,
+        "output_root": binding.output_root,
+    }
+
+
 @app.post("/api/workflows/{name}/batch-from-plan")
 async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> JsonDict:
     """Turn a ``plan_batch`` manifest into ready-to-run batch bindings for a workflow.
@@ -2032,6 +2093,9 @@ async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> Json
     item gets its own folder under the output root (see
     :mod:`medmcp.batchplan`). When an input cannot be matched, the answer names
     the columns to choose from (``columns``/``unmapped``) so the editor can ask.
+
+    A ``select_series`` manifest (one row per selected series) is accepted on the
+    same route and bound by :func:`_bind_selection`.
     """
 
     def _build() -> JsonDict:
@@ -2040,6 +2104,8 @@ async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> Json
             rows = batchplan.read_manifest(_confined_input_path(payload.plan_csv))
         except OSError as exc:
             return {"ok": False, "error": f"cannot read plan: {exc}", "runs": [], "skipped": []}
+        if batchplan.is_selection(rows):
+            return _bind_selection(recipe, rows, payload)
         columns = batchplan.role_columns(rows)
         has_plan_dirs = bool(rows) and "output_dir" in rows[0]
         root: Path | None = None
@@ -2068,6 +2134,7 @@ async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> Json
         return {
             "ok": True,
             "error": None,
+            "kind": "plan",
             "runs": [_confined_input_paths(r) for r in binding.runs],
             "labels": binding.labels,
             "skipped": binding.skipped,

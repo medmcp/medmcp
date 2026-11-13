@@ -12,6 +12,8 @@ Notable, user-visible changes to MedMCP. Format follows
 - Workflows: a cohort roll-out writes each subject's results to its own folder under an output folder (`results/<workflow>/<subject>` unless you choose another) and creates missing folders itself.
 - Workflows: `batch-from-plan` and `medmcp replay --batch` take an explicit input-to-column mapping and an output folder.
 - Workflows: every run keeps a self-contained record in `.vibe/runs/<id>/`: the workflow as it ran, the plan it came from, and per subject the inputs, each step's arguments, duration, error and result, with SHA-256 checksums of the files read and written. It also names the MedMCP build and each stack's image digest, and says whether the run was started from the preview.
+- Workflows: a selection of scans made with the cohort tools (`select_series`, `…_series.csv`) can be rolled out directly: choose "Selection" in the run editor. A workflow with one input runs once per selected scan. A workflow with several inputs runs once per subject and session, after you say which series each input is (for example FLAIR and T1 with contrast); a session that lacks a series, or has it twice, is listed and left out.
+- Workflows: when a cohort plan's columns cannot be matched to a workflow's inputs, the run editor asks which column is which.
 - Workflows: a workflow lists its past runs; each can be reopened and downloaded as one JSON file or a Markdown report (`GET /api/runs/{id}/export`).
 - Provenance: a chat's record names each stack's image digest and the MedMCP version.
 

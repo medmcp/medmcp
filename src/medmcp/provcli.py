@@ -7,6 +7,7 @@ Exposed as the ``medmcp`` console script::
     medmcp distill <session>    # save a replayable workflow from the raw log
     medmcp replay  <name> -i in_1=path ...       # replay a workflow on new inputs
     medmcp replay  <name> --batch batch_plan.csv # roll it out over a cohort manifest
+    medmcp replay  <name> --batch sel_series.csv --role in_1=FLAIR  # ... or a selection
     medmcp workflows            # list personal workflows
     medmcp delete   <name>      # delete a personal workflow
     medmcp export   <name>      # write a shareable <name>.workflow.yaml
@@ -88,6 +89,7 @@ def _replay(
     batch: str | None,
     column_map: dict[str, str],
     output_root: str | None = None,
+    role_map: dict[str, str] | None = None,
 ) -> int:
     """Replay a workflow deterministically — a single input set or a batch manifest.
 
@@ -108,10 +110,13 @@ def _replay(
     cwd = os.environ.get("MEDMCP_WORKSPACE") or None
 
     if batch is not None:
-        rows = batchplan.read_manifest(batch)
         try:
-            binding = batchplan.runs_from_manifest(
-                recipe, rows, column_map=column_map or None, output_root=output_root
+            binding = batchplan.bind_manifest(
+                recipe,
+                batch,
+                column_map=column_map or None,
+                role_map=role_map or None,
+                output_root=output_root,
             )
         except batchplan.BatchPlanError as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -126,7 +131,8 @@ def _replay(
         if not binding.runs:
             print("No 'ok' items to roll out.", file=sys.stderr)
             return 1
-        pairs = ", ".join(f"{k}<-{v}" for k, v in binding.column_map.items())
+        mapping = binding.role_map if binding.kind == "selection" else binding.column_map
+        pairs = ", ".join(f"{k}<-{v}" for k, v in mapping.items())
         print(f"Rolling out {recipe.name!r} over {len(binding.runs)} item(s) [{pairs}] ...")
         record = asyncio.run(
             _recorded_batch(recipe, binding, servers=servers, cwd=cwd, manifest=Path(batch))
@@ -271,6 +277,14 @@ def main(argv: list[str] | None = None) -> int:
         help="explicit recipe-input -> manifest-column mapping (repeatable)",
     )
     replay_p.add_argument(
+        "--role",
+        action="append",
+        default=[],
+        metavar="in_N=ROLE",
+        help="with a select_series manifest: which series feeds an input, "
+        "e.g. in_1=FLAIR in_2=T1+contrast (repeatable)",
+    )
+    replay_p.add_argument(
         "--output-root",
         metavar="DIR",
         help="with --batch: write each item's results to DIR/<subject>[/<session>]",
@@ -299,9 +313,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             inputs = _parse_bindings(args.input)
             column_map = _parse_bindings(args.map)
+            role_map = _parse_bindings(args.role)
         except ValueError as exc:
             parser.error(str(exc))
-        return _replay(args.name, inputs, args.batch, column_map, args.output_root)
+        return _replay(args.name, inputs, args.batch, column_map, args.output_root, role_map)
     if args.command == "workflows":
         return _list_workflows()
     if args.command == "delete":

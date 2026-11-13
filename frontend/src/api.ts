@@ -310,10 +310,20 @@ export async function fetchRuns(
   return (await res.json()) as { runs: RunSummary[]; live: string[] }
 }
 
-/** Turn a plan_batch manifest CSV into per-subject batch rows for this workflow. */
-export async function batchFromPlan(name: string, planCsv: string): Promise<BatchFromPlanResult> {
+/** Turn a manifest CSV — a plan_batch plan or a select_series selection — into
+ *  batch rows for this workflow. `mapping` assigns a column (plan) or a series
+ *  role (selection) to inputs the server could not place by itself. */
+export async function batchFromPlan(
+  name: string,
+  planCsv: string,
+  mapping: Record<string, string> = {},
+  outputRoot = '',
+): Promise<BatchFromPlanResult> {
   const res = await postJson(`/api/workflows/${encodeURIComponent(name)}/batch-from-plan`, {
     plan_csv: planCsv,
+    column_map: mapping,
+    role_map: mapping,
+    output_root: outputRoot,
   })
   return (await res.json()) as BatchFromPlanResult
 }

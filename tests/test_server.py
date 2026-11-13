@@ -2057,7 +2057,7 @@ class TestStackToolGrantForTheChat:
     async def test_later_calls_of_that_tool_are_allowed_without_a_dialog(
         self, responses: list[tuple[int, object]], tmp_path: Path
     ) -> None:
-        """vibe is answered ``allow_once`` each time; only the first call shows a dialog."""
+        """Vibe is answered ``allow_once`` each time; only the first call shows a dialog."""
         conn, _ = _connection()
         folder = str(tmp_path / "study")
         await self._answer(

@@ -8,6 +8,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Added
 
+- Chat: when a message names a workspace folder (a path, the folder's name the way people type it, or the file open in the viewer), the assistant is told what the cohort stack's table of scans already says about it — subjects, sessions, scans, sequences, orientation, date coverage — or that the folder has no table yet and `index_dataset` comes first. It no longer has to list the folder to find out.
 - Catalog: medmcp-stats (statistical tests and publication figures) and medmcp-cohort.
 
 ### Fixed

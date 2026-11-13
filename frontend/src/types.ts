@@ -91,6 +91,18 @@ export interface StackInfo {
   active: boolean
 }
 
+/** A background job (from GET /api/jobs): one approved stack call running in
+ *  its own container, which outlives the chat that started it. */
+export interface JobInfo {
+  id: string
+  stack: string
+  tool: string
+  /** A short name the stack gave the job (may be empty). */
+  name: string
+  status: 'running' | 'finished' | 'stopped' | 'failed'
+  started_at: string | null
+}
+
 /** A container-installed stack (from GET /api/stacks); uninstallable via the UI. */
 export interface InstalledStack {
   name: string

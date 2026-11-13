@@ -2477,7 +2477,13 @@ async def get_jobs() -> JsonDict:
         listed = await asyncio.to_thread(_jobs.list)
     except jobs.JobError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return {"enabled": True, "jobs": [j.public() for j in listed], "max": settings.max_jobs()}
+    out: list[JsonDict] = []
+    for job in listed:
+        entry = job.public()
+        if job.running:
+            entry["progress"] = jobs.read_progress(_jobs.workspace, job.id)
+        out.append(entry)
+    return {"enabled": True, "jobs": out, "max": settings.max_jobs()}
 
 
 @app.get("/api/jobs/{job_id}")

@@ -7,6 +7,7 @@ import { ExternalMcpBanner } from './components/ExternalMcpBanner'
 import { ExternalMcpWindow } from './components/ExternalMcpWindow'
 import { ModelsWindow } from './components/ModelsWindow'
 import { FileExplorer } from './components/FileExplorer'
+import { JobPill } from './components/JobPill'
 import { StackMarketplace } from './components/StackMarketplace'
 import { SettingsDrawer } from './components/SettingsDrawer'
 import { UpdateWindow } from './components/UpdateWindow'
@@ -195,6 +196,7 @@ export default function App() {
         <span className="app-logo">MedMCP</span>
         <span className="app-subtitle">workspace</span>
         <span className="app-header-right">
+          <JobPill />
           {updateNotice && (
             <button
               className="update-pill"

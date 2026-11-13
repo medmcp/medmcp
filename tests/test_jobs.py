@@ -431,3 +431,31 @@ async def test_the_broker_hands_only_approved_calls_to_the_job_hook(tmp_path: Pa
     assert refused["ok"] is False and "not approved" in refused["error"]
     assert seen == [("fake", "echo", {"text": "hi"}, "chat-7")]
     assert relayed["result"]["isError"] is True
+
+
+# ── progress ────────────────────────────────────────────────────────────────
+
+
+def test_progress_file_is_passed_and_read_back_sanitised(tmp_path: Path) -> None:
+    """The job is told where to write; the core keeps only a clamped fraction and one line."""
+    path = jobs.progress_path(str(tmp_path), "abc123")
+    assert path == tmp_path / ".medmcp" / "jobs" / "abc123.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"fraction": 1.7, "text": "epoch 41/100\n<b>x</b>" + "y" * 500, "cmd": "rm"})
+    )
+    got = jobs.read_progress(str(tmp_path), "abc123")
+    assert got is not None
+    assert got["fraction"] == 1.0
+    assert "\n" not in got["text"] and len(got["text"]) <= 120
+    assert set(got) == {"fraction", "text", "updated_at"}
+
+
+def test_progress_that_does_not_parse_is_ignored(tmp_path: Path) -> None:
+    """Garbage, a list, or an oversized file give no progress rather than an error."""
+    path = jobs.progress_path(str(tmp_path), "j")
+    path.parent.mkdir(parents=True)
+    for content in ("not json", "[1, 2]", json.dumps({"text": "x" * 5000})):
+        path.write_text(content)
+        assert jobs.read_progress(str(tmp_path), "j") is None
+    assert jobs.read_progress(str(tmp_path), "missing") is None

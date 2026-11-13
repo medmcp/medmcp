@@ -1814,3 +1814,168 @@ def test_an_approved_stack_call_is_granted_to_the_broker() -> None:
     assert ledger.consume("medmcp-neuro-core", "skull_strip", {"input_path": "/w/t1.nii"})
     assert not ledger.consume("medmcp-neuro-core", "skull_strip", {"input_path": "/w/t1.nii"})
     assert not ledger.consume("builtin", "bash", {"command": "ls"})
+
+
+class TestStackToolGrantForTheChat:
+    """A stack tool approved for the chat runs unasked, unless a call needs a look."""
+
+    @pytest.fixture
+    def responses(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> list[tuple[int, object]]:
+        """Capture what is answered to vibe; provenance and explanations off."""
+        sent: list[tuple[int, object]] = []
+
+        async def _respond(req_id: int, result: object) -> None:
+            sent.append((req_id, result))
+
+        monkeypatch.setattr(server._client, "respond", _respond)
+        monkeypatch.setattr(settings, "load_provenance_enabled", lambda: False)
+        monkeypatch.setattr(settings, "load_explain_enabled", lambda: False)
+        monkeypatch.setattr(server, "WORKSPACE_ROOT", tmp_path)
+        monkeypatch.delenv(server.STACK_TOOL_APPROVAL_ENV_VAR, raising=False)
+        (tmp_path / "study").mkdir()
+        return sent
+
+    @staticmethod
+    def _request(req_id: int, tool: str, **arguments: str) -> dict[str, object]:
+        return {
+            "id": req_id,
+            "method": "session/request_permission",
+            "params": {
+                "toolCall": {
+                    "toolCallId": f"c{req_id}",
+                    "title": tool,
+                    "toolName": tool,
+                    "rawInput": arguments,
+                },
+                "options": [
+                    {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "allow_always", "name": "Always", "kind": "allow_always"},
+                    {"optionId": "reject_once", "name": "Deny", "kind": "reject_once"},
+                ],
+            },
+        }
+
+    @staticmethod
+    def _dialogs(conn: server._ChatConnection) -> list[dict[str, Any]]:
+        return [m for m in cast("_StubWs", conn.ws).sent if m.get("type") == "permission_request"]
+
+    async def _answer(
+        self, conn: server._ChatConnection, req: dict[str, object], option: str
+    ) -> None:
+        """Run the handler until its dialog is shown, then choose *option*."""
+        task = asyncio.create_task(conn._handle_permission(req))
+        await asyncio.sleep(0.05)
+        conn._pending_perms[cast("int", req["id"])].set_result(option)
+        await task
+
+    async def test_the_dialog_offers_the_tool_for_the_rest_of_the_chat(
+        self, responses: list[tuple[int, object]], tmp_path: Path
+    ) -> None:
+        """The option names the tool, and vibe's own "always" stays hidden."""
+        conn, _ = _connection()
+        req = self._request(1, "medmcp-cohort_index_dataset", dataset_dir=str(tmp_path / "study"))
+        await self._answer(conn, req, "allow_once")
+        offered = {o["optionId"]: o["name"] for o in self._dialogs(conn)[0]["options"]}
+        assert offered[server._STACK_TOOL_CHAT_OPTION] == (
+            "Allow index_dataset for the rest of this chat"
+        )
+        assert "allow_always" not in offered
+
+    async def test_later_calls_of_that_tool_are_allowed_without_a_dialog(
+        self, responses: list[tuple[int, object]], tmp_path: Path
+    ) -> None:
+        """vibe is answered ``allow_once`` each time; only the first call shows a dialog."""
+        conn, _ = _connection()
+        folder = str(tmp_path / "study")
+        await self._answer(
+            conn,
+            self._request(1, "medmcp-cohort_summarize_dataset", index_path=folder),
+            server._STACK_TOOL_CHAT_OPTION,
+        )
+        await conn._handle_permission(
+            self._request(2, "medmcp-cohort_summarize_dataset", index_path=folder)
+        )
+        allow = {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
+        assert responses == [(1, allow), (2, allow)]
+        assert len(self._dialogs(conn)) == 1
+
+    async def test_another_tool_still_asks(
+        self, responses: list[tuple[int, object]], tmp_path: Path
+    ) -> None:
+        """The approval is for one tool of one stack, not for the stack."""
+        conn, _ = _connection()
+        folder = str(tmp_path / "study")
+        await self._answer(
+            conn,
+            self._request(1, "medmcp-cohort_summarize_dataset", index_path=folder),
+            server._STACK_TOOL_CHAT_OPTION,
+        )
+        await self._answer(
+            conn, self._request(2, "medmcp-cohort_select_series", index_path=folder), "allow_once"
+        )
+        assert len(self._dialogs(conn)) == 2
+
+    async def test_a_call_that_would_overwrite_a_file_asks_again(
+        self, responses: list[tuple[int, object]], tmp_path: Path
+    ) -> None:
+        """An approved tool is shown again, without the chat option, when it would overwrite."""
+        conn, _ = _connection()
+        scan = tmp_path / "study" / "scan.nii.gz"
+        scan.write_bytes(b"")
+        existing = tmp_path / "study" / "out.nii.gz"
+        await self._answer(
+            conn,
+            self._request(
+                1, "medmcp-tptbox_process_nifti", input_path=str(scan), output_path=str(existing)
+            ),
+            server._STACK_TOOL_CHAT_OPTION,
+        )
+        existing.write_bytes(b"")
+        await self._answer(
+            conn,
+            self._request(
+                2, "medmcp-tptbox_process_nifti", input_path=str(scan), output_path=str(existing)
+            ),
+            "allow_once",
+        )
+        dialogs = self._dialogs(conn)
+        assert len(dialogs) == 2
+        assert server._STACK_TOOL_CHAT_OPTION not in {o["optionId"] for o in dialogs[1]["options"]}
+
+    async def test_a_path_outside_the_workspace_is_never_covered(
+        self, responses: list[tuple[int, object]], tmp_path: Path
+    ) -> None:
+        """Neither offered for nor covered by the chat approval."""
+        conn, _ = _connection()
+        await self._answer(
+            conn, self._request(1, "medmcp-cohort_index_dataset", dataset_dir="/etc"), "allow_once"
+        )
+        assert server._STACK_TOOL_CHAT_OPTION not in {
+            o["optionId"] for o in self._dialogs(conn)[0]["options"]
+        }
+
+    async def test_the_shell_is_never_offered_it(self, responses: list[tuple[int, object]]) -> None:
+        """Built-in tools keep their own rules."""
+        conn, _ = _connection()
+        req = self._request(1, "bash", command="python3 script.py")
+        await self._answer(conn, req, "allow_once")
+        assert server._STACK_TOOL_CHAT_OPTION not in {
+            o["optionId"] for o in self._dialogs(conn)[0]["options"]
+        }
+
+    async def test_the_kill_switch_restores_per_call_approval(
+        self,
+        responses: list[tuple[int, object]],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """``MEDMCP_STACK_TOOL_APPROVAL=0`` removes the option."""
+        monkeypatch.setenv(server.STACK_TOOL_APPROVAL_ENV_VAR, "0")
+        conn, _ = _connection()
+        req = self._request(1, "medmcp-cohort_index_dataset", dataset_dir=str(tmp_path / "study"))
+        await self._answer(conn, req, "allow_once")
+        assert server._STACK_TOOL_CHAT_OPTION not in {
+            o["optionId"] for o in self._dialogs(conn)[0]["options"]
+        }

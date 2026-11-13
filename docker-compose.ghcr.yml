@@ -188,6 +188,9 @@ services:
       MEDMCP_UPDATE_URL: "${MEDMCP_UPDATE_URL:-}"
       # Chat-long approval of read-only shell commands (ls, cat, …); off with 0.
       MEDMCP_READ_ONLY_APPROVAL: "${MEDMCP_READ_ONLY_APPROVAL:-}"
+      # Code the assistant wrote itself (a Python heredoc, Rscript, a .py file):
+      # "ask" (default) shows every such call on its own; "deny" refuses it.
+      MEDMCP_ASSISTANT_CODE: "${MEDMCP_ASSISTANT_CODE:-}"
       # The agent runs in its own container: no docker socket, no state volume,
       # its config read-only, stack tools through the core (forces the stack
       # pool on). Empty runs it inside this container, as before.

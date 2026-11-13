@@ -153,6 +153,11 @@ services:
       # warm across calls and hides pool-machinery tools (warmup) from the model.
       # 1/true to enable; empty = off (legacy per-call spawn).
       MEDMCP_STACK_POOL: "${MEDMCP_STACK_POOL:-}"
+      # Background jobs: a stack tool that declares one (an nnU-Net training)
+      # runs in its own container, which outlives the chat and the pool. 0 turns
+      # them off; MEDMCP_MAX_JOBS is how many may run at once (default 1).
+      MEDMCP_STACK_JOBS: "${MEDMCP_STACK_JOBS:-}"
+      MEDMCP_MAX_JOBS: "${MEDMCP_MAX_JOBS:-}"
       # Tool-call repair shim between vibe and Ollama. On by default: without it
       # Ollama's Glimmer parser silently drops roughly half of all tool-using
       # turns, and the failure is invisible — no error, just a chat that never

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -177,3 +178,42 @@ def test_sync_repairs_existing_entry_without_startup_timeout(
     neuro = entries_by_name(synced_config(tmp_path, [_NEURO]))["medmcp-neuro"]
     assert neuro["startup_timeout_sec"] == settings.DEFAULT_STACK_STARTUP_TIMEOUT_SEC
     assert neuro["tool_timeout_sec"] == 7200.0  # other preserved fields survive
+
+
+# ── image revision in the launch entry (vibe descriptor cache key) ──────────
+
+
+def _fake_identity(ids: dict[str, str]) -> Callable[[str], JsonDict]:
+    def identity(image: str) -> JsonDict:
+        return {"digest": None, "id": ids.get(image)}
+
+    return identity
+
+
+@pytest.mark.parametrize("pool", [False, True])
+def test_sync_stamps_image_id_so_vibe_cache_key_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pool: bool
+) -> None:
+    """A new image under the same tag changes the entry vibe hashes for its tool cache."""
+    _isolate(monkeypatch, tmp_path, pool=pool)
+    monkeypatch.setattr(settings, "image_identity", _fake_identity({"neuro:dev": "sha256:aaa"}))
+    first = entries_by_name(synced_config(tmp_path, [_NEURO, _DICOM]))
+    assert first["medmcp-neuro"]["env"][settings.STACK_REVISION_ENV] == "sha256:aaa"
+    # a non-container stack carries no revision
+    assert settings.STACK_REVISION_ENV not in cast("JsonDict", first["medmcp-dicom"].get("env", {}))
+
+    monkeypatch.setattr(settings, "image_identity", _fake_identity({"neuro:dev": "sha256:bbb"}))
+    second = entries_by_name(synced_config(tmp_path, [_NEURO, _DICOM]))
+    assert second["medmcp-neuro"]["env"][settings.STACK_REVISION_ENV] == "sha256:bbb"
+
+
+def test_sync_drops_revision_when_image_is_gone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An image that cannot be inspected leaves no stale revision behind."""
+    _isolate(monkeypatch, tmp_path, pool=False)
+    monkeypatch.setattr(settings, "image_identity", _fake_identity({"neuro:dev": "sha256:aaa"}))
+    sync_servers_to_vibe_config([_NEURO])
+    monkeypatch.setattr(settings, "image_identity", _fake_identity({}))
+    neuro = entries_by_name(synced_config(tmp_path, [_NEURO]))["medmcp-neuro"]
+    assert settings.STACK_REVISION_ENV not in cast("JsonDict", neuro.get("env", {}))

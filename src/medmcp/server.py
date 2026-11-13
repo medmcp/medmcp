@@ -2525,6 +2525,17 @@ _AUTO_APPROVE_OPTIONS = frozenset({"allow_always", "allow_always_permanent"})
 # The permanent variant stays hidden: nothing is ever written to config.toml.
 _SESSION_APPROVE_OPTION = "allow_always"
 
+# A stack tool approved "for the rest of this chat". The option is MedMCP's own,
+# not one of vibe's: vibe is always answered ``allow_once`` for the call in hand,
+# so nothing is recorded outside this connection and the grant dies with the chat.
+# Each later call still passes the path guard, is still granted to the broker one
+# call at a time, and still asks when it would overwrite a file or reach outside
+# the workspace (see :func:`_call_needs_a_look`).
+_STACK_TOOL_CHAT_OPTION = "medmcp_allow_tool_for_chat"
+
+# Kill switch: ``MEDMCP_STACK_TOOL_APPROVAL=0`` restores strict per-call approval.
+STACK_TOOL_APPROVAL_ENV_VAR = "MEDMCP_STACK_TOOL_APPROVAL"
+
 # Kill switch: ``MEDMCP_READ_ONLY_APPROVAL=0`` restores strict per-call approval.
 READ_ONLY_APPROVAL_ENV_VAR = "MEDMCP_READ_ONLY_APPROVAL"
 
@@ -2563,6 +2574,30 @@ def _read_only_approval_enabled() -> bool:
     """Whether read-only shell commands may be approved for the rest of a chat (default on)."""
     value = os.environ.get(READ_ONLY_APPROVAL_ENV_VAR, "").strip().lower()
     return value not in {"0", "false", "no", "off"}
+
+
+def _stack_tool_approval_enabled() -> bool:
+    """Whether a stack tool may be approved for the rest of a chat (default on)."""
+    value = os.environ.get(STACK_TOOL_APPROVAL_ENV_VAR, "").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _call_needs_a_look(rule_keys: list[str], path_findings: list[Any]) -> bool:
+    """Whether one stack call must be shown even though its tool is approved for the chat.
+
+    The chat-long approval covers a tool doing its ordinary work inside the
+    workspace. A call that would overwrite an existing file, touch a path outside
+    the workspace, or whose paths could not be resolved is a different decision
+    from the one the person made, so it is put to them again.
+    """
+    if "outside_workspace" in rule_keys:
+        return True
+    for finding in path_findings:
+        if finding.get("severity") == "error":
+            return True
+        if finding.get("status") in {"will_overwrite", "outside_workspace"}:
+            return True
+    return False
 
 
 _REDIRECT_OPERATORS = frozenset({">&", "<&", ">", ">>", "<", "&>", "&>>", ">|"})
@@ -2820,6 +2855,8 @@ class _ChatConnection:
         # from then on every read-only command (any of _READ_ONLY_SESSION_PATTERNS,
         # with the same redirect rules) is allowed without asking again.
         self._read_only_granted = False
+        # Stack tools the person approved for the rest of this chat, as (stack, tool).
+        self._granted_stack_tools: set[tuple[str, str]] = set()
         self._prompt_task: asyncio.Task[None] | None = None
         # The session/prompt RPC of the current turn. It outlives a cancelled
         # prompt task: vibe-acp ends the turn only after it handles session/cancel,
@@ -3477,6 +3514,35 @@ class _ChatConnection:
             path_findings,
         )
 
+        # A stack tool can be approved once for the rest of the chat. Calls it then
+        # covers are answered here; anything that needs a look is still shown, and
+        # is shown without the chat-long option.
+        stack, tool = provenance.split_tool_name(
+            str(tool_call.get("toolName") or title), self._server_names
+        )
+        if stack != "builtin" and _stack_tool_approval_enabled():
+            needs_look = _call_needs_a_look(rule_keys, path_findings)
+            offered = {o.get("optionId") for o in options}
+            if (stack, tool) in self._granted_stack_tools and not needs_look:
+                if "allow_once" in offered:
+                    _audit.info(
+                        "permission covered by this chat's approval of %s/%s: %s",
+                        stack,
+                        tool,
+                        title,
+                    )
+                    await self._resolve_permission(req_id_raw, title, cached, "allow_once")
+                    return
+            elif not needs_look and "allow_once" in offered:
+                options = [
+                    *options,
+                    {
+                        "optionId": _STACK_TOOL_CHAT_OPTION,
+                        "name": f"Allow {tool} for the rest of this chat",
+                        "kind": "allow_always",
+                    },
+                ]
+
         _audit.info("permission requested: %s", title)
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[str | None] = loop.create_future()
@@ -3525,6 +3591,11 @@ class _ChatConnection:
             option_id = None
         if option_id == _SESSION_APPROVE_OPTION:
             self._read_only_granted = True
+        if option_id == _STACK_TOOL_CHAT_OPTION:
+            # vibe never sees MedMCP's own option: it is answered for this call only.
+            self._granted_stack_tools.add((stack, tool))
+            _audit.info("stack tool approved for the rest of this chat: %s/%s", stack, tool)
+            option_id = "allow_once"
         await self._resolve_permission(req_id_raw, title, cached, option_id)
 
     def _grant_stack_call(self, tool_call: JsonDict) -> None:

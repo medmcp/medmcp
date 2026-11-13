@@ -35,6 +35,7 @@ import mcp.types as mcp_types
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from medmcp import pathcheck, workflow
 from medmcp.toolresult import looks_failed, parse_structured_blob
 from medmcp.workflow import Recipe
 
@@ -329,6 +330,201 @@ def paths_outside(value: object, root: Path) -> list[str]:
     return found
 
 
+# ── Outputs must never land on inputs ─────────────────────────────────────────
+#
+# Replay has no model in the loop and no per-call approval, so a binding that
+# points an output argument at the file it was read from would overwrite source
+# data with nothing between the mistake and the write but the tool's own manners.
+# These checks are the engine's, not the tool's: a run that would do that is
+# refused before any step is called.
+
+
+@dataclass(frozen=True)
+class PathUse:
+    """One path a recipe hands to a tool, with what the tool does with it."""
+
+    param: str
+    path: str
+    role: pathcheck.PathRole
+    kind: workflow.OutputKind
+    """For an output: a folder results go into, or a file that is written."""
+
+
+def _normalised(path: str, base: Path | None) -> PurePosixPath:
+    """*path* made absolute against *base* and lexically normalised (no disk access)."""
+    text = os.path.expanduser(path.strip())
+    if not os.path.isabs(text) and base is not None:
+        text = os.path.join(str(base), text)
+    return PurePosixPath(os.path.normpath(text))
+
+
+def path_uses(recipe: Recipe, inputs: dict[str, Any]) -> list[PathUse]:
+    """Every path the recipe would pass to a tool for *inputs*, in step order.
+
+    Only arguments that are fully known before the run count: one that still
+    holds a ``{{stepM.key}}`` reference is a previous step's output, decided at
+    run time, and is checked there by the step that produced it.
+    """
+    bound = apply_input_defaults(recipe, inputs)
+    uses: list[PathUse] = []
+    for step in recipe.steps:
+        for key, raw in step.arguments.items():
+            value = resolve_value(raw, bound)
+            if unresolved_refs(value):
+                continue
+            role = pathcheck.classify_role(key)
+            for text in _strings(value):
+                if pathcheck.looks_like_path(text) and "://" not in text:
+                    uses.append(PathUse(key, text, role, workflow.output_kind(key)))
+    return uses
+
+
+def _strings(value: object) -> list[str]:
+    """Every string inside a (possibly nested) argument value."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in cast("JsonDict", value).values() for s in _strings(v)]
+    if isinstance(value, list):
+        return [s for v in cast("list[Any]", value) for s in _strings(v)]
+    return []
+
+
+def _is_file_path(path: PurePosixPath) -> bool:
+    """Whether *path* is a file: one on disk, or — when absent — a name with a suffix."""
+    real = Path(path)
+    try:
+        if real.exists():
+            return real.is_file()
+    except OSError:
+        pass
+    return bool(path.suffix)
+
+
+def output_collision(
+    recipe: Recipe, inputs: dict[str, Any], *, base: Path | None = None
+) -> str | None:
+    """Why this binding would write over what it reads, or ``None`` when it would not.
+
+    Refused:
+
+    - an output **file** that is one of the inputs (the binding that prompted
+      this check: ``output_path`` bound to the scan itself);
+    - an output file that is a folder holding an input, or that lies beneath an
+      input file — two paths that cannot both exist as named;
+    - an output **folder** that is, or lies beneath, an input *file*.
+
+    Allowed, deliberately: an output folder that holds the input, or is the
+    input folder. "Write the result next to the scan" is the ordinary case (it is
+    what a distilled ``output_dir`` defaults to), and a path alone cannot tell
+    whether a tool writing into a folder reuses a name already in it.
+    """
+    uses = path_uses(recipe, inputs)
+    outputs = [u for u in uses if u.role == "output"]
+    sources = [u for u in uses if u.role != "output"]
+    for out in outputs:
+        out_path = _normalised(out.path, base)
+        for src in sources:
+            src_path = _normalised(src.path, base)
+            src_is_file = _is_file_path(src_path)
+            if out_path == src_path:
+                if out.kind == "dir" and not src_is_file:
+                    continue
+                return (
+                    f"{out.param} is the same path as the input {src.param} "
+                    f"({src.path}): the run would overwrite its own input"
+                )
+            if src_is_file and src_path in out_path.parents:
+                return (
+                    f"{out.param} ({out.path}) lies beneath the input file {src.param} ({src.path})"
+                )
+            if out.kind == "file" and out_path in src_path.parents:
+                return (
+                    f"{out.param} ({out.path}) is written as a file but is the folder "
+                    f"that holds the input {src.param}"
+                )
+    return None
+
+
+def batch_output_collisions(
+    recipe: Recipe, runs: list[dict[str, Any]], *, base: Path | None = None
+) -> dict[int, str]:
+    """Items of a batch that would write to the same place as another item.
+
+    Returns ``{item index: reason}`` for **every** item involved, so none of them
+    runs until the person has told them apart.
+
+    Two items writing the same output *file* always collide. Two items sharing
+    an output *folder* collide when they also read a file of the same name: a
+    tool names its results after its input, so ``FLAIR.nii.gz`` of two subjects
+    into one folder is one result overwriting the other. Items that share a
+    folder but read differently named files are left alone — a flat folder of
+    scans with the results beside them is a layout people use.
+    """
+    files: dict[PurePosixPath, list[int]] = {}
+    folders: dict[PurePosixPath, list[int]] = {}
+    names: list[set[str]] = []
+    for index, inputs in enumerate(runs):
+        uses = path_uses(recipe, inputs)
+        names.append({_normalised(u.path, base).name for u in uses if u.role != "output"} - {""})
+        seen: set[PurePosixPath] = set()
+        for use in uses:
+            if use.role != "output":
+                continue
+            path = _normalised(use.path, base)
+            if path in seen:
+                continue
+            seen.add(path)
+            (folders if use.kind == "dir" else files).setdefault(path, []).append(index)
+
+    found: dict[int, str] = {}
+    for path, items in files.items():
+        if len(items) > 1:
+            for index in items:
+                other = next(i for i in items if i != index)
+                found.setdefault(index, f"writes the same output file as item {other + 1}: {path}")
+    for path, items in folders.items():
+        for index in items:
+            clash = next((o for o in items if o != index and names[index] & names[o]), None)
+            if clash is not None:
+                shared = sorted(names[index] & names[clash])[0]
+                found.setdefault(
+                    index,
+                    f"writes into the same folder as item {clash + 1} ({path}) and both "
+                    f"read a file named {shared}: one result would overwrite the other",
+                )
+    return found
+
+
+def ensure_output_folders(
+    step_arguments: JsonDict, resolved: JsonDict, *, confine_to: Path | None
+) -> None:
+    """Create the folders a step's output arguments need, before the tool runs.
+
+    In a chat the agent makes the folder first (a ``mkdir`` the recipe cannot
+    replay); on a roll-out nobody does, and thirty subjects would mean thirty
+    folders made by hand. An output *folder* is created itself, an output *file*
+    gets its parent. Only inside *confine_to* when one is given, and best-effort:
+    a folder that cannot be made is left for the tool to report in its own words.
+    """
+    for key in step_arguments:
+        if pathcheck.classify_role(key) != "output":
+            continue
+        for text in _strings(resolved.get(key)):
+            if not pathcheck.looks_like_path(text) or "://" in text:
+                continue
+            path = Path(text).expanduser()
+            if not path.is_absolute():
+                if confine_to is None:
+                    continue
+                path = confine_to / path
+            folder = path if workflow.output_kind(key) == "dir" else path.parent
+            if confine_to is not None and not folder.resolve().is_relative_to(confine_to.resolve()):
+                continue
+            with suppress(OSError):
+                folder.mkdir(parents=True, exist_ok=True)
+
+
 def _is_unset(value: object) -> bool:
     """Whether *value* counts as not supplied: absent, or whitespace-only text."""
     return value is None or (isinstance(value, str) and not value.strip())
@@ -364,11 +560,19 @@ def apply_input_defaults(recipe: Recipe, inputs: dict[str, Any]) -> dict[str, An
     return bound
 
 
-def validate(recipe: Recipe, inputs: dict[str, Any], servers: list[JsonDict]) -> str | None:
+def validate(
+    recipe: Recipe,
+    inputs: dict[str, Any],
+    servers: list[JsonDict],
+    *,
+    base: Path | None = None,
+) -> str | None:
     """Return a human-readable error if *recipe* can't be replayed, else ``None``.
 
     Checks that every declared input has a value, every referenced stack is
-    installed, and that the recipe has no built-in (non-MCP) tool steps.
+    installed, that the recipe has no built-in (non-MCP) tool steps, and that no
+    output would be written over an input (:func:`output_collision`; *base* is
+    what a relative path is read against, the workspace).
     """
     bound = apply_input_defaults(recipe, inputs)
     missing_inputs = [i.name for i in recipe.inputs if i.name not in bound]
@@ -396,7 +600,7 @@ def validate(recipe: Recipe, inputs: dict[str, Any], servers: list[JsonDict]) ->
 
     if not recipe.steps:
         return "this workflow has no replayable steps"
-    return None
+    return output_collision(recipe, inputs, base=base)
 
 
 async def replay_with_caller(
@@ -448,6 +652,7 @@ async def replay_with_caller(
 
         if on_step_start is not None:
             await on_step_start(index, step.server, step.tool)
+        ensure_output_folders(step.arguments, args, confine_to=confine_to)
         try:
             ok, structured, error = await caller(step.server, step.tool, args)
         except Exception as exc:
@@ -500,7 +705,7 @@ async def run(
     a stack that won't start) is reported via ``ReplayResult.error`` with an empty
     or partial ``steps`` list rather than raising.
     """
-    error = validate(recipe, inputs, servers)
+    error = validate(recipe, inputs, servers, base=confine_to)
     if error is not None:
         return ReplayResult(ok=False, error=error)
 
@@ -531,10 +736,11 @@ async def run_batch(
     **once** and reused across every item — a batch of N items pays the
     server-startup cost once, not N times. Items run sequentially; a failed item
     does not stop the rest. Each item is validated against its own inputs, and an
-    item that fails validation is recorded as a failed :class:`ReplayResult`
-    without running a step. ``on_step``/``on_item`` stream progress tagged with the
-    item's index in *runs*; the return value is one :class:`ReplayResult` per item,
-    in order.
+    item that fails validation — or that would write to the same place as another
+    item (:func:`batch_output_collisions`) — is recorded as a failed
+    :class:`ReplayResult` without running a step. ``on_step``/``on_item`` stream
+    progress tagged with the item's index in *runs*; the return value is one
+    :class:`ReplayResult` per item, in order.
 
     The MCP servers are shared across items for speed, but one that crashes is
     re-spawned for the next item (see :func:`mcp_caller`), so a single failure does
@@ -542,7 +748,10 @@ async def run_batch(
     ``(item, step_index, server, tool)`` just before a tool is called, so a caller
     can show which step is in flight.
     """
-    pre = [validate(recipe, inputs, servers) for inputs in runs]
+    pre = [validate(recipe, inputs, servers, base=confine_to) for inputs in runs]
+    for item, reason in batch_output_collisions(recipe, runs, base=confine_to).items():
+        if pre[item] is None:
+            pre[item] = reason
     results: list[ReplayResult] = []
 
     async def _emit(item: int, res: ReplayResult) -> None:

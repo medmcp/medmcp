@@ -189,6 +189,113 @@ class TestCreate:
         assert refused is not None and "registry" in refused
 
 
+JOB_IMAGE = "sha256:" + "a" * 64
+JOB_ID = "0123456789ab"
+JOB_IMAGE_LABELS: JsonDict = {
+    "org.medmcp.stack": json.dumps(
+        {
+            "name": "medmcp-nnunet",
+            "gpu": True,
+            "job": {"command": ["medmcp-nnunet-job", "call"], "tools": ["start_training"]},
+        }
+    )
+}
+
+
+def _job(**changes: object) -> JsonDict:
+    """A job's create body as the core's ``docker run -d`` sends it."""
+    body: JsonDict = {
+        "Image": JOB_IMAGE,
+        "Cmd": ["medmcp-nnunet-job", "call", "start_training", '{"dataset":"4"}'],
+        "Labels": {
+            "org.medmcp.job": "1",
+            "org.medmcp.job.id": JOB_ID,
+            "org.medmcp.job.stack": "medmcp-nnunet",
+            "org.medmcp.job.tool": "start_training",
+            "org.medmcp.job.workspace": WS,
+        },
+        "HostConfig": {
+            "NetworkMode": "none",
+            "CapDrop": ["ALL"],
+            "CapAdd": ["CAP_DAC_OVERRIDE"],
+            "SecurityOpt": ["no-new-privileges"],
+            "PidsLimit": 5120,
+            "ShmSize": 8 * 1024**3,
+            "Binds": [f"{WS}:{WS}"],
+            "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+            "DeviceRequests": [{"Driver": "cdi", "DeviceIDs": ["nvidia.com/gpu=all"]}],
+        },
+    }
+    for key, value in changes.items():
+        if key in body["HostConfig"] or key in {"Mounts"}:
+            body["HostConfig"] = {**body["HostConfig"], key: value}
+        elif key.startswith("org."):
+            body["Labels"] = {**body["Labels"], key: value}
+        else:
+            body[key] = value
+    return body
+
+
+def _check_job(body: JsonDict, name: str = f"medmcp-job-{JOB_ID}") -> str | None:
+    labels = JOB_IMAGE_LABELS if body.get("Image") == JOB_IMAGE else {}
+    return check_create(body, CTX, [], name=name, image_labels=labels)
+
+
+class TestJobs:
+    """A job container is created in one shape only (see medmcp.jobs)."""
+
+    def test_the_job_the_core_starts_passes(self) -> None:
+        """The create body of the core's own ``docker run -d`` is accepted."""
+        assert _check_job(_job()) is None
+
+    @pytest.mark.parametrize(
+        ("body", "reason"),
+        [
+            (_job(NetworkMode="bridge"), "network"),
+            (_job(Binds=[f"{WS}:{WS}", "medmcp_vibe-state:/state"]), "only the workspace"),
+            (_job(Mounts=[{"Type": "bind", "Source": WS, "Target": "/x"}]), "only the workspace"),
+            (_job(CapDrop=[]), "drop all"),
+            (_job(SecurityOpt=[]), "no-new-privileges"),
+            (_job(PidsLimit=0), "task limit"),
+            (_job(RestartPolicy={"Name": "always"}), "restart policy"),
+            (_job(Entrypoint=["sh", "-c"]), "entrypoint"),
+            (_job(Cmd=["sh", "-c", "curl x", "{}"]), "job runner"),
+            (_job(Cmd=["medmcp-nnunet-job", "call", "start_training", "{}", "--x"]), "job runner"),
+            (_job(Cmd=["medmcp-nnunet-job", "call", "predict", "{}"]), "tool"),
+            (_job(**{"org.medmcp.job.tool": "predict"}), "tool"),
+            (_job(**{"org.medmcp.job.stack": "medmcp-neuro"}), "stack label"),
+            (_job(**{"org.medmcp.job.workspace": "/elsewhere"}), "this workspace"),
+            (_job(**{"org.medmcp.job.id": "nope"}), "job id"),
+            (_job(Image="ghcr.io/medmcp/neuro-core:main"), "declares no job runner"),
+        ],
+    )
+    def test_anything_else_under_a_job_label_is_refused(self, body: JsonDict, reason: str) -> None:
+        """Each way of widening a job (network, mounts, command, labels) is refused."""
+        assert reason in (_check_job(body) or "")
+
+    def test_a_job_must_be_named_after_its_id(self) -> None:
+        """The name is how a core finds its jobs, so it is pinned to the id label."""
+        assert "named after" in (_check_job(_job(), name="medmcp-job-ffffffffffff") or "")
+        assert "named after" in (_check_job(_job(), name="") or "")
+
+    def test_a_job_name_without_the_labels_is_refused(self) -> None:
+        """A stack container cannot take a job's name."""
+        body = _stack()
+        assert "job label" in (_check_job(body, name=f"medmcp-job-{JOB_ID}") or "")
+
+    def test_no_container_is_created_from_an_image_labelled_as_a_job(self) -> None:
+        """Image labels are inherited, so such an image would forge job containers."""
+        reason = check_create(_stack(), CTX, [], image_labels={"org.medmcp.job": "1"})
+        assert "image carries a job label" in (reason or "")
+
+    def test_the_name_and_image_are_read_off_the_request(self) -> None:
+        """The name comes from the query string, the labels from the daemon's image record."""
+        body = json.dumps(_job()).encode()
+        assert _check("POST", f"/v1.47/containers/create?name=medmcp-job-{JOB_ID}", body).allowed
+        refused = _check("POST", "/v1.47/containers/create?name=medmcp-job-000000000000", body)
+        assert not refused.allowed
+
+
 class _Daemon:
     """A daemon stand-in: two containers, one the guard's, one another project's."""
 
@@ -204,6 +311,9 @@ class _Daemon:
 
     def repo_digests(self, ref: str) -> list[str]:
         return [HELPER_IMAGE] if ref == HELPER_IMAGE else []
+
+    def image_labels(self, ref: str) -> JsonDict:
+        return JOB_IMAGE_LABELS if ref == JOB_IMAGE else {}
 
     def context(self) -> GuardContext:
         return CTX

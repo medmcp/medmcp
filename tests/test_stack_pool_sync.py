@@ -198,13 +198,19 @@ def test_sync_stamps_image_id_so_vibe_cache_key_changes(
     _isolate(monkeypatch, tmp_path, pool=pool)
     monkeypatch.setattr(settings, "image_identity", _fake_identity({"neuro:dev": "sha256:aaa"}))
     first = entries_by_name(synced_config(tmp_path, [_NEURO, _DICOM]))
-    assert first["medmcp-neuro"]["env"][settings.STACK_REVISION_ENV] == "sha256:aaa"
+    assert first["medmcp-neuro"]["env"][settings.stack_revision_key("sha256:aaa")] == "sha256:aaa"
     # a non-container stack carries no revision
-    assert settings.STACK_REVISION_ENV not in cast("JsonDict", first["medmcp-dicom"].get("env", {}))
+    assert not any(
+        k.startswith(settings.STACK_REVISION_ENV)
+        for k in cast("JsonDict", first["medmcp-dicom"].get("env", {}))
+    )
 
     monkeypatch.setattr(settings, "image_identity", _fake_identity({"neuro:dev": "sha256:bbb"}))
     second = entries_by_name(synced_config(tmp_path, [_NEURO, _DICOM]))
-    assert second["medmcp-neuro"]["env"][settings.STACK_REVISION_ENV] == "sha256:bbb"
+    env = cast("JsonDict", second["medmcp-neuro"]["env"])
+    # vibe fingerprints env key *names*, so the name itself must change
+    assert settings.stack_revision_key("sha256:bbb") in env
+    assert settings.stack_revision_key("sha256:aaa") not in env
 
 
 def test_sync_drops_revision_when_image_is_gone(
@@ -216,4 +222,6 @@ def test_sync_drops_revision_when_image_is_gone(
     sync_servers_to_vibe_config([_NEURO])
     monkeypatch.setattr(settings, "image_identity", _fake_identity({}))
     neuro = entries_by_name(synced_config(tmp_path, [_NEURO]))["medmcp-neuro"]
-    assert settings.STACK_REVISION_ENV not in cast("JsonDict", neuro.get("env", {}))
+    assert not any(
+        k.startswith(settings.STACK_REVISION_ENV) for k in cast("JsonDict", neuro.get("env", {}))
+    )

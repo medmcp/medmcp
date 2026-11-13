@@ -1721,6 +1721,80 @@ class TestReplayRuns:
         record = client.get(f"/api/runs/{frames[0]['run_id']}").json()
         assert record["confirmation"]["previewed"] is False
 
+    def test_a_selection_manifest_feeds_the_roll_out(self, env: Path, client: TestClient) -> None:
+        """One row per selected series: the single input takes ``path``, no status needed."""
+        for subject in ("P1", "P2"):
+            (env / subject).mkdir()
+            (env / subject / "FLAIR.nii.gz").write_bytes(b"x")
+        (env / ".medmcp").mkdir()
+        (env / ".medmcp" / "sel_series.csv").write_text(
+            "subject_id,session_id,sequence,contrast,plane,path\n"
+            f"P1,ses-1,FLAIR,no,axial,{env}/P1/FLAIR.nii.gz\n"
+            "P2,ses-1,FLAIR,no,axial,P2/FLAIR.nii.gz\n"
+        )
+        body = client.post(
+            "/api/workflows/strip/batch-from-plan", json={"plan_csv": ".medmcp/sel_series.csv"}
+        ).json()
+        assert body["ok"] is True and body["kind"] == "selection"
+        assert body["labels"] == ["P1/ses-1", "P2/ses-1"]
+        assert [r["in_1"] for r in body["runs"]] == [
+            str(env / "P1" / "FLAIR.nii.gz"),
+            str(env / "P2" / "FLAIR.nii.gz"),
+        ]
+        assert body["roles"] == [{"role": "FLAIR-contrast", "series": 2, "units": 2}]
+
+    def test_a_selection_asks_for_roles_then_pivots(self, env: Path, client: TestClient) -> None:
+        """Two reading inputs: the endpoint offers the roles, then binds per subject-session."""
+        envelope = yaml.safe_dump(
+            {
+                "medmcp_workflow": 1,
+                "name": "onto",
+                "description": "demo",
+                "inputs": [
+                    {"name": "in_1", "example": "/d/FLAIR.nii.gz"},
+                    {"name": "in_2", "example": "/d/T1WKS.nii.gz"},
+                    {"name": "in_3", "example": "/d/out/FLAIR_on_T1.nii.gz"},
+                ],
+                "steps": [
+                    {
+                        "server": "medmcp-neuro",
+                        "tool": "resample",
+                        "arguments": {
+                            "input_path": "{{in_1}}",
+                            "reference_path": "{{in_2}}",
+                            "output_path": "{{in_3}}",
+                        },
+                    }
+                ],
+            }
+        )
+        assert client.post("/api/workflows/import", json={"content": envelope}).status_code == 200
+        (env / "sel_series.csv").write_text(
+            "subject_id,session_id,sequence,contrast,plane,path\n"
+            f"P1,,FLAIR,no,axial,{env}/P1/FLAIR.nii.gz\n"
+            f"P1,,T1,yes,axial,{env}/P1/T1WKS.nii.gz\n"
+            f"P2,,FLAIR,no,axial,{env}/P2/FLAIR.nii.gz\n"
+        )
+        asked = client.post(
+            "/api/workflows/onto/batch-from-plan", json={"plan_csv": "sel_series.csv"}
+        ).json()
+        assert asked["ok"] is False and asked["unmapped"] == ["in_1", "in_2"]
+        assert [r["role"] for r in asked["roles"]] == ["FLAIR-contrast", "T1+contrast"]
+        bound = client.post(
+            "/api/workflows/onto/batch-from-plan",
+            json={
+                "plan_csv": "sel_series.csv",
+                "role_map": {"in_1": "FLAIR", "in_2": "T1+contrast"},
+            },
+        ).json()
+        assert bound["ok"] is True and bound["labels"] == ["P1"]
+        assert bound["runs"][0]["in_3"] == str(
+            env / "results" / "onto" / "P1" / "FLAIR_on_T1.nii.gz"
+        )
+        assert bound["skipped"] == [
+            {"subject": "P2", "status": "missing", "reason": "no T1+contrast series for in_2"}
+        ]
+
     def test_bad_first_message_is_refused(self, env: Path, client: TestClient) -> None:
         """Neither a start nor an attach: the socket answers with an error and closes."""
         with client.websocket_connect("/ws/replay", headers=WS_HEADERS) as ws:

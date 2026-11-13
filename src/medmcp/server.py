@@ -98,7 +98,12 @@ from medmcp.acp import PROJECT_ROOT, JsonDict, VibeAcpClient
 from medmcp.backend_broker import BackendBroker
 from medmcp.backend_pool import BackendPool, BackendSpec
 from medmcp.reasoning import ThoughtStripper
-from medmcp.workspace_note import build_workspace_note, display_content_text, strip_workspace_note
+from medmcp.workspace_note import (
+    build_dataset_notes,
+    build_workspace_note,
+    display_content_text,
+    strip_workspace_note,
+)
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
 log: logging.Logger = logging.getLogger(__name__)
@@ -2943,22 +2948,32 @@ class _ChatConnection:
             "session_id": self.session_id,
             "prompt": [{"type": "text", "text": text}],
         }
+        # Notes ride as their own content blocks flagged `automatic`: vibe orders
+        # them after the user's text and keeps them out of auto-title derivation.
+        # lstrip() because vibe joins blocks with a blank line — the persisted text
+        # stays byte-identical to the old appended format, so strip_workspace_note
+        # keeps working on every transcript vintage. Every note starts with
+        # "[workspace context:", so that one pattern removes them all.
+        notes: list[str] = []
         if viewed_path is not None:
-            # The note rides as its own content block flagged `automatic`: vibe
-            # orders it after the user's text and keeps it out of auto-title
-            # derivation. lstrip() because vibe joins blocks with a blank line —
-            # the persisted text stays byte-identical to the old appended format,
-            # so strip_workspace_note keeps working on every transcript vintage.
-            cast("list[JsonDict]", params["prompt"]).append(
-                {
-                    "type": "text",
-                    "text": _workspace_note(viewed_path).lstrip(),
-                    "_meta": {"automatic": True},
-                }
+            notes.append(_workspace_note(viewed_path).lstrip())
+        # What the workspace already knows about a folder the prompt names: its
+        # table of scans, or that none exists yet. Reading it is a few stat calls
+        # and one small JSON file, off the event loop like every other disk access.
+        with contextlib.suppress(Exception):
+            viewed_abs = _resolve_input_path(viewed_path) if viewed_path is not None else None
+            dataset_notes = await asyncio.to_thread(
+                build_dataset_notes, text, viewed_abs, WORKSPACE_ROOT
+            )
+            if dataset_notes:
+                notes.append(dataset_notes)
+        if notes:
+            cast("list[JsonDict]", params["prompt"]).extend(
+                {"type": "text", "text": note, "_meta": {"automatic": True}} for note in notes
             )
             # user_display_content is persisted with the turn and echoed back in
             # replayed user_message_chunk frames, so resumed transcripts show the
-            # user's text without the note (no stripping needed on that path).
+            # user's text without the notes (no stripping needed on that path).
             params["_meta"] = {
                 "user_display_content": {
                     "version": "1",

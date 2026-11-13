@@ -3257,6 +3257,13 @@ textarea.wf-input {
   margin: 10px 16px 0;
 }
 
+.market-job {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .market-body {
   flex: 1;
   overflow-y: auto;

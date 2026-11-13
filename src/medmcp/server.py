@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 from urllib.parse import quote
 
+import mcp.types as mcp_types
 import uvicorn
 from fastapi import (
     FastAPI,
@@ -80,6 +81,7 @@ from medmcp import (
     explain,
     gateway,
     harness,
+    jobs,
     localmodels,
     origincheck,
     pathcheck,
@@ -160,17 +162,63 @@ _runs: runs.RunManager = runs.RunManager()
 # Stack calls approved in a chat, each spendable once by the broker: anything
 # that reaches the broker socket without one is refused (see medmcp.approvals).
 _approvals: approvals.ApprovalLedger = approvals.ApprovalLedger()
+# Background jobs (see ``jobs.py``): containers the core starts for an approved
+# stack call and leaves running. None when stacks cannot run jobs here.
+_jobs: jobs.JobManager | None = None
+
+
+def _active_server(name: str) -> JsonDict | None:
+    """An active stack's discovered server entry, or ``None``."""
+    return next((s for s in settings.active_servers() if s["name"] == name), None)
+
+
+def _record_job(started: jobs.Started) -> None:
+    """Write a started job into the provenance of the chat that approved it."""
+    job = started.job
+    if not job.session or not settings.load_provenance_enabled():
+        return
+    provenance.record_job_started(
+        job.session,
+        job_id=job.id,
+        server=job.stack,
+        tool=job.tool,
+        arguments=job.arguments or {},
+        image=job.image,
+        image_id=job.image_id,
+        image_digest=started.image_digest,
+        command=started.command,
+        container=jobs.jobspec.container_name(job.id),
+        gpu=job.gpu,
+    )
+
+
+async def _after_stack_call(
+    stack: str, tool: str, args: JsonDict, approval: object, result: mcp_types.CallToolResult
+) -> mcp_types.CallToolResult:
+    """Broker hook: start the job an approved call's result asks for (if any)."""
+    if _jobs is None:
+        return result
+    session = approval.session if isinstance(approval, approvals.Approval) else ""
+    return await jobs.after_call(_jobs, stack, tool, args, session, result, _record_job)
 
 
 def _resolve_backend_spec(name: str) -> BackendSpec | None:
     """Map an active stack name to its persistent-backend launch spec (pool callback)."""
-    entry = settings.build_backend_registry(settings.active_servers()).get(name)
+    servers = settings.active_servers()
+    entry = settings.build_backend_registry(servers).get(name)
     if entry is None:
         return None
+    args = [str(a) for a in cast("list[Any]", entry["args"])]
+    # Only the pooled backend is told the core runs jobs: its results come back
+    # through the broker, which is what acts on a job request. A stack spawned
+    # any other way (replay, the proxy's fallback) keeps its work in-container.
+    declared = next((s.get("job") for s in servers if s["name"] == name), None)
+    if _jobs is not None and declared and Path(str(entry["command"])).name == "docker":
+        args = jobs.offer_args(args)
     return BackendSpec(
         name=name,
         command=str(entry["command"]),
-        args=[str(a) for a in cast("list[Any]", entry["args"])],
+        args=args,
         env={str(k): str(v) for k, v in cast("JsonDict", entry["env"]).items()},
         gpu=bool(entry["gpu"]),
         idle_ttl_sec=float(entry["idle_ttl_sec"]),
@@ -182,7 +230,7 @@ def _resolve_backend_spec(name: str) -> BackendSpec | None:
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     """Start the stack pool + broker on boot (when enabled); tear them down on exit."""
-    global _pool, _broker, _gateway
+    global _pool, _broker, _gateway, _jobs
     _audit.info("workspace password %s", "required" if access.required() else "not set")
     _audit.info(
         "agent runs %s",
@@ -226,7 +274,15 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         # Proxy children read MEDMCP_WORKSPACE for their fallback cwd; export it.
         os.environ.setdefault("MEDMCP_WORKSPACE", str(WORKSPACE_ROOT))
         _pool = BackendPool(resolve_spec=_resolve_backend_spec, cwd=str(WORKSPACE_ROOT))
-        _broker = BackendBroker(_pool, settings.backend_socket_path(), _approvals.consume)
+        if settings.stack_jobs_enabled():
+            _jobs = jobs.JobManager(
+                workspace=str(WORKSPACE_ROOT),
+                resolve_server=_active_server,
+                max_jobs=settings.max_jobs,
+            )
+        _broker = BackendBroker(
+            _pool, settings.backend_socket_path(), _approvals.spend, _after_stack_call
+        )
         try:
             await _broker.start()
             # Proxied config + backends.json exist from boot, before any tool call.
@@ -253,9 +309,12 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
             await _pool.aclose()
         if _gateway is not None:
             await _gateway.aclose()
+        # Job containers are left running on purpose: they are found again by
+        # their labels when a core next starts (see medmcp.jobs).
         _broker = None
         _pool = None
         _gateway = None
+        _jobs = None
 
 
 async def _update_check_loop() -> None:
@@ -2394,6 +2453,72 @@ async def delete_run(run_id: str) -> JsonDict:
     return {"ok": True}
 
 
+# ── Background jobs ────────────────────────────────────────
+
+
+def _job_manager() -> jobs.JobManager:
+    if _jobs is None:
+        raise HTTPException(status_code=404, detail="background jobs are not enabled here")
+    return _jobs
+
+
+@app.get("/api/jobs")
+async def get_jobs() -> JsonDict:
+    """This workspace's background jobs, running and finished (newest first).
+
+    Read off the job containers themselves, so jobs started before this core
+    did are listed too. ``max`` is how many may run at once on this machine.
+    """
+    if _jobs is None:
+        return {"enabled": False, "jobs": [], "max": 0}
+    try:
+        listed = await asyncio.to_thread(_jobs.list)
+    except jobs.JobError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"enabled": True, "jobs": [j.public() for j in listed], "max": settings.max_jobs()}
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job(job_id: str, tail: int = 200) -> JsonDict:
+    """One job and the last lines its container wrote."""
+    manager = _job_manager()
+    try:
+        job = await asyncio.to_thread(manager.get, job_id)
+        logs = await asyncio.to_thread(manager.logs, job_id, tail)
+    except jobs.JobError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {**job.public(), "logs": _clip_output(logs)}
+
+
+@app.post("/api/jobs/{job_id}/stop")
+async def post_stop_job(job_id: str) -> JsonDict:
+    """Stop a running job (it gets a moment to save its state first)."""
+    manager = _job_manager()
+    try:
+        job = await asyncio.to_thread(manager.stop, job_id)
+    except jobs.JobError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _audit.info("job stopped from the UI: %s", job_id)
+    return job.public()
+
+
+@app.delete("/api/jobs/{job_id}")
+async def delete_job(job_id: str) -> JsonDict:
+    """Forget a finished job (removes its container). A running one must be stopped first."""
+    manager = _job_manager()
+    try:
+        job = await asyncio.to_thread(manager.get, job_id)
+    except jobs.JobError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if job.running:
+        raise HTTPException(status_code=409, detail="job is still running")
+    try:
+        await asyncio.to_thread(manager.remove, job_id)
+    except jobs.JobError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"ok": True}
+
+
 # ── WebSocket chat ─────────────────────────────────────────
 #
 # Wire protocol (JSON messages):
@@ -3580,6 +3705,12 @@ class _ChatConnection:
             pathcheck.coerce_arguments(tool_call.get("rawInput")),
             path_findings,
         )
+        # A call that starts a background job says so, whatever the model says.
+        job_stack, job_tool = provenance.split_tool_name(
+            str(tool_call.get("toolName") or title), self._server_names
+        )
+        if _jobs is not None and _jobs.declares(job_stack, job_tool):
+            rule_keys = _merge_keys(rule_keys, ["background_job"])
 
         # A stack tool can be approved once for the rest of the chat. Calls it then
         # covers are answered here; anything that needs a look is still shown, and
@@ -3671,7 +3802,12 @@ class _ChatConnection:
         stack, tool = provenance.split_tool_name(name, self._server_names)
         if stack == "builtin":
             return
-        _approvals.grant(stack, tool, pathcheck.coerce_arguments(tool_call.get("rawInput")))
+        _approvals.grant(
+            stack,
+            tool,
+            pathcheck.coerce_arguments(tool_call.get("rawInput")),
+            session=self.canonical_id,
+        )
 
     async def _explain_permission(
         self, req_id: int, tool_call: JsonDict, cached: JsonDict, rule_keys: list[str]

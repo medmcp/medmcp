@@ -18,6 +18,8 @@ Notable, user-visible changes to MedMCP. Format follows
 - Workflows: when a cohort plan's columns cannot be matched to a workflow's inputs, the run editor asks which column is which.
 - Workflows: a workflow lists its past runs; each can be reopened and downloaded as one JSON file or a Markdown report (`GET /api/runs/{id}/export`).
 - Provenance: a chat's record names each stack's image digest and the MedMCP version.
+- Stacks: background jobs. A stack can declare a job runner in its image label; an approved call of one of its job tools (an nnU-Net training) then runs in its own container, which keeps running when the chat is idle or closed, when another GPU stack is used and when MedMCP restarts. One job at a time by default (`MEDMCP_MAX_JOBS`); `MEDMCP_STACK_JOBS=0` turns jobs off.
+- Jobs: `/api/jobs` lists, shows and stops them; the Tool stacks window shows running jobs with a Stop button; a job's start, image and arguments are recorded in the provenance of the chat that approved it.
 
 ### Fixed
 
@@ -30,6 +32,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Security
 
+- Docker guard: a container named or labelled as a job is created only with no network, the workspace as its only mount and the job command its image declares; images carrying a job label are refused.
 - Images: uv 0.13.7 and Docker Compose 5.7.0, for critical advisories in their bundled zip and gRPC libraries.
 
 ## 0.7.4 — 2026-11-04

@@ -350,6 +350,31 @@ class TestReport:
         assert "decision: allow" in report
         assert "data/x/brain.nii.gz" in report
 
+    def test_a_started_job_is_recorded_with_its_image_and_arguments(self, tmp_path: Path) -> None:
+        """A job outlives its chat; its start is in the run log and the report."""
+        with patch.object(provenance, "VIBE_HOME", tmp_path):
+            provenance.record_job_started(
+                SESSION_ID,
+                job_id="0123456789ab",
+                server="medmcp-nnunet",
+                tool="start_training",
+                arguments={"dataset": "4", "fold": 0},
+                image="ghcr.io/medmcp/nnunet:main",
+                image_id="sha256:" + "a" * 64,
+                image_digest="sha256:" + "d" * 64,
+                command=["medmcp-nnunet-job", "call", "start_training", "{}"],
+                container="medmcp-job-0123456789ab",
+                gpu=True,
+            )
+            (event,) = provenance.read_run_events(SESSION_ID)
+            report = provenance.render_report(SESSION_ID)
+        assert event["event"] == "job_started" and event["arguments"]["dataset"] == "4"
+        assert event["job"]["image_id"] == "sha256:" + "a" * 64
+        assert "## Background jobs (1)" in report
+        assert "`medmcp-nnunet:start_training` — job `0123456789ab`" in report
+        assert "sha256:" + "d" * 64 in report
+        assert "## Tool calls (0)" in report  # a job is not counted as a tool call
+
     def test_write_report_returns_none_when_empty(self, tmp_path: Path) -> None:
         """No manifest and no events → no report file is written."""
         with patch.object(provenance, "VIBE_HOME", tmp_path):

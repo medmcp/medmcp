@@ -100,12 +100,18 @@ analysis pipelines through natural-language instructions.
     `export_cohort` (no `scans_dir`) first and pass its CSV.
   - Models and volumes → the matching tool (`regress`, `survival`,
     `extract_lesion_volume`, …).
-- Selecting scans by orientation or sequence (e.g. "sagittal T2", "coronal") →
-  never guess from file names and never write a script for it. Read each scan's
-  geometry with an inspection tool (`describe_image` from tptbox, or
-  `inspect_nifti` from the DICOM stack): the axis with the thickest slices is the
-  acquisition plane. For DICOM series, `classify_series` reads the series
-  description. If no such tool is available, say so and ask.
+- **Any question about what a folder of scans contains** — how many subjects,
+  sessions or timepoints, which sequences, how far apart the sessions are, which
+  scans are axial/coronal/sagittal, which have contrast, what is missing — and any
+  request to **select or filter scans** → the cohort stack's dataset tools, in
+  this order: `index_dataset` once for the folder (it reads the image headers and
+  writes a table with one row per scan), then `summarize_dataset` for counts,
+  sessions, intervals and missing scans, or `select_series` to pick scans by
+  sequence, contrast, orientation or session. Do not list the folder with
+  `ls`/`find`, do not read sidecar or DICOM files one by one, and do not compute
+  dates, intervals or counts yourself: the tools return them.
+- A value the tools report as `unknown` stays unknown: say so, and say what
+  would settle it. Never fill it in from a file name or a guess.
 - Do not write Python scripts to select, filter or sort a cohort; use the cohort
   tools, or ask the user if they cannot do what is needed.
 - Rule of thumb: if you're about to shell out to touch a `.csv`/`.h5ad`/`.nii.gz`,

@@ -2297,6 +2297,41 @@ def _ensure_pathguard_hook(vibe_home: Path) -> None:
     posture.enforce_hooks(vibe_home / "hooks.toml")
 
 
+# vibe caches each server's tool list under a hash of its whole launch entry, for
+# a day. A stack reinstalled or pulled under the same tag (or launched through the
+# proxy shim, whose entry never names the image) would keep its old tool list, and
+# the model would never see a new tool. The content id of the image goes into the
+# entry's env so the hash, and with it the cache key, changes with the image.
+STACK_REVISION_ENV: str = "MEDMCP_STACK_REVISION"
+
+
+def _stack_revision(entry: JsonDict) -> str | None:
+    """Content id of a container stack's image, ``None`` for anything else."""
+    if Path(str(entry.get("command", ""))).name != "docker":
+        return None
+    args = cast("list[str]", entry.get("args") or [])
+    if not args:
+        return None
+    return cast("str | None", image_identity(args[-1]).get("id"))
+
+
+def _stamp_stack_revisions(entries: list[JsonDict], revisions: dict[str, str | None]) -> None:
+    """Set or clear ``MEDMCP_STACK_REVISION`` in each entry's env (see above)."""
+    for entry in entries:
+        if entry.get("url"):
+            continue
+        revision = revisions.get(str(entry.get("name", "")))
+        env = dict(cast("dict[str, str]", entry.get("env") or {}))
+        if revision:
+            env[STACK_REVISION_ENV] = revision
+        else:
+            env.pop(STACK_REVISION_ENV, None)
+        if env:
+            entry["env"] = env
+        else:
+            entry.pop("env", None)
+
+
 def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
     """Write the resolved agent configuration into ``.vibe/config.toml``.
 
@@ -2414,6 +2449,7 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
     # External servers are exempt: the pool exists to amortise process spawn and
     # CUDA init for local stacks, and there is no such cost to amortise for an
     # HTTP endpoint — routing one through a spawn-shim would only break it.
+    revisions = {e["name"]: _stack_revision(e) for e in new_entries if not e.get("url")}
     if stack_pool_enabled():
         _write_backend_registry([s for s in servers if not s.get("external")])
         ws_root = os.environ.get("MEDMCP_WORKSPACE") or None
@@ -2422,6 +2458,7 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
         ]
     else:
         _strip_pool_env(new_entries)
+    _stamp_stack_revisions(new_entries, revisions)
 
     cfg["mcp_servers"] = new_entries
 

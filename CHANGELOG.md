@@ -23,6 +23,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Fixed
 
+- Stacks: after a stack is updated or reinstalled under the same image name, the assistant sees its new tools. Before, it kept the previous tool list for up to a day, so a newly added tool such as `check_dataset` could not be found.
 - Stacks: installing a stack from the catalog or by image works again with `docker compose`; since 0.7.2 the docker guard refused the image lookup.
 - Workflows: a cohort roll-out no longer binds a tool's output file to the subject's input file. A plan column whose name appeared in the output's file name was taken for it, so every subject's output pointed at its own scan.
 - Workflows: a run whose output would overwrite one of its inputs, and two rows that would write the same file, are refused in the preview and by the engine, with the reason per row. They were shown with a warning before.

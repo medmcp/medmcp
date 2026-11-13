@@ -82,6 +82,7 @@ LABEL org.opencontainers.image.source="https://github.com/medmcp/medmcp" \
 ENV PATH=/app/.venv/bin:$PATH \
     UV_NO_SYNC=1 \
     MEDMCP_BUILD=$MEDMCP_BUILD \
+    MEDMCP_REVISION=$MEDMCP_REVISION \
     MEDMCP_WORKSPACE_HOST=0.0.0.0 \
     OLLAMA_BASE_URL=http://llm:11434
 

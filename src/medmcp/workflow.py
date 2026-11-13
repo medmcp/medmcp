@@ -25,11 +25,11 @@ import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import yaml
 
-from medmcp import provenance
+from medmcp import pathcheck, provenance
 
 JsonDict = dict[str, Any]
 
@@ -136,6 +136,10 @@ class Recipe:
     inputs: list[WorkflowInput] = field(default_factory=list[WorkflowInput])
     steps: list[RecipeStep] = field(default_factory=list[RecipeStep])
     requires: list[StackRequirement] = field(default_factory=list[StackRequirement])
+    source: dict[str, str] = field(default_factory=dict[str, str])
+    """Where the recipe came from: ``session_id`` and ``model`` of the chat it was
+    distilled from, when known. Links a run of the workflow back to the chat's
+    own provenance record; never used by the replay engine."""
     manual_steps: list[str] = field(default_factory=list[str])
     """Built-in (non-MCP) steps dropped from the replayable recipe, kept as a note.
 
@@ -156,6 +160,8 @@ class Recipe:
             out["requires"] = [r.to_dict() for r in self.requires]
         if self.manual_steps:
             out["manual_steps"] = list(self.manual_steps)
+        if self.source:
+            out["source"] = dict(self.source)
         return out
 
     @classmethod
@@ -194,6 +200,12 @@ class Recipe:
             for r in cast("list[JsonDict]", data.get("requires") or [])
         ]
         manual_steps = [str(m) for m in cast("list[Any]", data.get("manual_steps") or [])]
+        raw_source = data.get("source")
+        source = (
+            {str(k): str(v) for k, v in cast("JsonDict", raw_source).items()}
+            if isinstance(raw_source, dict)
+            else {}
+        )
         return cls(
             name=str(data.get("name", "")),
             description=str(data.get("description", "")),
@@ -201,7 +213,63 @@ class Recipe:
             steps=steps,
             requires=requires,
             manual_steps=manual_steps,
+            source=source,
         )
+
+
+# ── What an input is used as ─────────────────────────────────────────────────
+
+_REF_RE = re.compile(r"\{\{([^{}]+)\}\}")
+
+# Parameter-name tokens that say an output argument is a folder, not a file.
+_DIR_TOKENS = frozenset({"dir", "dirs", "folder", "directory", "root"})
+
+OutputKind = Literal["file", "dir"]
+
+
+def input_argument_names(recipe: Recipe) -> dict[str, str]:
+    """Map each ``in_N`` to the argument name it is first used as.
+
+    An input's own name (``in_1``) says nothing about what a tool does with it;
+    the first step argument that references the placeholder does — ``input_path``
+    must exist, ``output_dir`` is written to. A reference through ``dir(...)``
+    counts for the input it wraps.
+    """
+    names: dict[str, str] = {}
+    for step in recipe.steps:
+        for key, value in step.arguments.items():
+            if not isinstance(value, str):
+                continue
+            for match in _REF_RE.finditer(value):
+                ref = match.group(1).strip()
+                inner = ref[4:-1].strip() if ref.startswith("dir(") and ref.endswith(")") else ref
+                names.setdefault(inner, key)
+    return names
+
+
+def input_roles(recipe: Recipe) -> dict[str, pathcheck.PathRole]:
+    """Classify each declared input as something a tool reads or writes.
+
+    The role comes from the name of the argument the input is first bound to
+    (see :func:`medmcp.pathcheck.classify_role`); an input no step references is
+    ``unknown``.
+    """
+    names = input_argument_names(recipe)
+    return {
+        i.name: pathcheck.classify_role(names[i.name]) if i.name in names else "unknown"
+        for i in recipe.inputs
+    }
+
+
+def output_kind(param: str) -> OutputKind:
+    """Whether an output argument names a folder (``output_dir``) or a file.
+
+    Only the parameter name decides. A name that does not say "folder" is read as
+    a file: a path written *as* is the safer reading than a folder written *into*,
+    because it is the one an input can be overwritten through.
+    """
+    tokens = {t.lower() for t in re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]+", param)}
+    return "dir" if tokens & _DIR_TOKENS else "file"
 
 
 # ── On-disk layout ───────────────────────────────────────────────────────────

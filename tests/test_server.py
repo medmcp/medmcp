@@ -1501,6 +1501,16 @@ class TestReplayRuns:
             yield _call
 
         monkeypatch.setattr(replay, "mcp_caller", fake_caller)
+
+        # The test client's loop ends with the socket; keep record-keeping on it.
+        async def inline(fn: Callable[[], object]) -> object:
+            return fn()
+
+        def no_image(image: str) -> dict[str, Any]:
+            return {"digest": "sha256:" + "ab" * 32, "id": None}
+
+        monkeypatch.setattr(runs, "_to_thread", inline)
+        monkeypatch.setattr(settings, "image_identity", no_image)
         return workspace
 
     def test_preview_flags_a_missing_input_per_item(self, env: Path, client: TestClient) -> None:
@@ -1549,6 +1559,241 @@ class TestReplayRuns:
         )
         assert client.delete(f"/api/runs/{run_id}").status_code == 200
         assert client.get(f"/api/runs/{run_id}").status_code == 404
+
+    def _import_reorient(self, client: TestClient) -> None:
+        """A workflow that reads ``in_1`` and writes the file ``in_2``."""
+        envelope = yaml.safe_dump(
+            {
+                "medmcp_workflow": 1,
+                "name": "reorient",
+                "description": "demo",
+                "inputs": [
+                    {"name": "in_1", "example": "/d/p1/consensus_gt.nii.gz"},
+                    {"name": "in_2", "example": "/d/out/consensus_gt_RAS.nii.gz"},
+                ],
+                "steps": [
+                    {
+                        "server": "medmcp-neuro",
+                        "tool": "reorient",
+                        "arguments": {"input_path": "{{in_1}}", "output_path": "{{in_2}}"},
+                    }
+                ],
+            }
+        )
+        assert client.post("/api/workflows/import", json={"content": envelope}).status_code == 200
+
+    def test_preview_refuses_an_output_on_its_input(self, env: Path, client: TestClient) -> None:
+        """Output bound to the input file: the item is refused with the reason."""
+        self._import_reorient(client)
+        (env / "b.nii.gz").write_bytes(b"x")
+        resp = client.post(
+            "/api/workflows/reorient/replay-preview",
+            json={
+                "runs": [
+                    {"in_1": "t1.nii.gz", "in_2": "t1.nii.gz"},
+                    {"in_1": "b.nii.gz", "in_2": "new/deep/b_RAS.nii.gz"},
+                ]
+            },
+        )
+        items = resp.json()["items"]
+        assert [i["ok"] for i in items] == [False, True]
+        assert "overwrite its own input" in items[0]["error"]
+        # The output folder does not exist yet: that is the run's job, not an error.
+        out = next(f for f in items[1]["findings"] if f["role"] == "output")
+        assert out["severity"] == "info" and "created" in out["note"]
+
+    def test_preview_refuses_two_items_with_one_output(self, env: Path, client: TestClient) -> None:
+        """Both rows that would write the same file are refused, each naming the other."""
+        self._import_reorient(client)
+        (env / "b.nii.gz").write_bytes(b"x")
+        resp = client.post(
+            "/api/workflows/reorient/replay-preview",
+            json={
+                "runs": [
+                    {"in_1": "t1.nii.gz", "in_2": "out/r.nii.gz"},
+                    {"in_1": "b.nii.gz", "in_2": "out/r.nii.gz"},
+                ]
+            },
+        )
+        body = resp.json()
+        assert body["ok"] is False
+        assert "item 2" in body["items"][0]["error"] and "item 1" in body["items"][1]["error"]
+
+    def test_batch_from_plan_places_outputs_under_a_root(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """The plan's file column feeds the input; the output gets a folder per subject."""
+        self._import_reorient(client)
+        for subject in ("p1", "p2"):
+            (env / subject).mkdir()
+            (env / subject / "consensus_gt.nii.gz").write_bytes(b"x")
+        plan = env / "batch_plan.csv"
+        plan.write_text(
+            "subject,consensus_gt,status,reason\n"
+            f"1,{env}/p1/consensus_gt.nii.gz,ok,\n"
+            f"2,{env}/p2/consensus_gt.nii.gz,ok,\n"
+        )
+        body = client.post(
+            "/api/workflows/reorient/batch-from-plan", json={"plan_csv": "batch_plan.csv"}
+        ).json()
+        assert body["ok"] is True
+        assert body["column_map"] == {"in_1": "consensus_gt"}
+        assert body["labels"] == ["1", "2"]
+        assert body["output_root"] == str(env / "results" / "reorient")
+        assert [r["in_2"] for r in body["runs"]] == [
+            str(env / "results" / "reorient" / s / "consensus_gt_RAS.nii.gz") for s in ("1", "2")
+        ]
+        chosen = client.post(
+            "/api/workflows/reorient/batch-from-plan",
+            json={"plan_csv": "batch_plan.csv", "output_root": "mine"},
+        ).json()
+        assert chosen["runs"][0]["in_2"] == str(env / "mine" / "1" / "consensus_gt_RAS.nii.gz")
+        outside = client.post(
+            "/api/workflows/reorient/batch-from-plan",
+            json={"plan_csv": "batch_plan.csv", "output_root": "/etc"},
+        )
+        assert outside.status_code == 400
+
+    def test_batch_from_plan_names_the_columns_when_it_cannot_map(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """An unmatched input comes back with the columns to choose from, and a map fixes it."""
+        self._import_reorient(client)
+        plan = env / "batch_plan.csv"
+        plan.write_text(
+            f"subject,mask,lesions,status,reason\n1,{env}/t1.nii.gz,{env}/x.nii.gz,ok,\n"
+        )
+        body = client.post(
+            "/api/workflows/reorient/batch-from-plan", json={"plan_csv": "batch_plan.csv"}
+        ).json()
+        assert body["ok"] is False
+        assert body["columns"] == ["mask", "lesions"] and body["unmapped"] == ["in_1"]
+        fixed = client.post(
+            "/api/workflows/reorient/batch-from-plan",
+            json={"plan_csv": "batch_plan.csv", "column_map": {"in_1": "mask"}},
+        ).json()
+        assert fixed["ok"] is True and fixed["runs"][0]["in_1"] == str(env / "t1.nii.gz")
+
+    def test_run_record_is_self_contained_and_exportable(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """Labels, manifest copy, environment, results and confirmation reach the record."""
+        (env / "sel.csv").write_text("subject_id,path\nP1,t1.nii.gz\n")
+        (env / "brain.nii.gz").write_bytes(b"brain")
+        bindings = [{"in_1": "t1.nii.gz"}]
+        assert (
+            client.post("/api/workflows/strip/replay-preview", json={"runs": bindings}).status_code
+            == 200
+        )
+        with client.websocket_connect("/ws/replay", headers=WS_HEADERS) as ws:
+            ws.send_json(
+                {"name": "strip", "runs": bindings, "labels": ["P1/ses-1"], "manifest": "sel.csv"}
+            )
+            frames: list[dict[str, Any]] = []
+            while not frames or frames[-1]["type"] != "result":
+                frames.append(ws.receive_json())
+        assert frames[0]["labels"] == ["P1/ses-1"]
+        run_id = frames[0]["run_id"]
+
+        record = client.get(f"/api/runs/{run_id}").json()
+        assert record["items"][0]["label"] == "P1/ses-1"
+        step = record["items"][0]["steps"][0]
+        assert step["result"] == {"brain_path": str(env / "brain.nii.gz")}
+        assert record["recipe"]["steps"][0]["tool"] == "skull_strip"
+        assert record["confirmation"]["previewed"] is True
+        assert record["manifest"]["copy"] == "manifest.csv"
+        assert record["environment"]["medmcp"]["version"]
+
+        exported = client.get(f"/api/runs/{run_id}/export")
+        assert exported.headers["content-disposition"].endswith(f'run-{run_id}.json"')
+        assert exported.json()["manifest"]["text"].startswith("subject_id,path")
+        report = client.get(f"/api/runs/{run_id}/export", params={"format": "md"})
+        assert "# MedMCP run report" in report.text and "P1/ses-1" in report.text
+        assert client.get("/api/runs/nope/export").status_code == 404
+
+    def test_a_start_that_was_never_previewed_says_so(self, env: Path, client: TestClient) -> None:
+        """The record does not claim a confirmation that did not happen."""
+        with client.websocket_connect("/ws/replay", headers=WS_HEADERS) as ws:
+            ws.send_json({"name": "strip", "runs": [{"in_1": "t1.nii.gz"}]})
+            frames: list[dict[str, Any]] = []
+            while not frames or frames[-1]["type"] != "result":
+                frames.append(ws.receive_json())
+        record = client.get(f"/api/runs/{frames[0]['run_id']}").json()
+        assert record["confirmation"]["previewed"] is False
+
+    def test_a_selection_manifest_feeds_the_roll_out(self, env: Path, client: TestClient) -> None:
+        """One row per selected series: the single input takes ``path``, no status needed."""
+        for subject in ("P1", "P2"):
+            (env / subject).mkdir()
+            (env / subject / "FLAIR.nii.gz").write_bytes(b"x")
+        (env / ".medmcp").mkdir()
+        (env / ".medmcp" / "sel_series.csv").write_text(
+            "subject_id,session_id,sequence,contrast,plane,path\n"
+            f"P1,ses-1,FLAIR,no,axial,{env}/P1/FLAIR.nii.gz\n"
+            "P2,ses-1,FLAIR,no,axial,P2/FLAIR.nii.gz\n"
+        )
+        body = client.post(
+            "/api/workflows/strip/batch-from-plan", json={"plan_csv": ".medmcp/sel_series.csv"}
+        ).json()
+        assert body["ok"] is True and body["kind"] == "selection"
+        assert body["labels"] == ["P1/ses-1", "P2/ses-1"]
+        assert [r["in_1"] for r in body["runs"]] == [
+            str(env / "P1" / "FLAIR.nii.gz"),
+            str(env / "P2" / "FLAIR.nii.gz"),
+        ]
+        assert body["roles"] == [{"role": "FLAIR-contrast", "series": 2, "units": 2}]
+
+    def test_a_selection_asks_for_roles_then_pivots(self, env: Path, client: TestClient) -> None:
+        """Two reading inputs: the endpoint offers the roles, then binds per subject-session."""
+        envelope = yaml.safe_dump(
+            {
+                "medmcp_workflow": 1,
+                "name": "onto",
+                "description": "demo",
+                "inputs": [
+                    {"name": "in_1", "example": "/d/FLAIR.nii.gz"},
+                    {"name": "in_2", "example": "/d/T1WKS.nii.gz"},
+                    {"name": "in_3", "example": "/d/out/FLAIR_on_T1.nii.gz"},
+                ],
+                "steps": [
+                    {
+                        "server": "medmcp-neuro",
+                        "tool": "resample",
+                        "arguments": {
+                            "input_path": "{{in_1}}",
+                            "reference_path": "{{in_2}}",
+                            "output_path": "{{in_3}}",
+                        },
+                    }
+                ],
+            }
+        )
+        assert client.post("/api/workflows/import", json={"content": envelope}).status_code == 200
+        (env / "sel_series.csv").write_text(
+            "subject_id,session_id,sequence,contrast,plane,path\n"
+            f"P1,,FLAIR,no,axial,{env}/P1/FLAIR.nii.gz\n"
+            f"P1,,T1,yes,axial,{env}/P1/T1WKS.nii.gz\n"
+            f"P2,,FLAIR,no,axial,{env}/P2/FLAIR.nii.gz\n"
+        )
+        asked = client.post(
+            "/api/workflows/onto/batch-from-plan", json={"plan_csv": "sel_series.csv"}
+        ).json()
+        assert asked["ok"] is False and asked["unmapped"] == ["in_1", "in_2"]
+        assert [r["role"] for r in asked["roles"]] == ["FLAIR-contrast", "T1+contrast"]
+        bound = client.post(
+            "/api/workflows/onto/batch-from-plan",
+            json={
+                "plan_csv": "sel_series.csv",
+                "role_map": {"in_1": "FLAIR", "in_2": "T1+contrast"},
+            },
+        ).json()
+        assert bound["ok"] is True and bound["labels"] == ["P1"]
+        assert bound["runs"][0]["in_3"] == str(
+            env / "results" / "onto" / "P1" / "FLAIR_on_T1.nii.gz"
+        )
+        assert bound["skipped"] == [
+            {"subject": "P2", "status": "missing", "reason": "no T1+contrast series for in_2"}
+        ]
 
     def test_bad_first_message_is_refused(self, env: Path, client: TestClient) -> None:
         """Neither a start nor an attach: the socket answers with an error and closes."""

@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import hashlib
 import importlib
 import io
 import json
@@ -47,9 +48,10 @@ import shutil
 import time
 import zipfile
 from collections.abc import AsyncGenerator, Coroutine, Iterator
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from urllib.parse import quote
 
 import uvicorn
@@ -85,6 +87,7 @@ from medmcp import (
     provenance,
     replay,
     riskcheck,
+    runrecord,
     runs,
     sessions,
     settings,
@@ -1849,6 +1852,26 @@ def _confined_input_paths(inputs: dict[str, str]) -> dict[str, str]:
     return {key: _confined_input_path(value) for key, value in inputs.items()}
 
 
+# Bindings the run screen has previewed, keyed by a hash of the workflow and the
+# exact rows, with when. A run records whether what it was asked to start is what
+# a preview showed; bounded, in memory, and never a gate (the engine's own checks
+# are) — it is the record's answer to "was this confirmed?".
+_previewed: dict[str, str] = {}
+_PREVIEWED_MAX = 256
+
+
+def _binding_key(name: str, bindings: list[dict[str, str]]) -> str:
+    """A stable fingerprint of one workflow run over these exact bindings."""
+    blob = json.dumps([name, bindings], sort_keys=True).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _remember_preview(name: str, bindings: list[dict[str, str]]) -> None:
+    _previewed[_binding_key(name, bindings)] = datetime.now(UTC).isoformat(timespec="seconds")
+    while len(_previewed) > _PREVIEWED_MAX:
+        _previewed.pop(next(iter(_previewed)))
+
+
 class ReplayPreviewPayload(BaseModel):
     """Request body for previewing a replay's resolved steps.
 
@@ -1856,25 +1879,6 @@ class ReplayPreviewPayload(BaseModel):
     """
 
     runs: list[dict[str, str]]
-
-
-def _input_argument_names(recipe: workflow.Recipe) -> dict[str, str]:
-    """Map each ``in_N`` to the argument name it is first used as.
-
-    The path checker classifies a path by its *parameter name* — ``input_path``
-    must exist, ``output_dir`` need not — and the input's own name (``in_1``)
-    says nothing. The first step argument that references the placeholder gives
-    the role the tool assigns it.
-    """
-    names: dict[str, str] = {}
-    for step in recipe.steps:
-        for key, value in step.arguments.items():
-            if not isinstance(value, str):
-                continue
-            for ref in replay.unresolved_refs(value):
-                inner = ref[4:-1].strip() if ref.startswith("dir(") and ref.endswith(")") else ref
-                names.setdefault(inner, key)
-    return names
 
 
 def _preflight_item(
@@ -1886,17 +1890,25 @@ def _preflight_item(
     """Everything the run screen wants to say about one item before it runs.
 
     ``error`` is the engine's own validation (a missing input, an uninstalled
-    stack). ``findings`` are the path checks on the *bound inputs* — the files
-    the person just pointed at — reported with the role the tool gives them, so
-    a missing scan is an error and an output folder that already holds results
-    is a warning about overwriting, not a false alarm.
+    stack, an output that would overwrite an input). ``findings`` are the path
+    checks on the *bound inputs* — the files the person just pointed at —
+    reported with the role the tool gives them, so a missing scan is an error
+    and an output folder that already holds results is a warning about
+    overwriting, not a false alarm. An output whose folder does not exist yet
+    is not an error here: the run creates it.
     """
-    error = replay.validate(recipe, inputs, servers)
+    error = replay.validate(recipe, inputs, servers, base=WORKSPACE_ROOT)
     if error is not None:
         return {"ok": False, "error": error, "findings": []}
     bound = replay.apply_input_defaults(recipe, inputs)
     checked = {arg_names.get(name, name): value for name, value in bound.items()}
     findings = pathcheck.check_tool_call_paths(checked, WORKSPACE_ROOT, containerized=True)
+    for finding in findings:
+        if finding["role"] == "output" and finding["status"] == "parent_missing":
+            finding["status"] = "ok"
+            finding["severity"] = "info"
+            finding["note"] = "the folder will be created"
+            finding["nearest"], finding["entries"], finding["entry_total"] = "", [], 0
     blocking = any(f["severity"] == "error" for f in findings)
     return {
         "ok": not blocking,
@@ -1912,18 +1924,26 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
     Inputs are bound now; cross-step refs (``{{stepM.*}}``) resolve at runtime,
     so they intentionally still show as placeholders in the preview. Every item
     is pre-flighted (see :func:`_preflight_item`) so a typo in one of forty rows
-    is caught here rather than by the tool, after the stacks were spawned.
+    is caught here rather than by the tool, after the stacks were spawned. An
+    item whose output would land on one of its inputs, or on another item's
+    output, is refused with the reason — never offered with a warning.
     """
 
     def _preview() -> JsonDict:
         recipe = workflow.load_workflow(name)
         bindings_list = [_confined_input_paths(dict(r)) for r in payload.runs]
         servers = settings.active_servers()
-        arg_names = _input_argument_names(recipe)
+        arg_names = workflow.input_argument_names(recipe)
         items = [
             {"index": i, **_preflight_item(recipe, b, servers, arg_names)}
             for i, b in enumerate(bindings_list)
         ]
+        # Two rows that would write to the same place: neither runs until they
+        # are told apart (the engine refuses them too, see replay.run_batch).
+        clashes = replay.batch_output_collisions(recipe, bindings_list, base=WORKSPACE_ROOT)
+        for index, reason in clashes.items():
+            if items[index]["error"] is None:
+                items[index].update(ok=False, error=reason)
         first_ok = next((i for i, item in enumerate(items) if item["error"] is None), None)
         if first_ok is None and items:
             return {"ok": False, "error": items[0]["error"], "steps": [], "items": items}
@@ -1950,6 +1970,12 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
                 )
                 return {"ok": False, "error": error, "steps": steps, "items": items}
         ready = sum(1 for item in items if item["ok"])
+        # What the Run button sends is the rows that passed, so that is what a
+        # start is compared against (see _binding_key).
+        _remember_preview(
+            name, [b for b, item in zip(bindings_list, items, strict=True) if item["ok"]]
+        )
+        _remember_preview(name, bindings_list)
         return {
             "ok": ready > 0,
             "error": None if ready > 0 else "no item can run",
@@ -1966,9 +1992,96 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
 
 
 class BatchFromPlanPayload(BaseModel):
-    """Request body: a workspace-relative ``plan_batch`` manifest CSV."""
+    """Request body: a workspace-relative ``plan_batch`` manifest CSV.
+
+    ``column_map`` names the manifest column for a recipe input the automatic
+    matching could not place; ``output_root`` is the folder results go under
+    (one sub-folder per subject). Left empty, the manifest's own ``output_dir``
+    column decides, and failing that ``results/<workflow>`` in the workspace.
+    """
 
     plan_csv: str
+    column_map: dict[str, str] = Field(default_factory=dict[str, str])
+    role_map: dict[str, str] = Field(default_factory=dict[str, str])
+    """For a ``select_series`` manifest: which series feeds which input, e.g.
+    ``{"in_1": "FLAIR", "in_2": "T1+contrast"}``."""
+    output_root: str = ""
+
+
+def _default_output_root(recipe: workflow.Recipe) -> Path:
+    """Where a roll-out writes when nobody said: ``results/<workflow>`` in the workspace."""
+    return WORKSPACE_ROOT / "results" / recipe.name
+
+
+def _confined_output_root(value: str) -> Path:
+    """An output root given by the client, as an absolute path inside the workspace.
+
+    Raises:
+        ValueError: the folder resolves outside :data:`WORKSPACE_ROOT`.
+    """
+    path = Path(value)
+    resolved = (path if path.is_absolute() else WORKSPACE_ROOT / path).resolve()
+    if not resolved.is_relative_to(WORKSPACE_ROOT):
+        raise ValueError(f"output folder is outside the workspace: {value!r}")
+    return resolved
+
+
+def _bind_selection(
+    recipe: workflow.Recipe, rows: list[dict[str, str]], payload: BatchFromPlanPayload
+) -> JsonDict:
+    """Bind a ``select_series`` manifest: one run per series, or per subject-session.
+
+    When the workflow reads several files and the roles are not all known, the
+    answer carries the roles the selection offers (``roles``) and the inputs
+    still to assign (``unmapped``), so the editor can ask instead of guessing.
+    """
+    root: Path | None = None
+    if payload.output_root.strip():
+        root = _confined_output_root(payload.output_root.strip())
+    elif batchplan.output_inputs(recipe):
+        root = _default_output_root(recipe)
+    offered = batchplan.selection_roles(rows)
+    plan_path = Path(_confined_input_path(payload.plan_csv))
+    try:
+        binding = batchplan.runs_from_selection(
+            recipe,
+            rows,
+            role_map=payload.role_map or None,
+            output_root=root,
+            base_dir=batchplan.dataset_dir(plan_path),
+        )
+    except batchplan.NeedsRolesError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "kind": "selection",
+            "runs": [],
+            "skipped": [],
+            "roles": offered,
+            "unmapped": exc.unmapped,
+            "role_map": exc.role_map,
+        }
+    except batchplan.BatchPlanError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "kind": "selection",
+            "runs": [],
+            "skipped": [],
+            "roles": offered,
+        }
+    return {
+        "ok": True,
+        "error": None,
+        "kind": "selection",
+        "runs": [_confined_input_paths(r) for r in binding.runs],
+        "labels": binding.labels,
+        "skipped": binding.skipped,
+        "roles": offered,
+        "role_map": binding.role_map,
+        "output_inputs": binding.output_inputs,
+        "output_root": binding.output_root,
+    }
 
 
 @app.post("/api/workflows/{name}/batch-from-plan")
@@ -1976,10 +2089,18 @@ async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> Json
     """Turn a ``plan_batch`` manifest into ready-to-run batch bindings for a workflow.
 
     Reads the cohort manifest CSV (written by the cohort stack's ``plan_batch``),
-    maps each ``ok`` row's resolved files onto the recipe's ``{{in_N}}`` inputs, and
+    maps each ``ok`` row's resolved files onto the recipe inputs a tool reads, and
     returns the per-subject runs that pre-fill the batch editor — so the user
     reviews the binding list instead of hand-entering one row per subject. Flagged
     rows (missing/ambiguous) are returned separately to be resolved, never run.
+
+    Inputs a tool *writes* are not read from the manifest's file columns: each
+    item gets its own folder under the output root (see
+    :mod:`medmcp.batchplan`). When an input cannot be matched, the answer names
+    the columns to choose from (``columns``/``unmapped``) so the editor can ask.
+
+    A ``select_series`` manifest (one row per selected series) is accepted on the
+    same route and bound by :func:`_bind_selection`.
     """
 
     def _build() -> JsonDict:
@@ -1988,16 +2109,44 @@ async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> Json
             rows = batchplan.read_manifest(_confined_input_path(payload.plan_csv))
         except OSError as exc:
             return {"ok": False, "error": f"cannot read plan: {exc}", "runs": [], "skipped": []}
+        if batchplan.is_selection(rows):
+            return _bind_selection(recipe, rows, payload)
+        columns = batchplan.role_columns(rows)
+        has_plan_dirs = bool(rows) and "output_dir" in rows[0]
+        root: Path | None = None
+        if payload.output_root.strip():
+            root = _confined_output_root(payload.output_root.strip())
+        elif not has_plan_dirs and batchplan.output_inputs(recipe):
+            root = _default_output_root(recipe)
         try:
-            binding = batchplan.runs_from_manifest(recipe, rows)
+            binding = batchplan.runs_from_manifest(
+                recipe, rows, column_map=payload.column_map or None, output_root=root
+            )
         except batchplan.BatchPlanError as exc:
-            return {"ok": False, "error": str(exc), "runs": [], "skipped": []}
+            readable = [
+                i.name for i in recipe.inputs if i.name not in batchplan.output_inputs(recipe)
+            ]
+            guessed = batchplan.infer_column_map(recipe, rows)
+            return {
+                "ok": False,
+                "error": str(exc),
+                "runs": [],
+                "skipped": [],
+                "columns": columns,
+                "unmapped": [n for n in readable if n not in {**guessed, **payload.column_map}],
+                "column_map": {**guessed, **payload.column_map},
+            }
         return {
             "ok": True,
             "error": None,
+            "kind": "plan",
             "runs": [_confined_input_paths(r) for r in binding.runs],
+            "labels": binding.labels,
             "skipped": binding.skipped,
             "column_map": binding.column_map,
+            "columns": columns,
+            "output_inputs": binding.output_inputs,
+            "output_root": binding.output_root,
         }
 
     try:
@@ -2014,6 +2163,11 @@ class ReplayStartRequest(BaseModel):
     name: str = ""
     runs: list[dict[str, str]] = Field(default_factory=list[dict[str, str]])
     attach: str = ""
+    labels: list[str] = Field(default_factory=list[str])
+    """Who each item is (``subject[/session]``), aligned with ``runs``."""
+    manifest: str = ""
+    """The workspace path of the plan or selection the rows came from, if any."""
+    output_root: str = ""
 
 
 @app.websocket("/ws/replay")
@@ -2077,12 +2231,32 @@ async def ws_replay(ws: WebSocket) -> None:
                 await ws.send_json({"type": "result", "ok": False, "error": str(exc)})
                 return
             servers = await asyncio.to_thread(settings.active_servers)
+            manifest_path: Path | None = None
+            if first.manifest.strip():
+                with contextlib.suppress(ValueError):
+                    manifest_path = Path(_confined_input_path(first.manifest.strip()))
+            previewed_at = _previewed.get(_binding_key(first.name, bindings))
             record = _runs.start(
                 recipe=recipe,
                 runs=bindings,
                 servers=servers,
                 cwd=str(WORKSPACE_ROOT),
                 confine_to=WORKSPACE_ROOT,
+                labels=first.labels,
+                manifest_path=manifest_path,
+                output_root=first.output_root,
+                image_identity=settings.image_identity,
+                confirmation={
+                    # One person owns a workspace; there is no account to name.
+                    # What can be said is how the start reached the server and
+                    # whether these exact rows had been shown in the preview.
+                    "by": "workspace user",
+                    "authenticated": access.required(),
+                    "client": ws.client.host if ws.client is not None else None,
+                    "previewed": previewed_at is not None,
+                    "previewed_at": previewed_at,
+                    "confirmed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                },
                 on_finished=lambda r: _audit.info(
                     "replay finished: %s run=%s status=%s", r.workflow, r.id, r.status
                 ),
@@ -2162,10 +2336,43 @@ async def get_runs(
 @app.get("/api/runs/{run_id}")
 async def get_run(run_id: str) -> JsonDict:
     """One run's full record: every item, every step, what each produced."""
-    record = await asyncio.to_thread(runs.load_run, run_id)
+    record = await asyncio.to_thread(_runs.full, run_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"no run {run_id!r}")
-    return {**record.to_dict(), "live": _runs.is_live(run_id)}
+    return {**record.to_dict(full=True), "live": _runs.is_live(run_id)}
+
+
+@app.get("/api/runs/{run_id}/export")
+async def export_run(run_id: str, format: Literal["json", "md"] = "json") -> Response:
+    """One run as a single file: the full record as JSON, or as a Markdown report.
+
+    The JSON is the run folder's ``run.json`` with the manifest's text inlined,
+    so the one file carries the recipe, the environment, every item's steps,
+    results and checksums, and the plan or selection the items came from.
+    """
+
+    def _export() -> tuple[str, str] | None:
+        record = _runs.full(run_id)
+        if record is None:
+            return None
+        payload = record.to_dict(full=True)
+        if format == "md":
+            return runrecord.render_report(payload), "text/markdown; charset=utf-8"
+        copy = runs.run_folder(run_id) / runs.MANIFEST_FILE
+        if payload.get("manifest") and copy.is_file():
+            with contextlib.suppress(OSError, UnicodeDecodeError):
+                payload["manifest"] = {**payload["manifest"], "text": copy.read_text("utf-8")}
+        return json.dumps(payload, indent=1), "application/json"
+
+    result = await asyncio.to_thread(_export)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"no run {run_id!r}")
+    body, media_type = result
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="run-{run_id}.{format}"'},
+    )
 
 
 @app.post("/api/runs/{run_id}/cancel")
@@ -2922,6 +3129,7 @@ class _ChatConnection:
                             self.canonical_id,
                             servers=self.servers,
                             model_name=self.model_name,
+                            image_identity=settings.image_identity,
                         )
                     )
         # Frames can still trickle in between a cancel and this prompt

@@ -173,9 +173,22 @@ export interface BatchPlanSkip {
 export interface BatchFromPlanResult {
   ok: boolean
   error: string | null
+  /** Which manifest it was: a plan_batch plan or a select_series selection. */
+  kind?: 'plan' | 'selection'
   runs: Record<string, string>[]
+  /** subject[/session] per run, aligned with `runs`. */
+  labels?: string[]
   skipped: BatchPlanSkip[]
   column_map?: Record<string, string>
+  /** A plan's file columns, to choose from when an input could not be matched. */
+  columns?: string[]
+  /** A selection's series roles (FLAIR, T1+contrast, …) with how many there are. */
+  roles?: { role: string; series: number; units: number }[]
+  role_map?: Record<string, string>
+  /** Inputs that still need a column (plan) or a role (selection). */
+  unmapped?: string[]
+  /** The folder each item's results go under, one sub-folder per subject. */
+  output_root?: string
 }
 
 /** One resolved step from POST /api/workflows/{name}/replay-preview. */
@@ -229,6 +242,8 @@ export type ReplayFrame =
       steps_per_item: number
       started_at: string
       runs: Record<string, string>[]
+      /** Who each item is (subject/session), "" where the rows were picked by hand. */
+      labels?: string[]
     }
   | {
       type: 'step_started'

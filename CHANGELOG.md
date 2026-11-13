@@ -11,10 +11,22 @@ Notable, user-visible changes to MedMCP. Format follows
 - Approvals: a stack tool can be allowed for the rest of the chat ("Allow index_dataset for the rest of this chat"). Later calls of that tool run without a dialog; a call that would overwrite a file or touch a path outside the workspace is still shown, and the shell keeps its own rules. `MEDMCP_STACK_TOOL_APPROVAL=0` restores a dialog for every call.
 - Chat: when a message names a workspace folder (a path, the folder's name the way people type it, or the file open in the viewer), the assistant is told what the cohort stack's table of scans already says about it — subjects, sessions, scans, sequences, orientation, date coverage — or that the folder has no table yet and `index_dataset` comes first. It no longer has to list the folder to find out.
 - Catalog: medmcp-stats (statistical tests and publication figures) and medmcp-cohort.
+- Workflows: a cohort roll-out writes each subject's results to its own folder under an output folder (`results/<workflow>/<subject>` unless you choose another) and creates missing folders itself.
+- Workflows: `batch-from-plan` and `medmcp replay --batch` take an explicit input-to-column mapping and an output folder.
+- Workflows: every run keeps a self-contained record in `.vibe/runs/<id>/`: the workflow as it ran, the plan it came from, and per subject the inputs, each step's arguments, duration, error and result, with SHA-256 checksums of the files read and written. It also names the MedMCP build and each stack's image digest, and says whether the run was started from the preview.
+- Workflows: a selection of scans made with the cohort tools (`select_series`, `…_series.csv`) can be rolled out directly: choose "Selection" in the run editor. A workflow with one input runs once per selected scan. A workflow with several inputs runs once per subject and session, after you say which series each input is (for example FLAIR and T1 with contrast); a session that lacks a series, or has it twice, is listed and left out.
+- Workflows: when a cohort plan's columns cannot be matched to a workflow's inputs, the run editor asks which column is which.
+- Workflows: a workflow lists its past runs; each can be reopened and downloaded as one JSON file or a Markdown report (`GET /api/runs/{id}/export`).
+- Provenance: a chat's record names each stack's image digest and the MedMCP version.
 
 ### Fixed
 
 - Stacks: installing a stack from the catalog or by image works again with `docker compose`; since 0.7.2 the docker guard refused the image lookup.
+- Workflows: a cohort roll-out no longer binds a tool's output file to the subject's input file. A plan column whose name appeared in the output's file name was taken for it, so every subject's output pointed at its own scan.
+- Workflows: a run whose output would overwrite one of its inputs, and two rows that would write the same file, are refused in the preview and by the engine, with the reason per row. They were shown with a warning before.
+- Workflows: a plan no longer fails to load for a workflow whose output folder has a default.
+- Workflows: a run lists the files it wrote when the output path was chosen by the caller; it showed none before.
+- Provenance: the record of a chat run from an image names the commit the image was built from; it was empty. Images must be built with `MEDMCP_REVISION`, as the release and `:main` builds are.
 
 ### Security
 

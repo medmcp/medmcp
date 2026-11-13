@@ -7,6 +7,7 @@ Exposed as the ``medmcp`` console script::
     medmcp distill <session>    # save a replayable workflow from the raw log
     medmcp replay  <name> -i in_1=path ...       # replay a workflow on new inputs
     medmcp replay  <name> --batch batch_plan.csv # roll it out over a cohort manifest
+    medmcp replay  <name> --batch sel_series.csv --role in_1=FLAIR  # ... or a selection
     medmcp workflows            # list personal workflows
     medmcp delete   <name>      # delete a personal workflow
     medmcp export   <name>      # write a shareable <name>.workflow.yaml
@@ -20,8 +21,9 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
-from medmcp import batchplan, distill, provenance, sessions, share, workflow
+from medmcp import batchplan, distill, provenance, runs, sessions, share, workflow
 
 
 def _list_sessions() -> int:
@@ -82,7 +84,12 @@ def _workflow_dir(name: str) -> Path | None:
 
 
 def _replay(
-    name: str, inputs: dict[str, str], batch: str | None, column_map: dict[str, str]
+    name: str,
+    inputs: dict[str, str],
+    batch: str | None,
+    column_map: dict[str, str],
+    output_root: str | None = None,
+    role_map: dict[str, str] | None = None,
 ) -> int:
     """Replay a workflow deterministically — a single input set or a batch manifest.
 
@@ -103,9 +110,14 @@ def _replay(
     cwd = os.environ.get("MEDMCP_WORKSPACE") or None
 
     if batch is not None:
-        rows = batchplan.read_manifest(batch)
         try:
-            binding = batchplan.runs_from_manifest(recipe, rows, column_map=column_map or None)
+            binding = batchplan.bind_manifest(
+                recipe,
+                batch,
+                column_map=column_map or None,
+                role_map=role_map or None,
+                output_root=output_root,
+            )
         except batchplan.BatchPlanError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
@@ -119,20 +131,21 @@ def _replay(
         if not binding.runs:
             print("No 'ok' items to roll out.", file=sys.stderr)
             return 1
-        pairs = ", ".join(f"{k}<-{v}" for k, v in binding.column_map.items())
+        mapping = binding.role_map if binding.kind == "selection" else binding.column_map
+        pairs = ", ".join(f"{k}<-{v}" for k, v in mapping.items())
         print(f"Rolling out {recipe.name!r} over {len(binding.runs)} item(s) [{pairs}] ...")
-        results = asyncio.run(
-            replay.run_batch(recipe, list(binding.runs), servers=servers, cwd=cwd)
+        record = asyncio.run(
+            _recorded_batch(recipe, binding, servers=servers, cwd=cwd, manifest=Path(batch))
         )
-        failed = 0
-        for index, result in enumerate(results):
-            label = binding.labels[index] if index < len(binding.labels) else str(index)
-            if result.ok:
-                print(f"  [{index + 1}/{len(results)}] {label}: ok")
+        for index, item in enumerate(record.items):
+            label = item.label or str(index)
+            if item.ok:
+                print(f"  [{index + 1}/{len(record.items)}] {label}: ok")
             else:
-                failed += 1
-                print(f"  [{index + 1}/{len(results)}] {label}: FAILED — {result.error}")
-        print(f"Done: {len(results) - failed} ok, {failed} failed.")
+                print(f"  [{index + 1}/{len(record.items)}] {label}: FAILED — {item.error}")
+        failed = sum(1 for item in record.items if not item.ok)
+        print(f"Done: {len(record.items) - failed} ok, {failed} failed.")
+        print(f"Record: {runs.run_folder(record.id)}")
         return 1 if failed else 0
 
     result = asyncio.run(replay.run(recipe, inputs, servers=servers, cwd=cwd))
@@ -144,6 +157,35 @@ def _replay(
         print(f"  step {step.index} {step.server}:{step.tool}: {mark}")
     print("Replay ok." if result.ok else f"Replay failed: {result.error}")
     return 0 if result.ok else 1
+
+
+async def _recorded_batch(
+    recipe: workflow.Recipe,
+    binding: batchplan.BatchBinding,
+    *,
+    servers: list[dict[str, Any]],
+    cwd: str | None,
+    manifest: Path,
+) -> runs.RunRecord:
+    """Run a bound batch through the run manager, so it leaves the same record as the UI's."""
+    from medmcp import settings
+
+    manager = runs.RunManager()
+    started = manager.start(
+        recipe=recipe,
+        runs=list(binding.runs),
+        servers=servers,
+        cwd=cwd,
+        labels=binding.labels,
+        manifest_path=manifest.resolve(),
+        output_root=binding.output_root,
+        image_identity=settings.image_identity,
+        # The command line has no preview screen; typing the command is the
+        # confirmation, and the record says which it was.
+        confirmation={"by": "command line", "previewed": False},
+    )
+    await manager.wait(started.id)
+    return manager.full(started.id) or started
 
 
 def _list_workflows() -> int:
@@ -234,6 +276,19 @@ def main(argv: list[str] | None = None) -> int:
         metavar="in_N=COLUMN",
         help="explicit recipe-input -> manifest-column mapping (repeatable)",
     )
+    replay_p.add_argument(
+        "--role",
+        action="append",
+        default=[],
+        metavar="in_N=ROLE",
+        help="with a select_series manifest: which series feeds an input, "
+        "e.g. in_1=FLAIR in_2=T1+contrast (repeatable)",
+    )
+    replay_p.add_argument(
+        "--output-root",
+        metavar="DIR",
+        help="with --batch: write each item's results to DIR/<subject>[/<session>]",
+    )
 
     sub.add_parser("workflows", help="list personal workflows")
 
@@ -258,9 +313,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             inputs = _parse_bindings(args.input)
             column_map = _parse_bindings(args.map)
+            role_map = _parse_bindings(args.role)
         except ValueError as exc:
             parser.error(str(exc))
-        return _replay(args.name, inputs, args.batch, column_map)
+        return _replay(args.name, inputs, args.batch, column_map, args.output_root, role_map)
     if args.command == "workflows":
         return _list_workflows()
     if args.command == "delete":

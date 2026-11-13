@@ -576,3 +576,167 @@ def test_blank_required_input_is_reported_missing() -> None:
     )
     error = replay.validate(recipe, {"in_1": "   "}, [{"name": "s"}])
     assert error is not None and "in_1" in error
+
+
+# ── an output can never be an input ──────────────────────────────────────────
+
+CallerResult = tuple[bool, dict[str, Any], str | None]
+
+
+def _reorient_recipe() -> Recipe:
+    """One tool that reads ``in_1`` and writes the file ``in_2``."""
+    return Recipe(
+        name="reorient",
+        description="d",
+        inputs=[
+            WorkflowInput(name="in_1", example="/ws/a/scan.nii.gz"),
+            WorkflowInput(name="in_2", example="/ws/out/scan_RAS.nii.gz"),
+        ],
+        steps=[
+            RecipeStep(
+                server="medmcp-neuro",
+                tool="reorient",
+                arguments={"input_path": "{{in_1}}", "output_path": "{{in_2}}"},
+                produces={"output_path": "step1.output_path"},
+            )
+        ],
+    )
+
+
+def _folder_recipe() -> Recipe:
+    """One tool that reads ``in_1`` and writes into the folder ``in_2``."""
+    return Recipe(
+        name="seg",
+        description="d",
+        inputs=[
+            WorkflowInput(name="in_1", example="/ws/a/scan.nii.gz"),
+            WorkflowInput(name="in_2", example="/ws/a", default="{{dir(in_1)}}"),
+        ],
+        steps=[
+            RecipeStep(
+                server="medmcp-neuro",
+                tool="segment",
+                arguments={"input_path": "{{in_1}}", "output_dir": "{{in_2}}"},
+            )
+        ],
+    )
+
+
+class TestOutputCollision:
+    """A binding that would write over what it reads is refused, not warned about."""
+
+    def test_output_file_equal_to_the_input_is_refused(self) -> None:
+        """The binding that prompted the check: output_path bound to the scan."""
+        same = {"in_1": "/ws/a/scan.nii.gz", "in_2": "/ws/a/scan.nii.gz"}
+        reason = replay.output_collision(_reorient_recipe(), same)
+        assert reason is not None and "overwrite its own input" in reason
+        assert replay.validate(_reorient_recipe(), same, neuro_servers()) == reason
+
+    def test_spelling_differences_do_not_hide_the_collision(self, tmp_path: Path) -> None:
+        """A relative path and ``..`` name the same file as the absolute one."""
+        binding = {"in_1": "a/scan.nii.gz", "in_2": str(tmp_path / "b" / ".." / "a/scan.nii.gz")}
+        assert replay.output_collision(_reorient_recipe(), binding, base=tmp_path) is not None
+
+    def test_parent_and_child_file_collisions_are_refused(self) -> None:
+        """An output beneath an input file, or an output file that holds the input."""
+        beneath = {"in_1": "/ws/a/scan.nii.gz", "in_2": "/ws/a/scan.nii.gz/out.nii.gz"}
+        assert "beneath the input file" in (
+            replay.output_collision(_reorient_recipe(), beneath) or ""
+        )
+        holder = {"in_1": "/ws/a/scan.nii.gz", "in_2": "/ws/a"}
+        assert "folder" in (replay.output_collision(_reorient_recipe(), holder) or "")
+
+    def test_a_distinct_output_file_is_fine(self) -> None:
+        """Next to the input under another name is the normal case."""
+        ok = {"in_1": "/ws/a/scan.nii.gz", "in_2": "/ws/a/scan_RAS.nii.gz"}
+        assert replay.output_collision(_reorient_recipe(), ok) is None
+
+    def test_an_output_folder_may_hold_the_input(self) -> None:
+        """``output_dir`` defaulting to the scan's folder stays allowed."""
+        assert replay.output_collision(_folder_recipe(), {"in_1": "/ws/a/scan.nii.gz"}) is None
+        on_file = {"in_1": "/ws/a/scan.nii.gz", "in_2": "/ws/a/scan.nii.gz"}
+        assert replay.output_collision(_folder_recipe(), on_file) is not None
+
+    def test_two_items_writing_one_file_are_both_refused(self) -> None:
+        """Neither item of a pair that shares an output file may run."""
+        runs = [
+            {"in_1": "/ws/a/scan.nii.gz", "in_2": "/ws/out/r.nii.gz"},
+            {"in_1": "/ws/b/scan.nii.gz", "in_2": "/ws/out/r.nii.gz"},
+            {"in_1": "/ws/c/scan.nii.gz", "in_2": "/ws/out/c.nii.gz"},
+        ]
+        clashes = replay.batch_output_collisions(_reorient_recipe(), runs)
+        assert sorted(clashes) == [0, 1]
+        assert "item 2" in clashes[0] and "item 1" in clashes[1]
+
+    def test_a_shared_folder_collides_only_for_equally_named_inputs(self) -> None:
+        """Same folder and same file name: one result would replace the other."""
+        same_names = [
+            {"in_1": "/ws/p1/FLAIR.nii.gz", "in_2": "/ws/out"},
+            {"in_1": "/ws/p2/FLAIR.nii.gz", "in_2": "/ws/out"},
+        ]
+        assert sorted(replay.batch_output_collisions(_folder_recipe(), same_names)) == [0, 1]
+        flat = [{"in_1": "/ws/scans/s1.nii.gz"}, {"in_1": "/ws/scans/s2.nii.gz"}]
+        assert replay.batch_output_collisions(_folder_recipe(), flat) == {}
+
+    async def test_run_batch_refuses_colliding_items_and_runs_the_rest(self) -> None:
+        """The engine itself refuses, whatever the caller previewed."""
+        called: list[JsonDict] = []
+
+        async def caller(server: str, tool: str, args: JsonDict) -> CallerResult:
+            called.append(args)
+            return True, {"output_path": args["output_path"]}, None
+
+        @contextlib.asynccontextmanager
+        async def factory(*_a: object, **_k: object) -> AsyncGenerator[replay.ToolCaller]:
+            yield caller
+
+        runs = [
+            {"in_1": "/ws/a/scan.nii.gz", "in_2": "/ws/a/scan.nii.gz"},
+            {"in_1": "/ws/b/scan.nii.gz", "in_2": "/nonexistent-root/out/b.nii.gz"},
+        ]
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(replay, "mcp_caller", factory)
+            results = await replay.run_batch(_reorient_recipe(), runs, servers=neuro_servers())
+        assert [r.ok for r in results] == [False, True]
+        assert "overwrite its own input" in (results[0].error or "")
+        assert [c["input_path"] for c in called] == ["/ws/b/scan.nii.gz"]
+
+
+class TestOutputFolders:
+    """The run makes the folders its outputs need."""
+
+    async def test_missing_output_folders_are_created(self, tmp_path: Path) -> None:
+        """A file output gets its parent, a folder output is made itself."""
+        recipe = Recipe(
+            name="w",
+            description="d",
+            inputs=[],
+            steps=[
+                RecipeStep(
+                    server="medmcp-neuro",
+                    tool="t",
+                    arguments={
+                        "output_path": str(tmp_path / "out" / "7" / "x.nii.gz"),
+                        "output_dir": "results/7",
+                    },
+                )
+            ],
+        )
+
+        async def caller(server: str, tool: str, args: JsonDict) -> CallerResult:
+            assert (tmp_path / "out" / "7").is_dir()
+            assert (tmp_path / "results" / "7").is_dir()
+            return True, {}, None
+
+        result = await replay.replay_with_caller(recipe, {}, caller=caller, confine_to=tmp_path)
+        assert result.ok
+
+    def test_nothing_is_created_outside_the_workspace(self, tmp_path: Path) -> None:
+        """A path that leaves the confinement is left alone (the step is refused anyway)."""
+        outside = tmp_path / "elsewhere" / "x.nii.gz"
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        replay.ensure_output_folders(
+            {"output_path": "{{in_1}}"}, {"output_path": str(outside)}, confine_to=workspace
+        )
+        assert not outside.parent.exists()

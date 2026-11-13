@@ -158,6 +158,63 @@ class TestInstall:
             settings.load_mcp_servers.cache_clear()
 
 
+JOB_LABEL = (
+    '{"name": "medmcp-foo", "gpu": true, "job": {"command": ["medmcp-foo-job", "call"], '
+    '"tools": ["start_training"], "shm_size": "16g"}}'
+)
+
+
+class TestJobDeclaration:
+    """A stack's job runner travels from the image label into the manifest."""
+
+    def test_install_records_the_job_runner(self, stacks_dir: Path) -> None:
+        """The declaration is written as given, and discovery carries it."""
+        with patch("medmcp.settings._run_docker", _fake_docker(JOB_LABEL)):
+            settings.install_stack_image("ghcr.io/x/foo:dev")
+        expected = {
+            "command": ["medmcp-foo-job", "call"],
+            "tools": ["start_training"],
+            "shm_size": "16g",
+        }
+        assert _read_manifest(stacks_dir, "medmcp-foo")["job"] == expected
+        (entry,) = settings._load_stack_manifests()  # pyright: ignore[reportPrivateUsage]
+        assert entry["job"] == expected
+        assert settings.list_installed_stacks()[0]["jobs"] == ["start_training"]
+
+    def test_a_malformed_declaration_installs_without_jobs(self, stacks_dir: Path) -> None:
+        """A command that is not plain words is dropped, not repaired."""
+        label = '{"name": "medmcp-foo", "job": {"command": ["sh", "-c", "x; y"], "tools": ["t"]}}'
+        with patch("medmcp.settings._run_docker", _fake_docker(label)):
+            settings.install_stack_image("ghcr.io/x/foo:dev")
+        assert "job" not in _read_manifest(stacks_dir, "medmcp-foo")
+
+    def test_a_hand_edited_declaration_is_not_carried(self, stacks_dir: Path) -> None:
+        """What a manifest says about jobs only makes the offer; a bad one makes none."""
+        with patch("medmcp.settings._run_docker", _fake_docker(LABEL)):
+            settings.install_stack_image("ghcr.io/x/foo:dev")
+        path = stacks_dir / "medmcp-foo.toml"
+        path.write_text(path.read_text() + '\n[job]\ncommand = ["--privileged"]\ntools = ["t"]\n')
+        (entry,) = settings._load_stack_manifests()  # pyright: ignore[reportPrivateUsage]
+        assert "job" not in entry
+
+    def test_jobs_follow_the_pool_and_can_be_switched_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No pool, no jobs; ``MEDMCP_STACK_JOBS=0`` turns them off with the pool on."""
+        monkeypatch.delenv("MEDMCP_AGENT_ISOLATION", raising=False)
+        monkeypatch.delenv("MEDMCP_STACK_POOL", raising=False)
+        assert settings.stack_jobs_enabled() is False
+        monkeypatch.setenv("MEDMCP_STACK_POOL", "1")
+        assert settings.stack_jobs_enabled() is True
+        monkeypatch.setenv("MEDMCP_STACK_JOBS", "0")
+        assert settings.stack_jobs_enabled() is False
+        assert settings.max_jobs() == 1
+        monkeypatch.setenv("MEDMCP_MAX_JOBS", "3")
+        assert settings.max_jobs() == 3
+        monkeypatch.setenv("MEDMCP_MAX_JOBS", "many")
+        assert settings.max_jobs() == 1
+
+
 class TestUninstall:
     """uninstall_stack removes the manifest and extracted skills."""
 
@@ -195,7 +252,13 @@ class TestListInstalled:
         ):
             settings.install_stack_image("ghcr.io/x/foo:dev")
         assert settings.list_installed_stacks() == [
-            {"name": "medmcp-foo", "image": "ghcr.io/x/foo:dev", "gpu": False, "network": False}
+            {
+                "name": "medmcp-foo",
+                "image": "ghcr.io/x/foo:dev",
+                "gpu": False,
+                "network": False,
+                "jobs": [],
+            }
         ]
 
 

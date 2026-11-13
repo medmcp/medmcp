@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from medmcp.backend_broker import BackendBroker
+from medmcp.backend_broker import AfterCall, Authorize, BackendBroker
 from medmcp.backend_pool import BackendPool, BackendSpec
 
 JsonDict = dict[str, Any]
@@ -43,13 +43,14 @@ def resolver(specs: dict[str, BackendSpec]) -> Callable[[str], BackendSpec | Non
 async def broker(
     tmp_path: Path,
     specs: dict[str, BackendSpec] | None = None,
-    authorize: Callable[[str, str, JsonDict], bool] | None = None,
+    authorize: Authorize | None = None,
+    after_call: AfterCall | None = None,
 ) -> AsyncGenerator[Path]:
     """Run a broker over a real socket against a pool (the fake stack by default)."""
     if specs is None:
         specs = {"fake": fake_spec("fake")}
     pool = BackendPool(resolve_spec=resolver(specs))
-    broker = BackendBroker(pool, tmp_path / "broker.sock", authorize)
+    broker = BackendBroker(pool, tmp_path / "broker.sock", authorize, after_call)
     await broker.start()
     try:
         yield broker.socket_path

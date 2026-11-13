@@ -42,7 +42,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from medmcp import agentbox, posture, signing
+from medmcp import agentbox, jobspec, posture, signing
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict
 from medmcp.statefile import atomic_write_json, atomic_write_toml, read_json
 from medmcp.workflow import list_workflows
@@ -171,6 +171,30 @@ def stack_pool_enabled() -> bool:
     if agentbox.isolation_enabled():
         return True
     return os.environ.get("MEDMCP_STACK_POOL", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def stack_jobs_enabled() -> bool:
+    """Whether stacks may run background jobs (see :mod:`medmcp.jobs`).
+
+    On wherever the pool is: a job request rides on the result of a pooled call,
+    so without the pool there is nobody to act on one. ``MEDMCP_STACK_JOBS=0``
+    turns it off; stacks then run their long work the way they did before.
+    """
+    if os.environ.get("MEDMCP_STACK_JOBS", "").strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    return stack_pool_enabled()
+
+
+def max_jobs() -> int:
+    """How many background jobs may run at once on this machine (default one).
+
+    A job holds the GPU next to the model for hours; a second one is refused,
+    not queued, so nothing starts later than the approval that asked for it.
+    """
+    try:
+        return max(1, int(os.environ.get("MEDMCP_MAX_JOBS", "1")))
+    except ValueError:
+        return 1
 
 
 def backend_socket_path() -> Path:
@@ -479,6 +503,13 @@ def _load_stack_manifests() -> list[JsonDict]:
             entry["startup_timeout_sec"] = raw["startup_timeout_sec"]
         if raw.get("idle_ttl_sec") is not None:
             entry["idle_ttl_sec"] = raw["idle_ttl_sec"]
+        # Only what makes the core offer jobs to this stack; the declaration a
+        # job is started from is read off the image (see medmcp.jobs).
+        runner = jobspec.parse_declaration(raw.get("job"))
+        if runner is not None:
+            entry["job"] = runner.manifest()
+        elif raw.get("job") is not None:
+            _audit.warning("stack manifest %s: job declaration ignored (malformed)", path.name)
         manifests.append(entry)
     return manifests
 
@@ -1956,6 +1987,13 @@ def install_stack_image(
         else DEFAULT_STACK_STARTUP_TIMEOUT_SEC
     )
 
+    # A stack that runs long work as a job (medmcp.jobs) says so in its label.
+    runner = jobspec.parse_declaration(meta.get("job"))
+    if runner is not None:
+        entry["job"] = runner.manifest()
+    elif meta.get("job") is not None:
+        report("The image's job declaration is malformed; installing without jobs.")
+
     # Skills live inside the image but the agent loads them from the core fs, so
     # extract them next to the manifest and point skills_path there.
     in_image_skills = meta.get("skills_path")
@@ -2007,6 +2045,9 @@ def list_installed_stacks() -> list[JsonDict]:
                 # Reported so the UI can show which stacks can reach off-machine;
                 # a stack with egress must not look like one without.
                 "network": stack_has_network(args),
+                "jobs": sorted(
+                    cast("list[str]", cast("JsonDict", m.get("job") or {}).get("tools", []))
+                ),
             }
         )
     return out

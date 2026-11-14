@@ -38,7 +38,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
-from medmcp import harness
+from medmcp import harness, plan
 from medmcp.pathcheck import PathFinding, check_tool_call_paths
 from medmcp.statefile import atomic_write_json, read_json
 
@@ -171,6 +171,10 @@ def decide(invocation: dict[str, Any]) -> dict[str, Any]:
     tool_name = harness.canonical_tool_name(
         str(invocation.get("tool_name") or ""), container_stack_names()
     )
+    if plan.is_plan_tool(tool_name):
+        # A plan names folders that do not exist yet (its output folder); the
+        # person reads it, and each call it leads to is checked on its own.
+        return {"decision": "allow"}
     session_id = str(invocation.get("session_id") or "")
     tool_input = invocation.get("tool_input")
 

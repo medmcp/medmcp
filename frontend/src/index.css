@@ -4557,3 +4557,147 @@ textarea.wf-input {
 .confirm-dialog p.login-error {
   color: var(--red-tint);
 }
+
+/* ── Plan first: the plan card (Go / Change) and off-plan flags ── */
+
+/* The proposed plan reuses the checklist's look; while it waits for an answer it
+   carries the approval box's blue so it reads as a decision, not as progress. */
+.plan-proposal.plan-state-pending {
+  background: rgba(43, 79, 163, 0.08);
+  border-color: rgba(43, 79, 163, 0.45);
+  padding: 12px 15px 13px;
+}
+
+.plan-badge {
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  border-radius: 5px;
+  padding: 1px 7px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.plan-badge-pending {
+  color: var(--blue-xl);
+  background: rgba(43, 79, 163, 0.3);
+}
+
+.plan-badge-approved {
+  color: var(--ok);
+  background: rgba(74, 222, 128, 0.1);
+}
+
+.plan-badge-changed {
+  color: var(--warn);
+  background: rgba(251, 191, 36, 0.1);
+}
+
+.plan-understanding {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  margin: 2px 0 8px;
+}
+
+.plan-steps .plan-mark {
+  width: 16px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.plan-tool {
+  margin-left: 7px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--blue-xl);
+  background: rgba(43, 79, 163, 0.18);
+  border-radius: 4px;
+  padding: 0 5px;
+}
+
+.plan-io {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.plan-failed .plan-mark {
+  color: var(--red-tint);
+}
+
+.plan-output {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted2);
+}
+
+.plan-output code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text);
+}
+
+.plan-questions {
+  margin: 8px 0 0;
+  padding: 7px 10px 7px 26px;
+  border-radius: 7px;
+  background: rgba(251, 191, 36, 0.07);
+  border: 1px solid rgba(251, 191, 36, 0.2);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.plan-change {
+  margin-top: 10px;
+}
+
+.plan-change textarea {
+  width: 100%;
+  resize: vertical;
+  background: var(--dark);
+  color: var(--text);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.plan-go {
+  font-weight: 600;
+}
+
+.approval-plan {
+  font-size: 12px;
+  line-height: 1.5;
+  border-radius: 7px;
+  padding: 6px 10px;
+  margin: 0 0 8px;
+}
+
+.approval-offplan {
+  color: var(--warn);
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+}
+
+.approval-inplan {
+  color: var(--muted2);
+  background: rgba(74, 222, 128, 0.06);
+  border: 1px solid rgba(74, 222, 128, 0.2);
+}
+
+.offplan-chip {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--warn);
+  background: rgba(251, 191, 36, 0.1);
+  border-radius: 5px;
+  padding: 0 6px;
+  white-space: nowrap;
+}

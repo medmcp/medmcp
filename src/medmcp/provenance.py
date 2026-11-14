@@ -472,11 +472,23 @@ def record_tool_event(session_id: str, tc_id: str, info: JsonDict, server_names:
         human_readable=human_readable if isinstance(human_readable, str) else None,
         duration_sec=duration,
     )
+    plan = info.get("plan")
+    if isinstance(plan, dict):
+        # Plan first (see medmcp.plan): the step of the approved plan this call
+        # was, or that it was not in the plan.
+        event["plan"] = plan
     with contextlib.suppress(Exception):
         append_run_event(session_id, event)
 
 
 JOB_STARTED = "job_started"
+
+# Plan first (see medmcp.plan): a plan the agent proposed, and the person's answer
+# to it. Off-plan calls are not events of their own: the tool call's event says so
+# under ``plan``.
+PLAN_PROPOSED = "plan_proposed"
+PLAN_DECISION = "plan_decision"
+_PLAN_EVENTS = frozenset({PLAN_PROPOSED, PLAN_DECISION})
 
 
 def record_job_started(
@@ -859,7 +871,11 @@ def render_report(session_id: str) -> str:
         )
 
     started_jobs = [e for e in events if e.get("event") == JOB_STARTED]
-    events = [e for e in events if e.get("event") != JOB_STARTED]
+    plan_events = [e for e in events if e.get("event") in _PLAN_EVENTS]
+    events = [
+        e for e in events if e.get("event") != JOB_STARTED and e.get("event") not in _PLAN_EVENTS
+    ]
+    lines.extend(_render_plans(plan_events))
     if started_jobs:
         lines.append(f"## Background jobs ({len(started_jobs)})\n")
         for event in started_jobs:
@@ -886,6 +902,9 @@ def render_report(session_id: str) -> str:
         header = f"### {i}. `{server}:{tool}` — {status}"
         if decision:
             header += f" (decision: {decision})"
+        plan_note = _plan_note(event.get("plan"))
+        if plan_note:
+            header += f" — {plan_note}"
         lines.append(header)
         explanation = event.get("explanation")
         if isinstance(explanation, str) and explanation:
@@ -900,6 +919,55 @@ def render_report(session_id: str) -> str:
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _plan_note(plan: object) -> str:
+    """How a tool call relates to the plan, for its heading in the report."""
+    if not isinstance(plan, dict):
+        return ""
+    record = cast("JsonDict", plan)
+    if record.get("proposal"):
+        return "plan proposal"
+    if record.get("off_plan"):
+        return "**not in the plan**" if record.get("plan_id") else "**no plan approved**"
+    if record.get("setup"):
+        return "plan setup (output folder)"
+    step = record.get("step")
+    return f"plan step {step}" if step is not None else ""
+
+
+def _render_plans(events: list[JsonDict]) -> list[str]:
+    """The report's plan section: each proposed plan and the answer it got."""
+    proposed = [e for e in events if e.get("event") == PLAN_PROPOSED]
+    if not proposed:
+        return []
+    decisions: dict[str, list[JsonDict]] = {}
+    for event in events:
+        if event.get("event") == PLAN_DECISION:
+            decisions.setdefault(str(event.get("plan_id")), []).append(event)
+    lines = [f"## Plans ({len(proposed)})\n"]
+    for n, event in enumerate(proposed, start=1):
+        plan = cast("JsonDict", event.get("plan") or {})
+        answers = decisions.get(str(event.get("plan_id")), [])
+        answer = answers[-1] if answers else None
+        verdict = (
+            "Go"
+            if answer and answer.get("decision") == "go"
+            else "Change"
+            if answer
+            else "no answer"
+        )
+        lines.append(f"### Plan {n} — {verdict} ({event.get('ts', '')})")
+        lines.append(f"{plan.get('understanding', '')}\n")
+        for k, step in enumerate(cast("list[JsonDict]", plan.get("steps") or []), start=1):
+            tool = f" (`{step['tool']}`)" if step.get("tool") else ""
+            lines.append(f"{k}. {step.get('action', '')}{tool}")
+        if plan.get("output_dir"):
+            lines.append(f"\n**Output folder:** `{plan['output_dir']}`")
+        if answer and answer.get("correction"):
+            lines.append(f"\n> Change requested: {answer['correction']}")
+        lines.append("")
+    return lines
 
 
 def write_report(session_id: str) -> Path | None:

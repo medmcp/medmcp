@@ -42,7 +42,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from medmcp import agentbox, jobspec, posture, signing
+from medmcp import agentbox, jobspec, plan, posture, signing
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict
 from medmcp.statefile import atomic_write_json, atomic_write_toml, read_json
 from medmcp.workflow import list_workflows
@@ -129,6 +129,8 @@ ACTIVE_STACKS_PATH: Path = VIBE_HOME / "active_stacks.json"
 PROVENANCE_ENABLED_PATH: Path = VIBE_HOME / "provenance_enabled.json"
 # Persists the explain-tool-calls on/off preference; defaults to on when absent.
 EXPLAIN_ENABLED_PATH: Path = VIBE_HOME / "explain_enabled.json"
+# Persists the plan-first on/off preference; defaults to on when absent.
+PLAN_FIRST_PATH: Path = VIBE_HOME / "plan_first.json"
 
 # Directory of container-stack manifests (``stacks.d/<name>.toml``). Each manifest
 # declares a stack launched as a container (``command = "docker"``, ``args = [...]``)
@@ -664,6 +666,9 @@ def load_mcp_servers() -> list[JsonDict]:
             # narrows it away).
             if command and Path(command).name in ("docker", PROXY_COMMAND):
                 log.debug("Skipping orphaned stack config.toml entry %r", name)
+                continue
+            # The core's own plan tool: written by the sync, never a stack.
+            if name == plan.PLAN_SERVER or Path(command).name == plan.PLAN_COMMAND:
                 continue
             # An HTTP entry here is one this sync wrote for an external server —
             # source #4 owns those. Re-adopting it would strip it back to a stdio
@@ -1627,11 +1632,47 @@ _PROMPT_VARIANTS: dict[tuple[bool, bool], tuple[str, str]] = {
     (True, False): (CLOUD_SYSTEM_PROMPT_ID, CLOUD_RULE),
     (True, True): (CLOUD_EXTERNAL_SYSTEM_PROMPT_ID, CLOUD_EXTERNAL_RULE),
 }
-OWNED_SYSTEM_PROMPT_IDS: tuple[str, ...] = (
-    "",
+# Plan first (see medmcp.plan) is on by default and the base prompt says so. With
+# it switched off, each prompt has a derived twin, ``<id>-noplan``, whose plan-first
+# section is swapped back for the todo-list rules.
+NO_PLAN_SUFFIX: str = "-noplan"
+PLAN_FIRST_HEADING: str = "**Plan first**"
+TODO_SECTION: str = (
+    "**Planning multi-step work**\n"
+    "- Whenever the user asks for more than one thing, write the parts to the `todo` tool"
+    " — always, even when each part looks small. Look around first if you need to"
+    " understand what is being asked; write the list before you start doing the work."
+    " Then keep it current: set a step to `in_progress` when you start it and"
+    " `completed` when it lands.\n"
+    '- `action: "write"` replaces the whole list. Send every item each time, reusing'
+    " each item's `id`; sending only the one that changed deletes the rest.\n"
+    "- Keep one step `in_progress` at a time.\n"
+    "- A request for a single thing needs no list.\n"
+)
+_BASE_PROMPT_IDS: tuple[str, ...] = (
     BASE_SYSTEM_PROMPT_ID,
     *(prompt_id for prompt_id, _ in _PROMPT_VARIANTS.values()),
 )
+OWNED_SYSTEM_PROMPT_IDS: tuple[str, ...] = (
+    "",
+    *_BASE_PROMPT_IDS,
+    *(f"{prompt_id}{NO_PLAN_SUFFIX}" for prompt_id in _BASE_PROMPT_IDS),
+)
+
+
+def without_plan_first(text: str) -> str | None:
+    """*text* with its plan-first section replaced by :data:`TODO_SECTION`.
+
+    The section runs from :data:`PLAN_FIRST_HEADING` to the next bold heading.
+    ``None`` when the heading is missing, so a prompt edit can never silently
+    hand the agent a plan-free prompt that still tells it to plan.
+    """
+    start = text.find(PLAN_FIRST_HEADING)
+    if start < 0:
+        return None
+    end = text.find("\n**", start + len(PLAN_FIRST_HEADING))
+    tail = text[end + 1 :] if end >= 0 else ""
+    return text[:start] + TODO_SECTION + ("\n" + tail if tail else "")
 
 
 def _sync_agent_profile_prompt(prompt_id: str) -> None:
@@ -1653,12 +1694,17 @@ def _sync_agent_profile_prompt(prompt_id: str) -> None:
     atomic_write_toml(AGENT_PROFILE_PATH, profile)
 
 
-def write_prompt_variant(prompt_id: str, rule: str) -> bool:
+def write_prompt_variant(prompt_id: str, rule: str | None, *, plan_first: bool = True) -> bool:
     """Derive the system prompt *prompt_id* next to the base one, carrying *rule*.
 
+    *rule* replaces the on-premise rule (``None`` keeps it); ``plan_first=False``
+    swaps the plan-first section for the todo-list rules (see
+    :func:`without_plan_first`).
+
     Returns ``False`` — leaving the base prompt in force — when the source is
-    missing or no longer carries the on-premise rule, so a prompt edit can never
-    silently hand the agent a variant identical to the one it was meant to relax.
+    missing or no longer carries the on-premise rule (or, for a plan-free
+    variant, the plan-first section), so a prompt edit can never silently hand
+    the agent a variant identical to the one it was meant to change.
     """
     prompts = VIBE_HOME / "prompts"
     base = prompts / f"{BASE_SYSTEM_PROMPT_ID}.md"
@@ -1672,8 +1718,16 @@ def write_prompt_variant(prompt_id: str, rule: str) -> bool:
             "%s no longer contains the on-premise rule; keeping the base system prompt", base
         )
         return False
+    if rule is not None:
+        text = text.replace(ONPREM_RULE, rule)
+    if not plan_first:
+        stripped = without_plan_first(text)
+        if stripped is None:
+            log.warning("%s has no plan-first section; keeping the base system prompt", base)
+            return False
+        text = stripped
     try:
-        (prompts / f"{prompt_id}.md").write_text(text.replace(ONPREM_RULE, rule))
+        (prompts / f"{prompt_id}.md").write_text(text)
     except OSError as exc:
         log.warning("could not write the %s system prompt: %s", prompt_id, exc)
         return False
@@ -2180,6 +2234,36 @@ def save_explain_enabled(enabled: bool) -> None:
     _save_flag(EXPLAIN_ENABLED_PATH, enabled)
 
 
+def load_plan_first_enabled() -> bool:
+    """Return whether the agent proposes a plan before each task (default ``True``).
+
+    On, the agent shows a short plan the person confirms (Go) or corrects (Change)
+    before it calls anything (see :mod:`medmcp.plan`). Off — for people who would
+    rather approve each call as it comes — the plan tool is not offered and the
+    prompt asks for a ``todo`` list instead.
+    """
+    return _load_flag(PLAN_FIRST_PATH, default=True)
+
+
+def save_plan_first_enabled(enabled: bool) -> None:
+    """Persist the plan-first on/off preference to disk."""
+    _save_flag(PLAN_FIRST_PATH, enabled)
+
+
+def plan_server_entry() -> JsonDict:
+    """The ``[[mcp_servers]]`` entry for the core's own plan tool.
+
+    Spawned directly by vibe (never through the pool proxy: it starts nothing,
+    runs nothing and answers from its arguments alone).
+    """
+    return {
+        "transport": "stdio",
+        "name": plan.PLAN_SERVER,
+        "command": shutil.which(plan.PLAN_COMMAND) or plan.PLAN_COMMAND,
+        "startup_timeout_sec": DEFAULT_STARTUP_TIMEOUT_SEC,
+    }
+
+
 def load_gpu_selection() -> str:
     """Effective GPU (CDI device id) for container stacks (persisted, else boot default)."""
     return os.environ.get("MEDMCP_GPU", "all")
@@ -2469,6 +2553,13 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
         _strip_pool_env(new_entries)
     _stamp_stack_revisions(new_entries, revisions)
 
+    # The plan tool rides alongside the stacks while plan-first is on. A stack
+    # that happens to carry its name loses to it: the name is the core's.
+    plan_first = load_plan_first_enabled()
+    new_entries = [e for e in new_entries if e.get("name") != plan.PLAN_SERVER]
+    if plan_first:
+        new_entries.append(plan_server_entry())
+
     cfg["mcp_servers"] = new_entries
 
     # Select the model chats run on: the cloud model while it is in force, else
@@ -2480,7 +2571,11 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
     # left alone rather than being reset on the next sync.
     prompt_id = BASE_SYSTEM_PROMPT_ID
     variant = _PROMPT_VARIANTS.get((cloud_in_force, any(s.get("external") for s in servers)))
-    if variant is not None and write_prompt_variant(*variant):
+    if not plan_first:
+        variant_id, rule = variant if variant is not None else (BASE_SYSTEM_PROMPT_ID, None)
+        if write_prompt_variant(f"{variant_id}{NO_PLAN_SUFFIX}", rule, plan_first=False):
+            prompt_id = f"{variant_id}{NO_PLAN_SUFFIX}"
+    elif variant is not None and write_prompt_variant(*variant):
         prompt_id = variant[0]
     if str(cfg.get("system_prompt_id", "")) in OWNED_SYSTEM_PROMPT_IDS:
         cfg["system_prompt_id"] = prompt_id

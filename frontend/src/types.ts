@@ -68,6 +68,37 @@ export interface PlanNote {
   step: number | null
   /** Why it is flagged, e.g. "Not in the plan you approved." */
   reason: string
+  /** For a call outside an approved plan: its number among them (from 1). */
+  offPlanCount?: number
+  /** Enough calls have left the plan that asking for a revised plan is suggested. */
+  revise?: boolean
+}
+
+/** One row of a selection review that still needs a decision. */
+export interface ReviewRow {
+  subject: string
+  session: string
+  role: string
+  status: string
+  reason: string
+  candidates: string[]
+  moreCandidates: number
+}
+
+/** The review a confirm_selection call would confirm (src/medmcp/reviewsummary.py). */
+export interface SelectionReview {
+  path?: string
+  /** Rows per status (ok, only_derived, needs_decision, multiple_stations, missing). */
+  counts?: Record<string, number>
+  /** Up to 10 rows that need a decision, of `rowsTotal`. */
+  rows?: ReviewRow[]
+  rowsTotal?: number
+  /** Decisions (overrides) the call passes. */
+  overrides?: number
+  /** The note the call would record. */
+  note?: string
+  /** Why the review could not be read; the rest is empty then. */
+  error?: string | null
 }
 
 /** One step of a proposed plan. */
@@ -113,6 +144,8 @@ export interface PermissionRequest {
   paths?: PathFinding[]
   /** Plan first: whether this call is in the approved plan (null when off). */
   plan?: PlanNote | null
+  /** confirm_selection: the review it would confirm. */
+  review?: SelectionReview | null
 }
 
 /** One prior chat session, as served by GET /api/sessions. */
@@ -434,6 +467,7 @@ export type ServerFrame =
       risks?: RiskTag[]
       paths?: PathFinding[]
       plan?: PlanNote | null
+      review?: SelectionReview | null
     }
   /** Plan first: a proposed plan waiting for Go or Change. */
   | { type: 'plan_request'; requestId: number; toolCallId: string; plan: PlanProposal }

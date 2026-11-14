@@ -451,6 +451,8 @@ class TestApprovalScope:
             "planId": "c1",
             "step": None,
             "reason": "Not in the plan you approved.",
+            "offPlanCount": 1,
+            "revise": False,
         }
         assert chat.answer(2) == REJECT
 
@@ -558,7 +560,7 @@ class TestProvenance:
             3, "medmcp-cohort_select_series", {"index_path": str(tmp_path)}, "allow_once"
         )
         assert planned["plan"] == {"plan_id": "c1", "step": 1}
-        assert offplan["plan"] == {"plan_id": "c1", "off_plan": True}
+        assert offplan["plan"] == {"plan_id": "c1", "off_plan": True, "off_plan_n": 1}
         provenance.record_tool_event("sid", "c2", planned, [])
         provenance.record_tool_event("sid", "c3", offplan, [])
         by_id = {e.get("tool_call_id"): e for e in provenance.read_run_events("sid")}

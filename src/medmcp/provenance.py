@@ -875,7 +875,7 @@ def render_report(session_id: str) -> str:
     events = [
         e for e in events if e.get("event") != JOB_STARTED and e.get("event") not in _PLAN_EVENTS
     ]
-    lines.extend(_render_plans(plan_events))
+    lines.extend(_render_plans(plan_events, events))
     if started_jobs:
         lines.append(f"## Background jobs ({len(started_jobs)})\n")
         for event in started_jobs:
@@ -929,18 +929,36 @@ def _plan_note(plan: object) -> str:
     if record.get("proposal"):
         return "plan proposal"
     if record.get("off_plan"):
-        return "**not in the plan**" if record.get("plan_id") else "**no plan approved**"
+        if not record.get("plan_id"):
+            return "**no plan approved**"
+        number = record.get("off_plan_n")
+        return (
+            f"**not in the plan** (call {number} outside it)" if number else "**not in the plan**"
+        )
     if record.get("setup"):
         return "plan setup (output folder)"
     step = record.get("step")
     return f"plan step {step}" if step is not None else ""
 
 
-def _render_plans(events: list[JsonDict]) -> list[str]:
-    """The report's plan section: each proposed plan and the answer it got."""
+def _off_plan_counts(tool_events: list[JsonDict]) -> dict[str, int]:
+    """Calls outside each approved plan, by plan id, from the tool events."""
+    counts: dict[str, int] = {}
+    for event in tool_events:
+        record = event.get("plan")
+        if isinstance(record, dict) and cast("JsonDict", record).get("off_plan"):
+            plan_id = cast("JsonDict", record).get("plan_id")
+            if plan_id:
+                counts[str(plan_id)] = counts.get(str(plan_id), 0) + 1
+    return counts
+
+
+def _render_plans(events: list[JsonDict], tool_events: list[JsonDict] | None = None) -> list[str]:
+    """The report's plan section: each plan, its answer and the calls made outside it."""
     proposed = [e for e in events if e.get("event") == PLAN_PROPOSED]
     if not proposed:
         return []
+    off_plan = _off_plan_counts(tool_events or [])
     decisions: dict[str, list[JsonDict]] = {}
     for event in events:
         if event.get("event") == PLAN_DECISION:
@@ -966,7 +984,13 @@ def _render_plans(events: list[JsonDict]) -> list[str]:
             lines.append(f"\n**Output folder:** `{plan['output_dir']}`")
         if answer and answer.get("correction"):
             lines.append(f"\n> Change requested: {answer['correction']}")
+        outside = off_plan.get(str(event.get("plan_id")), 0)
+        if outside:
+            lines.append(f"\n**Calls outside this plan:** {outside}")
         lines.append("")
+    total = sum(off_plan.values())
+    if total:
+        lines.append(f"**Calls outside an approved plan, in all:** {total}\n")
     return lines
 
 

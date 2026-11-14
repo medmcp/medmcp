@@ -31,13 +31,16 @@ rejection. See the design doc's open decisions.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import logging
 import os
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 import mcp.types as mcp_types
 from mcp import ClientSession, StdioServerParameters
@@ -287,6 +290,7 @@ class BackendPool:
         max_warm_gpu: int = 1,
         cwd: str | None = None,
         reaper_interval_sec: float = _REAPER_INTERVAL_SEC,
+        schema_cache: Path | None = None,
     ) -> None:
         """Create an empty pool.
 
@@ -298,8 +302,16 @@ class BackendPool:
                 Clamped to at least 1.
             cwd: Working directory passed to every backend (the workspace root).
             reaper_interval_sec: How often the idle reaper sweeps.
+            schema_cache: A JSON file that keeps each stack's tool list (names and
+                input schemas) across restarts; see :meth:`known_tools`.
         """
         self._resolve = resolve_spec
+        self._schema_cache = schema_cache
+        # Each stack's tools as last listed, kept after its backend is reaped: a plan
+        # is checked against them (medmcp.plan.check_tools) without warming anything.
+        self._known: dict[str, dict[str, JsonDict]] = self._load_schemas()
+        # Output schemas, by stack and tool, for what may be added to a result.
+        self._outputs: dict[str, dict[str, JsonDict | None]] = {}
         self._max_warm_gpu = max(1, max_warm_gpu)
         self._cwd = cwd
         self._reaper_interval = reaper_interval_sec
@@ -360,7 +372,59 @@ class BackendPool:
     async def list_tools(self, name: str) -> list[mcp_types.Tool]:
         """Return the tools advertised by stack *name*, warming it if needed."""
         backend = await self.ensure(name)
-        return await backend.list_tools()
+        tools = await backend.list_tools()
+        self._remember(name, tools)
+        return tools
+
+    def known_tools(self, name: str) -> dict[str, JsonDict] | None:
+        """Stack *name*'s tools as last listed (tool → input schema), never warming it.
+
+        ``None`` when the pool has never listed them. The list survives the
+        backend's eviction and, with a ``schema_cache`` file, a restart; it is
+        refreshed every time the stack's tools are listed (vibe lists them again
+        when the stack's image changes).
+        """
+        known = self._known.get(name)
+        return dict(known) if known is not None else None
+
+    def output_schema(self, name: str, tool: str) -> JsonDict | None:
+        """The output schema *tool* of stack *name* declared when last listed, if any."""
+        return self._outputs.get(name, {}).get(tool)
+
+    def _remember(self, name: str, tools: list[mcp_types.Tool]) -> None:
+        self._outputs[name] = {
+            t.name: dict(t.outputSchema) if t.outputSchema else None for t in tools
+        }
+        listed = {t.name: dict(t.inputSchema) for t in tools if t.name != WARMUP_TOOL}
+        if self._known.get(name) == listed:
+            return
+        self._known[name] = listed
+        if self._schema_cache is None:
+            return
+        try:
+            self._schema_cache.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._schema_cache.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._known, default=str), encoding="utf-8")
+            tmp.replace(self._schema_cache)
+        except OSError as exc:
+            log.debug("could not write the tool schema cache: %s", exc)
+
+    def _load_schemas(self) -> dict[str, dict[str, JsonDict]]:
+        if self._schema_cache is None:
+            return {}
+        with contextlib.suppress(OSError, ValueError):
+            data = json.loads(self._schema_cache.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {
+                    str(stack): {
+                        str(tool): cast("JsonDict", schema)
+                        for tool, schema in cast("JsonDict", tools).items()
+                        if isinstance(schema, dict)
+                    }
+                    for stack, tools in cast("JsonDict", data).items()
+                    if isinstance(tools, dict)
+                }
+        return {}
 
     async def prewarm(self, names: Iterable[str]) -> dict[str, str | None]:
         """Warm each named stack now (activation hook); never raises.
@@ -438,6 +502,7 @@ class BackendPool:
         except Exception as exc:
             log.debug("warmup tool-list for %s failed: %s", backend.spec.name, exc)
             return
+        self._remember(backend.spec.name, tools)
         if any(t.name == WARMUP_TOOL for t in tools):
             try:
                 await backend.call(WARMUP_TOOL, {})

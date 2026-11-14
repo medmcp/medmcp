@@ -74,7 +74,8 @@ user control:
   calls it lists, with paths inside the ones the plan names, and `mkdir -p` of its
   output folder, until the next plan. Any other call asks, marked "Not in the
   plan"; code the assistant wrote, an overwrite or a path outside the workspace
-  always asks. See [docs/plan-first.md](docs/plan-first.md).
+  always asks, and so does `confirm_selection`, whose dialog shows the review it
+  confirms. See [docs/plan-first.md](docs/plan-first.md).
 - **What approving a command grants.** A shell command runs with the agent's
   rights. In a `docker compose` install the agent has its own container: the
   workspace, its own configuration read-only, and nothing else — no Docker

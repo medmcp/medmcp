@@ -12,6 +12,7 @@ import type {
   PlanDecisionState,
   PlanProposal,
   PlanStepStatus,
+  SelectionReview,
   ServerFrame,
   TodoItem,
   ToolCallState,
@@ -377,6 +378,82 @@ const AssistantMessage = memo(function AssistantMessage({
   )
 })
 
+const STATUS_LABELS: Record<string, string> = {
+  ok: 'ok',
+  only_derived: 'only derived',
+  needs_decision: 'needs a decision',
+  multiple_stations: 'multiple stations',
+  missing: 'missing',
+}
+
+/** What a confirm_selection call would confirm: the review, read by the core. */
+function ReviewSummary({ review }: { review: SelectionReview }) {
+  if (review.error) {
+    return (
+      <div className="approval-review approval-review-error">
+        <strong>Selection review</strong> — {review.error}
+      </div>
+    )
+  }
+  const counts = Object.entries(review.counts ?? {}).filter(([, n]) => n > 0)
+  const rows = review.rows ?? []
+  const total = review.rowsTotal ?? rows.length
+  return (
+    <div className="approval-review">
+      <div className="approval-review-head">
+        <strong>Selection review you are confirming</strong>
+        {review.path && <code className="approval-review-path">{review.path}</code>}
+      </div>
+      {counts.length > 0 && (
+        <div className="approval-review-counts">
+          {counts.map(([status, n]) => (
+            <span key={status} className={`review-count review-${status}`}>
+              {n} {STATUS_LABELS[status] ?? status}
+            </span>
+          ))}
+        </div>
+      )}
+      {total > 0 ? (
+        <>
+          <div className="approval-review-sub">
+            {total} row{total === 1 ? '' : 's'} need{total === 1 ? 's' : ''} a decision
+            {review.overrides ? ` · the call passes ${review.overrides} decision(s)` : ''}:
+          </div>
+          <ul className="approval-review-rows">
+            {rows.map((r, i) => (
+              <li key={`${r.subject}-${r.session}-${r.role}-${i}`}>
+                <span className="review-unit">
+                  {r.subject}
+                  {r.session ? ` / ${r.session}` : ''} · {r.role}
+                </span>{' '}
+                <span className={`review-count review-${r.status}`}>
+                  {STATUS_LABELS[r.status] ?? r.status}
+                </span>
+                {r.candidates.length > 0 && (
+                  <span className="review-cands">
+                    {' '}
+                    {r.candidates.join(' | ')}
+                    {r.moreCandidates > 0 && ` … (+${r.moreCandidates})`}
+                  </span>
+                )}
+                {r.reason && <div className="review-reason">{r.reason}</div>}
+              </li>
+            ))}
+          </ul>
+          {total > rows.length && (
+            <div className="approval-review-sub">… and {total - rows.length} more.</div>
+          )}
+        </>
+      ) : (
+        <div className="approval-review-sub">No row needs a decision.</div>
+      )}
+      <div className="approval-review-note">
+        Note to be recorded: {review.note ? <q>{review.note}</q> : <em>none</em>}
+      </div>
+    </div>
+  )
+}
+
 function PermissionCard({
   perm,
   onDecide,
@@ -400,8 +477,14 @@ function PermissionCard({
         ) : (
           <div className="approval-plan approval-offplan">
             <strong>Not in the plan.</strong> {perm.plan.reason}
+            {perm.plan.revise && (
+              <div className="approval-revise">
+                Consider asking the assistant to revise the plan.
+              </div>
+            )}
           </div>
         ))}
+      {perm.review && <ReviewSummary review={perm.review} />}
       {perm.explanation ? (
         <div className="approval-explanation">{perm.explanation}</div>
       ) : perm.explaining ? (
@@ -730,6 +813,7 @@ export const Chat = memo(function Chat({
             risks: frame.risks,
             paths: frame.paths,
             plan: frame.plan,
+            review: frame.review,
           })
           break
         case 'permission_update':

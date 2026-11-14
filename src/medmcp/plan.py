@@ -23,8 +23,17 @@ What a Go covers, and what it never covers:
   create its output folder before the first call writes to it.
 * Never **code the assistant wrote** (a script, an interpreter, ``write_file`` of
   a ``.py``): that is put to the person on its own, plan or no plan.
+* Never ``confirm_selection`` (the cohort stack): confirming a selection is the
+  person's decision about a review they have seen, so it always opens its own
+  dialog, which shows that review (:mod:`medmcp.reviewsummary`).
 * Never anything else: a call outside the plan goes to the ordinary approval
-  dialog, flagged as not in the plan.
+  dialog, flagged as not in the plan. From the third such call in one plan the
+  dialog suggests asking for a revised plan, and the call's result reminds the
+  agent to propose one (:func:`off_plan_reminder`).
+
+A plan whose steps name a tool no stack offers, or a parameter its tool does not
+take, is not shown: :func:`check_tools` lists the problems and the tool hands them
+back with the parameters the tool does take.
 
 The workspace root and the filesystem root never cover what lies under them — a
 plan naming the whole workspace as an input would otherwise approve everything.
@@ -33,9 +42,13 @@ plan naming the whole workspace as an input would otherwise approve everything.
 from __future__ import annotations
 
 import contextlib
+import difflib
+import hashlib
 import json
 import os
 import shlex
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -58,6 +71,16 @@ PLAN_TOOL_NAMES: frozenset[str] = frozenset(
         f"{harness.mcp_group(PLAN_SERVER)}.{PLAN_TOOL}",
     }
 )
+
+# The cohort stack's tools around a selection review. confirm_selection is never
+# covered by a Go (see the module doc); a plan never holds both, because the review
+# is what the person decides on, and they decide after reading it.
+REVIEW_TOOL = "review_selection"
+CONFIRM_TOOL = "confirm_selection"
+
+# From this many calls outside one plan on, the dialog suggests a revised plan and
+# the allowed call's result reminds the agent to propose one.
+OFF_PLAN_NUDGE_FROM = 3
 
 # Bounds that keep a plan a plan: something a person reads in a few seconds.
 MAX_STEPS = 12
@@ -284,6 +307,13 @@ def parse_plan(raw: object, *, plan_id: str = "") -> Plan:
                 problems.append(f"{where} inputs must be an object of argument names to values")
             outputs = _string_list(step.get("outputs"), f"{where} outputs", problems)
             steps.append(PlanStep(action=action, tool=tool, inputs=inputs, outputs=outputs))
+    named = [st.tool for st in steps if st.tool]
+    if any(_names(t, REVIEW_TOOL) for t in named) and any(_names(t, CONFIRM_TOOL) for t in named):
+        problems.append(
+            f"{REVIEW_TOOL} and {CONFIRM_TOOL} cannot be in the same plan: end this plan "
+            "with the review, show it to the user and stop; confirm only after the user "
+            "has answered, in a plan of its own"
+        )
     output_dir = _text(args.get("output_dir"), "output_dir", problems)
     if output_dir and not output_dir.startswith("/"):
         problems.append("output_dir must be an absolute path")
@@ -330,6 +360,183 @@ def step_names_tool(step_tool: str, stack: str, tool: str) -> bool:
     if _norm(text) == _norm(tool):
         return True
     return _norm(text) == _norm(f"{stack}_{tool}")
+
+
+def _bare_tool(step_tool: str) -> str:
+    """The tool part of a step's ``tool``, whatever the spelling (``a.b`` → ``b``)."""
+    text = step_tool.strip()
+    if "." in text:
+        text = text.rpartition(".")[2]
+    return _norm(text)
+
+
+def _names(step_tool: str, tool: str) -> bool:
+    """Whether a step's ``tool`` names *tool* of whichever stack."""
+    bare = _bare_tool(step_tool)
+    return bare == tool or bare.endswith(f"_{tool}")
+
+
+def is_confirm_selection(stack: str, tool: str) -> bool:
+    """Whether a stack call is ``confirm_selection`` — never covered by a Go."""
+    return stack != "builtin" and _norm(tool) == CONFIRM_TOOL
+
+
+# ── Checking a plan against the tools the stacks offer ───────────────────────
+
+# Names a step may give that are not stack tools: vibe's own tools (a plan may
+# list a shell step; it is never covered by the Go) and the harness's.
+_BUILTIN_STEP_TOOLS: frozenset[str] = frozenset(
+    {
+        *harness.BUILTIN_ROUTES,
+        *harness.BUILTIN_ROUTES.values(),
+        *harness.HARNESS_TOOLS,
+        "grep",
+        "todo",
+        "edit",
+        "task",
+        "skill",
+        "web_fetch",
+        "ask_user_question",
+        "mkdir",
+    }
+)
+
+# Stack tool name → its input schema, per stack: ``{stack: {tool: schema}}``.
+ToolSchemas = Mapping[str, Mapping[str, JsonDict]]
+
+
+def _parameters(schema: JsonDict) -> list[str] | None:
+    """The parameter names *schema* allows, or ``None`` when it allows any."""
+    if schema.get("additionalProperties") is True:
+        return None
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return None
+    return list(cast("JsonDict", props))
+
+
+def check_tools(plan: Plan, schemas: ToolSchemas, *, complete: bool) -> list[str]:
+    """What is wrong with *plan*'s steps given the tools the stacks offer.
+
+    A step must name a tool one of the stacks offers (or one of vibe's own), and
+    every argument it lists must be a parameter of that tool; each problem lists
+    the parameters the tool does take, so the model can fix it in one go. An
+    unknown tool name is reported only when *complete* — when *schemas* holds
+    every stack of the chat; otherwise a tool not found may be one whose list is
+    not known yet, and only the steps with a known tool are checked.
+    """
+    problems: list[str] = []
+    for n, step in enumerate(plan.steps, start=1):
+        if not step.tool or step.tool.strip().removeprefix("tools.") in _BUILTIN_STEP_TOOLS:
+            continue
+        found = [
+            (stack, name, schema)
+            for stack, tools in schemas.items()
+            for name, schema in tools.items()
+            if step_names_tool(step.tool, stack, name)
+        ]
+        if not found:
+            if complete:
+                offered = sorted({name for tools in schemas.values() for name in tools})
+                close = difflib.get_close_matches(_bare_tool(step.tool), offered, n=3, cutoff=0.5)
+                hint = (
+                    f"did you mean {', '.join(close)}?"
+                    if close
+                    else "name one of the tools your stacks offer"
+                )
+                problems.append(f"step {n}: no stack offers a tool {step.tool!r}; {hint}")
+            continue
+        _stack, name, schema = found[0]
+        allowed = _parameters(schema)
+        if allowed is None:
+            continue
+        unknown = [key for key in step.inputs if key not in allowed]
+        if unknown:
+            listed = ", ".join(allowed) if allowed else "none"
+            problems.append(
+                f"step {n} ({name}): {name} has no parameter "
+                + ", ".join(repr(k) for k in unknown)
+                + f"; its parameters are: {listed}"
+            )
+    return problems
+
+
+def plan_key(raw: object) -> str:
+    """A stable key for a ``propose_plan`` call's arguments.
+
+    The core and the plan tool see the same arguments (one at the approval step,
+    the other when the call runs), so a verdict the core reached can be looked up
+    by the tool with this key.
+    """
+    canonical = json.dumps(_coerce(raw), sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def off_plan_reminder(count: int) -> str:
+    """What an allowed call outside the plan carries back to the model, from the third on."""
+    return (
+        f"[MedMCP] This was call {count} outside the plan the user approved. Before any "
+        "further step that is not in the plan, call propose_plan with a revised plan "
+        "and wait for the user's Go."
+    )
+
+
+def note_key(name: str, args: JsonDict) -> str:
+    """The key a call is known by in :class:`PlanNotes`: its tool and arguments.
+
+    A shell command is known by its command alone, so the hook (which sees the
+    call as the harness hands it over) and the core (which saw it at the approval
+    step) agree whatever else rides along.
+    """
+    command = args.get("command")
+    if name == "bash" and isinstance(command, str):
+        return json.dumps(["bash", command])
+    return json.dumps([name, args], sort_keys=True, separators=(",", ":"), default=str)
+
+
+class PlanNotes:
+    """What to add to the results of calls allowed outside the plan, until taken.
+
+    The core adds a note when the person allows such a call; whatever returns the
+    call's result to the model takes it — the broker for a stack call, the
+    plan-note hook (``medmcp-plan-note``) for one of vibe's own tools. A note
+    nobody took expires.
+    """
+
+    def __init__(self, ttl_sec: float = 900.0, clock: Callable[[], float] = time.monotonic) -> None:
+        """Notes expire *ttl_sec* after they are added."""
+        self._ttl = ttl_sec
+        self._clock = clock
+        self._notes: dict[str, list[tuple[float, str]]] = {}
+
+    def add(self, name: str, args: JsonDict, text: str) -> None:
+        """Add *text* to the next result of the call *name* with *args*."""
+        self._notes.setdefault(note_key(name, args), []).append((self._clock(), text))
+
+    def take(self, name: str, args: JsonDict) -> str | None:
+        """The note for this call, removed; ``None`` when there is none."""
+        key = note_key(name, args)
+        now = self._clock()
+        live = [n for n in self._notes.get(key, []) if now - n[0] < self._ttl]
+        if not live:
+            self._notes.pop(key, None)
+            return None
+        _, text = live.pop(0)
+        if live:
+            self._notes[key] = live
+        else:
+            self._notes.pop(key, None)
+        return text
+
+
+def off_plan_reason(count: int) -> str:
+    """The dialog's note on a call outside the approved plan (*count*: its number)."""
+    if count < OFF_PLAN_NUDGE_FROM:
+        return "Not in the plan you approved."
+    return (
+        f"Not in the plan you approved — call {count} outside it. Ask the assistant "
+        "to revise the plan: deny this and say so in the chat."
+    )
 
 
 def _resolve(value: str, workspace: Path) -> Path:
@@ -470,7 +677,8 @@ def approval_text(plan: Plan) -> str:
         "The user approved this plan (Go). Carry out exactly these steps, in order, "
         "without asking again; then give a short summary. If anything not listed here "
         "becomes necessary — another tool, any script, another output folder — stop "
-        "and call propose_plan with a revised plan first.",
+        "and call propose_plan with a revised plan first. confirm_selection is never "
+        "part of a Go: the user approves it on its own, after reading the review.",
     ]
     for n, step in enumerate(plan.steps, start=1):
         tool = f" [{step.tool}]" if step.tool else ""
@@ -480,22 +688,85 @@ def approval_text(plan: Plan) -> str:
     return "\n".join(lines)
 
 
-def tool_result(arguments: object) -> tuple[str, bool]:
+def _not_shown(problems: list[str]) -> str:
+    return (
+        "The plan could not be shown to the user. Fix these and call propose_plan "
+        "again: " + "; ".join(problems)
+    )
+
+
+def tool_result(arguments: object, core_problems: list[str] | None = None) -> tuple[str, bool]:
     """The text the tool returns for *arguments*, and whether it is an error.
 
     The tool only runs once the person said Go — the core holds the call at the
     approval step until then — or when the plan could not be shown, in which case
-    it says what to fix.
+    it says what to fix: its own problems (:func:`parse_plan`) or those the core
+    found checking the steps against the stacks' tools (*core_problems*).
     """
     try:
         plan = parse_plan(arguments)
     except PlanError as exc:
-        return (
-            "The plan could not be shown to the user. Fix these and call propose_plan "
-            "again: " + "; ".join(exc.problems),
-            True,
-        )
+        return _not_shown(exc.problems), True
+    if core_problems:
+        return _not_shown(core_problems), True
     return approval_text(plan), False
+
+
+def _broker_socket() -> Path:
+    """The core's broker socket, as an agent process finds it (``$VIBE_HOME``)."""
+    home = os.environ.get("VIBE_HOME", "").strip()
+    base = Path(home) if home else Path(__file__).resolve().parents[2] / ".vibe"
+    return base / "backend.sock"
+
+
+async def ask_core(op: str, payload: JsonDict, *, timeout: float = 5.0) -> JsonDict | None:
+    """One request to the core's broker; ``None`` when it cannot be reached.
+
+    Used by the plan tool (``check_plan``: did the core refuse to show this plan,
+    and why) and by the plan-note hook (``plan_note``). A core without a broker
+    (no stack pool) checks no schemas and keeps no notes, so ``None`` is the
+    answer "nothing to add".
+    """
+    import asyncio
+
+    path = _broker_socket()
+    if not path.exists():
+        return None
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_unix_connection(str(path), limit=32 * 1024 * 1024), timeout
+        )
+    except (OSError, TimeoutError):
+        return None
+    try:
+        request = {"op": op, "stack": PLAN_SERVER, "id": 1, **payload}
+        writer.write(json.dumps(request, default=str).encode() + b"\n")
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), timeout)
+    except (OSError, TimeoutError):
+        return None
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+    try:
+        response = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(response, dict) or not cast("JsonDict", response).get("ok"):
+        return None
+    return cast("JsonDict", response)
+
+
+async def core_problems(arguments: object) -> list[str]:
+    """The problems the core found with this plan (``[]``: none, or no core to ask)."""
+    response = await ask_core("check_plan", {"key": plan_key(arguments)})
+    if response is None:
+        return []
+    problems = response.get("problems")
+    if not isinstance(problems, list):
+        return []
+    return [str(p) for p in cast("list[object]", problems)]
 
 
 async def _serve() -> None:
@@ -519,7 +790,7 @@ async def _serve() -> None:
         if name != PLAN_TOOL:
             text, is_error = f"unknown tool {name!r}", True
         else:
-            text, is_error = tool_result(arguments)
+            text, is_error = tool_result(arguments, await core_problems(arguments))
         return mcp_types.CallToolResult(
             content=[mcp_types.TextContent(type="text", text=text)], isError=is_error
         )

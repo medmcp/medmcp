@@ -50,6 +50,16 @@ Go approves, for that plan only:
 
 Never covered by a Go:
 
+- **`confirm_selection`** (cohort stack): confirming a selection is your
+  decision about a review you have read, so it always opens its own dialog,
+  even when a step of the plan names it. The dialog shows that review, read by
+  the core from the `<name>_review.json` beside the file the call names: the
+  number of rows per status (ok, only derived, needs a decision, multiple
+  stations, missing), up to ten of the rows that need a decision with their
+  candidate series, how many decisions the call passes, and the note it would
+  record. A review that cannot be read (missing, not a review, outside the
+  workspace) is said so in the dialog. `confirm_selection` is also never
+  allowed "for the rest of this chat";
 - **code the assistant wrote** (a script, `python3 -c`, a heredoc, a `.py` it
   writes): it is always put to you on its own, as before;
 - a call that would **overwrite** a file or reach **outside the workspace**: it
@@ -60,6 +70,23 @@ Never covered by a Go:
   marked **Not in the plan**, and its card in the chat says "not in the plan".
   While a plan is in force such a call is shown even if its tool was allowed
   "for the rest of this chat".
+
+## Calls outside the plan
+
+The calls outside each approved plan are counted. From the **third** on, the
+dialog adds "Ask the assistant to revise the plan: deny this and say so in the
+chat", and if you allow the call anyway, its result reaches the agent with a
+reminder:
+
+> [MedMCP] This was call 3 outside the plan the user approved. Before any
+> further step that is not in the plan, call propose_plan with a revised plan
+> and wait for the user's Go.
+
+A stack call's result carries it through the core's broker (as text, and as
+`medmcp_note` in the structured result unless the tool's output schema forbids
+extra keys); the result of one of vibe's own tools (`bash`, `write_file`, …)
+through the `medmcp-plan-note` hook, a `post_tool` hook that can only add text
+to a result. A denied call carries nothing. A new plan starts the count again.
 
 The approval lasts until the agent proposes another plan or the chat is closed.
 The agent is told to stop and propose a revised plan whenever something outside
@@ -96,8 +123,37 @@ The core holds the call at its approval step and shows the card instead of the
 approval dialog. Go answers the call "allow", so the tool runs and tells the
 agent to carry out exactly those steps; Change answers it "reject" and the
 correction follows as a prompt. A plan the card cannot show (a missing field,
-too many steps) is let through without a card, and the tool tells the agent
-what to fix.
+too many steps, `review_selection` and `confirm_selection` in one plan) is let
+through without a card, and the tool tells the agent what to fix.
+
+### Plans are checked against the real tools
+
+Before a card is shown, the core checks each step against the tool lists of the
+chat's stacks: a step must name a tool a stack offers (or one of vibe's own,
+such as `bash`), and every argument it lists must be a parameter of that tool.
+A plan that fails is not shown either; the tool hands the problems back with the
+parameters the tool does take, e.g.
+
+> step 1 (select_series): select_series has no parameter 'session_label'; its
+> parameters are: index_path, sequences, plane, …
+
+The tool lists are the ones the stack pool already holds (each stack's tools as
+last listed, kept across eviction and restarts in
+`.vibe/state/tool_schemas.json`); nothing is started to check a plan. A tool
+name no stack offers is refused only when every stack of the chat has a known
+list; otherwise only the steps whose tool is known are checked. Without the
+stack pool (`MEDMCP_STACK_POOL=0`) no plan is checked. The plan tool learns why
+the core refused a plan from the broker (`check_plan`, keyed by the plan's
+arguments); with no broker to ask it lets the plan through, as before.
+
+## Truncated tool results
+
+A tool result too large for the context reaches the model truncated, with the
+full result saved to a file and the harness's advice to inspect it with `jq`.
+The model then parsed saved results with Python one-liners. The core's LLM shim
+(local models) replaces that advice with "[MedMCP] Result truncated — call the
+tool again with narrower arguments; do not parse files with shell", and the
+prompt says the same for every model.
 
 With plan first off, the tool is not offered and the agent's prompt asks for a
 `todo` list instead (the prompt `medmcp-noplan`, derived from `medmcp`).
@@ -110,8 +166,11 @@ A chat's run log (`run.jsonl`) records:
 - `{"event": "plan_decision", "plan_id", "decision": "go" | "change", "correction"}`;
 - on each tool call decided while plan first is on, `"plan"`:
   `{"plan_id", "step": n}` for a planned call, `{"plan_id", "setup": true}` for
-  the output folder's `mkdir`, `{"plan_id", "off_plan": true}` for a call
-  outside the plan (`plan_id` is null when no plan had been approved).
+  the output folder's `mkdir`, `{"plan_id", "off_plan": true, "off_plan_n": k}`
+  for the k-th call outside the plan (`plan_id` is null, and `off_plan_n`
+  absent, when no plan had been approved).
 
-The session report lists each plan with its answer and marks every call as a
-plan step or **not in the plan**. Distilled workflows leave the plan out.
+The session report lists each plan with its answer and the number of calls made
+outside it ("Calls outside this plan: 3", and the total over all plans), and
+marks every call as a plan step or **not in the plan** (call k outside it).
+Distilled workflows leave the plan out.

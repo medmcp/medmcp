@@ -53,6 +53,13 @@ This shim sits between vibe and Ollama and applies these repairs:
    next parameter or the end of the invoke; and a ``tool.parameter`` invoke with
    no parameters gives its text to that parameter when the tool declares it.
 
+7. **Truncated results** (both modes). A tool result too large for the context
+   reaches the model as the harness's receipt: the first characters inside
+   ``<truncated-output>``, the full result saved to a file, and the advice to
+   inspect that file with ``jq``/``grep``. The model then parsed saved results
+   with Python one-liners (D2, parallel rehearsal). The shim drops that advice
+   and adds :data:`TRUNCATION_NOTE`: call the tool again, narrower; no shell.
+
 **Relay mode** (``MEDMCP_SHIM_RELAY``). ``live`` (default): reasoning and
 ``content`` deltas stream straight through, so the answer appears as it is
 written; only ``tool_calls`` deltas are withheld until the turn is known to be
@@ -259,12 +266,46 @@ def _rename_tool_calls(message: JsonDict, renames: Mapping[str, str]) -> None:
         fn["arguments"] = sanitize_arguments(fn.get("arguments"))
 
 
+# The harness's large-output receipt (vibe's _unified_tool_projection mirrors the tag).
+TRUNCATED_TAG = "<truncated-output>"
+# The receipt's advice to read the saved file with shell tools, dropped (see repair 7).
+_SAVED_FILE_ADVICE = re.compile(
+    r"Read the JSON's inferred type definition[^\n]*?instead of `read_file`\.\)?"
+)
+TRUNCATION_NOTE = (
+    "[MedMCP] Result truncated — call the tool again with narrower arguments; "
+    "do not parse files with shell (no jq, grep, awk, Python or read_file on the "
+    "saved result)."
+)
+
+
+def _note_truncation(text: str) -> str:
+    if TRUNCATED_TAG not in text or TRUNCATION_NOTE in text:
+        return text
+    return _SAVED_FILE_ADVICE.sub("", text).rstrip() + "\n\n" + TRUNCATION_NOTE
+
+
+def note_truncated_result(message: JsonDict) -> None:
+    """Add :data:`TRUNCATION_NOTE` to a ``tool`` message holding a truncation receipt."""
+    content = message.get("content")
+    if isinstance(content, str):
+        message["content"] = _note_truncation(content)
+    elif isinstance(content, list):
+        for raw_part in cast("list[object]", content):
+            if isinstance(raw_part, dict):
+                part = cast("JsonDict", raw_part)
+                text = part.get("text")
+                if isinstance(text, str) and TRUNCATED_TAG in text:
+                    part["text"] = _note_truncation(text)
+
+
 def repair_request(payload: JsonDict, renames: Mapping[str, str]) -> JsonDict:
     """Return ``payload`` with tools renamed and tool-call arguments sanitised.
 
     Renames are applied to the advertised ``tools`` list, to assistant ``tool_calls``
     already in the history, and to the ``name`` on ``tool`` result messages, so the
-    model never sees the two spellings mixed.
+    model never sees the two spellings mixed. A truncated tool result gets
+    :data:`TRUNCATION_NOTE` (repair 7).
     """
     out = cast("JsonDict", json.loads(json.dumps(payload)))
 
@@ -292,6 +333,7 @@ def repair_request(payload: JsonDict, renames: Mapping[str, str]) -> JsonDict:
                 tool_name = message.get("name")
                 if isinstance(tool_name, str) and tool_name in renames:
                     message["name"] = renames[tool_name]
+                note_truncated_result(message)
 
     return out
 

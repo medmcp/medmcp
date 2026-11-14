@@ -4686,6 +4686,102 @@ textarea.wf-input {
   border: 1px solid rgba(251, 191, 36, 0.3);
 }
 
+.approval-revise {
+  margin-top: 4px;
+  font-weight: 600;
+}
+
+/* confirm_selection: the review being confirmed, read by the core. */
+.approval-review {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted2);
+  background: var(--card2);
+  border: 1px solid var(--border2);
+  border-radius: 7px;
+  padding: 8px 10px;
+  margin: 0 0 8px;
+}
+
+.approval-review-error {
+  color: var(--warn);
+}
+
+.approval-review-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  color: var(--text);
+}
+
+.approval-review-path {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.approval-review-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.review-count {
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 5px;
+  padding: 1px 6px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.review-ok {
+  color: var(--ok);
+}
+
+.review-needs_decision,
+.review-multiple_stations,
+.review-missing {
+  color: var(--warn);
+}
+
+.approval-review-sub {
+  margin: 4px 0;
+}
+
+.approval-review-rows {
+  margin: 0 0 4px;
+  padding-left: 16px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.approval-review-rows li {
+  margin: 3px 0;
+}
+
+.review-unit {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+}
+
+.review-cands {
+  color: var(--muted);
+}
+
+.review-reason {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.approval-review-note {
+  margin-top: 6px;
+  color: var(--text);
+}
+
 .approval-inplan {
   color: var(--muted2);
   background: rgba(74, 222, 128, 0.06);

@@ -54,6 +54,7 @@ medmcp-docker-guard = "medmcp.dockerguard:main"
 medmcp-llm-shim = "medmcp.llmshim:main"
 medmcp-pathguard = "medmcp.pathguard:main"
 medmcp-plan-tool = "medmcp.plan:main"
+medmcp-plan-note = "medmcp.plannote:main"
 medmcp-update = "medmcp.updater:main"
 
 [dependency-groups]

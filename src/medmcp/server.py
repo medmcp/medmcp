@@ -88,6 +88,7 @@ from medmcp import (
     pathguard,
     provenance,
     replay,
+    reviewsummary,
     riskcheck,
     runrecord,
     runs,
@@ -166,6 +167,55 @@ _approvals: approvals.ApprovalLedger = approvals.ApprovalLedger()
 # Background jobs (see ``jobs.py``): containers the core starts for an approved
 # stack call and leaves running. None when stacks cannot run jobs here.
 _jobs: jobs.JobManager | None = None
+# Plan first: the reminder to propose a revised plan, waiting for the result of a
+# call the person allowed outside the plan (taken by the broker for a stack call,
+# by the plan-note hook for one of vibe's own tools) ...
+_plan_notes: planfirst.PlanNotes = planfirst.PlanNotes()
+# ... and plans the core would not show because their steps do not fit the stacks'
+# tools, by planfirst.plan_key: the plan tool asks for these (check_plan).
+_plan_refusals: dict[str, tuple[float, list[str]]] = {}
+_PLAN_REFUSAL_TTL_SEC = 900.0
+# Set once the broker listens: only then can the plan tool learn why a plan was
+# refused, so only then does the core refuse one.
+_broker_ready = False
+
+
+def _refuse_plan(key: str, problems: list[str]) -> None:
+    """Remember why the plan with *key* is not shown, for the plan tool to say."""
+    now = time.monotonic()
+    for stale in [k for k, (t, _) in _plan_refusals.items() if now - t > _PLAN_REFUSAL_TTL_SEC]:
+        _plan_refusals.pop(stale, None)
+    _plan_refusals[key] = (now, problems)
+
+
+def _check_plan_op(req: JsonDict) -> JsonDict:
+    """Broker op ``check_plan``: the problems the core found with a plan (by key)."""
+    entry = _plan_refusals.pop(str(req.get("key") or ""), None)
+    return {"problems": entry[1] if entry else []}
+
+
+def _plan_note_op(req: JsonDict) -> JsonDict:
+    """Broker op ``plan_note``: the note for a call of one of vibe's own tools, taken."""
+    raw = req.get("args")
+    args = cast("JsonDict", raw) if isinstance(raw, dict) else {}
+    return {"note": _plan_notes.take(str(req.get("tool") or ""), args)}
+
+
+def _with_note(
+    stack: str, tool: str, result: mcp_types.CallToolResult, note: str
+) -> mcp_types.CallToolResult:
+    """*result* with the core's *note* added where the model will read it.
+
+    As a text block, and — since a call from ``run_typescript`` hands the program
+    the structured result, not the text — under ``medmcp_note`` in the structured
+    result, unless the tool's output schema forbids extra keys.
+    """
+    content = [*result.content, mcp_types.TextContent(type="text", text=note)]
+    structured = result.structuredContent
+    schema = _pool.output_schema(stack, tool) if _pool is not None else None
+    if isinstance(structured, dict) and (schema or {}).get("additionalProperties") is not False:
+        structured = {**structured, "medmcp_note": note}
+    return result.model_copy(update={"content": content, "structuredContent": structured})
 
 
 def _active_server(name: str) -> JsonDict | None:
@@ -196,7 +246,14 @@ def _record_job(started: jobs.Started) -> None:
 async def _after_stack_call(
     stack: str, tool: str, args: JsonDict, approval: object, result: mcp_types.CallToolResult
 ) -> mcp_types.CallToolResult:
-    """Broker hook: start the job an approved call's result asks for (if any)."""
+    """Broker hook: start the job an approved call's result asks for (if any).
+
+    A call the person allowed outside the plan also carries the core's reminder
+    to propose a revised plan, when one is due (see :func:`_with_note`).
+    """
+    note = _plan_notes.take(f"{stack}_{tool}", args)
+    if note is not None:
+        result = _with_note(stack, tool, result, note)
     if _jobs is None:
         return result
     session = approval.session if isinstance(approval, approvals.Approval) else ""
@@ -231,7 +288,7 @@ def _resolve_backend_spec(name: str) -> BackendSpec | None:
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     """Start the stack pool + broker on boot (when enabled); tear them down on exit."""
-    global _pool, _broker, _gateway, _jobs
+    global _pool, _broker, _gateway, _jobs, _broker_ready
     _audit.info("workspace password %s", "required" if access.required() else "not set")
     _audit.info(
         "agent runs %s",
@@ -274,7 +331,11 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     if settings.stack_pool_enabled():
         # Proxy children read MEDMCP_WORKSPACE for their fallback cwd; export it.
         os.environ.setdefault("MEDMCP_WORKSPACE", str(WORKSPACE_ROOT))
-        _pool = BackendPool(resolve_spec=_resolve_backend_spec, cwd=str(WORKSPACE_ROOT))
+        _pool = BackendPool(
+            resolve_spec=_resolve_backend_spec,
+            cwd=str(WORKSPACE_ROOT),
+            schema_cache=settings.VIBE_STATE_DIR / "tool_schemas.json",
+        )
         if settings.stack_jobs_enabled():
             _jobs = jobs.JobManager(
                 workspace=str(WORKSPACE_ROOT),
@@ -282,10 +343,15 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
                 max_jobs=settings.max_jobs,
             )
         _broker = BackendBroker(
-            _pool, settings.backend_socket_path(), _approvals.spend, _after_stack_call
+            _pool,
+            settings.backend_socket_path(),
+            _approvals.spend,
+            _after_stack_call,
+            ops={"check_plan": _check_plan_op, "plan_note": _plan_note_op},
         )
         try:
             await _broker.start()
+            _broker_ready = True
             # Proxied config + backends.json exist from boot, before any tool call.
             await asyncio.to_thread(settings.sync_servers_to_vibe_config, settings.active_servers())
             log.info("stack pool enabled; broker at %s", settings.backend_socket_path())
@@ -313,6 +379,7 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         # Job containers are left running on purpose: they are found again by
         # their labels when a core next starts (see medmcp.jobs).
         _broker = None
+        _broker_ready = False
         _pool = None
         _gateway = None
         _jobs = None
@@ -3164,6 +3231,10 @@ class _ChatConnection:
         self._plan: planfirst.Plan | None = None
         self._pending_plans: dict[int, planfirst.Plan] = {}
         self._plan_calls: dict[str, tuple[str, int | None]] = {}
+        # Calls outside each approved plan so far (by plan id), and the number each
+        # such call got (by tool call id: vibe may ask about one call twice).
+        self._off_plan_counts: dict[str, int] = {}
+        self._off_plan_numbers: dict[str, int] = {}
         self._prompt_task: asyncio.Task[None] | None = None
         # The session/prompt RPC of the current turn. It outlives a cancelled
         # prompt task: vibe-acp ends the turn only after it handles session/cancel,
@@ -3859,7 +3930,21 @@ class _ChatConnection:
         # needs a look (an overwrite, a path outside the workspace) or runs code the
         # assistant wrote. Every other call is put to the person, marked as not in
         # the plan.
+        #
+        # confirm_selection is never covered — not by a Go, not by a chat-long grant:
+        # it is the person's decision about a review, and its dialog shows that
+        # review (see medmcp.reviewsummary).
+        confirm = planfirst.is_confirm_selection(stack, tool)
+        call_args = pathcheck.coerce_arguments(tool_call.get("rawInput"))
+        review: JsonDict | None = None
+        if confirm:
+            try:
+                review = await asyncio.to_thread(reviewsummary.summarize, call_args, WORKSPACE_ROOT)
+            except Exception as exc:  # the dialog must open whatever the review holds
+                log.warning("review summary failed for %s", title, exc_info=True)
+                review = {"error": f"The review could not be read: {exc}."}
         plan_note: JsonDict | None = None
+        off_plan_number = 0
         if self._plan_first:
             step = self._plan_step_for(stack, tool, tool_call, command)
             covered = step is not None and "assistant_code" not in rule_keys
@@ -3867,30 +3952,45 @@ class _ChatConnection:
             if covered and plan_id is not None and step is not None:
                 self._note_plan_call(tc_id, cached, plan_id, step)
                 offered = {o.get("optionId") for o in options}
-                if not _call_needs_a_look(rule_keys, path_findings) and "allow_once" in offered:
+                if (
+                    not confirm
+                    and not _call_needs_a_look(rule_keys, path_findings)
+                    and "allow_once" in offered
+                ):
                     _audit.info("permission covered by the approved plan: %s", title)
                     await self._resolve_permission(req_id_raw, title, cached, "allow_once")
                     await self._send_plan_progress(tc_id, "running")
                     return
-                plan_note = {"inPlan": True, "planId": plan_id, "step": step, "reason": ""}
+                plan_note = {
+                    "inPlan": True,
+                    "planId": plan_id,
+                    "step": step,
+                    "reason": (
+                        "Confirming a selection always needs your own approval." if confirm else ""
+                    ),
+                }
             else:
-                self._note_plan_call(tc_id, cached, plan_id, None)
+                if plan_id is not None:
+                    off_plan_number = self._off_plan_number(plan_id, tc_id)
+                self._note_plan_call(tc_id, cached, plan_id, None, off_plan_number)
                 plan_note = {
                     "inPlan": False,
                     "planId": plan_id,
                     "step": None,
                     "reason": (
-                        "Not in the plan you approved."
+                        planfirst.off_plan_reason(off_plan_number)
                         if plan_id is not None
                         else "No plan was approved for this."
                     ),
+                    "offPlanCount": off_plan_number,
+                    "revise": off_plan_number >= planfirst.OFF_PLAN_NUDGE_FROM,
                 }
 
         # A stack tool can be approved once for the rest of the chat. Calls it then
         # covers are answered here; anything that needs a look is still shown, and
         # is shown without the chat-long option. While a plan is in force a call
         # outside it is always shown: the plan is what the person agreed to.
-        if stack != "builtin" and _stack_tool_approval_enabled():
+        if stack != "builtin" and _stack_tool_approval_enabled() and not confirm:
             needs_look = _call_needs_a_look(rule_keys, path_findings)
             offered = {o.get("optionId") for o in options}
             off_plan = plan_note is not None and not plan_note["inPlan"] and self._plan is not None
@@ -3929,6 +4029,7 @@ class _ChatConnection:
                 "risks": explain.resolve_risks(_merge_keys(rule_keys, risk_keys)),
                 "paths": path_findings,
                 "plan": plan_note,
+                "review": review,
             }
         )
         if explaining:
@@ -3968,11 +4069,26 @@ class _ChatConnection:
             self._granted_stack_tools.add((stack, tool))
             _audit.info("stack tool approved for the rest of this chat: %s/%s", stack, tool)
             option_id = "allow_once"
+        allowed = option_id is not None and option_id.startswith("allow")
+        if allowed and off_plan_number >= planfirst.OFF_PLAN_NUDGE_FROM:
+            # Before the call runs: its result is what carries the reminder.
+            name = tool if stack == "builtin" else f"{stack}_{tool}"
+            _plan_notes.add(name, call_args, planfirst.off_plan_reminder(off_plan_number))
         await self._resolve_permission(req_id_raw, title, cached, option_id)
-        if option_id is not None and option_id.startswith("allow"):
+        if allowed:
             await self._send_plan_progress(tc_id, "running")
 
     # ── Plan first ──────────────────────────────────────────
+
+    def _off_plan_number(self, plan_id: str, tc_id: str) -> int:
+        """The number of this call among the calls outside plan *plan_id* (from 1)."""
+        if tc_id and tc_id in self._off_plan_numbers:
+            return self._off_plan_numbers[tc_id]
+        number = self._off_plan_counts.get(plan_id, 0) + 1
+        self._off_plan_counts[plan_id] = number
+        if tc_id:
+            self._off_plan_numbers[tc_id] = number
+        return number
 
     def _plan_step_for(
         self, stack: str, tool: str, tool_call: JsonDict, command: object
@@ -3990,14 +4106,25 @@ class _ChatConnection:
         return planfirst.match_call(approved, stack, tool, args, WORKSPACE_ROOT)
 
     def _note_plan_call(
-        self, tc_id: str, cached: JsonDict, plan_id: str | None, step: int | None
+        self,
+        tc_id: str,
+        cached: JsonDict,
+        plan_id: str | None,
+        step: int | None,
+        off_plan_number: int = 0,
     ) -> None:
-        """Remember (and mark for provenance) which step of which plan a call is."""
+        """Remember (and mark for provenance) which step of which plan a call is.
+
+        A call outside an approved plan also records its number among them
+        (``off_plan_n``), which the session report counts.
+        """
         if tc_id:
             self._plan_calls[tc_id] = (plan_id or "", step)
         record: JsonDict = {"plan_id": plan_id}
         if step is None:
             record["off_plan"] = True
+            if off_plan_number:
+                record["off_plan_n"] = off_plan_number
         elif step == PLAN_SETUP_STEP:
             record["setup"] = True
         else:
@@ -4056,6 +4183,15 @@ class _ChatConnection:
             _audit.info("plan could not be shown (%s); the tool reports it: %s", exc, title)
             await self._resolve_permission(req_id, title, cached, allow)
             return
+        problems = self._check_plan_tools(proposal)
+        if problems:
+            # Not shown either: the tool hands the problems back (it asks the broker,
+            # check_plan). The plan in force lapses — the agent wants another one.
+            _refuse_plan(planfirst.plan_key(tool_call.get("rawInput")), problems)
+            self._plan = None
+            _audit.info("plan does not fit the stacks' tools (%s): %s", "; ".join(problems), title)
+            await self._resolve_permission(req_id, title, cached, allow)
+            return
         # A new plan withdraws the one in force: the agent says it needs another.
         self._plan = None
         cached["plan"] = {"plan_id": tc_id, "proposal": True}
@@ -4100,6 +4236,28 @@ class _ChatConnection:
             status = "cancelled"
         await self._resolve_permission(req_id, title, cached, option)
         await self._send({"type": "plan_status", "planId": tc_id, "status": status})
+
+    def _check_plan_tools(self, proposal: planfirst.Plan) -> list[str]:
+        """What is wrong with *proposal*'s steps given this chat's stacks' tools.
+
+        Only with the broker up (the plan tool learns the problems through it) and
+        from the tool lists the pool already holds — nothing is started for it. A
+        tool name no stack offers counts only when every stack of the chat has a
+        known tool list.
+        """
+        if not _broker_ready or _pool is None:
+            return []
+        schemas: dict[str, dict[str, JsonDict]] = {}
+        complete = True
+        for name in (str(s["name"]) for s in self.servers):
+            known = _pool.known_tools(name)
+            if known is None:
+                complete = False
+            else:
+                schemas[name] = known
+        if not schemas:
+            return []
+        return planfirst.check_tools(proposal, schemas, complete=complete)
 
     async def _on_plan_decision(self, data: JsonDict) -> None:
         """Relay the browser's Go or Change to the waiting plan, and record it.

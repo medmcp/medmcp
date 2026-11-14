@@ -172,7 +172,8 @@ class TestRegistration:
         """Not config.toml — vibe never reads hooks from there."""
         settings._ensure_pathguard_hook(tmp_path)
         assert not (tmp_path / "config.toml").exists()
-        (hook,) = self._hooks(tmp_path)
+        hook, note = self._hooks(tmp_path)
+        assert note == posture.plan_note_hook()
         assert hook["type"] == "pre_tool"
         assert hook["command"] == "medmcp-pathguard"
         assert "match" not in hook  # every tool: write_file and edit take paths too
@@ -190,20 +191,21 @@ class TestRegistration:
         for _ in range(3):
             settings._ensure_pathguard_hook(tmp_path)
         names = [h["name"] for h in self._hooks(tmp_path)]
-        assert names == [settings.PATHGUARD_HOOK_NAME]
+        assert names == [settings.PATHGUARD_HOOK_NAME, posture.PLAN_NOTE_HOOK_NAME]
 
     def test_unparseable_file_is_rewritten(self, tmp_path: Path) -> None:
         """A corrupt hooks.toml must not leave the guard unregistered."""
         (tmp_path / "hooks.toml").write_text("this is not toml {{{")
         settings._ensure_pathguard_hook(tmp_path)
-        assert [h["name"] for h in self._hooks(tmp_path)] == [settings.PATHGUARD_HOOK_NAME]
+        names = [h["name"] for h in self._hooks(tmp_path)]
+        assert names == [settings.PATHGUARD_HOOK_NAME, posture.PLAN_NOTE_HOOK_NAME]
 
     def test_the_shipped_container_file_registers_the_hook(self) -> None:
         """The image bakes hooks.toml so the guard is live on the first prompt."""
         shipped = Path(__file__).resolve().parents[1] / "docker" / "hooks.toml"
         with shipped.open("rb") as fh:
             hooks = cast("list[dict[str, Any]]", tomllib.load(fh)["hooks"])
-        assert hooks == [posture.pathguard_hook()]
+        assert hooks == posture.workspace_hooks()
 
 
 class TestHookContract:

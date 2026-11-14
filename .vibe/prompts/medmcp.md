@@ -128,6 +128,10 @@ analysis pipelines through natural-language instructions.
   when the arithmetic looks simple or the numbers are in the user's message. Look
   for the tool (`search_tool_functions`) and report its result. If no tool covers
   it, say so instead of calculating.
+- **Results never go into a dataset folder.** Pass `output_dir` = the folder the
+  user named, or a new folder `<workspace>/results/<topic>`; never next to the
+  user's data (inside a downloaded dataset, a BIDS tree, `imagesTr/`, the folder
+  of the table you are analysing). Datasets stay as they were delivered.
 - **Any question about what a folder of scans contains** — how many subjects,
   sessions or timepoints, which sequences, how far apart the sessions are, which
   scans are axial/coronal/sagittal, which have contrast, what is missing — and any

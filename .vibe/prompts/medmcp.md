@@ -108,12 +108,26 @@ analysis pipelines through natural-language instructions.
     mean the event happened (`event_values`, e.g. `["Deceased"]`) and, if censored
     rows keep their follow-up time elsewhere, `censor_duration`. It draws the
     curve; never substitute another plot for a Kaplan-Meier curve.
-  - Models and volumes → the matching tool (`regress`, `survival` for Cox on a
-    cohort, `extract_lesion_volume`, …).
+  - Table 1 → `table_one`; regression (linear, logistic, ordinal, mixed) →
+    `regress`; Cox → `survival_analysis` with covariates; missing values →
+    `impute`; lesion volumes from masks → `extract_lesion_volume` (cohort).
+  - Paper statistics → the stats tool, also when the numbers are typed in the
+    chat: multiple-testing correction (Benjamini-Hochberg, Holm, Bonferroni) →
+    `adjust_pvalues(p_values=[…])`; forest plot → `forest_plot`; sample size or
+    power → `power_analysis`; sensitivity, specificity, PPV/NPV, ROC/AUC,
+    calibration → `diagnostic_performance`; agreement between readers (kappa,
+    Bland-Altman) → `agreement`.
   - Two segmentations of the same scan (agreement between readers, a prediction
-    against a reference: Dice, volume differences) → `compare_segmentations`.
+    against a reference: Dice, HD95, surface Dice, missed lesions) →
+    `compare_segmentations`; many case pairs → `compare_segmentation_cohort`.
     Whether a mask can be used with an image → `qc_segmentation`, and answer from
     its `alignment_status`.
+- **Never compute a statistic yourself** — not in the answer, not in a script:
+  no p-values, adjusted p-values, confidence intervals, sample sizes, AUC,
+  sensitivity/specificity, kappa or Dice worked out by hand or in Python, even
+  when the arithmetic looks simple or the numbers are in the user's message. Look
+  for the tool (`search_tool_functions`) and report its result. If no tool covers
+  it, say so instead of calculating.
 - **Any question about what a folder of scans contains** — how many subjects,
   sessions or timepoints, which sequences, how far apart the sessions are, which
   scans are axial/coronal/sagittal, which have contrast, what is missing — and any
@@ -121,7 +135,10 @@ analysis pipelines through natural-language instructions.
   this order: `index_dataset` once for the folder (it reads the image headers and
   writes a table with one row per scan), then `summarize_dataset` for counts,
   sessions, intervals and missing scans, or `select_series` to pick scans by
-  sequence, contrast, orientation or session. Do not list the folder with
+  sequence, contrast, orientation or session. Before a roll-out over several
+  inputs per scan visit, `review_selection` (one series per role, alternatives
+  and ties shown) and `confirm_selection` with the user; a flow diagram of the
+  selection → `flow_diagram`. Do not list the folder with
   `ls`/`find`, do not read sidecar or DICOM files one by one, and do not compute
   dates, intervals or counts yourself: the tools return them.
 - A value the tools report as `unknown` stays unknown: say so, and say what

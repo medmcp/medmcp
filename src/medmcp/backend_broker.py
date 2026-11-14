@@ -25,6 +25,14 @@ Response (broker → proxy)::
     {"id": 2, "ok": true, "result": <CallToolResult.model_dump>}
     {"id": 2, "ok": false, "error": "stack 'x' is not installed"}
 
+More ops answer the core's own helpers, not a stack, and run nothing:
+``check_plan`` (the plan tool asks whether the core refused to show a plan, and
+why), ``plan_note`` (the plan-note hook asks what to add to a tool result),
+``tool_schema`` (the path guard asks for a stack tool's input schema),
+``record_denial`` / ``take_denial`` (the path guard leaves the reason of a
+denial for the LLM shim to hand to the model). The server supplies them as
+*ops*; see :mod:`medmcp.plan`, :mod:`medmcp.pathguard` and :mod:`medmcp.llmshim`.
+
 Sampling relay is intentionally omitted in v1 (no stack uses MCP sampling).
 
 A call that was authorized may be followed by one more step in this process:
@@ -66,6 +74,8 @@ Authorize = Callable[[str, str, JsonDict], object]
 AfterCall = Callable[
     [str, str, JsonDict, object, mcp_types.CallToolResult], Awaitable[mcp_types.CallToolResult]
 ]
+# An op answered by the server itself (request → the response's fields).
+Op = Callable[[JsonDict], JsonDict]
 
 
 class BrokerRequestError(Exception):
@@ -81,6 +91,7 @@ class BackendBroker:
         socket_path: Path,
         authorize: Authorize | None = None,
         after_call: AfterCall | None = None,
+        ops: dict[str, Op] | None = None,
     ) -> None:
         """Create a broker; call :meth:`start` to begin listening.
 
@@ -94,7 +105,11 @@ class BackendBroker:
             after_call: Run on the result of every call that *authorize* approved
                 (never without an *authorize*): it may act on the result and
                 returns the one to relay.
+            ops: Further ops answered by the server itself, by name; they read
+                core state and run nothing (``check_plan``, ``plan_note``,
+                ``tool_schema``, ``record_denial``, ``take_denial``).
         """
+        self._ops = dict(ops or {})
         self._pool = pool
         self._socket_path = socket_path
         self._authorize = authorize
@@ -178,6 +193,8 @@ class BackendBroker:
         await self._send(writer, resp)
 
     async def _run_op(self, req_id: object, op: object, stack: object, req: JsonDict) -> JsonDict:
+        if isinstance(op, str) and op in self._ops:
+            return {**self._ops[op](req), "id": req_id, "ok": True}
         if not isinstance(stack, str) or not stack:
             raise BrokerRequestError("missing 'stack'")
 

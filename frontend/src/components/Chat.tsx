@@ -9,12 +9,18 @@ import { previewRewind, rewindTo } from '../api'
 import type {
   ChatItem,
   PermissionRequest,
+  PlanDecisionState,
+  PlanProposal,
+  PlanStepStatus,
+  SelectionReview,
   ServerFrame,
   TodoItem,
   ToolCallState,
 } from '../types'
+import { PLAN_TOOL, parseProposal } from '../planProposal'
 import { ChatsMenu } from './ChatsMenu'
 import { PlusIcon, ShieldIcon } from './icons'
+import { PlanProposalCard } from './PlanProposal'
 
 // vibe-acp >= 2.14 sends a tool call's rawInput as a JSON-encoded *string*
 // (read/edit/write tools) rather than an object. Parse it back so the card
@@ -129,6 +135,7 @@ const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
       <div className="tool-card-head">
         <span className={`status-dot ${statusClass}`} />
         <span className="tool-title">{tc.title}</span>
+        {tc.offPlan && <span className="offplan-chip">not in the plan</span>}
         <span className="tool-status">{tc.status}</span>
       </div>
       {tc.rawInput != null && (
@@ -150,7 +157,11 @@ const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
 /** Whether this call may fold into a run of calls to the same tool. */
 function groupable(tc: ToolCallState): boolean {
   return (
-    !!tc.toolName && tc.toolName !== TODO_TOOL && tc.toolName !== TOOL_SEARCH && !tc.pathGuardRetry
+    !!tc.toolName &&
+    tc.toolName !== TODO_TOOL &&
+    tc.toolName !== TOOL_SEARCH &&
+    tc.toolName !== PLAN_TOOL &&
+    !tc.pathGuardRetry
   )
 }
 
@@ -187,6 +198,7 @@ const ToolGroup = memo(
                 <summary>
                   <span className={`status-dot ${callStatusClass(tc.status)}`} />
                   <span className="tool-group-label">{label}</span>
+                  {tc.offPlan && <span className="offplan-chip">not in the plan</span>}
                 </summary>
                 {tc.rawInput != null && (
                   <details>
@@ -366,6 +378,82 @@ const AssistantMessage = memo(function AssistantMessage({
   )
 })
 
+const STATUS_LABELS: Record<string, string> = {
+  ok: 'ok',
+  only_derived: 'only derived',
+  needs_decision: 'needs a decision',
+  multiple_stations: 'multiple stations',
+  missing: 'missing',
+}
+
+/** What a confirm_selection call would confirm: the review, read by the core. */
+function ReviewSummary({ review }: { review: SelectionReview }) {
+  if (review.error) {
+    return (
+      <div className="approval-review approval-review-error">
+        <strong>Selection review</strong> — {review.error}
+      </div>
+    )
+  }
+  const counts = Object.entries(review.counts ?? {}).filter(([, n]) => n > 0)
+  const rows = review.rows ?? []
+  const total = review.rowsTotal ?? rows.length
+  return (
+    <div className="approval-review">
+      <div className="approval-review-head">
+        <strong>Selection review you are confirming</strong>
+        {review.path && <code className="approval-review-path">{review.path}</code>}
+      </div>
+      {counts.length > 0 && (
+        <div className="approval-review-counts">
+          {counts.map(([status, n]) => (
+            <span key={status} className={`review-count review-${status}`}>
+              {n} {STATUS_LABELS[status] ?? status}
+            </span>
+          ))}
+        </div>
+      )}
+      {total > 0 ? (
+        <>
+          <div className="approval-review-sub">
+            {total} row{total === 1 ? '' : 's'} need{total === 1 ? 's' : ''} a decision
+            {review.overrides ? ` · the call passes ${review.overrides} decision(s)` : ''}:
+          </div>
+          <ul className="approval-review-rows">
+            {rows.map((r, i) => (
+              <li key={`${r.subject}-${r.session}-${r.role}-${i}`}>
+                <span className="review-unit">
+                  {r.subject}
+                  {r.session ? ` / ${r.session}` : ''} · {r.role}
+                </span>{' '}
+                <span className={`review-count review-${r.status}`}>
+                  {STATUS_LABELS[r.status] ?? r.status}
+                </span>
+                {r.candidates.length > 0 && (
+                  <span className="review-cands">
+                    {' '}
+                    {r.candidates.join(' | ')}
+                    {r.moreCandidates > 0 && ` … (+${r.moreCandidates})`}
+                  </span>
+                )}
+                {r.reason && <div className="review-reason">{r.reason}</div>}
+              </li>
+            ))}
+          </ul>
+          {total > rows.length && (
+            <div className="approval-review-sub">… and {total - rows.length} more.</div>
+          )}
+        </>
+      ) : (
+        <div className="approval-review-sub">No row needs a decision.</div>
+      )}
+      <div className="approval-review-note">
+        User's reply to be recorded: {review.note ? <q>{review.note}</q> : <em>none</em>}
+      </div>
+    </div>
+  )
+}
+
 function PermissionCard({
   perm,
   onDecide,
@@ -380,6 +468,23 @@ function PermissionCard({
         Action requires your approval
       </div>
       <div className="approval-title">{perm.toolCall.title ?? 'tool call'}</div>
+      {perm.plan &&
+        (perm.plan.inPlan ? (
+          <div className="approval-plan approval-inplan">
+            Step {(perm.plan.step ?? 0) + 1} of the plan you approved — shown because it needs a
+            look.
+          </div>
+        ) : (
+          <div className="approval-plan approval-offplan">
+            <strong>Not in the plan.</strong> {perm.plan.reason}
+            {perm.plan.revise && (
+              <div className="approval-revise">
+                Consider asking the assistant to revise the plan.
+              </div>
+            )}
+          </div>
+        ))}
+      {perm.review && <ReviewSummary review={perm.review} />}
       {perm.explanation ? (
         <div className="approval-explanation">{perm.explanation}</div>
       ) : perm.explaining ? (
@@ -542,6 +647,15 @@ export const Chat = memo(function Chat({
   const [retrying, setRetrying] = useState<{ category: string; detail: string } | null>(null)
   const [usage, setUsage] = useState<{ used: number; size: number | null } | null>(null)
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
+  // Plan first: the plan waiting for Go/Change (request id + the proposing call's
+  // id), every plan's state and validated content, and each approved plan's
+  // per-step progress — all keyed by the proposing call's id.
+  const [planRequest, setPlanRequest] = useState<{ requestId: number; planId: string } | null>(
+    null,
+  )
+  const [planStates, setPlanStates] = useState<Record<string, PlanDecisionState>>({})
+  const [planProposals, setPlanProposals] = useState<Record<string, PlanProposal>>({})
+  const [planSteps, setPlanSteps] = useState<Record<string, Record<number, PlanStepStatus>>>({})
   // Pending rewind confirmation: set after the preview call, cleared on
   // confirm/cancel/reconnect. `paths` are the workspace files a rewind restores.
   const [rewind, setRewind] = useState<{
@@ -576,6 +690,8 @@ export const Chat = memo(function Chat({
     const seenToolIds = new Set<string>()
     // Ids of plan (todo) calls, so a newer plan can retire its predecessors.
     const planIds = new Set<string>()
+    // The proposed plan (plan first) still waiting for Go/Change, if any.
+    let pendingPlanId: string | null = null
     // Chunks arrive near per-token; buffer them and flush into state on a
     // short timer so a long answer doesn't trigger thousands of re-renders
     // (each re-parsing the accumulated markdown).
@@ -665,7 +781,29 @@ export const Chat = memo(function Chat({
         case 'usage':
           setUsage({ used: frame.used, size: frame.size ?? null })
           break
+        case 'plan_request':
+          pendingPlanId = frame.toolCallId
+          setPlanRequest({ requestId: frame.requestId, planId: frame.toolCallId })
+          setPlanProposals((p) => ({ ...p, [frame.toolCallId]: frame.plan }))
+          setPlanStates((p) => ({ ...p, [frame.toolCallId]: 'pending' }))
+          break
+        case 'plan_status':
+          if (pendingPlanId === frame.planId) pendingPlanId = null
+          setPlanStates((p) => ({ ...p, [frame.planId]: frame.status }))
+          setPlanRequest((r) => (r && r.planId === frame.planId ? null : r))
+          break
+        case 'plan_progress':
+          setPlanSteps((p) => ({
+            ...p,
+            [frame.planId]: { ...(p[frame.planId] ?? {}), [frame.step]: frame.status },
+          }))
+          break
         case 'permission_request':
+          // A call outside the plan is flagged on its card as well as in the box.
+          if (frame.plan && !frame.plan.inPlan && frame.toolCall.toolCallId) {
+            const id = frame.toolCall.toolCallId
+            setToolCalls((prev) => (prev[id] ? { ...prev, [id]: { ...prev[id], offPlan: true } } : prev))
+          }
           setPermission({
             requestId: frame.requestId,
             toolCall: frame.toolCall,
@@ -674,6 +812,8 @@ export const Chat = memo(function Chat({
             explaining: frame.explaining,
             risks: frame.risks,
             paths: frame.paths,
+            plan: frame.plan,
+            review: frame.review,
           })
           break
         case 'permission_update':
@@ -689,6 +829,13 @@ export const Chat = memo(function Chat({
           setBusy(false)
           setRetrying(null)
           setPermission(null)
+          // A plan still waiting when the turn ended was never answered.
+          if (pendingPlanId) {
+            const id = pendingPlanId
+            setPlanStates((p) => (p[id] === 'pending' ? { ...p, [id]: 'cancelled' } : p))
+            pendingPlanId = null
+          }
+          setPlanRequest(null)
           onToolActivityRef.current?.()
           break
         case 'error':
@@ -732,6 +879,7 @@ export const Chat = memo(function Chat({
           // resume replays history, a reconnect reloads it — so rebuild from
           // scratch and drop any buffered/partial state from the old socket.
           seenToolIds.clear()
+          pendingPlanId = null
           chunkBuffer = ''
           if (flushTimer != null) {
             clearTimeout(flushTimer)
@@ -742,6 +890,10 @@ export const Chat = memo(function Chat({
           setToolCalls({})
           setBusy(false)
           setPermission(null)
+          setPlanRequest(null)
+          setPlanStates({})
+          setPlanProposals({})
+          setPlanSteps({})
           setRewind(null)
           if (frame.model) setModel(frame.model)
           setCloud(frame.cloud === true)
@@ -760,6 +912,7 @@ export const Chat = memo(function Chat({
         // is stuck on a dead Stop button after every reconnect.
         setBusy(false)
         setPermission(null)
+        setPlanRequest(null)
       }
     }
     const socket = new ChatSocket({ onFrame, onStatusChange }, resumeIdRef.current)
@@ -773,7 +926,7 @@ export const Chat = memo(function Chat({
   useEffect(() => {
     // Smooth scrolling per streamed flush is janky; only ease when idle.
     bottomRef.current?.scrollIntoView({ behavior: busy ? 'auto' : 'smooth' })
-  }, [items, permission, busy])
+  }, [items, permission, planRequest, busy])
 
   // Stable so the memoized ChatInput doesn't re-render on every streaming flush;
   // the trim/empty + open-socket guards live in ChatInput.
@@ -794,6 +947,23 @@ export const Chat = memo(function Chat({
       socketRef.current?.sendPermission(permission.requestId, optionId)
       setPermission(null)
     }
+  }
+
+  const planGo = () => {
+    if (!planRequest) return
+    socketRef.current?.sendPlanDecision(planRequest.requestId, 'go')
+    setPlanStates((p) => ({ ...p, [planRequest.planId]: 'approved' }))
+    setPlanRequest(null)
+  }
+
+  // A correction ends the agent's turn and goes in as the doctor's next message,
+  // which the agent answers with a revised plan.
+  const planChange = (text: string) => {
+    if (!planRequest) return
+    socketRef.current?.sendPlanDecision(planRequest.requestId, 'change', text)
+    setPlanStates((p) => ({ ...p, [planRequest.planId]: 'changed' }))
+    setPlanRequest(null)
+    send(`Change to the plan: ${text}`)
   }
 
   const askRewind = async (messageId: string) => {
@@ -901,6 +1071,34 @@ export const Chat = memo(function Chat({
           const { item, index: i } = row
           if (item.kind === 'tool') {
             const tc = toolCalls[item.toolCallId]
+            if (tc?.toolName === PLAN_TOOL) {
+              const proposal = planProposals[tc.toolCallId] ?? parseProposal(tc.toolCallId, tc.rawInput)
+              if (!proposal) {
+                // Not a plan the card could show: the agent was told what to fix.
+                return tc.status === 'failed' ? (
+                  <div key={item.id} className="tool-retry-note">
+                    ↻ the agent is completing its plan
+                  </div>
+                ) : null
+              }
+              // A replayed plan carries no decision frames: the plan tool runs
+              // only after Go, so a completed call was approved.
+              const state =
+                planStates[tc.toolCallId] ??
+                (tc.status === 'completed' ? 'approved' : tc.status === 'failed' ? 'cancelled' : 'pending')
+              return (
+                <PlanProposalCard
+                  key={item.id}
+                  plan={proposal}
+                  state={state}
+                  steps={planSteps[tc.toolCallId] ?? {}}
+                  canDecide={status === 'open' && planRequest?.planId === tc.toolCallId}
+                  idle={!busy}
+                  onGo={planGo}
+                  onChange={planChange}
+                />
+              )
+            }
             return tc ? (
               <ToolCard
                 key={item.id}
@@ -983,7 +1181,7 @@ export const Chat = memo(function Chat({
           )
         })}
         {permission && <PermissionCard perm={permission} onDecide={decide} />}
-        {busy && !permission && <div className="thinking">●●●</div>}
+        {busy && !permission && !planRequest && <div className="thinking">●●●</div>}
         <div ref={bottomRef} />
       </div>
       <ChatInput busy={busy} canSend={status === 'open'} onSend={send} onCancel={cancel} />

@@ -83,6 +83,11 @@ export class ChatSocket {
     this.send({ type: 'permission', requestId, optionId })
   }
 
+  /** Answer a proposed plan. A Change's correction follows as a prompt. */
+  sendPlanDecision(requestId: number, decision: 'go' | 'change', text = ''): void {
+    this.send({ type: 'plan_decision', requestId, decision, text })
+  }
+
   cancel(): void {
     this.send({ type: 'cancel' })
   }

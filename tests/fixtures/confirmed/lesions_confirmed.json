@@ -1,0 +1,253 @@
+{
+ "kind": "medmcp-cohort confirm_selection",
+ "confirmed_at": "2026-11-14T12:50:20+00:00",
+ "note": "fixture for the core's roll-out tests",
+ "confirmed_csv": {
+  "path": "/workspace/study/.medmcp/lesions_confirmed.csv",
+  "sha256": "10f6f25b0fdaf1af5f8c91b5a1d180f84c5daf5ac4ec947331569a3c9a9f8060"
+ },
+ "manifest": {
+  "path": "/workspace/study/.medmcp/lesions_series.csv",
+  "sha256": "955d6f97696b9820d3297be24d7bcf7e049fb623132f4e0be1a2500d3d76f9c4"
+ },
+ "criteria": {
+  "path": "/workspace/study/.medmcp/lesions_criteria.json",
+  "sha256": "1cff2563e058d59a66efaaa6ad1685fbf672e3fdb5467e1cf9536b88c3ff0b4d"
+ },
+ "index": {
+  "path": "/workspace/study/.medmcp/dataset_index.csv",
+  "sha256": "955d6f97696b9820d3297be24d7bcf7e049fb623132f4e0be1a2500d3d76f9c4"
+ },
+ "index_unchanged_since_review": true,
+ "review": {
+  "csv": {
+   "path": "/workspace/study/.medmcp/lesions_review.csv",
+   "sha256": "c88db7354b14fa1a6dca202c6cb7107c603b7e126461fa0d2cd63a014ccaebe4"
+  },
+  "record": {
+   "path": "/workspace/study/.medmcp/lesions_review.json",
+   "sha256": "d926fd38faee6d8927f7c9f4f4f0288dca104366e2c4e1590cefd85de6128890"
+  },
+  "created": "2026-11-14T12:50:20+00:00"
+ },
+ "rule_version": "2",
+ "rule_order": [
+  "drop_localizers_derived",
+  "requested_plane",
+  "identical_copies",
+  "complementary_series",
+  "same_station",
+  "full_coverage",
+  "prefer_3d",
+  "thinnest_slices",
+  "highest_inplane_resolution",
+  "latest_series"
+ ],
+ "rules": {
+  "drop_localizers_derived": "drop localizers and masks; drop derived or reformatted series unless every remaining candidate is one (then the row is only_derived)",
+  "requested_plane": "keep the plane the selection criteria asked for (the first listed plane that a candidate has)",
+  "identical_copies": "the same acquisition stored more than once (same series number, acquisition time and geometry, other series UID or description) counts once",
+  "complementary_series": "stop when candidates differ only in a phase-encoding direction (AP/PA/RL/LR) or b-value: they belong together, they are not alternatives",
+  "same_station": "stop when the candidates cover different stations along the body (z-extents overlap less than 80 % of the smaller one, e.g. C-, T- and L-spine): multiple_stations",
+  "full_coverage": "drop candidates covering less than 50 % of the largest through-plane extent (add-on, partial or needle-check series); a pick under 60 % is flagged",
+  "prefer_3d": "prefer 3D acquisitions (MRAcquisitionType, else isotropic spacing) over 2D",
+  "thinnest_slices": "prefer the thinnest slices",
+  "highest_inplane_resolution": "prefer the smallest in-plane voxel area",
+  "latest_series": "prefer the latest series of the session (highest series number, else latest acquisition time)"
+ },
+ "roles": [
+  {
+   "label": "T1-contrast",
+   "given": "T1",
+   "note": "'T1' read as T1-contrast because T1+contrast is also a role"
+  },
+  {
+   "label": "T1+contrast",
+   "given": "T1+contrast",
+   "note": ""
+  },
+  {
+   "label": "FLAIR",
+   "given": "FLAIR",
+   "note": ""
+  }
+ ],
+ "core_role_labels": [
+  "T1-contrast",
+  "T1+contrast",
+  "FLAIR"
+ ],
+ "decisions": [
+  {
+   "collection": "",
+   "subject_id": "P01",
+   "session_id": "ses-01",
+   "role": "T1-contrast",
+   "status_at_review": "ok",
+   "decided_by": "rules",
+   "chosen": {
+    "path": "P01/ses-01/s02.nii.gz",
+    "series_uid": "1.2.3.2",
+    "series_number": "8"
+   },
+   "reason": "2 candidates; latest_series: kept #8 'T1 SE repeat' (series number 8) over #3 'T1 SE' (series number 3); chosen: #8 'T1 SE repeat'; its contrast is unknown, read as T1-contrast because the session's T1+contrast is #12 'T1 post' (contrast yes)"
+  },
+  {
+   "collection": "",
+   "subject_id": "P01",
+   "session_id": "ses-01",
+   "role": "T1+contrast",
+   "status_at_review": "ok",
+   "decided_by": "rules",
+   "chosen": {
+    "path": "P01/ses-01/s03.nii.gz",
+    "series_uid": "1.2.3.3",
+    "series_number": "12"
+   },
+   "reason": "3 candidates; latest_series: kept #12 'T1 post' (series number 12) over #3 'T1 SE', #8 'T1 SE repeat' (series number 3, 8); chosen: #12 'T1 post'"
+  },
+  {
+   "collection": "",
+   "subject_id": "P01",
+   "session_id": "ses-01",
+   "role": "FLAIR",
+   "status_at_review": "ok",
+   "decided_by": "only candidate",
+   "chosen": {
+    "path": "P01/ses-01/s04.nii.gz",
+    "series_uid": "1.2.3.4",
+    "series_number": "5"
+   },
+   "reason": "only candidate: #5 'FLAIR'"
+  },
+  {
+   "collection": "",
+   "subject_id": "P02",
+   "session_id": "ses-01",
+   "role": "T1-contrast",
+   "status_at_review": "needs_decision",
+   "decided_by": "override",
+   "chosen": {
+    "path": "P02/ses-01/s06.nii.gz",
+    "series_uid": "1.2.3.6",
+    "series_number": "2"
+   },
+   "reason": "tie: #2 'T1', #2 'T1' are identical on every criterion (description, plane, 2D/3D, slice thickness, in-plane voxel size, derived/original, series number, acquisition time, contrast); possibly the same series stored twice"
+  },
+  {
+   "collection": "",
+   "subject_id": "P02",
+   "session_id": "ses-01",
+   "role": "T1+contrast",
+   "status_at_review": "ok",
+   "decided_by": "only candidate",
+   "chosen": {
+    "path": "P02/ses-01/s07.nii.gz",
+    "series_uid": "1.2.3.7",
+    "series_number": "12"
+   },
+   "reason": "only candidate: #12 'T1 post'"
+  },
+  {
+   "collection": "",
+   "subject_id": "P02",
+   "session_id": "ses-01",
+   "role": "FLAIR",
+   "status_at_review": "ok",
+   "decided_by": "only candidate",
+   "chosen": {
+    "path": "P02/ses-01/s08.nii.gz",
+    "series_uid": "1.2.3.8",
+    "series_number": "5"
+   },
+   "reason": "only candidate: #5 'FLAIR'"
+  },
+  {
+   "collection": "",
+   "subject_id": "P03",
+   "session_id": "ses-01",
+   "role": "T1-contrast",
+   "status_at_review": "ok",
+   "decided_by": "only candidate",
+   "chosen": {
+    "path": "P03/ses-01/s09.nii.gz",
+    "series_uid": "1.2.3.9",
+    "series_number": "3"
+   },
+   "reason": "only candidate: #3 'T1'"
+  },
+  {
+   "collection": "",
+   "subject_id": "P03",
+   "session_id": "ses-01",
+   "role": "T1+contrast",
+   "status_at_review": "ok",
+   "decided_by": "only candidate",
+   "chosen": {
+    "path": "P03/ses-01/s10.nii.gz",
+    "series_uid": "1.2.3.10",
+    "series_number": "12"
+   },
+   "reason": "only candidate: #12 'T1 post'"
+  },
+  {
+   "collection": "",
+   "subject_id": "P03",
+   "session_id": "ses-01",
+   "role": "FLAIR",
+   "status_at_review": "missing",
+   "decided_by": "only candidate",
+   "chosen": null,
+   "reason": "no FLAIR series in this session (selected here: T1+contrast, T1-contrast)"
+  }
+ ],
+ "overrides": [
+  {
+   "collection": "",
+   "subject_id": "P02",
+   "session_id": "ses-01",
+   "role": "T1-contrast",
+   "series": "P02/ses-01/s06.nii.gz",
+   "status_at_review": "needs_decision",
+   "applied_at": "2026-11-14T12:50:20+00:00",
+   "action": "pick",
+   "chosen": {
+    "path": "P02/ses-01/s06.nii.gz",
+    "series_uid": "1.2.3.6",
+    "series_number": "2",
+    "description": "T1"
+   },
+   "was": null
+  }
+ ],
+ "excluded": [
+  {
+   "collection": "",
+   "subject_id": "P03",
+   "session_id": "ses-01",
+   "reason": "no FLAIR series",
+   "source": "review"
+  }
+ ],
+ "warnings": [],
+ "counts": {
+  "subject_sessions_reviewed": 3,
+  "subject_sessions_confirmed": 2,
+  "subject_sessions_excluded": 1,
+  "series_confirmed": 6,
+  "rows_at_review": {
+   "ok": 7,
+   "only_derived": 0,
+   "needs_decision": 1,
+   "multiple_stations": 0,
+   "missing": 1
+  },
+  "overrides_applied": 1,
+  "decided_by": {
+   "rules": 2,
+   "only candidate": 6,
+   "override": 1,
+   "excluded by override": 0
+  }
+ }
+}

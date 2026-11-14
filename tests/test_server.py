@@ -9,12 +9,13 @@ exercisable without a live vibe-acp subprocess.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import io
 import zipfile
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import pytest
 import yaml
@@ -1743,57 +1744,198 @@ class TestReplayRuns:
         ]
         assert body["roles"] == [{"role": "FLAIR-contrast", "series": 2, "units": 2}]
 
-    def test_a_selection_asks_for_roles_then_pivots(self, env: Path, client: TestClient) -> None:
-        """Two reading inputs: the endpoint offers the roles, then binds per subject-session."""
+    def _import_lesions(self, client: TestClient) -> None:
+        """A workflow reading a T1, a T1 with contrast and a FLAIR, writing one file."""
         envelope = yaml.safe_dump(
             {
                 "medmcp_workflow": 1,
-                "name": "onto",
+                "name": "lesions",
                 "description": "demo",
                 "inputs": [
-                    {"name": "in_1", "example": "/d/FLAIR.nii.gz"},
-                    {"name": "in_2", "example": "/d/T1WKS.nii.gz"},
-                    {"name": "in_3", "example": "/d/out/FLAIR_on_T1.nii.gz"},
+                    {"name": "in_1", "example": "/d/T1.nii.gz"},
+                    {"name": "in_2", "example": "/d/T1KM.nii.gz"},
+                    {"name": "in_3", "example": "/d/FLAIR.nii.gz"},
+                    {"name": "in_4", "example": "/d/out/lesions.nii.gz"},
                 ],
                 "steps": [
                     {
                         "server": "medmcp-neuro",
-                        "tool": "resample",
+                        "tool": "segment_lesions",
                         "arguments": {
-                            "input_path": "{{in_1}}",
-                            "reference_path": "{{in_2}}",
-                            "output_path": "{{in_3}}",
+                            "t1_path": "{{in_1}}",
+                            "t1ce_path": "{{in_2}}",
+                            "flair_path": "{{in_3}}",
+                            "output_path": "{{in_4}}",
                         },
                     }
                 ],
             }
         )
         assert client.post("/api/workflows/import", json={"content": envelope}).status_code == 200
-        (env / "sel_series.csv").write_text(
-            "subject_id,session_id,sequence,contrast,plane,path\n"
-            f"P1,,FLAIR,no,axial,{env}/P1/FLAIR.nii.gz\n"
-            f"P1,,T1,yes,axial,{env}/P1/T1WKS.nii.gz\n"
-            f"P2,,FLAIR,no,axial,{env}/P2/FLAIR.nii.gz\n"
-        )
-        asked = client.post(
-            "/api/workflows/onto/batch-from-plan", json={"plan_csv": "sel_series.csv"}
+
+    def _study(self, env: Path) -> Path:
+        """The cohort tools' confirmed selection (tests/fixtures/confirmed) in a study folder.
+
+        Every series it names exists, so the preview finds the files.
+        """
+        folder = env / "study" / ".medmcp"
+        folder.mkdir(parents=True)
+        fixtures = Path(__file__).parent / "fixtures" / "confirmed"
+        for name in ("lesions_series.csv", "lesions_confirmed.csv", "lesions_confirmed.json"):
+            (folder / name).write_bytes((fixtures / name).read_bytes())
+        for line in (folder / "lesions_series.csv").read_text().splitlines()[1:]:
+            scan = env / "study" / line.split(",")[11]
+            scan.parent.mkdir(parents=True, exist_ok=True)
+            scan.write_bytes(b"x")
+        return folder
+
+    ROLES: ClassVar[dict[str, str]] = {
+        "in_1": "T1-contrast",
+        "in_2": "T1+contrast",
+        "in_3": "FLAIR",
+    }
+
+    def test_a_plain_selection_is_refused_for_several_inputs(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """No roles are asked for: the answer says to review and confirm the selection."""
+        self._import_lesions(client)
+        self._study(env)
+        for role_map in ({}, self.ROLES):
+            body = client.post(
+                "/api/workflows/lesions/batch-from-plan",
+                json={"plan_csv": "study/.medmcp/lesions_series.csv", "role_map": role_map},
+            ).json()
+            assert body["ok"] is False and body["refused"] is True
+            assert "review_selection and confirm_selection first" in body["error"]
+            assert "unmapped" not in body
+        # One input is never ambiguous: the same selection still feeds it, a run per series.
+        one = client.post(
+            "/api/workflows/strip/batch-from-plan",
+            json={"plan_csv": "study/.medmcp/lesions_series.csv"},
         ).json()
-        assert asked["ok"] is False and asked["unmapped"] == ["in_1", "in_2"]
-        assert [r["role"] for r in asked["roles"]] == ["FLAIR-contrast", "T1+contrast"]
+        assert one["ok"] is True and len(one["runs"]) == 10 and one["confirmation"] is None
+
+    def test_a_confirmed_selection_asks_for_its_roles_then_binds(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """The roles offered are the confirmed labels; the answer carries the confirmation."""
+        self._import_lesions(client)
+        folder = self._study(env)
+        plan = {"plan_csv": "study/.medmcp/lesions_confirmed.csv"}
+        asked = client.post("/api/workflows/lesions/batch-from-plan", json=plan).json()
+        assert asked["ok"] is False and asked["unmapped"] == ["in_1", "in_2", "in_3"]
+        assert [r["role"] for r in asked["roles"]] == ["T1-contrast", "T1+contrast", "FLAIR"]
+        assert asked["roles"][0] == {"role": "T1-contrast", "series": 2, "units": 2}
+
         bound = client.post(
-            "/api/workflows/onto/batch-from-plan",
-            json={
-                "plan_csv": "sel_series.csv",
-                "role_map": {"in_1": "FLAIR", "in_2": "T1+contrast"},
-            },
+            "/api/workflows/lesions/batch-from-plan", json={**plan, "role_map": self.ROLES}
         ).json()
-        assert bound["ok"] is True and bound["labels"] == ["P1"]
-        assert bound["runs"][0]["in_3"] == str(
-            env / "results" / "onto" / "P1" / "FLAIR_on_T1.nii.gz"
+        assert bound["ok"] is True and bound["labels"] == ["P01/ses-01", "P02/ses-01"]
+        assert bound["runs"][1]["in_1"] == str(env / "study" / "P02" / "ses-01" / "s06.nii.gz")
+        assert bound["runs"][1]["in_4"] == str(
+            env / "results" / "lesions" / "P02" / "ses-01" / "lesions.nii.gz"
         )
-        assert bound["skipped"] == [
-            {"subject": "P2", "status": "missing", "reason": "no T1+contrast series for in_2"}
+        info = bound["confirmation"]
+        assert info["rule_version"] == "2" and info["overrides"] == 1 and info["excluded"] == 1
+        assert info["confirmed_at"] and info["path"] == str(folder / "lesions_confirmed.json")
+
+        csv_path = folder / "lesions_confirmed.csv"
+        csv_path.write_text(csv_path.read_text().replace("s06.nii.gz", "s05.nii.gz"))
+        refused = client.post(
+            "/api/workflows/lesions/batch-from-plan", json={**plan, "role_map": self.ROLES}
+        ).json()
+        assert refused["ok"] is False and refused["refused"] is True
+        assert "the confirmed selection was changed after confirmation" in refused["error"]
+
+    def _run(self, client: TestClient, message: dict[str, Any]) -> list[dict[str, Any]]:
+        with client.websocket_connect("/ws/replay", headers=WS_HEADERS) as ws:
+            ws.send_json(message)
+            frames: list[dict[str, Any]] = []
+            while not frames or frames[-1]["type"] != "result":
+                frames.append(ws.receive_json())
+        return frames
+
+    def test_a_confirmed_roll_out_records_its_confirmation(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """The run cites the record by path and hash, with the source manifest and index."""
+        from medmcp import runs
+
+        self._import_lesions(client)
+        folder = self._study(env)
+        manifest = "study/.medmcp/lesions_confirmed.csv"
+        bound = client.post(
+            "/api/workflows/lesions/batch-from-plan",
+            json={"plan_csv": manifest, "role_map": self.ROLES},
+        ).json()
+        preview = client.post("/api/workflows/lesions/replay-preview", json={"runs": bound["runs"]})
+        assert preview.json()["ok"] is True
+        frames = self._run(
+            client,
+            {
+                "name": "lesions",
+                "runs": bound["runs"],
+                "labels": bound["labels"],
+                "manifest": manifest,
+            },
+        )
+        assert frames[-1]["ok"] is True
+        run_id = frames[0]["run_id"]
+
+        record = client.get(f"/api/runs/{run_id}").json()
+        selection = record["manifest"]["confirmed_selection"]
+        record_file = folder / "lesions_confirmed.json"
+        csv_bytes = (folder / "lesions_confirmed.csv").read_bytes()
+        assert selection["path"] == str(record_file)
+        assert selection["sha256"] == hashlib.sha256(record_file.read_bytes()).hexdigest()
+        assert selection["confirmed_csv_sha256"] == hashlib.sha256(csv_bytes).hexdigest()
+        assert record["manifest"]["sha256"] == selection["confirmed_csv_sha256"]
+        assert (
+            selection["source_manifest"]["sha256"]
+            == hashlib.sha256((folder / "lesions_series.csv").read_bytes()).hexdigest()
+        )
+        assert selection["index"]["sha256"]
+        assert selection["copy"] == "confirmation.json" and "error" not in selection
+        copied = runs.run_folder(run_id) / "confirmation.json"
+        assert copied.read_bytes() == record_file.read_bytes()
+
+        exported = client.get(f"/api/runs/{run_id}/export").json()
+        assert (
+            exported["manifest"]["confirmed_selection"]["record"]["counts"]["overrides_applied"]
+            == 1
+        )
+        report = client.get(f"/api/runs/{run_id}/export", params={"format": "md"}).text
+        assert "**Confirmed selection:**" in report and selection["sha256"] in report
+
+    def test_a_run_rechecks_the_manifest_at_its_start(self, env: Path, client: TestClient) -> None:
+        """Edited after binding, or a plain selection under several inputs: no run starts."""
+        self._import_lesions(client)
+        folder = self._study(env)
+        manifest = "study/.medmcp/lesions_confirmed.csv"
+        bound = client.post(
+            "/api/workflows/lesions/batch-from-plan",
+            json={"plan_csv": manifest, "role_map": self.ROLES},
+        ).json()
+        csv_path = folder / "lesions_confirmed.csv"
+        csv_path.write_bytes(csv_path.read_bytes() + b"\n")
+        message = {"name": "lesions", "runs": bound["runs"], "manifest": manifest}
+        frames = self._run(client, message)
+        assert frames == [
+            {"type": "result", "ok": False, "error": frames[0]["error"]},
         ]
+        assert "the confirmed selection was changed after confirmation" in frames[0]["error"]
+
+        csv_path.write_bytes(csv_path.read_bytes()[:-1])  # as confirmed again
+        edited = [dict(r) for r in bound["runs"]]
+        edited[1]["in_1"] = str(env / "study" / "P02" / "ses-01" / "s05.nii.gz")
+        frames = self._run(client, {**message, "runs": edited})
+        assert frames[0]["ok"] is False
+        assert "item 2 reads" in frames[0]["error"] and "not a series of" in frames[0]["error"]
+
+        plain = self._run(client, {**message, "manifest": "study/.medmcp/lesions_series.csv"})
+        assert plain[0]["ok"] is False and "confirm_selection first" in plain[0]["error"]
+        assert client.get("/api/runs", params={"workflow": "lesions"}).json()["runs"] == []
 
     def test_bad_first_message_is_refused(self, env: Path, client: TestClient) -> None:
         """Neither a start nor an attach: the socket answers with an error and closes."""

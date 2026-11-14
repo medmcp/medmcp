@@ -187,11 +187,31 @@ export interface BatchPlanSkip {
   reason?: string
 }
 
+/** What confirm_selection recorded about a confirmed selection (its
+ *  `<name>_confirmed.json`), as checked against the CSV being rolled out. */
+export interface SelectionConfirmation {
+  path: string
+  sha256: string
+  confirmed_csv_sha256: string
+  confirmed_at: string | null
+  note: string
+  rule_version: string | null
+  roles: string[]
+  overrides: number
+  excluded: number
+}
+
 /** Result of POST /api/workflows/{name}/batch-from-plan: rows to pre-fill the
  *  batch editor from a plan_batch manifest, plus the flagged rows to resolve. */
 export interface BatchFromPlanResult {
   ok: boolean
   error: string | null
+  /** The manifest cannot be rolled out as it is (`error` says why and what to
+   *  do): a confirmed selection changed since confirmation, or a selection that
+   *  was never confirmed under a workflow that reads several scans. */
+  refused?: boolean
+  /** For a confirmed selection: its confirmation record. */
+  confirmation?: SelectionConfirmation | null
   /** Which manifest it was: a plan_batch plan or a select_series selection. */
   kind?: 'plan' | 'selection'
   runs: Record<string, string>[]

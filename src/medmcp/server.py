@@ -2088,13 +2088,19 @@ def _confined_output_root(value: str) -> Path:
 
 
 def _bind_selection(
-    recipe: workflow.Recipe, rows: list[dict[str, str]], payload: BatchFromPlanPayload
+    recipe: workflow.Recipe,
+    rows: list[dict[str, str]],
+    payload: BatchFromPlanPayload,
+    confirmation: batchplan.Confirmation | None,
 ) -> JsonDict:
     """Bind a ``select_series`` manifest: one run per series, or per subject-session.
 
     When the workflow reads several files and the roles are not all known, the
     answer carries the roles the selection offers (``roles``) and the inputs
     still to assign (``unmapped``), so the editor can ask instead of guessing.
+    A confirmed selection (already checked against its record) offers its
+    ``role`` labels and carries the record's summary as ``confirmation``; a
+    multi-input workflow over a plain selection is refused (``refused``).
     """
     root: Path | None = None
     if payload.output_root.strip():
@@ -2103,6 +2109,7 @@ def _bind_selection(
         root = _default_output_root(recipe)
     offered = batchplan.selection_roles(rows)
     plan_path = Path(_confined_input_path(payload.plan_csv))
+    confirmed = confirmation.summary() if confirmation is not None else None
     try:
         binding = batchplan.runs_from_selection(
             recipe,
@@ -2111,6 +2118,16 @@ def _bind_selection(
             output_root=root,
             base_dir=batchplan.dataset_dir(plan_path),
         )
+    except batchplan.NeedsConfirmationError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "refused": True,
+            "kind": "selection",
+            "runs": [],
+            "skipped": [],
+            "roles": offered,
+        }
     except batchplan.NeedsRolesError as exc:
         return {
             "ok": False,
@@ -2121,6 +2138,7 @@ def _bind_selection(
             "roles": offered,
             "unmapped": exc.unmapped,
             "role_map": exc.role_map,
+            "confirmation": confirmed,
         }
     except batchplan.BatchPlanError as exc:
         return {
@@ -2130,11 +2148,13 @@ def _bind_selection(
             "runs": [],
             "skipped": [],
             "roles": offered,
+            "confirmation": confirmed,
         }
     return {
         "ok": True,
         "error": None,
         "kind": "selection",
+        "confirmation": confirmed,
         "runs": [_confined_input_paths(r) for r in binding.runs],
         "labels": binding.labels,
         "skipped": binding.skipped,
@@ -2161,17 +2181,27 @@ async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> Json
     the columns to choose from (``columns``/``unmapped``) so the editor can ask.
 
     A ``select_series`` manifest (one row per selected series) is accepted on the
-    same route and bound by :func:`_bind_selection`.
+    same route and bound by :func:`_bind_selection`; a ``confirm_selection`` one
+    only while it matches its record, else it is refused with the reason.
     """
 
     def _build() -> JsonDict:
         recipe = workflow.load_workflow(name)
         try:
-            rows = batchplan.read_manifest(_confined_input_path(payload.plan_csv))
-        except OSError as exc:
+            rows, confirmation = batchplan.load_manifest(_confined_input_path(payload.plan_csv))
+        except (OSError, UnicodeDecodeError) as exc:
             return {"ok": False, "error": f"cannot read plan: {exc}", "runs": [], "skipped": []}
+        except batchplan.ConfirmationError as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "refused": True,
+                "kind": "selection",
+                "runs": [],
+                "skipped": [],
+            }
         if batchplan.is_selection(rows):
-            return _bind_selection(recipe, rows, payload)
+            return _bind_selection(recipe, rows, payload, confirmation)
         columns = batchplan.role_columns(rows)
         has_plan_dirs = bool(rows) and "output_dir" in rows[0]
         root: Path | None = None
@@ -2296,6 +2326,19 @@ async def ws_replay(ws: WebSocket) -> None:
             if first.manifest.strip():
                 with contextlib.suppress(ValueError):
                     manifest_path = Path(_confined_input_path(first.manifest.strip()))
+            # The rows were bound earlier; the manifest they came from is checked
+            # again now, so a confirmed selection edited since (or a plain one
+            # under a multi-input workflow) cannot start a run.
+            selection: batchplan.Confirmation | None = None
+            if manifest_path is not None:
+                try:
+                    selection = await asyncio.to_thread(
+                        batchplan.check_run_manifest, manifest_path, recipe, bindings
+                    )
+                except batchplan.BatchPlanError as exc:
+                    _audit.warning("replay refused: %s", exc)
+                    await ws.send_json({"type": "result", "ok": False, "error": str(exc)})
+                    return
             previewed_at = _previewed.get(_binding_key(first.name, bindings))
             record = _runs.start(
                 recipe=recipe,
@@ -2305,6 +2348,7 @@ async def ws_replay(ws: WebSocket) -> None:
                 confine_to=WORKSPACE_ROOT,
                 labels=first.labels,
                 manifest_path=manifest_path,
+                confirmed_selection=selection.summary() if selection is not None else None,
                 output_root=first.output_root,
                 image_identity=settings.image_identity,
                 confirmation={
@@ -2423,6 +2467,13 @@ async def export_run(run_id: str, format: Literal["json", "md"] = "json") -> Res
         if payload.get("manifest") and copy.is_file():
             with contextlib.suppress(OSError, UnicodeDecodeError):
                 payload["manifest"] = {**payload["manifest"], "text": copy.read_text("utf-8")}
+        record_copy = runs.run_folder(run_id) / runs.CONFIRMATION_FILE
+        manifest = cast("JsonDict", payload.get("manifest") or {})
+        selection = cast("JsonDict", manifest.get("confirmed_selection") or {})
+        if selection and record_copy.is_file():
+            with contextlib.suppress(OSError, ValueError):
+                selection = {**selection, "record": json.loads(record_copy.read_text("utf-8"))}
+                payload["manifest"] = {**manifest, "confirmed_selection": selection}
         return json.dumps(payload, indent=1), "application/json"
 
     result = await asyncio.to_thread(_export)

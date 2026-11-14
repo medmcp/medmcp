@@ -21,6 +21,7 @@ import type {
   ReplayPreviewResult,
   RunSummary,
   RunStatus,
+  SelectionConfirmation,
     StackRequirement,
   WorkflowDetail,
   WorkflowListEntry,
@@ -85,13 +86,27 @@ const MANIFEST_TEXT: Record<
     other: 'Load a different plan',
   },
   selection: {
-    placeholder: '…/.medmcp/selection_series.csv',
+    placeholder: '…/.medmcp/selection_confirmed.csv',
     point:
-      'Point at the …_series.csv written by the cohort select_series step: click the field, then the file in the explorer, or drag it in.',
+      'Point at the …_confirmed.csv written by confirm_selection (a workflow that reads one scan also takes the …_series.csv of select_series): click the field, then the file in the explorer, or drag it in.',
     loaded: 'One row per selected scan, or per subject and session when the workflow reads several scans.',
     load: 'Load selection',
     other: 'Load a different selection',
   },
+}
+
+/** One line about a confirmed selection: when, under which rules, what was decided by hand. */
+function confirmationLine(c: SelectionConfirmation): string {
+  const when = c.confirmed_at ? new Date(c.confirmed_at).toLocaleString() : 'at an unknown time'
+  const parts = [
+    `Confirmed selection (${when})`,
+    `review rules v${c.rule_version ?? '?'}`,
+    `${c.overrides} override${c.overrides === 1 ? '' : 's'}`,
+  ]
+  if (c.excluded > 0) {
+    parts.push(`${c.excluded} subject-session${c.excluded === 1 ? '' : 's'} left out`)
+  }
+  return `${parts.join(' · ')}. The run records it with its SHA-256.`
 }
 
 const SOURCES: { value: RunSource; icon: ReactNode; title: string; hint: string }[] = [
@@ -635,6 +650,9 @@ export const WorkflowPanel = memo(function WorkflowPanel({
   const [now, setNow] = useState(() => Date.now())
   const [planCsv, setPlanCsv] = useState('')
   const [planSkipped, setPlanSkipped] = useState<BatchPlanSkip[] | null>(null)
+  // A selection's confirmation record once loaded, or why the manifest was refused.
+  const [planConfirmation, setPlanConfirmation] = useState<SelectionConfirmation | null>(null)
+  const [planRefused, setPlanRefused] = useState<string | null>(null)
   // Loading a manifest: where results go (blank = the server's default), and —
   // when the server could not tell which column or series feeds an input — the
   // question it asked and the answers so far.
@@ -971,6 +989,13 @@ export const WorkflowPanel = memo(function WorkflowPanel({
   const fillFromPlan = (name: string) =>
     withBusy('Building the list of runs…', async () => {
       const res = await batchFromPlan(name, planCsv.trim(), mapping, outputRoot.trim())
+      setPlanConfirmation(res.confirmation ?? null)
+      setPlanRefused(res.refused ? (res.error ?? 'this manifest cannot be rolled out') : null)
+      if (res.refused) {
+        setPlanSkipped(null)
+        setAsk(null)
+        return
+      }
       if (!res.ok) {
         setPlanSkipped(null)
         const options = res.kind === 'selection' ? res.roles?.map((r) => r.role) : res.columns
@@ -1003,6 +1028,8 @@ export const WorkflowPanel = memo(function WorkflowPanel({
   /** Forget a manifest that was being loaded (its file, mapping and flags). */
   const resetManifest = () => {
     setPlanSkipped(null)
+    setPlanConfirmation(null)
+    setPlanRefused(null)
     setPlanCsv('')
     setOutputRoot('')
     setMapping({})
@@ -1245,6 +1272,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                 {text.load}
               </button>
             </div>
+            {planRefused && <div className="wf-step-error">Not rolled out: {planRefused}</div>}
             {ask && (
               <>
                 <div className="wf-hint">
@@ -1391,6 +1419,14 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                 </button>
               )}
             </div>
+          </div>
+        )}
+        {planConfirmation && m.rows.length > 0 && (
+          <div
+            className="wf-hint"
+            title={`${planConfirmation.path}\nsha256 ${planConfirmation.sha256}`}
+          >
+            {confirmationLine(planConfirmation)}
           </div>
         )}
         {planSkipped && planSkipped.length > 0 && (

@@ -38,6 +38,13 @@ against the stack's schema as the pool last listed it (the broker's
 That denial is not capped: letting an invalid call through ends the turn. No
 schema known, or anything going wrong while checking, allows as before.
 
+A stack tool is called from ``run_typescript``, and that program -- so the model
+-- gets only ``tool_skipped`` back from a denial under vibe 2.26.1, never the
+reason. So every denial of a stack call is also left with the core
+(:class:`DenialNotes`), and the LLM shim adds its reason to the result the model
+reads (:func:`medmcp.llmshim.note_denied_calls`). Local models only: a cloud
+model does not go through the shim.
+
 The hook contract is "exit 0 and print a JSON object on stdout", so every failure
 path here still prints ``{"decision": "allow"}``: a broken guard must never be
 able to block work.
@@ -49,6 +56,8 @@ import hashlib
 import json
 import os
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -312,8 +321,81 @@ def check_schema(route: str, tool_input: object) -> dict[str, Any] | None:
     return {"decision": "deny", "reason": problem} if problem else None
 
 
+class DenialNotes:
+    """The guard's recent denials of stack calls, until the LLM shim takes them.
+
+    A stack tool is called from ``run_typescript``, and under vibe 2.26.1 the
+    program -- and so the model -- gets only ``tool_skipped: Tool execution was
+    skipped by Runtime policy.`` back from a denial, never its reason. So the guard
+    also hands each denial to the core (broker op ``record_denial``), and the shim
+    (:mod:`medmcp.llmshim`), seeing that text in the next request to the model,
+    takes the oldest live denial of the tool the error names (``take_denial``) and
+    adds its reason to the result. The tool is all both sides can see: the shim has
+    the program's error, not the arguments the program built. Denials expire after
+    *ttl_sec* and at most *limit* are kept, so one nobody took cannot resurface
+    much later.
+    """
+
+    def __init__(
+        self,
+        ttl_sec: float = 120.0,
+        limit: int = 100,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """Keep up to *limit* denials, each for *ttl_sec*."""
+        self._ttl = ttl_sec
+        self._limit = limit
+        self._clock = clock
+        self._denials: list[tuple[float, str, str, str]] = []
+
+    def _live(self) -> list[tuple[float, str, str, str]]:
+        now = self._clock()
+        self._denials = [d for d in self._denials if now - d[0] < self._ttl]
+        return self._denials
+
+    def add(self, session_id: str, tool: str, reason: str) -> None:
+        """Record that the call of *tool* (its bare name) was denied for *reason*."""
+        live = self._live()
+        live.append((self._clock(), session_id, tool, reason))
+        del live[: max(0, len(live) - self._limit)]
+
+    def take(self, tool: str) -> str | None:
+        """The reason of the oldest live denial of *tool*, removed; ``None`` if none."""
+        for i, (_, _session, name, reason) in enumerate(self._live()):
+            if name == tool:
+                del self._denials[i]
+                return reason
+        return None
+
+
+def _record_denial(route: str, session_id: str, response: dict[str, Any]) -> dict[str, Any]:
+    """Hand a stack call's denial to the core for the LLM shim; returns *response*.
+
+    Only stack calls (``mcp_<stack>.<tool>``): they are the ones made from
+    ``run_typescript``, whose program never sees the reason. vibe's own tools are
+    called directly and their denial reason reaches the model as it is.
+    """
+    group, dot, tool = route.partition(".")
+    if dot and group.startswith("mcp_") and response.get("decision") == "deny":
+        payload = {"session": session_id, "tool": tool, "reason": str(response["reason"])}
+        try:
+            asyncio.run(plan.ask_core("record_denial", payload, timeout=2.0))
+        except Exception as exc:
+            print(f"medmcp-pathguard: denial not recorded: {exc}", file=sys.stderr)
+    return response
+
+
 def decide(invocation: dict[str, Any]) -> dict[str, Any]:
-    """Return the hook response for one ``pre_tool`` invocation."""
+    """Return the hook response for one ``pre_tool`` invocation (recorded if a denial)."""
+    return _record_denial(
+        str(invocation.get("tool_name") or ""),
+        str(invocation.get("session_id") or ""),
+        _decide(invocation),
+    )
+
+
+def _decide(invocation: dict[str, Any]) -> dict[str, Any]:
+    """The hook response for one ``pre_tool`` invocation."""
     # The harness names a tool by route (``mcp_medmcp_neuro.skull_strip``,
     # ``file_system.read_file``); the checks and the ledger key use MedMCP's name.
     tool_name = harness.canonical_tool_name(

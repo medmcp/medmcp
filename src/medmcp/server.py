@@ -201,6 +201,24 @@ def _plan_note_op(req: JsonDict) -> JsonDict:
     return {"note": _plan_notes.take(str(req.get("tool") or ""), args)}
 
 
+# The path guard's recent denials of stack calls, for the LLM shim to hand their
+# reasons to the model (record_denial / take_denial; see pathguard.DenialNotes).
+_denials: pathguard.DenialNotes = pathguard.DenialNotes()
+
+
+def _record_denial_op(req: JsonDict) -> JsonDict:
+    """Broker op ``record_denial``: the path guard denied a stack call, and why."""
+    tool, reason = str(req.get("tool") or ""), str(req.get("reason") or "")
+    if tool and reason:
+        _denials.add(str(req.get("session") or ""), tool, reason)
+    return {}
+
+
+def _take_denial_op(req: JsonDict) -> JsonDict:
+    """Broker op ``take_denial``: the reason of the oldest live denial of a tool, taken."""
+    return {"reason": _denials.take(str(req.get("tool") or ""))}
+
+
 def _tool_schema_op(req: JsonDict) -> JsonDict:
     """Broker op ``tool_schema``: the input schema of a stack tool, if the pool knows it.
 
@@ -379,6 +397,8 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
                 "check_plan": _check_plan_op,
                 "plan_note": _plan_note_op,
                 "tool_schema": _tool_schema_op,
+                "record_denial": _record_denial_op,
+                "take_denial": _take_denial_op,
             },
         )
         try:

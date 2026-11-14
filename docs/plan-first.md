@@ -166,9 +166,30 @@ denies an invalid one:
 
 This denial is not capped like a path denial, since letting the call through
 ends the turn. A tool with no known schema, no broker to ask, or any error while
-checking allows the call as before. Under vibe 2.26.1 a call made from
-`run_typescript` gets only `tool_skipped: Tool execution was skipped by Runtime
-policy.` back from a denial, not its reason (the chat shows the reason).
+checking allows the call as before.
+
+### Denial reasons reach the model through the shim
+
+Stack tools are called from `run_typescript`, and under vibe 2.26.1 a denial by
+the path guard -- the schema check above or a path that does not exist --
+reaches that program, and so the model, only as `tool_skipped: Tool execution
+was skipped by Runtime policy.`; the reason is shown in the chat but never sent
+to the model. So the guard also leaves each denial of a stack call with the core
+(broker op `record_denial`: session, tool, reason; kept two minutes, at most
+100). The core's LLM shim, finding that error in a fresh tool result of the
+next request, takes the oldest denial of the tool the error names (`take_denial`,
+from the `[as <tool>]` in the error's stack) and appends `[MedMCP] <reason>`;
+it adds the same note whenever the result is sent again later in the chat. The
+tool name is all both sides share (the shim sees the program's error, not the
+arguments the program built), so two chats denied the same tool within the same
+moment could swap reasons.
+
+Only local models go through the shim. With a cloud model (Anthropic, OpenAI)
+vibe talks to the provider directly and the model still sees only
+`tool_skipped`. A cheap equivalent would be pointing the cloud provider's
+`api_base` at the shim as well, with the shim forwarding to the provider and
+applying only this repair (OpenAI-compatible providers; Anthropic's API would
+need its own message shape) -- not built.
 
 ## Truncated tool results
 

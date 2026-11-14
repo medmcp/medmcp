@@ -94,7 +94,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | setproctitle | 1.3.7 | BSD-3-Clause |
 | six | 1.17.0 | MIT |
 | smmap | 5.0.3 | BSD-3-Clause |
-| soupsieve | 2.9.2 | MIT |
+| soupsieve | 4.1 | MIT |
 | sse-starlette | 3.4.1 | BSD-3-Clause |
 | starlette | 1.3.1 | BSD-3-Clause |
 | textual | 8.2.8 | MIT |

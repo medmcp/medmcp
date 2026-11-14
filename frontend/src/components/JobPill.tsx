@@ -68,17 +68,22 @@ export function JobPill() {
 
   const running = jobs.filter((j) => j.status === 'running')
   const unseen = jobs.filter((j) => j.status !== 'running' && !seen.has(j.id))
-  if (!running.length && !unseen.length) return null
+  // Opening the list marks finished jobs as seen; the pill stays while the list
+  // is open, so the list does not vanish with it.
+  const first = running[0] ?? unseen[0] ?? (open ? jobs[0] : undefined)
+  if (!first) return null
 
   const failed = unseen.some((j) => j.status === 'failed')
   const state = running.length ? 'running' : failed ? 'failed' : 'done'
-  const first = running[0] ?? unseen[0]
   const progress = first.progress
-  const text = running.length
-    ? `${label(first)}${progress?.text ? ` · ${progress.text}` : ''}${
-        running.length > 1 ? ` (+${running.length - 1})` : ''
-      }`
-    : `${label(first)} ${first.status === 'failed' ? 'failed' : 'finished'}`
+  // The state goes in its own span so a long job name never hides it.
+  const status = running.length
+    ? [progress?.text || 'running', running.length > 1 ? `+${running.length - 1}` : '']
+        .filter(Boolean)
+        .join(' · ')
+    : first.status === 'failed'
+      ? 'failed'
+      : 'finished'
 
   const toggle = () => {
     setOpen((o) => !o)
@@ -107,7 +112,8 @@ export function JobPill() {
         title="Background jobs"
       >
         <span className="job-pill-dot" />
-        <span className="job-pill-text">{text}</span>
+        <span className="job-pill-text">{label(first)}</span>
+        <span className="job-pill-state">{status}</span>
         {running.length > 0 && typeof progress?.fraction === 'number' && (
           <span className="job-pill-bar">
             <span style={{ width: `${Math.round(progress.fraction * 100)}%` }} />

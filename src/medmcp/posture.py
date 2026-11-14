@@ -67,6 +67,7 @@ CANONICAL_AGENT_PROFILE: JsonDict = {
 }
 
 PATHGUARD_HOOK_NAME = "medmcp-pathguard"
+PLAN_NOTE_HOOK_NAME = "medmcp-plan-note"
 
 
 def _note(where: str, what: str) -> None:
@@ -164,8 +165,33 @@ def pathguard_hook() -> JsonDict:
     }
 
 
+def plan_note_hook() -> JsonDict:
+    """The plan-note hook (see :mod:`medmcp.plannote`).
+
+    A ``post_tool`` hook: it runs after a call and can only add text to its
+    result — the core's reminder, on a call allowed outside the approved plan, to
+    propose a revised plan. Not strict: a hook that fails leaves the result alone.
+    """
+    return {
+        "name": PLAN_NOTE_HOOK_NAME,
+        "type": "post_tool",
+        "command": "medmcp-plan-note",
+        "timeout": 10.0,
+        "strict": False,
+        "description": (
+            "Add the core's reminder to propose a revised plan to the result of a "
+            "call the person allowed outside the approved plan."
+        ),
+    }
+
+
+def workspace_hooks() -> list[JsonDict]:
+    """Every hook this workspace runs, in order: the path guard and the plan note."""
+    return [pathguard_hook(), plan_note_hook()]
+
+
 def enforce_hooks(path: Path) -> list[str]:
-    """Make ``hooks.toml`` hold exactly the path guard; return what was removed.
+    """Make ``hooks.toml`` hold exactly :func:`workspace_hooks`; return what was removed.
 
     vibe reads this file with no trust gate, and a ``pre_tool`` hook runs before
     the permission check on every call and may answer ``allow``.
@@ -177,12 +203,13 @@ def enforce_hooks(path: Path) -> list[str]:
                 current = cast("list[JsonDict]", tomllib.load(fh).get("hooks", []))
         except (OSError, tomllib.TOMLDecodeError):
             current = []
-    wanted = pathguard_hook()
-    removed = [str(h.get("name", "?")) for h in current if h.get("name") != PATHGUARD_HOOK_NAME]
+    wanted = workspace_hooks()
+    names = {str(h["name"]) for h in wanted}
+    removed = [str(h.get("name", "?")) for h in current if h.get("name") not in names]
     for name in removed:
         _note("hooks.toml", f"hook {name!r}")
-    if current != [wanted]:
-        atomic_write_toml(path, {"hooks": [wanted]})
+    if current != wanted:
+        atomic_write_toml(path, {"hooks": wanted})
     return removed
 
 

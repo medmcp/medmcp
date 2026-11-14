@@ -160,6 +160,7 @@ export async function saveSettings(state: SettingsState): Promise<boolean> {
   const res = await sendJson('PUT', '/api/settings', {
     explain_tools: state.explain_tools,
     record_provenance: state.record_provenance,
+    plan_first: state.plan_first,
     gpu: state.gpu,
     stacks: state.stacks.map((s) => ({ name: s.name, active: s.active })),
   })

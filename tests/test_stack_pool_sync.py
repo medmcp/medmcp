@@ -165,6 +165,8 @@ def test_sync_repairs_existing_entry_without_startup_timeout(
     container stack on first run.
     """
     _isolate(monkeypatch, tmp_path, pool=False)
+    # The plan tool's entry carries a timeout of its own; this is about the stack's.
+    monkeypatch.setattr(settings, "load_plan_first_enabled", lambda: False)
     # Simulate a config written before the floor existed.
     sync_servers_to_vibe_config([_NEURO])
     config = tmp_path / "config.toml"

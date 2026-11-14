@@ -37,14 +37,26 @@ def test_resolve_backend_spec_maps_active_registry(monkeypatch: pytest.MonkeyPat
     assert server._resolve_backend_spec("ghost") is None
 
 
-async def test_lifespan_disabled_creates_no_pool(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With the flag off, the lifespan leaves the pool/broker unset."""
+async def test_lifespan_disabled_creates_no_pool(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With the flag off there is no pool, only the broker for the core's own ops.
+
+    The plan tool takes the core's verdict on each plan over it; without it no
+    plan could be approved.
+    """
     monkeypatch.delenv("MEDMCP_STACK_POOL", raising=False)
+    monkeypatch.setattr(settings, "VIBE_HOME", tmp_path)
     monkeypatch.setattr(server, "_pool", None)
     monkeypatch.setattr(server, "_broker", None)
+    sock = tmp_path / "backend.sock"
     async with server._lifespan(server.app):
         assert server._pool is None
-        assert server._broker is None
+        assert server._broker is not None
+        assert server._broker.socket_path == sock
+        assert sock.exists()
+    assert server._broker is None
+    assert not sock.exists()
 
 
 async def test_lifespan_enabled_starts_and_stops_broker(

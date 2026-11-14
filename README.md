@@ -39,7 +39,7 @@ To build from source or run without Docker, see **[CONTRIBUTING.md](CONTRIBUTING
 
 ## Features
 
-- **Chat & agent**: ask for an analysis in plain language; the agent picks and runs the tools.
+- **Chat & agent**: ask for an analysis in plain language; the agent shows a short plan first (Go / Change, [docs/plan-first.md](docs/plan-first.md)), then picks and runs the tools.
 - **File explorer and image viewer**: browse your data and view medical images (`.nii.gz`, `.mgz`, `.nrrd`, ...) with segmentation and map overlays, a label legend and intensity windows, plus other files (`.pdf`, `.csv`, ...). Label names come from the `<name>_labels.csv` table a stack writes beside its `<name>_dseg` segmentation; the viewer has no label-name table of its own.
 - **Workflows**: turn a chat into a workflow you can replay on new data and share, or roll out over a cohort ([docs/rollout.md](docs/rollout.md)).
 - **Tool stacks**: install new imaging capabilities from the UI.
@@ -48,6 +48,7 @@ To build from source or run without Docker, see **[CONTRIBUTING.md](CONTRIBUTING
 ## Security
 
 - **You approve every action**: writing or editing a file, fetching a URL, or running a command with side effects needs a click each time. There is no "always allow".
+- **Plan first**: Go on the agent's plan approves exactly the calls it lists; anything else asks again, marked "not in the plan", and code the assistant wrote always asks on its own.
 - **Local by default**: the server listens on localhost only, `web_search` is disabled, `web_fetch` requires approval, and tool stacks run without network access.
 - **Outside services are opt-in**: external MCP servers and a cloud model stay off until you switch them on, and a banner shows for as long as they are in use.
 - **Signed releases**: published images are signed, and the workspace verifies them before it updates or installs a stack.

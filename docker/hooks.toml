@@ -18,3 +18,14 @@ command = "medmcp-pathguard"
 timeout = 10.0
 strict = false
 description = "Refuse a tool call whose file paths do not resolve, handing the reason back to the model so it can correct them."
+
+# After a call the person allowed outside the approved plan (the third and later),
+# add the core's reminder to propose a revised plan to its result. A post_tool hook
+# can only add to a result; strict = false leaves the result alone if it fails.
+[[hooks]]
+name = "medmcp-plan-note"
+type = "post_tool"
+command = "medmcp-plan-note"
+timeout = 10.0
+strict = false
+description = "Add the core's reminder to propose a revised plan to the result of a call the person allowed outside the approved plan."

@@ -16,7 +16,7 @@ from medmcp.settings import (
     save_provenance_enabled,
 )
 
-from .conftest import synced_config
+from .conftest import entries_by_name, synced_config
 
 JsonDict = dict[str, Any]
 
@@ -225,8 +225,7 @@ class TestSyncServersToVibeConfig:
         with patch("medmcp.settings.VIBE_HOME", tmp_path):
             result = synced_config(tmp_path, _TWO_SERVERS)
 
-        names = {s["name"] for s in result["mcp_servers"]}
-        assert names == {"medmcp-neuro", "medmcp-cardiac"}
+        assert set(entries_by_name(result)) == {"medmcp-neuro", "medmcp-cardiac"}
 
     def test_empty_list_clears_section(self, tmp_path: Path) -> None:
         """Passing an empty list removes all mcp_servers entries."""
@@ -235,7 +234,7 @@ class TestSyncServersToVibeConfig:
         with patch("medmcp.settings.VIBE_HOME", tmp_path):
             result = synced_config(tmp_path, [])
 
-        assert result.get("mcp_servers", []) == []
+        assert entries_by_name(result) == {}
 
     def test_preserves_existing_timeout_fields(self, tmp_path: Path) -> None:
         """startup_timeout_sec and tool_timeout_sec survive a rewrite."""
@@ -293,8 +292,7 @@ class TestSyncServersToVibeConfig:
 
         assert cfg_path.exists()
 
-        names = {s["name"] for s in result["mcp_servers"]}
-        assert names == {"medmcp-neuro", "medmcp-cardiac"}
+        assert set(entries_by_name(result)) == {"medmcp-neuro", "medmcp-cardiac"}
 
     def test_skill_paths_written_when_present(self, tmp_path: Path) -> None:
         """skill_paths in server dicts are collected into config.toml skill_paths."""

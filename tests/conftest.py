@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from medmcp import access, provenance, server, settings
+from medmcp import access, plan, provenance, server, settings
 
 JsonDict = dict[str, Any]
 
@@ -79,6 +79,16 @@ def _isolate_stacks_d(  # pyright: ignore[reportUnusedFunction]  # autouse fixtu
 
 
 @pytest.fixture(autouse=True)
+def _isolate_plan_first(  # pyright: ignore[reportUnusedFunction]  # autouse fixture, invoked by pytest
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[None]:
+    """Read the plan-first switch from an empty state dir: on, its default."""
+    state = tmp_path_factory.mktemp("plan_first_state")
+    with patch("medmcp.settings.PLAN_FIRST_PATH", state / "plan_first.json"):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_model_choice(  # pyright: ignore[reportUnusedFunction]  # autouse fixture, invoked by pytest
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[None]:
@@ -141,8 +151,16 @@ def synced_config(vibe_home: Path, servers: list[JsonDict] | None = None) -> Jso
 
 
 def entries_by_name(cfg: JsonDict) -> dict[str, JsonDict]:
-    """The ``[[mcp_servers]]`` entries of a loaded config, keyed by name."""
-    return {str(e["name"]): e for e in cast("list[JsonDict]", cfg["mcp_servers"])}
+    """The stack ``[[mcp_servers]]`` entries of a loaded config, keyed by name.
+
+    The core's own plan tool (written alongside the stacks while plan-first is on,
+    see :mod:`medmcp.plan`) is left out: it is not a stack.
+    """
+    return {
+        str(e["name"]): e
+        for e in cast("list[JsonDict]", cfg.get("mcp_servers", []))
+        if e.get("name") != plan.PLAN_SERVER
+    }
 
 
 @pytest.fixture

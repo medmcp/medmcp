@@ -142,9 +142,31 @@ last listed, kept across eviction and restarts in
 `.vibe/state/tool_schemas.json`); nothing is started to check a plan. A tool
 name no stack offers is refused only when every stack of the chat has a known
 list; otherwise only the steps whose tool is known are checked. Without the
-stack pool (`MEDMCP_STACK_POOL=0`) no plan is checked. The plan tool learns why
-the core refused a plan from the broker (`check_plan`, keyed by the plan's
-arguments); with no broker to ask it lets the plan through, as before.
+stack pool (`MEDMCP_STACK_POOL=0`) no tool list is known, so no step is checked.
+
+A step whose tool requires inputs must show them: `inputs: {}`, or a required
+input left `""`, `[]` or as a placeholder (`"<path from step 1>"`), is refused
+(rehearsal U1, U4, U5, D7).
+
+### "Approved" only on the core's Go
+
+The plan tool says "The user approved this plan (Go)" only when the core
+recorded a Go for exactly this plan's card. For each plan it decides the core
+keeps a verdict — Go, or refused with the problems — keyed by the plan as
+validated (`plan.plan_key`), and the tool takes it from the broker
+(`plan_verdict`, once). The plan comes into force when the tool takes the Go,
+not before, so a plan the agent was not told is approved never governs a call.
+Anything else — no verdict, a broker out of reach, a plan allowed in an ordinary
+dialog — comes back as "not approved: propose again". The plan tool is never
+covered by "allow for the rest of this chat". Without the stack pool the core
+still runs the broker, for its own ops only.
+
+The tool reaches the broker through `MEDMCP_BROKER_SOCK`, set on its
+`[[mcp_servers]]` entry: vibe starts an MCP server with only the variables its
+entry lists (plus `PATH`, `HOME`, …). Until v0.7.4-plan4 the tool looked for
+`$VIBE_HOME`, never found it, found no broker, and answered "approved" — which
+is how plans the core had refused (U7, U9: parameters the tools do not take)
+reached the agent as approved without a card.
 
 ### Calls are checked against the real tools too
 

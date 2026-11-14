@@ -2253,13 +2253,16 @@ def save_plan_first_enabled(enabled: bool) -> None:
 def plan_server_entry() -> JsonDict:
     """The ``[[mcp_servers]]`` entry for the core's own plan tool.
 
-    Spawned directly by vibe (never through the pool proxy: it starts nothing,
-    runs nothing and answers from its arguments alone).
+    Spawned directly by vibe (never through the pool proxy: it starts nothing and
+    runs nothing). It takes the core's verdict on each plan over the broker
+    socket, named here: vibe hands an MCP server only the variables its entry
+    lists (and a few like ``PATH``), so ``$VIBE_HOME`` would not reach it.
     """
     return {
         "transport": "stdio",
         "name": plan.PLAN_SERVER,
         "command": shutil.which(plan.PLAN_COMMAND) or plan.PLAN_COMMAND,
+        "env": {plan.BROKER_SOCK_ENV: str(backend_socket_path())},
         "startup_timeout_sec": DEFAULT_STARTUP_TIMEOUT_SEC,
     }
 

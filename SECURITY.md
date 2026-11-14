@@ -75,7 +75,10 @@ user control:
   output folder, until the next plan. Any other call asks, marked "Not in the
   plan"; code the assistant wrote, an overwrite or a path outside the workspace
   always asks, and so does `confirm_selection`, whose dialog shows the review it
-  confirms. See [docs/plan-first.md](docs/plan-first.md).
+  confirms. The plan tool tells the agent a plan was approved only when the core
+  recorded Go on that plan's card, and the plan is in force only from then; it is
+  never covered by "allow for the rest of this chat". See
+  [docs/plan-first.md](docs/plan-first.md).
 - **What approving a command grants.** A shell command runs with the agent's
   rights. In a `docker compose` install the agent has its own container: the
   workspace, its own configuration read-only, and nothing else — no Docker

@@ -26,8 +26,8 @@ Response (broker → proxy)::
     {"id": 2, "ok": false, "error": "stack 'x' is not installed"}
 
 More ops answer the core's own helpers, not a stack, and run nothing:
-``check_plan`` (the plan tool asks whether the core refused to show a plan, and
-why), ``plan_note`` (the plan-note hook asks what to add to a tool result),
+``plan_verdict`` (the plan tool takes the core's verdict on a plan: Go, or
+refused and why), ``plan_note`` (the plan-note hook asks what to add to a tool result),
 ``tool_schema`` (the path guard asks for a stack tool's input schema),
 ``record_denial`` / ``take_denial`` (the path guard leaves the reason of a
 denial for the LLM shim to hand to the model). The server supplies them as
@@ -87,7 +87,7 @@ class BackendBroker:
 
     def __init__(
         self,
-        pool: BackendPool,
+        pool: BackendPool | None,
         socket_path: Path,
         authorize: Authorize | None = None,
         after_call: AfterCall | None = None,
@@ -97,7 +97,8 @@ class BackendBroker:
 
         Args:
             pool: The persistent backend pool to dispatch to (owned elsewhere — the
-                broker does not close it).
+                broker does not close it); ``None`` for a broker that answers only
+                the *ops* (no stack pool: the plan tool still needs the core).
             socket_path: Path to the unix domain socket to bind.
             authorize: Asked before every ``call_tool`` with (stack, tool, args); a
                 call it refuses is answered with an error and never run (the
@@ -106,7 +107,7 @@ class BackendBroker:
                 (never without an *authorize*): it may act on the result and
                 returns the one to relay.
             ops: Further ops answered by the server itself, by name; they read
-                core state and run nothing (``check_plan``, ``plan_note``,
+                core state and run nothing (``plan_verdict``, ``plan_note``,
                 ``tool_schema``, ``record_denial``, ``take_denial``).
         """
         self._ops = dict(ops or {})
@@ -197,6 +198,8 @@ class BackendBroker:
             return {**self._ops[op](req), "id": req_id, "ok": True}
         if not isinstance(stack, str) or not stack:
             raise BrokerRequestError("missing 'stack'")
+        if self._pool is None:
+            raise BrokerRequestError("no stack pool: this broker answers the core's ops only")
 
         if op == "list_tools":
             tools = await self._pool.list_tools(stack)

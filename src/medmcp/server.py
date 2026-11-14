@@ -47,7 +47,8 @@ import re
 import shutil
 import time
 import zipfile
-from collections.abc import AsyncGenerator, Coroutine, Iterator
+from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -171,27 +172,68 @@ _jobs: jobs.JobManager | None = None
 # call the person allowed outside the plan (taken by the broker for a stack call,
 # by the plan-note hook for one of vibe's own tools) ...
 _plan_notes: planfirst.PlanNotes = planfirst.PlanNotes()
-# ... and plans the core would not show because their steps do not fit the stacks'
-# tools, by planfirst.plan_key: the plan tool asks for these (check_plan).
-_plan_refusals: dict[str, tuple[float, list[str]]] = {}
-_PLAN_REFUSAL_TTL_SEC = 900.0
-# Set once the broker listens: only then can the plan tool learn why a plan was
-# refused, so only then does the core refuse one.
+
+
+# ... and its verdict on each plan it decided, by planfirst.plan_key: the plan tool
+# takes it (plan_verdict) and says "approved" only on a Go. A Go puts the plan in
+# force when the tool takes it, so a plan the agent was never told is approved is
+# never in force either.
+@dataclass
+class _PlanVerdict:
+    """The core's word on one plan card: Go, or refused with the problems."""
+
+    at: float
+    verdict: str
+    problems: list[str] = field(default_factory=lambda: cast("list[str]", []))
+    on_take: Callable[[], None] | None = None
+
+
+_plan_verdicts: dict[str, list[_PlanVerdict]] = {}
+_PLAN_VERDICT_TTL_SEC = 900.0
+# Set once the broker listens: only then can the plan tool learn the core's verdict.
 _broker_ready = False
 
 
-def _refuse_plan(key: str, problems: list[str]) -> None:
-    """Remember why the plan with *key* is not shown, for the plan tool to say."""
+def _record_plan_verdict(key: str, verdict: _PlanVerdict) -> None:
+    """Keep *verdict* on the plan with *key* until the plan tool takes it."""
     now = time.monotonic()
-    for stale in [k for k, (t, _) in _plan_refusals.items() if now - t > _PLAN_REFUSAL_TTL_SEC]:
-        _plan_refusals.pop(stale, None)
-    _plan_refusals[key] = (now, problems)
+    for k in list(_plan_verdicts):
+        live = [v for v in _plan_verdicts[k] if now - v.at < _PLAN_VERDICT_TTL_SEC]
+        if live:
+            _plan_verdicts[k] = live
+        else:
+            _plan_verdicts.pop(k, None)
+    _plan_verdicts.setdefault(key, []).append(verdict)
 
 
-def _check_plan_op(req: JsonDict) -> JsonDict:
-    """Broker op ``check_plan``: the problems the core found with a plan (by key)."""
-    entry = _plan_refusals.pop(str(req.get("key") or ""), None)
-    return {"problems": entry[1] if entry else []}
+def _plan_verdict_op(req: JsonDict) -> JsonDict:
+    """Broker op ``plan_verdict``: the core's verdict on a plan (by key), taken once.
+
+    ``{"verdict": None}`` when there is none — the plan tool then tells the agent
+    nothing was approved. Taking a Go puts its plan in force in its chat.
+    """
+    key = str(req.get("key") or "")
+    now = time.monotonic()
+    live = [v for v in _plan_verdicts.pop(key, []) if now - v.at < _PLAN_VERDICT_TTL_SEC]
+    if not live:
+        return {"verdict": None, "problems": []}
+    verdict = live.pop(0)
+    if live:
+        _plan_verdicts[key] = live
+    if verdict.on_take is not None:
+        verdict.on_take()
+    return {"verdict": verdict.verdict, "problems": verdict.problems}
+
+
+def _core_ops() -> dict[str, Callable[[JsonDict], JsonDict]]:
+    """The broker ops the core answers itself (see :mod:`medmcp.backend_broker`)."""
+    return {
+        "plan_verdict": _plan_verdict_op,
+        "plan_note": _plan_note_op,
+        "tool_schema": _tool_schema_op,
+        "record_denial": _record_denial_op,
+        "take_denial": _take_denial_op,
+    }
 
 
 def _plan_note_op(req: JsonDict) -> JsonDict:
@@ -393,13 +435,7 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
             settings.backend_socket_path(),
             _approvals.spend,
             _after_stack_call,
-            ops={
-                "check_plan": _check_plan_op,
-                "plan_note": _plan_note_op,
-                "tool_schema": _tool_schema_op,
-                "record_denial": _record_denial_op,
-                "take_denial": _take_denial_op,
-            },
+            ops=_core_ops(),
         )
         try:
             await _broker.start()
@@ -409,6 +445,15 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
             log.info("stack pool enabled; broker at %s", settings.backend_socket_path())
         except Exception:
             log.exception("backend broker failed to start; proxy will direct-spawn")
+    else:
+        # No stack pool, but the plan tool still takes the core's verdict on each
+        # plan over the socket: without it no plan could ever be approved.
+        _broker = BackendBroker(None, settings.backend_socket_path(), ops=_core_ops())
+        try:
+            await _broker.start()
+            _broker_ready = True
+        except Exception:
+            log.exception("core broker failed to start; no plan can be approved")
     try:
         yield
     finally:
@@ -422,8 +467,7 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         # project: left running, it would outlive the core and hold its network.
         with contextlib.suppress(Exception):
             await _client.stop()
-        if _broker is not None:
-            await _broker.aclose()
+        await _broker.aclose()
         if _pool is not None:
             await _pool.aclose()
         if _gateway is not None:
@@ -3281,6 +3325,9 @@ class _ChatConnection:
         # step ``None`` for a call not in the plan.
         self._plan_first = plan_first
         self._plan: planfirst.Plan | None = None
+        # The plan the person said Go to whose Go the plan tool has not taken yet
+        # (see _plan_verdict_op): it comes into force only when the tool takes it.
+        self._plan_awaiting_tool: planfirst.Plan | None = None
         self._pending_plans: dict[int, planfirst.Plan] = {}
         self._plan_calls: dict[str, tuple[str, int | None]] = {}
         # Calls outside each approved plan so far (by plan id), and the number each
@@ -3890,7 +3937,10 @@ class _ChatConnection:
 
         # The plan tool is not a call to approve: it is the plan, shown as a card
         # with Go and Change instead of the approval dialog.
-        if self._plan_first and planfirst.is_plan_tool(str(tool_call.get("toolName") or "")):
+        if self._plan_first and (
+            planfirst.is_plan_tool(str(tool_call.get("toolName") or ""))
+            or planfirst.is_plan_tool(str(title))
+        ):
             await self._handle_plan_proposal(req_id_raw, tool_call, cached, options, title)
             return
 
@@ -4042,7 +4092,9 @@ class _ChatConnection:
         # covers are answered here; anything that needs a look is still shown, and
         # is shown without the chat-long option. While a plan is in force a call
         # outside it is always shown: the plan is what the person agreed to.
-        if stack != "builtin" and _stack_tool_approval_enabled() and not confirm:
+        # The plan tool never: its "approved" is the core's Go on its card, nothing else.
+        plan_tool = stack == planfirst.PLAN_SERVER or planfirst.is_plan_tool(f"{stack}_{tool}")
+        if stack != "builtin" and _stack_tool_approval_enabled() and not confirm and not plan_tool:
             needs_look = _call_needs_a_look(rule_keys, path_findings)
             offered = {o.get("optionId") for o in options}
             off_plan = plan_note is not None and not plan_note["inPlan"] and self._plan is not None
@@ -4116,7 +4168,9 @@ class _ChatConnection:
             option_id = None
         if option_id == _SESSION_APPROVE_OPTION:
             self._read_only_granted = True
-        if option_id == _STACK_TOOL_CHAT_OPTION:
+        if option_id == _STACK_TOOL_CHAT_OPTION and plan_tool:
+            option_id = "allow_once"  # never offered for it; never a grant either
+        elif option_id == _STACK_TOOL_CHAT_OPTION:
             # vibe never sees MedMCP's own option: it is answered for this call only.
             self._granted_stack_tools.add((stack, tool))
             _audit.info("stack tool approved for the rest of this chat: %s/%s", stack, tool)
@@ -4220,32 +4274,41 @@ class _ChatConnection:
     ) -> None:
         """Show a proposed plan with Go and Change, and answer vibe with the choice.
 
-        Go answers the call ``allow_once`` — the tool then tells the agent to carry
-        the plan out — and puts the plan in force. Change answers it ``reject_once``;
-        the correction itself follows from the browser as an ordinary prompt, which
-        ends this turn. A plan that cannot be shown (missing fields, too long) is
-        let through without a card: the tool itself tells the agent what to fix.
+        Go records the core's verdict for exactly this plan and answers the call
+        ``allow_once``; the tool takes the verdict, tells the agent to carry the
+        plan out, and only then is the plan in force. Change answers it
+        ``reject_once``; the correction itself follows from the browser as an
+        ordinary prompt, which ends this turn. A plan that cannot be shown (missing
+        fields, too long, steps that do not fit the stacks' tools) is let through
+        without a card: the tool tells the agent what to fix — never "approved",
+        since no Go was recorded for it.
         """
         tc_id = str(tool_call.get("toolCallId") or "")
         offered = {o.get("optionId") for o in options}
         allow = "allow_once" if "allow_once" in offered else None
+        key = planfirst.plan_key(tool_call.get("rawInput"))
+        # Any proposal withdraws the plan in force, and a Go the tool has not taken:
+        # the agent says it needs another plan.
+        self._plan = None
+        self._plan_awaiting_tool = None
         try:
             proposal = planfirst.parse_plan(tool_call.get("rawInput"), plan_id=tc_id)
         except planfirst.PlanError as exc:
             _audit.info("plan could not be shown (%s); the tool reports it: %s", exc, title)
+            _record_plan_verdict(
+                key, _PlanVerdict(time.monotonic(), planfirst.VERDICT_REFUSED, exc.problems)
+            )
             await self._resolve_permission(req_id, title, cached, allow)
             return
         problems = self._check_plan_tools(proposal)
         if problems:
-            # Not shown either: the tool hands the problems back (it asks the broker,
-            # check_plan). The plan in force lapses — the agent wants another one.
-            _refuse_plan(planfirst.plan_key(tool_call.get("rawInput")), problems)
-            self._plan = None
+            # Not shown either: the tool hands the problems back (plan_verdict).
+            _record_plan_verdict(
+                key, _PlanVerdict(time.monotonic(), planfirst.VERDICT_REFUSED, problems)
+            )
             _audit.info("plan does not fit the stacks' tools (%s): %s", "; ".join(problems), title)
             await self._resolve_permission(req_id, title, cached, allow)
             return
-        # A new plan withdraws the one in force: the agent says it needs another.
-        self._plan = None
         cached["plan"] = {"plan_id": tc_id, "proposal": True}
         await asyncio.to_thread(
             self._record_plan_event,
@@ -4276,8 +4339,18 @@ class _ChatConnection:
         finally:
             self._pending_perms.pop(req_id, None)
             self._pending_plans.pop(req_id, None)
-        if choice == _PLAN_GO:
-            self._plan = proposal
+        if choice == _PLAN_GO and allow is not None:
+            # In force once the tool has taken this Go, and not before: a plan the
+            # agent was not told is approved never governs a call.
+            self._plan_awaiting_tool = proposal
+            _record_plan_verdict(
+                key,
+                _PlanVerdict(
+                    time.monotonic(),
+                    planfirst.VERDICT_GO,
+                    on_take=partial(self._put_plan_in_force, proposal),
+                ),
+            )
             option: str | None = allow
             status = "approved"
         elif choice == _PLAN_CHANGE:
@@ -4288,6 +4361,16 @@ class _ChatConnection:
             status = "cancelled"
         await self._resolve_permission(req_id, title, cached, option)
         await self._send({"type": "plan_status", "planId": tc_id, "status": status})
+
+    def _put_plan_in_force(self, proposal: planfirst.Plan) -> None:
+        """The plan tool took the Go on *proposal*: from now on it governs approvals.
+
+        Unless the agent proposed another plan in between, which withdrew this one.
+        """
+        if self._plan_awaiting_tool is proposal:
+            self._plan_awaiting_tool = None
+            self._plan = proposal
+            _audit.info("plan in force: %s", proposal.id)
 
     def _check_plan_tools(self, proposal: planfirst.Plan) -> list[str]:
         """What is wrong with *proposal*'s steps given this chat's stacks' tools.
@@ -4336,10 +4419,8 @@ class _ChatConnection:
             event["correction"] = text
         _audit.info("plan %s: %s", decision, proposal.id)
         await asyncio.to_thread(self._record_plan_event, event)
-        if decision == _PLAN_GO:
-            # In force from the moment of Go: the agent's first planned call can
-            # arrive before the handler resumes.
-            self._plan = proposal
+        # A Go is not in force yet: the handler records it for the plan tool, and
+        # the plan governs calls once the tool has taken it (_put_plan_in_force).
         fut.set_result(str(decision))
 
     def _grant_stack_call(self, tool_call: JsonDict) -> None:

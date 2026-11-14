@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, cast
@@ -92,7 +93,7 @@ class TestParsePlan:
 
     def test_the_tool_result_after_go_lists_the_steps(self, tmp_path: Path) -> None:
         """What the agent reads after Go: carry out exactly these, revise for anything else."""
-        text, is_error = plan.tool_result(_plan_args(tmp_path))
+        text, is_error = plan.tool_result(_plan_args(tmp_path), {"verdict": plan.VERDICT_GO})
         assert not is_error
         assert "approved this plan (Go)" in text
         assert "1. Index the scans [index_dataset]" in text
@@ -100,7 +101,7 @@ class TestParsePlan:
 
     def test_the_tool_result_for_a_bad_plan_says_what_to_fix(self) -> None:
         """The core lets a plan it cannot show through; the tool tells the agent why."""
-        text, is_error = plan.tool_result({"steps": []})
+        text, is_error = plan.tool_result({"steps": []}, {"verdict": plan.VERDICT_GO})
         assert is_error
         assert "understanding is required" in text
 
@@ -297,14 +298,23 @@ class _Harness:
     def answer(self, req_id: int) -> object:
         return next(r for i, r in self.responses if i == req_id)
 
-    async def propose(self, req_id: int, args: object, decision: str, text: str = "") -> None:
-        """Propose a plan and answer it with *decision* as the browser would."""
+    async def propose(
+        self, req_id: int, args: object, decision: str, text: str = "", *, run_tool: bool = True
+    ) -> JsonDict | None:
+        """Propose a plan and answer it with *decision* as the browser would.
+
+        Then, if the call was allowed and *run_tool*, the plan tool runs as vibe
+        would run it: it takes the core's verdict (plan_verdict), returned here.
+        """
         task = asyncio.create_task(self.conn._handle_permission(_request(req_id, PLAN_TOOL, args)))
         await asyncio.sleep(0.05)
         await self.conn._on_plan_decision(
             {"type": "plan_decision", "requestId": req_id, "decision": decision, "text": text}
         )
         await task
+        if run_tool and self.answer(req_id) == ALLOW:
+            return server._plan_verdict_op({"key": plan.plan_key(args)})
+        return None
 
     async def ask(self, req_id: int, tool: str, raw_input: object, option: str = "") -> None:
         """Send a permission request; answer its dialog with *option* if one opens."""
@@ -768,7 +778,12 @@ class TestSettingsApi:
 
 
 async def test_the_plan_server_offers_the_tool_over_stdio(tmp_path: Path) -> None:
-    """The MCP server vibe spawns lists propose_plan and answers it from the arguments."""
+    """The MCP server vibe spawns lists propose_plan; with no core to ask, nothing is a Go.
+
+    Spawned the way vibe spawns it — the MCP client's default environment, so no
+    ``$VIBE_HOME`` — which is how the rehearsal's plan tool ran (U7, U9): it
+    found no broker and used to answer "approved".
+    """
     import sys
 
     from mcp import ClientSession, StdioServerParameters
@@ -782,7 +797,60 @@ async def test_the_plan_server_offers_the_tool_over_stdio(tmp_path: Path) -> Non
         tools = (await session.list_tools()).tools
         assert [t.name for t in tools] == [plan.PLAN_TOOL]
         assert tools[0].inputSchema["required"] == ["understanding", "steps"]
-        ok = await session.call_tool(plan.PLAN_TOOL, _plan_args(tmp_path))
-        assert not ok.isError
+        unconfirmed = await session.call_tool(plan.PLAN_TOOL, _plan_args(tmp_path))
+        assert unconfirmed.isError
+        text = cast("Any", unconfirmed.content[0]).text
+        assert text == plan.NOT_APPROVED_TEXT
+        assert "approved this plan (Go)" not in text
         bad = await session.call_tool(plan.PLAN_TOOL, {"steps": []})
         assert bad.isError
+
+
+async def test_the_plan_server_says_go_only_on_the_cores_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spawned with exactly the env its config entry gives, the tool reaches the core.
+
+    The core's broker here answers only its own ops (no stack pool). A Go the core
+    recorded for this plan is "approved" once, and puts the plan in force; asked
+    again, the same plan has no verdict left and is not approved.
+    """
+    import sys
+
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    from medmcp.backend_broker import BackendBroker
+
+    monkeypatch.setattr(server, "_plan_verdicts", {})
+    sock = tmp_path / "s.sock"
+    monkeypatch.setattr(settings, "backend_socket_path", lambda: sock)
+    entry = settings.plan_server_entry()
+    assert entry["env"] == {plan.BROKER_SOCK_ENV: str(sock)}
+    broker = BackendBroker(None, sock, ops=server._core_ops())
+    await broker.start()
+    taken: list[str] = []
+    args = _plan_args(tmp_path)
+    server._record_plan_verdict(
+        plan.plan_key(args),
+        server._PlanVerdict(time.monotonic(), plan.VERDICT_GO, on_take=lambda: taken.append("go")),
+    )
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-c", "from medmcp.plan import main; main()"],
+        env=entry["env"],
+    )
+    try:
+        async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+            await session.initialize()
+            # vibe may hand the steps as a JSON string: the same plan, the same key.
+            as_string = {**args, "steps": json.dumps(args["steps"])}
+            ok = await session.call_tool(plan.PLAN_TOOL, as_string)
+            assert not ok.isError
+            assert "approved this plan (Go)" in cast("Any", ok.content[0]).text
+            assert taken == ["go"]
+            again = await session.call_tool(plan.PLAN_TOOL, args)
+            assert again.isError
+            assert cast("Any", again.content[0]).text == plan.NOT_APPROVED_TEXT
+    finally:
+        await broker.aclose()

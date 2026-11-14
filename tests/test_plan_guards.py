@@ -15,6 +15,7 @@ Four guards, each against something the rehearsal saw:
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +37,7 @@ JsonDict = dict[str, Any]
 def _fresh_core_state(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
     """Each test starts with no pending notes or refused plans."""
     monkeypatch.setattr(server, "_plan_notes", plan.PlanNotes())
-    monkeypatch.setattr(server, "_plan_refusals", {})
+    monkeypatch.setattr(server, "_plan_verdicts", {})
 
 
 # ── 1. confirm_selection ─────────────────────────────────────────────────────
@@ -285,10 +286,22 @@ class TestCheckTools:
 
     def test_the_tool_hands_the_core_problems_back(self, tmp_path: Path) -> None:
         """A plan the core refused comes back as an error listing the problems."""
-        text, is_error = plan.tool_result(_plan_args(tmp_path), ["step 1: no parameter 'x'"])
+        refused = {"verdict": plan.VERDICT_REFUSED, "problems": ["step 1: no parameter 'x'"]}
+        text, is_error = plan.tool_result(_plan_args(tmp_path), refused)
         assert is_error
         assert "no parameter 'x'" in text
         assert "could not be shown" in text
+        assert "approved" not in text
+
+    @pytest.mark.parametrize("verdict", [None, {}, {"verdict": None}, {"verdict": "change"}])
+    def test_without_the_cores_go_the_tool_never_says_approved(
+        self, tmp_path: Path, verdict: JsonDict | None
+    ) -> None:
+        """No verdict, no core to ask, anything but Go: not approved, propose again."""
+        text, is_error = plan.tool_result(_plan_args(tmp_path), verdict)
+        assert is_error
+        assert text == plan.NOT_APPROVED_TEXT
+        assert "propose_plan again" in text
 
 
 class _KnownPool:
@@ -318,7 +331,7 @@ class TestPlanRefusedByTheCore:
     async def test_no_card_and_the_problems_wait_for_the_tool(
         self, with_schemas: _Harness, tmp_path: Path
     ) -> None:
-        """Answered allow without a card; check_plan hands the problems out once."""
+        """Answered allow without a card; plan_verdict hands the problems out once."""
         chat = with_schemas
         args = _d6_plan(tmp_path).to_json()
         args.pop("id")
@@ -326,9 +339,105 @@ class TestPlanRefusedByTheCore:
         assert chat.frames("plan_request") == []
         assert chat.answer(1) == ALLOW
         assert chat.conn._plan is None
-        problems = server._check_plan_op({"key": plan.plan_key(args)})["problems"]
-        assert any("session_label" in p for p in problems)
-        assert server._check_plan_op({"key": plan.plan_key(args)}) == {"problems": []}
+        verdict = server._plan_verdict_op({"key": plan.plan_key(args)})
+        assert verdict["verdict"] == plan.VERDICT_REFUSED
+        assert any("session_label" in p for p in verdict["problems"])
+        assert chat.conn._plan is None
+        # Taken once: the same plan again has no verdict, so it is not approved.
+        again = server._plan_verdict_op({"key": plan.plan_key(args)})
+        assert again == {"verdict": None, "problems": []}
+        text, is_error = plan.tool_result(args, again)
+        assert is_error
+        assert text == plan.NOT_APPROVED_TEXT
+
+    async def test_u9_plan_is_refused_and_never_approved(
+        self, with_schemas: _Harness, tmp_path: Path
+    ) -> None:
+        """The U9 plan (dataset_dir on summarize/select, sequence_name): no card, no Go."""
+        chat = with_schemas
+        ds = str(tmp_path / "dcm_qa")
+        args: JsonDict = {
+            "understanding": "Which DWI series per session.",
+            "steps": [
+                {"action": "Index", "tool": "index_dataset", "inputs": {"dataset_dir": ds}},
+                {"action": "Summarize", "tool": "summarize_dataset", "inputs": {"dataset_dir": ds}},
+                {
+                    "action": "Select DWI",
+                    "tool": "select_series",
+                    "inputs": {"dataset_dir": ds, "sequence_name": "DWI"},
+                },
+            ],
+            "output_dir": str(tmp_path / "results"),
+        }
+        await chat.conn._handle_permission(_request(1, PLAN_TOOL, args))
+        assert chat.frames("plan_request") == []
+        text, is_error = plan.tool_result(
+            args, server._plan_verdict_op({"key": plan.plan_key(args)})
+        )
+        assert is_error
+        assert "approved" not in text
+        assert "summarize_dataset has no parameter 'dataset_dir'" in text
+        assert "'sequence_name'" in text
+        assert chat.conn._plan is None
+
+    async def test_a_go_is_in_force_only_once_the_tool_took_it(
+        self, with_schemas: _Harness, tmp_path: Path
+    ) -> None:
+        """Go records the verdict; the plan governs calls once the tool has taken it."""
+        chat = with_schemas
+        args = _plan_args(tmp_path)
+        await chat.propose(1, args, "go", run_tool=False)
+        assert chat.answer(1) == ALLOW
+        assert chat.conn._plan is None
+        verdict = server._plan_verdict_op({"key": plan.plan_key(args)})
+        assert verdict["verdict"] == plan.VERDICT_GO
+        assert chat.conn._plan is not None
+        assert chat.conn._plan.id == "c1"
+
+    async def test_a_go_withdrawn_by_a_new_proposal_never_comes_into_force(
+        self, with_schemas: _Harness, tmp_path: Path
+    ) -> None:
+        """A second proposal before the tool took the first Go withdraws that Go."""
+        chat = with_schemas
+        first = _plan_args(tmp_path)
+        await chat.propose(1, first, "go", run_tool=False)
+        second = _plan_args(tmp_path, understanding="Something else entirely.")
+        await chat.propose(2, second, "change")
+        server._plan_verdict_op({"key": plan.plan_key(first)})
+        assert chat.conn._plan is None
+
+    async def test_change_leaves_no_verdict(self, with_schemas: _Harness, tmp_path: Path) -> None:
+        """A plan the person changed has nothing for the tool to take."""
+        args = _plan_args(tmp_path)
+        await with_schemas.propose(1, args, "change", "FLAIR only")
+        assert server._plan_verdict_op({"key": plan.plan_key(args)})["verdict"] is None
+
+    async def test_a_plan_through_an_ordinary_dialog_is_not_approved(
+        self, with_schemas: _Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Allowed in a plain approval dialog (no card), the plan tool still has no Go."""
+        chat = with_schemas
+        chat.conn._plan_first = False  # the card path is not taken
+        args = _plan_args(tmp_path)
+        await chat.ask(1, PLAN_TOOL, args, "allow_once")
+        (dialog,) = chat.frames("permission_request")
+        ids = [o["optionId"] for o in dialog["options"]]
+        assert server._STACK_TOOL_CHAT_OPTION not in ids
+        text, is_error = plan.tool_result(
+            args, server._plan_verdict_op({"key": plan.plan_key(args)})
+        )
+        assert is_error
+        assert text == plan.NOT_APPROVED_TEXT
+
+    async def test_the_plan_tool_is_never_granted_for_the_chat(
+        self, with_schemas: _Harness, tmp_path: Path
+    ) -> None:
+        """Even a client sending the chat-long option gets no grant on the plan tool."""
+        chat = with_schemas
+        chat.conn._plan_first = False
+        await chat.ask(1, PLAN_TOOL, _plan_args(tmp_path), server._STACK_TOOL_CHAT_OPTION)
+        assert ("medmcp-plan", "propose_plan") not in chat.conn._granted_stack_tools
+        assert chat.answer(1) != ALLOW  # not offered: treated as no decision
 
     async def test_a_fitting_plan_is_shown(self, with_schemas: _Harness, tmp_path: Path) -> None:
         """The example plan fits the schemas: card as before."""
@@ -362,23 +471,50 @@ def _d6_args(ws: Path) -> JsonDict:
 async def test_the_plan_tool_asks_the_core_over_the_broker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """core_problems reaches check_plan on the broker socket in $VIBE_HOME."""
-    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+    """core_verdict reaches plan_verdict on the socket $MEDMCP_BROKER_SOCK names."""
+    monkeypatch.delenv("VIBE_HOME", raising=False)
+    sock = tmp_path / "backend.sock"
+    monkeypatch.setenv(plan.BROKER_SOCK_ENV, str(sock))
     pool = BackendPool(resolve_spec=resolver({}))
-    broker = BackendBroker(
-        pool, tmp_path / "backend.sock", ops={"check_plan": server._check_plan_op}
-    )
+    broker = BackendBroker(pool, sock, ops=server._core_ops())
     await broker.start()
     try:
         args = _d6_args(tmp_path)
-        assert await plan.core_problems(args) == []
-        server._refuse_plan(plan.plan_key(args), ["step 1: bad"])
-        assert await plan.core_problems(args) == ["step 1: bad"]
+        assert await plan.core_verdict(args) == {
+            "verdict": None,
+            "problems": [],
+            "id": 1,
+            "ok": True,
+        }
+        server._record_plan_verdict(
+            plan.plan_key(args),
+            server._PlanVerdict(time.monotonic(), plan.VERDICT_REFUSED, ["step 1: bad"]),
+        )
+        verdict = await plan.core_verdict(args)
+        assert verdict is not None
+        assert verdict["verdict"] == plan.VERDICT_REFUSED
+        assert verdict["problems"] == ["step 1: bad"]
     finally:
         await broker.aclose()
         await pool.aclose()
-    # No broker: nothing to add, the plan goes through as before.
-    assert await plan.core_problems(_d6_args(tmp_path)) == []
+    # No broker: no verdict, and the tool says the plan is not approved.
+    assert await plan.core_verdict(_d6_args(tmp_path)) is None
+    text, is_error = plan.tool_result(_d6_args(tmp_path), None)
+    assert is_error
+    assert text == plan.NOT_APPROVED_TEXT
+
+
+async def test_an_ops_only_broker_refuses_stack_calls(tmp_path: Path) -> None:
+    """Without a stack pool the core's broker answers its ops and nothing else."""
+    broker = BackendBroker(None, tmp_path / "b.sock", ops=server._core_ops())
+    await broker.start()
+    try:
+        response = await broker._run_op(1, "plan_verdict", "medmcp-plan", {"key": "k"})
+        assert response["verdict"] is None
+        with pytest.raises(Exception, match="no stack pool"):
+            await broker._run_op(2, "call_tool", "medmcp-cohort", {"tool": "x", "args": {}})
+    finally:
+        await broker.aclose()
 
 
 async def test_the_pool_keeps_tool_lists_across_eviction_and_restart(tmp_path: Path) -> None:

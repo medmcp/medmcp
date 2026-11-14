@@ -31,9 +31,18 @@ What a Go covers, and what it never covers:
   dialog suggests asking for a revised plan, and the call's result reminds the
   agent to propose one (:func:`off_plan_reminder`).
 
-A plan whose steps name a tool no stack offers, or a parameter its tool does not
-take, is not shown: :func:`check_tools` lists the problems and the tool hands them
-back with the parameters the tool does take.
+A plan whose steps name a tool no stack offers, a parameter its tool does not
+take, or leave a required input empty, is not shown: :func:`check_tools` lists the
+problems and the tool hands them back with the parameters the tool does take. A
+plan that selects series and also rolls out over them, or confirms the selection,
+is not shown either (:func:`parse_plan`): a selection plan ends with the review.
+
+The tool says "approved" only on the core's word. The core keeps a verdict for
+each plan it decided — Go, or refused with the problems — keyed by the plan
+(:func:`plan_key`); the tool takes it over the broker (``plan_verdict``), and a
+Go puts the plan in force only when the tool takes it. No verdict — the broker
+out of reach, a plan that went to an ordinary dialog, arguments that do not match
+the card — is "not approved: propose again", never a Go.
 
 The workspace root and the filesystem root never cover what lies under them — a
 plan naming the whole workspace as an input would otherwise approve everything.
@@ -46,6 +55,7 @@ import difflib
 import hashlib
 import json
 import os
+import re
 import shlex
 import time
 from collections.abc import Callable, Mapping
@@ -77,6 +87,9 @@ PLAN_TOOL_NAMES: frozenset[str] = frozenset(
 # is what the person decides on, and they decide after reading it.
 REVIEW_TOOL = "review_selection"
 CONFIRM_TOOL = "confirm_selection"
+# The verdicts the core hands the plan tool (broker op ``plan_verdict``).
+VERDICT_GO = "go"
+VERDICT_REFUSED = "refused"
 
 # From this many calls outside one plan on, the dialog suggests a revised plan and
 # the allowed call's result reminds the agent to propose one.
@@ -415,12 +428,39 @@ def _parameters(schema: JsonDict) -> list[str] | None:
     return list(cast("JsonDict", props))
 
 
+def _required(schema: JsonDict) -> list[str]:
+    """The parameters *schema* requires."""
+    required = schema.get("required")
+    if not isinstance(required, list):
+        return []
+    return [str(r) for r in cast("list[object]", required)]
+
+
+# A value the model wrote in place of one it does not know: "<path from step 1>".
+_PLACEHOLDER = re.compile(r"^\s*<[^<>]*>\s*$")
+
+
+def _is_empty(value: object) -> bool:
+    """Whether *value* is obviously no value: nothing, blank, a placeholder, all-empty."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip() or bool(_PLACEHOLDER.match(value))
+    if isinstance(value, dict):
+        return not value
+    if isinstance(value, list):
+        return all(_is_empty(v) for v in cast("list[object]", value))
+    return False
+
+
 def check_tools(plan: Plan, schemas: ToolSchemas, *, complete: bool) -> list[str]:
     """What is wrong with *plan*'s steps given the tools the stacks offer.
 
     A step must name a tool one of the stacks offers (or one of vibe's own), and
     every argument it lists must be a parameter of that tool; each problem lists
-    the parameters the tool does take, so the model can fix it in one go. An
+    the parameters the tool does take, so the model can fix it in one go. A step
+    whose tool requires inputs must show them: an empty ``inputs``, or a required
+    input left blank or as a placeholder (``"<path from step 1>"``), is refused. An
     unknown tool name is reported only when *complete* — when *schemas* holds
     every stack of the chat; otherwise a tool not found may be one whose list is
     not known yet, and only the steps with a known tool are checked.
@@ -458,6 +498,21 @@ def check_tools(plan: Plan, schemas: ToolSchemas, *, complete: bool) -> list[str
                 + ", ".join(repr(k) for k in unknown)
                 + f"; its parameters are: {listed}"
             )
+        required = [r for r in _required(schema) if r in allowed]
+        if required and not step.inputs:
+            problems.append(
+                f"step {n} ({name}): give the inputs this call will use; {name} requires "
+                + ", ".join(required)
+            )
+            continue
+        empty = [r for r in required if r in step.inputs and _is_empty(step.inputs[r])]
+        if empty:
+            problems.append(
+                f"step {n} ({name}): "
+                + ", ".join(repr(k) for k in empty)
+                + " is empty; give the actual value this call will use (a path an earlier "
+                "step writes is fine), or end the plan before this step"
+            )
     return problems
 
 
@@ -466,9 +521,17 @@ def plan_key(raw: object) -> str:
 
     The core and the plan tool see the same arguments (one at the approval step,
     the other when the call runs), so a verdict the core reached can be looked up
-    by the tool with this key.
+    by the tool with this key. It is taken over the plan as validated — what the
+    card shows — so a JSON-string ``steps``, blank optional fields, stray keys or
+    surrounding whitespace on either side do not make the two disagree. Should they
+    disagree anyway, the tool finds no verdict and says "not approved", never Go.
     """
-    canonical = json.dumps(_coerce(raw), sort_keys=True, separators=(",", ":"), default=str)
+    try:
+        body = parse_plan(raw).to_json()
+        body.pop("id", None)
+    except PlanError:
+        body = _coerce(raw)
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
@@ -695,25 +758,52 @@ def _not_shown(problems: list[str]) -> str:
     )
 
 
-def tool_result(arguments: object, core_problems: list[str] | None = None) -> tuple[str, bool]:
+NOT_APPROVED_TEXT = (
+    "The user has not approved this plan: it was not shown to them as a plan card, "
+    "or no Go was recorded for it. Nothing is approved — do not carry out any of its "
+    "steps. Call propose_plan again with your plan and wait for the user's answer."
+)
+
+
+def tool_result(arguments: object, verdict: Mapping[str, object] | None) -> tuple[str, bool]:
     """The text the tool returns for *arguments*, and whether it is an error.
 
-    The tool only runs once the person said Go — the core holds the call at the
-    approval step until then — or when the plan could not be shown, in which case
-    it says what to fix: its own problems (:func:`parse_plan`) or those the core
-    found checking the steps against the stacks' tools (*core_problems*).
+    *verdict* is the core's word on this plan (broker op ``plan_verdict``):
+    ``{"verdict": "go"}`` once the person said Go to exactly this plan's card,
+    ``{"verdict": "refused", "problems": [...]}`` when the core would not show
+    it. Only a Go gives the approval text. A plan the tool itself cannot read
+    (:func:`parse_plan`) says what to fix; anything else — no verdict, no core
+    to ask — is :data:`NOT_APPROVED_TEXT`.
     """
     try:
         plan = parse_plan(arguments)
     except PlanError as exc:
         return _not_shown(exc.problems), True
-    if core_problems:
-        return _not_shown(core_problems), True
-    return approval_text(plan), False
+    kind = verdict.get("verdict") if verdict is not None else None
+    if kind == VERDICT_GO:
+        return approval_text(plan), False
+    if kind == VERDICT_REFUSED:
+        raw = verdict.get("problems") if verdict is not None else None
+        problems = [str(p) for p in cast("list[object]", raw)] if isinstance(raw, list) else []
+        return _not_shown(problems or ["the core refused it"]), True
+    return NOT_APPROVED_TEXT, True
+
+
+# The variable naming the broker socket for a process the core configured (the
+# stack proxy and the plan tool): vibe hands its MCP servers only the variables an
+# entry lists, so ``$VIBE_HOME`` is not among them.
+BROKER_SOCK_ENV = "MEDMCP_BROKER_SOCK"
 
 
 def _broker_socket() -> Path:
-    """The core's broker socket, as an agent process finds it (``$VIBE_HOME``)."""
+    """The core's broker socket, as an agent process finds it.
+
+    ``$MEDMCP_BROKER_SOCK`` (set on the plan tool's config entry), else
+    ``$VIBE_HOME`` (the hooks), else the checkout's ``.vibe``.
+    """
+    explicit = os.environ.get(BROKER_SOCK_ENV, "").strip()
+    if explicit:
+        return Path(explicit)
     home = os.environ.get("VIBE_HOME", "").strip()
     base = Path(home) if home else Path(__file__).resolve().parents[2] / ".vibe"
     return base / "backend.sock"
@@ -722,10 +812,10 @@ def _broker_socket() -> Path:
 async def ask_core(op: str, payload: JsonDict, *, timeout: float = 5.0) -> JsonDict | None:
     """One request to the core's broker; ``None`` when it cannot be reached.
 
-    Used by the plan tool (``check_plan``: did the core refuse to show this plan,
-    and why) and by the plan-note hook (``plan_note``). A core without a broker
-    (no stack pool) checks no schemas and keeps no notes, so ``None`` is the
-    answer "nothing to add".
+    Used by the plan tool (``plan_verdict``: did the person say Go to this plan,
+    or did the core refuse to show it, and why) and by the plan-note hook
+    (``plan_note``). For the hook ``None`` is "nothing to add"; for the plan tool
+    it is "not approved".
     """
     import asyncio
 
@@ -758,15 +848,9 @@ async def ask_core(op: str, payload: JsonDict, *, timeout: float = 5.0) -> JsonD
     return cast("JsonDict", response)
 
 
-async def core_problems(arguments: object) -> list[str]:
-    """The problems the core found with this plan (``[]``: none, or no core to ask)."""
-    response = await ask_core("check_plan", {"key": plan_key(arguments)})
-    if response is None:
-        return []
-    problems = response.get("problems")
-    if not isinstance(problems, list):
-        return []
-    return [str(p) for p in cast("list[object]", problems)]
+async def core_verdict(arguments: object) -> JsonDict | None:
+    """The core's verdict on this plan, taken (``None``: no core could be asked)."""
+    return await ask_core("plan_verdict", {"key": plan_key(arguments)})
 
 
 async def _serve() -> None:
@@ -790,7 +874,7 @@ async def _serve() -> None:
         if name != PLAN_TOOL:
             text, is_error = f"unknown tool {name!r}", True
         else:
-            text, is_error = tool_result(arguments, await core_problems(arguments))
+            text, is_error = tool_result(arguments, await core_verdict(arguments))
         return mcp_types.CallToolResult(
             content=[mcp_types.TextContent(type="text", text=text)], isError=is_error
         )

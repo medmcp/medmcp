@@ -85,7 +85,9 @@ export function JobPill() {
         .join(' · ')
     : first.status === 'failed'
       ? 'failed'
-      : 'finished'
+      : first.status === 'stopped'
+        ? 'stopped'
+        : 'finished'
 
   const toggle = () => {
     setOpen((o) => !o)
@@ -110,8 +112,6 @@ export function JobPill() {
       <button
         className={`job-pill job-pill-${state}`}
         onClick={toggle}
-        aria-label="Background jobs"
-        title="Background jobs"
       >
         <span className="job-pill-dot" />
         <span className="job-pill-text">{label(first)}</span>

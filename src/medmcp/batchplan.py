@@ -1,6 +1,6 @@
 """Turn a cohort batch manifest into per-item replay bindings.
 
-The cohort stack's ``plan_batch`` tool writes a reviewable ``batch_plan.csv`` —
+A stack that plans a cohort roll-out writes a reviewable batch plan (CSV) —
 one row per map unit (subject, or subject-session), each with the resolved input
 files and a ``status``. This module converts that manifest into the ``runs`` a
 :func:`medmcp.replay.run_batch` call consumes: a list of ``{in_N: value}``
@@ -20,7 +20,7 @@ bound every subject's output to its own input file. It is placed instead under
 an output root, one folder per item: ``<root>/<subject>[/<session>]`` for a
 folder, and that folder plus the recorded file name for a file.
 
-**Selection manifests.** The cohort stack's ``select_series`` writes a different
+**Selection manifests.** A stack that selects scans writes a different
 table: one row per selected *series* (``subject_id``, ``session_id``,
 ``sequence``, ``contrast``, ``plane``, ``path``, …; ``collection`` when several
 collections are indexed together), with no ``status`` — every row was selected
@@ -32,11 +32,13 @@ subject-session where a role is absent or present twice is flagged, not guessed.
 
 **Confirmed selections.** A plain selection can hold two T1s of one visit, so
 a recipe that reads several series per subject-session is not rolled out from
-it: :class:`NeedsConfirmationError` sends the person to ``review_selection``
-and ``confirm_selection`` first. Those write ``<name>_confirmed.csv`` (the
-selection's columns plus ``role``: exactly one row per role per
-subject-session) and ``<name>_confirmed.json``, the record of who decided what
-under which rules, with the SHA-256 of the confirmed CSV. A manifest with a
+it: :class:`NeedsConfirmationError` sends the person to review and confirm it
+first, with the tools of the stack that made it. Confirming writes
+``<name>_confirmed.csv`` (the selection's columns plus ``role``: exactly one
+row per role per subject-session) and ``<name>_confirmed.json``, the record of
+who decided what under which rules, with the SHA-256 of the confirmed CSV.
+The record's format is the core's (:data:`CONFIRMATION_MARKER`), so any stack
+can write one. A manifest with a
 ``role`` column binds by that column — the roles offered are its labels, not
 labels derived from sequence and contrast — and is read only together with its
 record, whose hash must match the bytes being bound (:func:`load_manifest`):
@@ -83,10 +85,10 @@ class BatchBinding:
             rather than read from a column.
         output_root: The root those were placed under ("" when the manifest's
             own ``output_dir`` column, or the recipe's default, decided).
-        kind: ``"plan"`` (a ``plan_batch`` manifest) or ``"selection"``.
+        kind: ``"plan"`` (a batch plan) or ``"selection"``.
         role_map: For a selection, the ``in_N -> role`` assignment used.
         confirmation: For a confirmed selection read by :func:`bind_manifest`,
-            its checked ``confirm_selection`` record.
+            its checked confirmation record.
     """
 
     runs: list[dict[str, str]] = field(default_factory=list[dict[str, str]])
@@ -286,7 +288,7 @@ def runs_from_manifest(
     return binding
 
 
-# ── Selection manifests (select_series) ──────────────────────────────────────
+# ── Selection manifests ──────────────────────────────────────────────────────
 
 
 class NeedsRolesError(BatchPlanError):
@@ -310,9 +312,9 @@ class NeedsRolesError(BatchPlanError):
 class NeedsConfirmationError(BatchPlanError):
     """A multi-input roll-out was asked of a selection nobody has confirmed.
 
-    A ``select_series`` manifest may hold several series of one role in a
-    session (a repeat, a reformat); which one a tool reads is decided by
-    ``review_selection`` and ``confirm_selection`` with the person, not here.
+    A plain selection may hold several series of one role in a session (a
+    repeat, a reformat); which one a tool reads is decided with the person,
+    by the review and confirmation tools of the stack that selected, not here.
 
     Attributes:
         inputs: The recipe inputs that read a series.
@@ -323,23 +325,35 @@ class NeedsConfirmationError(BatchPlanError):
         super().__init__(
             f"this workflow reads {len(inputs)} series per subject-session "
             f"({', '.join(inputs)}), and a selection that has not been confirmed can hold "
-            "more than one series per role: run review_selection and confirm_selection "
-            "first, then roll out over the <name>_confirmed.csv they write"
+            "more than one series per role: have the selection reviewed and confirmed "
+            "first, then roll out over the <name>_confirmed.csv that writes"
         )
         self.inputs = inputs
 
 
 class ConfirmationError(BatchPlanError):
-    """A confirmed selection whose ``confirm_selection`` record is missing or does not match."""
+    """A confirmed selection whose confirmation record is missing or does not match."""
 
 
-#: The ``kind`` of a ``confirm_selection`` record (``<name>_confirmed.json``).
-CONFIRMATION_KIND = "medmcp-cohort confirm_selection"
+#: The key that marks a confirmation record (``<name>_confirmed.json``), and the
+#: format version this core reads. The record is a JSON object with:
+#:
+#: - ``medmcp_selection_confirmation``: ``1``
+#: - ``confirmed_csv``: ``{"path", "sha256"}`` of the confirmed CSV (required)
+#: - optional ``confirmed_at``, ``note``, ``rule_version``, ``role_labels`` (the
+#:   labels of the ``role`` column), ``overrides`` and ``excluded`` (lists), ``counts``
+#:   (``subject_sessions_confirmed``, ``series_confirmed``), and ``manifest``,
+#:   ``index``, ``criteria`` as ``{"path", "sha256"}`` references to what the
+#:   confirmation was made from.
+#:
+#: Anything else in it belongs to the stack that wrote it and is kept, unread.
+CONFIRMATION_MARKER = "medmcp_selection_confirmation"
+CONFIRMATION_VERSION = 1
 
 
 @dataclass(frozen=True)
 class Confirmation:
-    """The ``confirm_selection`` record of a confirmed selection, checked against it.
+    """The confirmation record of a confirmed selection, checked against it.
 
     Attributes:
         path: The record, ``<name>_confirmed.json`` beside the confirmed CSV.
@@ -365,7 +379,7 @@ class Confirmation:
             "confirmed_at": rec.get("confirmed_at"),
             "note": rec.get("note") or "",
             "rule_version": rec.get("rule_version"),
-            "roles": list(cast("list[str]", rec.get("core_role_labels") or [])),
+            "roles": [str(r) for r in cast("list[object]", rec.get("role_labels") or [])],
             "overrides": len(cast("list[object]", rec.get("overrides") or [])),
             "excluded": len(cast("list[object]", rec.get("excluded") or [])),
             "subject_sessions_confirmed": counts.get("subject_sessions_confirmed"),
@@ -401,7 +415,7 @@ def check_confirmation(manifest: str | Path, data: bytes) -> Confirmation:
             is used, not of the file as it may be by now.
 
     Raises:
-        ConfirmationError: The record is missing, is not a ``confirm_selection``
+        ConfirmationError: The record is missing, is not a confirmation
             record, or its ``confirmed_csv.sha256`` differs from *data*'s.
     """
     record_path = confirmation_path(manifest)
@@ -411,23 +425,26 @@ def check_confirmation(manifest: str | Path, data: bytes) -> Confirmation:
     except OSError:
         raise ConfirmationError(
             f"{name} has no confirmation record ({record_path.name} beside it): "
-            "run confirm_selection again, and keep the two files together"
+            "confirm the selection again, and keep the two files together"
         ) from None
     try:
         loaded: object = json.loads(raw)
     except ValueError as exc:
         raise ConfirmationError(f"{record_path.name} is not valid JSON: {exc}") from None
     record = cast("dict[str, Any]", loaded) if isinstance(loaded, dict) else {}
-    if record.get("kind") != CONFIRMATION_KIND:
-        raise ConfirmationError(f"{record_path.name} is not a confirm_selection record")
+    if record.get(CONFIRMATION_MARKER) != CONFIRMATION_VERSION:
+        raise ConfirmationError(
+            f"{record_path.name} is not a confirmation record this version reads "
+            f"(no {CONFIRMATION_MARKER}: {CONFIRMATION_VERSION})"
+        )
     confirmed = cast("dict[str, Any]", record.get("confirmed_csv") or {})
     expected = str(confirmed.get("sha256") or "")
     actual = hashlib.sha256(data).hexdigest()
     if expected != actual:
         raise ConfirmationError(
             f"the confirmed selection was changed after confirmation: {name} no longer has "
-            f"the SHA-256 recorded in {record_path.name}. Run review_selection and "
-            "confirm_selection again instead of editing the confirmed file"
+            f"the SHA-256 recorded in {record_path.name}. Review and confirm the "
+            "selection again instead of editing the confirmed file"
         )
     return Confirmation(
         path=record_path.resolve(),
@@ -459,7 +476,7 @@ def load_manifest(
     if not is_confirmed(rows):
         raise ConfirmationError(
             f"{Path(path).name} is not a confirmed selection (no role column): "
-            "use the file confirm_selection wrote"
+            "use the file the confirmation wrote"
         )
     return rows, check_confirmation(path, data)
 
@@ -509,7 +526,7 @@ class Role:
 
     Written ``SEQUENCE``, ``SEQUENCE+contrast``, ``SEQUENCE-contrast`` or
     ``SEQUENCE?contrast`` (contrast unknown), with an optional ``@plane`` — the
-    notation ``select_series`` uses for ``require_in_session``. ``contrast`` and
+    notation of the ``role`` column. ``contrast`` and
     ``plane`` empty mean "any".
     """
 
@@ -561,7 +578,7 @@ def role_of(row: dict[str, str]) -> str:
 
 
 def is_selection(rows: list[dict[str, str]]) -> bool:
-    """Whether *rows* are a ``select_series`` manifest rather than a ``plan_batch`` one."""
+    """Whether *rows* are a selection manifest rather than a batch plan."""
     return bool(rows) and "path" in rows[0] and "subject_id" in rows[0]
 
 
@@ -661,7 +678,7 @@ def runs_from_selection(
     output_root: str | Path | None = None,
     base_dir: Path | None = None,
 ) -> BatchBinding:
-    """Build replay bindings from a ``select_series`` manifest.
+    """Build replay bindings from a selection manifest.
 
     Args:
         recipe: The distilled workflow.
@@ -676,7 +693,7 @@ def runs_from_selection(
             ``<output_root>/[<collection>/]<subject>[/<session>]``.
         base_dir: What a relative ``path`` is read against (the dataset folder).
 
-    A manifest with a ``role`` column (``confirm_selection``) is bound by that
+    A manifest with a ``role`` column (a confirmed selection) is bound by that
     column. This function does not check it against its record; read it with
     :func:`load_manifest` (as :func:`bind_manifest` does) for that.
 

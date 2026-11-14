@@ -11,17 +11,23 @@ Notable, user-visible changes to MedMCP. Format follows
 - Jobs: a pill in the header shows running background jobs with their progress (e.g. "nnunet · start_training · epoch 41/100 · pseudo-Dice 0.88 · ~30 min left"), and a finished or failed job until it has been looked at; click for the list with Stop. A job may report progress by writing `{"fraction", "text"}` to the file named in `MEDMCP_JOB_PROGRESS`; the core keeps only a clamped fraction and one short line.
 - Approvals: code the assistant wrote itself (a Python heredoc or `-c`, `Rscript`, `node`, an awk program, a shell on a string, a `.py`/`.R`/`.sh` file it writes) is labelled as such in the approval dialog and is never covered by a chat-long approval. `MEDMCP_ASSISTANT_CODE=deny` refuses it outright, so only tools run.
 - Approvals: a stack tool can be allowed for the rest of the chat ("Allow index_dataset for the rest of this chat"). Later calls of that tool run without a dialog; a call that would overwrite a file or touch a path outside the workspace is still shown, and the shell keeps its own rules. `MEDMCP_STACK_TOOL_APPROVAL=0` restores a dialog for every call.
-- Chat: when a message names a workspace folder (a path, the folder's name the way people type it, or the file open in the viewer), the assistant is told what the cohort stack's table of scans already says about it — subjects, sessions, scans, sequences, orientation, date coverage — or that the folder has no table yet and `index_dataset` comes first. It no longer has to list the folder to find out.
+- Chat: when a message names a workspace folder and an active stack declares a dataset index (`dataset_index` in its image label), the assistant is told what that index says about the folder, or which tool builds it first. Without such a stack nothing is added.
 - Catalog: medmcp-stats (statistical tests and publication figures) and medmcp-cohort.
 - Workflows: a cohort roll-out writes each subject's results to its own folder under an output folder (`results/<workflow>/<subject>` unless you choose another) and creates missing folders itself.
 - Workflows: `batch-from-plan` and `medmcp replay --batch` take an explicit input-to-column mapping and an output folder.
 - Workflows: every run keeps a self-contained record in `.vibe/runs/<id>/`: the workflow as it ran, the plan it came from, and per subject the inputs, each step's arguments, duration, error and result, with SHA-256 checksums of the files read and written. It also names the MedMCP build and each stack's image digest, and says whether the run was started from the preview.
-- Workflows: a selection of scans made with the cohort tools can be rolled out directly: choose "Selection" in the run editor. A workflow with one input runs once per selected scan (`select_series`, `…_series.csv`). A workflow with several inputs runs once per subject and session, and only from a selection that was reviewed and confirmed first (`review_selection`, then `confirm_selection`, `…_confirmed.csv`); a plain selection is refused with that guidance. A confirmed selection binds by its `role` column: the editor offers exactly its role labels for each input and shows when the selection was confirmed, under which review rules and with how many overrides. It is read only together with its confirmation record (`…_confirmed.json`) and refused if its SHA-256 differs from the one recorded ("the confirmed selection was changed after confirmation"); the check is repeated when the run starts. The run keeps a copy of the record and cites it with its SHA-256 and the hashes of the source selection and index, for the methods section. See [docs/rollout.md](docs/rollout.md).
+- Workflows: a selection of scans can be rolled out directly ("Selection" in the run editor): once per scan for a one-input workflow; a workflow with several inputs runs once per subject and session, only from a selection that was reviewed and confirmed, read with its hash-checked record, which the run keeps and cites. See [docs/rollout.md](docs/rollout.md).
 - Workflows: when a cohort plan's columns cannot be matched to a workflow's inputs, the run editor asks which column is which.
 - Workflows: a workflow lists its past runs; each can be reopened and downloaded as one JSON file or a Markdown report (`GET /api/runs/{id}/export`).
 - Provenance: a chat's record names each stack's image digest and the MedMCP version.
 - Stacks: background jobs. A stack can declare a job runner in its image label; an approved call of one of its job tools (an nnU-Net training) then runs in its own container, which keeps running when the chat is idle or closed, when another GPU stack is used and when MedMCP restarts. One job at a time by default (`MEDMCP_MAX_JOBS`); `MEDMCP_STACK_JOBS=0` turns jobs off.
 - Jobs: `/api/jobs` lists, shows and stops them; the Tool stacks window shows running jobs with a Stop button; a job's start, image and arguments are recorded in the provenance of the chat that approved it.
+
+### Changed
+
+- Prompt: the per-tool routing for the cohort and stats stacks is gone from the system prompt; the stacks' own skills carry it. The general rules stay (use the tool, never compute a statistic by hand, results never into a dataset folder, ask before writing code).
+- Workflows: the record of a confirmed selection is a core format (`medmcp_selection_confirmation: 1`, `role_labels`) that any stack can write; messages no longer name a stack's tools. See [docs/rollout.md](docs/rollout.md).
+- Explorer: the second upload button and the folder menu's upload entries are removed again; Upload acts on the selected folder.
 
 ### Fixed
 
@@ -36,6 +42,9 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Security
 
+- Runs: `DELETE /api/runs/{id}` only accepts a run id; `..` removed the folder above the run records.
+- Approvals: "for the rest of this chat" is not offered for a tool that starts a background job or for an external MCP server, and the read-only shell approval covers the shell only, not another tool's `command` argument.
+- Jobs: a progress file is read only if it is a regular file; a pipe left in its place blocked the server.
 - Docker guard: a container named or labelled as a job is created only with no network, the workspace as its only mount and the job command its image declares; images carrying a job label are refused.
 - Images: uv 0.13.7 and Docker Compose 5.7.0, for critical advisories in their bundled zip and gRPC libraries.
 

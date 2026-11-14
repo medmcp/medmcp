@@ -2,20 +2,36 @@
 
 A workflow distilled from one chat can be rolled out over a cohort: the run
 editor (or `medmcp replay <name> --batch <manifest>`) reads a manifest written by
-the cohort stack, binds the workflow's inputs per subject or subject-session,
+a stack, binds the workflow's inputs per subject or subject-session,
 pre-flights every item, and runs the steps without a model in between. Each item
 writes its results to its own folder under the output folder
 (`results/<workflow>/<subject>[/<session>]` unless another is chosen).
 
 ## Manifests
 
-| Manifest | Written by | One row per | Inputs bound by |
-| --- | --- | --- | --- |
-| `batch_plan.csv` | `plan_batch` | subject (or subject-session), with a `status` | the plan's file columns (matched to the recorded example, or chosen in the editor) |
-| `<name>_series.csv` | `select_series` | selected series | `path`; one input only (see below) |
-| `<name>_confirmed.csv` + `<name>_confirmed.json` | `review_selection`, then `confirm_selection` | role per subject-session | the `role` column |
+These formats are the core's; any stack can write them. The core names no
+stack and no tool. medmcp-cohort is the stack that writes them today
+(`plan_batch`, `select_series`, `review_selection`, `confirm_selection`).
+
+| Manifest | One row per | Inputs bound by |
+| --- | --- | --- |
+| Batch plan (CSV with a `status` column) | subject (or subject-session) | the plan's file columns (matched to the recorded example, or chosen in the editor) |
+| Selection (CSV with `subject_id` and `path`; optional `session_id`, `collection`, `sequence`, `contrast`, `plane`) | selected series | `path`; one input only (see below) |
+| Confirmed selection (`<name>_confirmed.csv`: a selection plus `role`) with its record `<name>_confirmed.json` | role per subject-session | the `role` column |
 
 Only `ok` rows of a plan run; flagged rows are listed and left out.
+
+The record of a confirmed selection is a JSON object:
+
+- `medmcp_selection_confirmation`: `1` (required; the format version);
+- `confirmed_csv`: `{path, sha256}` of the confirmed CSV (required);
+- optional `confirmed_at`, `note`, `rule_version`, `role_labels` (the labels of
+  the `role` column), `overrides` and `excluded` (lists), `counts`
+  (`subject_sessions_confirmed`, `series_confirmed`), and `manifest`, `index`,
+  `criteria` as `{path, sha256}` references to what was confirmed from.
+
+Anything else in it belongs to the stack that wrote it; the run keeps the whole
+record.
 
 ## Selections: confirm before a multi-input roll-out
 
@@ -25,21 +41,18 @@ workflow runs once per selected series. A workflow that reads several scans per
 subject-session (a T1, a T1 with contrast, a FLAIR) needs exactly one series per
 role, and which one is decided with the person, not by the roll-out:
 
-1. `select_series` picks the candidate series.
-2. `review_selection(manifest_path, roles=[...])` shows one series per subject,
-   session and role, with the alternatives, ties and missing roles.
-3. `confirm_selection(review_path, overrides, note)` applies the person's
-   decisions and writes `<name>_confirmed.csv` (the selection's columns plus
-   `role`, `decided_by` and the index's own `index_sequence`/`index_contrast`/
-   `index_plane`) and `<name>_confirmed.json` (the record: SHA-256 of the
-   confirmed CSV, the source selection, criteria and index with their hashes,
-   the rule version, every decision and override, the subject-sessions left out
-   and the counts).
+1. A selection tool picks the candidate series.
+2. A review tool shows one series per subject, session and role, with the
+   alternatives, ties and missing roles.
+3. A confirmation tool applies the person's decisions and writes
+   `<name>_confirmed.csv` and `<name>_confirmed.json` (the record: SHA-256 of
+   the confirmed CSV, what it was confirmed from with hashes, the rule version,
+   the overrides, the subject-sessions left out and the counts).
 
 The rules the core applies:
 
 - **A multi-input workflow over a selection without a `role` column is
-  refused**: "run review_selection and confirm_selection first". No roles are
+  refused**: "have the selection reviewed and confirmed first". No roles are
   asked for and none are guessed.
 - **A confirmed selection binds by its `role` column.** The editor offers
   exactly its role labels (`T1-contrast`, `T1+contrast`, `FLAIR`, …) for each
@@ -47,7 +60,7 @@ The rules the core applies:
   confirmed selection with several roles asks which role it reads.
 - **A confirmed selection is read only with its record.** The core hashes the
   CSV bytes it binds and compares them with `confirmed_csv.sha256` in the
-  `.json` beside it. A missing record, a record of something else, or a CSV
+  `.json` beside it. A missing record, a record without the marker, or a CSV
   that differs is refused: "the confirmed selection was changed after
   confirmation". Confirm again instead of editing the confirmed file.
 - **The checks are repeated when the run starts**, whatever bound the rows, so
@@ -56,7 +69,7 @@ The rules the core applies:
   confirmed roll-out reads must also be a row of the confirmed CSV: a path
   edited in the run editor is refused, since the record would otherwise cite a
   selection the run did not use.
-- Plans (`batch_plan.csv`) are not affected by these rules.
+- Plans are not affected by these rules.
 
 The run editor shows, once a confirmed selection is loaded, when it was
 confirmed, under which review rule version and how many overrides and left-out

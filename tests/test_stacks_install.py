@@ -158,6 +158,36 @@ class TestInstall:
             settings.load_mcp_servers.cache_clear()
 
 
+INDEX_LABEL = (
+    '{"name": "medmcp-foo", "dataset_index": {"summary": ".index/summary.json", '
+    '"build": "build_index", "query": ["pick_scans"]}}'
+)
+
+
+class TestDatasetIndexDeclaration:
+    """A stack's dataset index travels from the image label into discovery."""
+
+    def test_install_records_the_declaration(self, stacks_dir: Path) -> None:
+        """The declaration is written as given, and discovery carries it."""
+        with patch("medmcp.settings._run_docker", _fake_docker(INDEX_LABEL)):
+            settings.install_stack_image("ghcr.io/x/foo:dev")
+        expected = {
+            "summary": ".index/summary.json",
+            "build": "build_index",
+            "query": ["pick_scans"],
+        }
+        assert _read_manifest(stacks_dir, "medmcp-foo")["dataset_index"] == expected
+        (entry,) = settings._load_stack_manifests()  # pyright: ignore[reportPrivateUsage]
+        assert entry["dataset_index"] == expected
+
+    def test_a_malformed_declaration_is_dropped(self, stacks_dir: Path) -> None:
+        """A summary path that leaves the folder is not a declaration."""
+        label = '{"name": "medmcp-foo", "dataset_index": {"summary": "../x", "build": "b"}}'
+        with patch("medmcp.settings._run_docker", _fake_docker(label)):
+            settings.install_stack_image("ghcr.io/x/foo:dev")
+        assert "dataset_index" not in _read_manifest(stacks_dir, "medmcp-foo")
+
+
 JOB_LABEL = (
     '{"name": "medmcp-foo", "gpu": true, "job": {"command": ["medmcp-foo-job", "call"], '
     '"tools": ["start_training"], "shm_size": "16g"}}'

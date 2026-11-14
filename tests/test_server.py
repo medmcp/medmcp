@@ -1807,7 +1807,7 @@ class TestReplayRuns:
                 json={"plan_csv": "study/.medmcp/lesions_series.csv", "role_map": role_map},
             ).json()
             assert body["ok"] is False and body["refused"] is True
-            assert "review_selection and confirm_selection first" in body["error"]
+            assert "reviewed and confirmed first" in body["error"]
             assert "unmapped" not in body
         # One input is never ambiguous: the same selection still feeds it, a run per series.
         one = client.post(
@@ -1934,7 +1934,7 @@ class TestReplayRuns:
         assert "item 2 reads" in frames[0]["error"] and "not a series of" in frames[0]["error"]
 
         plain = self._run(client, {**message, "manifest": "study/.medmcp/lesions_series.csv"})
-        assert plain[0]["ok"] is False and "confirm_selection first" in plain[0]["error"]
+        assert plain[0]["ok"] is False and "reviewed and confirmed first" in plain[0]["error"]
         assert client.get("/api/runs", params={"workflow": "lesions"}).json()["runs"] == []
 
     def test_bad_first_message_is_refused(self, env: Path, client: TestClient) -> None:
@@ -2366,6 +2366,59 @@ class TestStackToolGrantForTheChat:
         assert server._STACK_TOOL_CHAT_OPTION not in {
             o["optionId"] for o in self._dialogs(conn)[0]["options"]
         }
+
+
+class TestWhatAChatLongApprovalNeverCovers:
+    """Jobs, external servers, and another tool's ``command`` argument still ask."""
+
+    responses = TestStackToolGrantForTheChat.responses
+    _request = staticmethod(TestStackToolGrantForTheChat._request)
+    _dialogs = staticmethod(TestStackToolGrantForTheChat._dialogs)
+    _answer = TestStackToolGrantForTheChat._answer
+
+    async def test_a_tool_that_starts_a_job_is_asked_every_time(
+        self,
+        responses: list[tuple[int, object]],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A job runs for hours on its own arguments; one approval is one job."""
+
+        class _Jobs:
+            def declares(self, stack: str, tool: str) -> bool:
+                return (stack, tool) == ("medmcp-foo", "start_long_run")
+
+        monkeypatch.setattr(server, "_jobs", _Jobs())
+        conn, _ = _connection()
+        req = self._request(1, "medmcp-foo_start_long_run", data=str(tmp_path / "study"))
+        await self._answer(conn, req, "allow_once")
+        offered = {o["optionId"] for o in self._dialogs(conn)[0]["options"]}
+        assert server._STACK_TOOL_CHAT_OPTION not in offered
+
+    async def test_an_external_server_is_asked_every_time(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """Each call of an external server sends data out; none is covered."""
+        conn, _ = _connection()
+        conn.servers = [{"name": "remote", "url": "https://mcp.example/mcp"}]
+        await self._answer(conn, self._request(1, "remote_lookup", query="x"), "allow_once")
+        offered = {o["optionId"] for o in self._dialogs(conn)[0]["options"]}
+        assert server._STACK_TOOL_CHAT_OPTION not in offered
+
+    async def test_the_read_only_grant_is_for_the_shell_only(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """A stack tool with a ``command`` argument is not a read-only shell command."""
+        conn, _ = _connection()
+        conn.servers = [{"name": "medmcp-foo"}]
+        conn._read_only_granted = True
+        task = asyncio.create_task(
+            conn._handle_permission(self._request(1, "medmcp-foo_run", command="ls"))
+        )
+        await asyncio.sleep(0.05)
+        assert len(self._dialogs(conn)) == 1
+        conn._pending_perms[1].set_result("reject_once")
+        await task
 
 
 class TestAssistantCode:

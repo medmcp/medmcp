@@ -45,8 +45,10 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import re
 import secrets
+import stat
 import subprocess
 import threading
 import time
@@ -194,10 +196,15 @@ def read_progress(workspace: str, job_id: str) -> JsonDict | None:
     """
     path = progress_path(workspace, job_id)
     try:
-        if path.stat().st_size > 4096:
-            return None
-        raw: object = json.loads(path.read_text(encoding="utf-8"))
-        updated = path.stat().st_mtime
+        # A regular file only, opened so that neither a pipe (a read would never
+        # return) nor a link to some other file can stand in for it.
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as fh:
+            info = os.fstat(fh.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+                return None
+            raw: object = json.loads(fh.read(4097).decode("utf-8"))
+        updated = info.st_mtime
     except (OSError, ValueError):
         return None
     if not isinstance(raw, dict):

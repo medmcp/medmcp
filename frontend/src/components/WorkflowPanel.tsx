@@ -80,15 +80,15 @@ const MANIFEST_TEXT: Record<
   plan: {
     placeholder: '…/batch_plan.csv',
     point:
-      'Point at the batch_plan.csv written by the cohort plan_batch step: click the field, then the file in the explorer, or drag it in.',
+      'Point at the batch plan (CSV) a stack wrote: click the field, then the file in the explorer, or drag it in.',
     loaded: 'One row per cohort item, as resolved by the plan. Fix a path here if one is wrong.',
     load: 'Load plan',
     other: 'Load a different plan',
   },
   selection: {
-    placeholder: '…/.medmcp/selection_confirmed.csv',
+    placeholder: '…/selection_confirmed.csv',
     point:
-      'Point at the …_confirmed.csv written by confirm_selection (a workflow that reads one scan also takes the …_series.csv of select_series): click the field, then the file in the explorer, or drag it in.',
+      'Point at a confirmed selection (…_confirmed.csv; a workflow that reads one scan also takes a plain selection): click the field, then the file in the explorer, or drag it in.',
     loaded: 'One row per selected scan, or per subject and session when the workflow reads several scans.',
     load: 'Load selection',
     other: 'Load a different selection',
@@ -982,8 +982,8 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       setMode({ kind: 'view' })
     })
 
-  // Fill the editor from a manifest — a plan_batch plan or a select_series
-  // selection — so the roll-out is a review-and-run. Flagged (missing/ambiguous)
+  // Fill the editor from a manifest — a batch plan or a selection of
+  // scans — so the roll-out is a review-and-run. Flagged (missing/ambiguous)
   // items are surfaced, never silently run; when the server cannot tell which
   // column or series feeds an input it asks, and the answer is sent back.
   const fillFromPlan = (name: string) =>
@@ -1339,7 +1339,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
               const warn = verdict?.findings.find((f) => f.severity === 'warning')
               return (
                 <div key={ri} className="wf-batch-row">
-                  <span className="wf-batch-idx" title={row.label}>
+                  <span className="wf-batch-idx">
                     {ri + 1}
                   </span>
                   {required.map((i) => (
@@ -1424,7 +1424,6 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         {planConfirmation && m.rows.length > 0 && (
           <div
             className="wf-hint"
-            title={`${planConfirmation.path}\nsha256 ${planConfirmation.sha256}`}
           >
             {confirmationLine(planConfirmation)}
           </div>

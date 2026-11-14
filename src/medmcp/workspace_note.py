@@ -21,7 +21,9 @@ from __future__ import annotations
 import json
 import os
 import re
-from pathlib import Path
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 # The note is always appended last, separated by a blank line, so the strip
@@ -70,13 +72,14 @@ def display_content_text(display: dict[str, Any]) -> str:
 
 
 # ── dataset notes ────────────────────────────────────────────────────────────────
-# The cohort stack's ``index_dataset`` writes ``<folder>/.medmcp/dataset_summary.json``
-# next to its table of scans. When a prompt refers to a workspace folder, the agent
-# is told what that table already says — or that there is none yet — so it does not
-# explore the folder by shell first. Like the viewer note above, each line starts
+# A stack may keep an index of a folder of scans: a table with one row per scan and,
+# beside it, a small summary file. It says so in its image label (``dataset_index``,
+# see :func:`parse_dataset_index`). When a prompt refers to a workspace folder and
+# an active stack declares such an index, the agent is told what the summary says —
+# or that there is none yet and which tool builds it — so it does not explore the
+# folder by shell first. Without a declaring stack nothing is added: the core knows
+# no stack's files or tools by name. Like the viewer note above, each line starts
 # with ``[workspace context:`` and is therefore removed by ``strip_workspace_note``.
-
-DATASET_SUMMARY_RELPATH = Path(".medmcp") / "dataset_summary.json"
 
 # At most this many folders are described per prompt; a prompt naming more is rare
 # and the note must stay a few lines.
@@ -85,6 +88,9 @@ _MAX_DATASET_NOTES = 3
 # How many directory entries the "does this folder hold scans?" check may visit.
 _SCAN_PROBE_BUDGET = 3000
 
+# How much of a summary's own description is quoted.
+_MAX_DESCRIPTION_CHARS = 400
+
 # Folder-name words too common to identify a folder on their own.
 _GENERIC_NAME_TOKENS = frozenset(
     {"data", "dataset", "datasets", "master", "main", "test", "tests", "testdata", "raw", "new"}
@@ -92,6 +98,69 @@ _GENERIC_NAME_TOKENS = frozenset(
 
 _ABS_PATH_RE = re.compile(r"(/[^\s\"'`<>|]+)")
 _IMAGE_SUFFIXES = (".nii", ".nii.gz", ".dcm", ".ima")
+_TOOL_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
+_MAX_QUERY_TOOLS = 4
+
+
+@dataclass(frozen=True)
+class DatasetIndex:
+    """A stack's declaration that it indexes folders of scans.
+
+    Attributes:
+        stack: The declaring stack.
+        summary: Where the summary lives, relative to the indexed folder. A JSON
+            object; its optional ``description`` string is what the agent is told.
+        build: The tool that indexes a folder.
+        query: The tools that answer from an index.
+    """
+
+    stack: str
+    summary: PurePosixPath
+    build: str
+    query: tuple[str, ...] = ()
+
+    def manifest(self) -> dict[str, Any]:
+        """The declaration as it is stored in a stack manifest."""
+        return {"summary": str(self.summary), "build": self.build, "query": list(self.query)}
+
+
+def parse_dataset_index(stack: str, raw: object) -> DatasetIndex | None:
+    """Read a ``dataset_index`` declaration, or ``None`` when absent or malformed.
+
+    The shape, in the image label or the manifest::
+
+        {"summary": ".index/summary.json", "build": "build_index",
+         "query": ["summarize_index", "pick_scans"]}
+
+    ``summary`` must be a relative path that stays inside the folder; tool names
+    are plain identifiers, since they are written into the prompt.
+    """
+    if not isinstance(raw, dict):
+        return None
+    decl = cast("dict[str, Any]", raw)
+    summary, build, query = decl.get("summary"), decl.get("build"), decl.get("query", [])
+    if not isinstance(summary, str) or not isinstance(build, str) or not isinstance(query, list):
+        return None
+    relpath = PurePosixPath(summary.strip())
+    if not relpath.parts or relpath.is_absolute() or ".." in relpath.parts:
+        return None
+    tools = cast("list[object]", query)
+    names = [build, *tools]
+    if len(tools) > _MAX_QUERY_TOOLS or not all(
+        isinstance(n, str) and _TOOL_NAME_RE.fullmatch(n) for n in names
+    ):
+        return None
+    return DatasetIndex(stack, relpath, build, tuple(cast("list[str]", tools)))
+
+
+def dataset_indexes(servers: Iterable[dict[str, Any]]) -> list[DatasetIndex]:
+    """The dataset indexes the given (active) stacks declare."""
+    found: list[DatasetIndex] = []
+    for server in servers:
+        index = parse_dataset_index(str(server.get("name", "")), server.get("dataset_index"))
+        if index is not None:
+            found.append(index)
+    return found
 
 
 def _tokens(name: str) -> list[str]:
@@ -132,17 +201,24 @@ def _holds_scans(folder: Path) -> bool:
     return False
 
 
-def _indexed_ancestor(path: Path, workspace_root: Path) -> Path | None:
+def _indexed_ancestor(
+    path: Path, workspace_root: Path, indexes: Sequence[DatasetIndex]
+) -> Path | None:
     """The nearest folder at or above *path*, inside the workspace, that has an index."""
     current = path if path.is_dir() else path.parent
     while current != workspace_root and workspace_root in current.parents:
-        if (current / DATASET_SUMMARY_RELPATH).is_file():
+        if any((current / index.summary).is_file() for index in indexes):
             return current
         current = current.parent
     return None
 
 
-def find_dataset_dirs(text: str, viewed_path: str | None, workspace_root: Path) -> list[Path]:
+def find_dataset_dirs(
+    text: str,
+    viewed_path: str | None,
+    workspace_root: Path,
+    indexes: Sequence[DatasetIndex],
+) -> list[Path]:
     """Workspace folders a prompt refers to, most specific mention first.
 
     Three sources: absolute paths written in the prompt, top-level workspace
@@ -160,7 +236,9 @@ def find_dataset_dirs(text: str, viewed_path: str | None, workspace_root: Path) 
             return
         if resolved == root or root not in resolved.parents or not resolved.exists():
             return
-        target = _indexed_ancestor(resolved, root) or (resolved if resolved.is_dir() else None)
+        target = _indexed_ancestor(resolved, root, indexes) or (
+            resolved if resolved.is_dir() else None
+        )
         if target is not None and target not in found:
             found.append(target)
 
@@ -175,78 +253,93 @@ def find_dataset_dirs(text: str, viewed_path: str | None, workspace_root: Path) 
     for folder in top_level:
         if _mentions_folder(prompt_tokens, flat, folder.name):
             add(folder)
-    if viewed_path:
-        indexed = _indexed_ancestor(Path(viewed_path), root) if Path(viewed_path).exists() else None
+    if viewed_path and Path(viewed_path).exists():
+        indexed = _indexed_ancestor(Path(viewed_path), root, indexes)
         if indexed is not None and indexed not in found:
             found.append(indexed)
     return found[:_MAX_DATASET_NOTES]
 
 
-def _tally(summary: dict[str, Any], key: str, limit: int = 6) -> str:
-    counts = summary.get(key)
-    if not isinstance(counts, dict) or not counts:
+def _summary_description(summary_file: Path) -> str | None:
+    """The summary's own one-line description; ``""`` without one, ``None`` if unreadable.
+
+    The text is the stack's, so it is flattened to one line, kept free of the
+    brackets that delimit a note, and clipped.
+    """
+    try:
+        loaded: object = json.loads(summary_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    text = cast("dict[str, Any]", loaded).get("description")
+    if not isinstance(text, str):
         return ""
-    pairs = sorted(
-        ((str(k), v) for k, v in cast("dict[str, Any]", counts).items() if isinstance(v, int)),
-        key=lambda kv: -kv[1],
-    )
-    shown = ", ".join(f"{k} {v}" for k, v in pairs[:limit])
-    return shown + (", …" if len(pairs) > limit else "")
+    flat = " ".join(text.replace("[", "(").replace("]", ")").split())
+    if len(flat) > _MAX_DESCRIPTION_CHARS:
+        flat = flat[: _MAX_DESCRIPTION_CHARS - 1].rstrip() + "…"
+    return flat
 
 
-def describe_dataset(folder: Path) -> str | None:
+def _tool_list(index: DatasetIndex, tools: Sequence[str]) -> str:
+    return f"{' or '.join(tools)} ({index.stack})"
+
+
+def describe_dataset(folder: Path, indexes: Sequence[DatasetIndex]) -> str | None:
     """One ``[workspace context: …]`` line for *folder*, or ``None`` when it needs none.
 
-    An indexed folder is described from its ``dataset_summary.json``; a folder
-    that holds scans but has no index gets the instruction to build one first; a
-    folder without imaging files gets nothing.
+    An indexed folder is described from its summary; a folder that holds scans
+    but has no index gets the instruction to build one first; a folder without
+    imaging files, or no stack that indexes folders, gets nothing.
     """
-    summary_file = folder / DATASET_SUMMARY_RELPATH
-    if summary_file.is_file():
-        try:
-            summary = cast("dict[str, Any]", json.loads(summary_file.read_text(encoding="utf-8")))
-        except (OSError, ValueError):
-            summary = None
-        if isinstance(summary, dict):
-            parts = [
-                f"{summary.get('n_subjects', '?')} subjects, {summary.get('n_sessions', '?')} "
-                f"sessions, {summary.get('n_series', '?')} scans"
-            ]
-            for label, key in (
-                ("sequences", "sequences"),
-                ("orientation", "planes"),
-                ("contrast", "contrast"),
-            ):
-                tally = _tally(summary, key)
-                if tally:
-                    parts.append(f"{label}: {tally}")
-            coverage = summary.get("date_coverage")
-            if coverage:
-                parts.append(f"dates: {coverage}")
-            unknown = summary.get("n_unknown_sequence")
-            if isinstance(unknown, int) and unknown:
-                parts.append(f"{unknown} scans with unknown sequence")
-            return (
-                f'[workspace context: the folder "{folder}" already has a table of its scans '
-                f"({'; '.join(parts)}). For any question about what it contains, how far apart "
-                "the sessions are, or to pick scans, call summarize_dataset or select_series "
-                f'with dataset "{folder}"; do not list or read its files yourself]'
-            )
+    if not indexes:
+        return None
+    for index in indexes:
+        summary_file = folder / index.summary
+        if not summary_file.is_file():
+            continue
+        description = _summary_description(summary_file)
+        if description is None:
+            continue
+        said = f" ({description})" if description else ""
+        ask = (
+            f" For any question about what it contains, or to pick scans, call "
+            f'{_tool_list(index, index.query)} with "{folder}";'
+            if index.query
+            else ""
+        )
+        return (
+            f'[workspace context: the folder "{folder}" already has a table of its scans'
+            f"{said}.{ask} do not list or read its files yourself]"
+        )
     if not _holds_scans(folder):
         return None
+    index = indexes[0]
+    then = f", then {' or '.join(index.query)}" if index.query else ""
     return (
         f'[workspace context: the folder "{folder}" holds scans but has no table of them yet. '
-        "Before answering anything about its contents or selecting scans, call index_dataset "
-        f'with dataset_dir "{folder}", then summarize_dataset or select_series; do not list '
-        "or read its files yourself]"
+        "Before answering anything about its contents or selecting scans, call "
+        f'{_tool_list(index, [index.build])} for "{folder}"{then}; do not list or read its '
+        "files yourself]"
     )
 
 
-def build_dataset_notes(text: str, viewed_path: str | None, workspace_root: Path) -> str:
-    """The dataset lines for one prompt, joined by blank lines (``""`` when none)."""
+def build_dataset_notes(
+    text: str,
+    viewed_path: str | None,
+    workspace_root: Path,
+    indexes: Sequence[DatasetIndex],
+) -> str:
+    """The dataset lines for one prompt, joined by blank lines (``""`` when none).
+
+    *indexes* are the declarations of the active stacks (:func:`dataset_indexes`);
+    with none, no folder is looked at and nothing is added.
+    """
+    if not indexes:
+        return ""
     lines = [
         line
-        for folder in find_dataset_dirs(text, viewed_path, workspace_root)
-        if (line := describe_dataset(folder)) is not None
+        for folder in find_dataset_dirs(text, viewed_path, workspace_root, indexes)
+        if (line := describe_dataset(folder, indexes)) is not None
     ]
     return "\n\n".join(lines)

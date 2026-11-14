@@ -179,7 +179,7 @@ export interface WorkflowDetail {
   replay_error: string | null
 }
 
-/** A flagged manifest row from plan_batch that isn't ready to run. */
+/** A flagged manifest row that isn't ready to run. */
 export interface BatchPlanSkip {
   subject?: string
   session?: string
@@ -187,7 +187,7 @@ export interface BatchPlanSkip {
   reason?: string
 }
 
-/** What confirm_selection recorded about a confirmed selection (its
+/** What the confirmation record says about a confirmed selection (its
  *  `<name>_confirmed.json`), as checked against the CSV being rolled out. */
 export interface SelectionConfirmation {
   path: string
@@ -202,7 +202,7 @@ export interface SelectionConfirmation {
 }
 
 /** Result of POST /api/workflows/{name}/batch-from-plan: rows to pre-fill the
- *  batch editor from a plan_batch manifest, plus the flagged rows to resolve. */
+ *  batch editor from a manifest, plus the flagged rows to resolve. */
 export interface BatchFromPlanResult {
   ok: boolean
   error: string | null
@@ -212,7 +212,7 @@ export interface BatchFromPlanResult {
   refused?: boolean
   /** For a confirmed selection: its confirmation record. */
   confirmation?: SelectionConfirmation | null
-  /** Which manifest it was: a plan_batch plan or a select_series selection. */
+  /** Which manifest it was: a batch plan or a selection of scans. */
   kind?: 'plan' | 'selection'
   runs: Record<string, string>[]
   /** subject[/session] per run, aligned with `runs`. */

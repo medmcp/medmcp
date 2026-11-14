@@ -106,6 +106,7 @@ from medmcp.reasoning import ThoughtStripper
 from medmcp.workspace_note import (
     build_dataset_notes,
     build_workspace_note,
+    dataset_indexes,
     display_content_text,
     strip_workspace_note,
 )
@@ -2053,7 +2054,7 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
 
 
 class BatchFromPlanPayload(BaseModel):
-    """Request body: a workspace-relative ``plan_batch`` manifest CSV.
+    """Request body: a workspace-relative batch plan or selection CSV.
 
     ``column_map`` names the manifest column for a recipe input the automatic
     matching could not place; ``output_root`` is the folder results go under
@@ -2064,7 +2065,7 @@ class BatchFromPlanPayload(BaseModel):
     plan_csv: str
     column_map: dict[str, str] = Field(default_factory=dict[str, str])
     role_map: dict[str, str] = Field(default_factory=dict[str, str])
-    """For a ``select_series`` manifest: which series feeds which input, e.g.
+    """For a selection manifest: which series feeds which input, e.g.
     ``{"in_1": "FLAIR", "in_2": "T1+contrast"}``."""
     output_root: str = ""
 
@@ -2093,7 +2094,7 @@ def _bind_selection(
     payload: BatchFromPlanPayload,
     confirmation: batchplan.Confirmation | None,
 ) -> JsonDict:
-    """Bind a ``select_series`` manifest: one run per series, or per subject-session.
+    """Bind a selection manifest: one run per series, or per subject-session.
 
     When the workflow reads several files and the roles are not all known, the
     answer carries the roles the selection offers (``roles``) and the inputs
@@ -2167,9 +2168,9 @@ def _bind_selection(
 
 @app.post("/api/workflows/{name}/batch-from-plan")
 async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> JsonDict:
-    """Turn a ``plan_batch`` manifest into ready-to-run batch bindings for a workflow.
+    """Turn a batch plan into ready-to-run batch bindings for a workflow.
 
-    Reads the cohort manifest CSV (written by the cohort stack's ``plan_batch``),
+    Reads the manifest CSV a stack wrote for a cohort roll-out,
     maps each ``ok`` row's resolved files onto the recipe inputs a tool reads, and
     returns the per-subject runs that pre-fill the batch editor — so the user
     reviews the binding list instead of hand-entering one row per subject. Flagged
@@ -2180,8 +2181,8 @@ async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> Json
     :mod:`medmcp.batchplan`). When an input cannot be matched, the answer names
     the columns to choose from (``columns``/``unmapped``) so the editor can ask.
 
-    A ``select_series`` manifest (one row per selected series) is accepted on the
-    same route and bound by :func:`_bind_selection`; a ``confirm_selection`` one
+    A selection manifest (one row per selected series) is accepted on the
+    same route and bound by :func:`_bind_selection`; a confirmed one
     only while it matches its record, else it is refused with the reason.
     """
 
@@ -2532,7 +2533,7 @@ async def get_jobs() -> JsonDict:
     for job in listed:
         entry = job.public()
         if job.running:
-            entry["progress"] = jobs.read_progress(_jobs.workspace, job.id)
+            entry["progress"] = await asyncio.to_thread(jobs.read_progress, _jobs.workspace, job.id)
         # The chat's name for the jobs list; ``session`` itself is an id.
         entry["session_title"] = (
             await asyncio.to_thread(sessions.chat_title, job.session) if job.session else None
@@ -2852,9 +2853,10 @@ def _call_needs_a_look(rule_keys: list[str], path_findings: list[Any]) -> bool:
     The chat-long approval covers a tool doing its ordinary work inside the
     workspace. A call that would overwrite an existing file, touch a path outside
     the workspace, or whose paths could not be resolved is a different decision
-    from the one the person made, so it is put to them again.
+    from the one the person made, so it is put to them again. So is a call that
+    starts a background job: each one runs for hours with its own arguments.
     """
-    if "outside_workspace" in rule_keys:
+    if "outside_workspace" in rule_keys or "background_job" in rule_keys:
         return True
     for finding in path_findings:
         if finding.get("severity") == "error":
@@ -3346,13 +3348,18 @@ class _ChatConnection:
         notes: list[str] = []
         if viewed_path is not None:
             notes.append(_workspace_note(viewed_path).lstrip())
-        # What the workspace already knows about a folder the prompt names: its
-        # table of scans, or that none exists yet. Reading it is a few stat calls
-        # and one small JSON file, off the event loop like every other disk access.
+        # What an active stack's index already says about a folder the prompt
+        # names, or that none exists yet. Only for stacks that declare such an
+        # index; reading it is a few stat calls and one small JSON file, off the
+        # event loop like every other disk access.
         with contextlib.suppress(Exception):
             viewed_abs = _resolve_input_path(viewed_path) if viewed_path is not None else None
             dataset_notes = await asyncio.to_thread(
-                build_dataset_notes, text, viewed_abs, WORKSPACE_ROOT
+                build_dataset_notes,
+                text,
+                viewed_abs,
+                WORKSPACE_ROOT,
+                dataset_indexes(self.servers),
             )
             if dataset_notes:
                 notes.append(dataset_notes)
@@ -3721,8 +3728,13 @@ class _ChatConnection:
         # gets path-scoped options, which are never shown), so the core reads the
         # command itself; the session option, when offered, is chosen so vibe
         # stops asking for that pattern too.
+        # Only the shell: another tool's ``command`` argument is not a shell command.
+        called_stack, _called_tool = provenance.split_tool_name(
+            str(tool_call.get("toolName") or title), self._server_names
+        )
         if (
             self._read_only_granted
+            and called_stack == "builtin"
             and isinstance(command, str)
             and _is_read_only_command(command, WORKSPACE_ROOT)
             and not riskcheck.runs_assistant_code("bash", {"command": command})
@@ -3803,7 +3815,10 @@ class _ChatConnection:
         stack, tool = provenance.split_tool_name(
             str(tool_call.get("toolName") or title), self._server_names
         )
-        if stack != "builtin" and _stack_tool_approval_enabled():
+        # Not for an external server: each call sends data off the premises, and
+        # its arguments carry no paths that would bring the dialog back.
+        external = any(s.get("name") == stack and s.get("url") for s in self.servers)
+        if stack != "builtin" and not external and _stack_tool_approval_enabled():
             needs_look = _call_needs_a_look(rule_keys, path_findings)
             offered = {o.get("optionId") for o in options}
             if (stack, tool) in self._granted_stack_tools and not needs_look:

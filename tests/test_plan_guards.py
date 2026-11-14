@@ -751,6 +751,17 @@ class TestPrompt:
         assert "pass their reply word for word as `user_reply`" in text
         assert "Do not confirm in the same turn" in text
 
+    def test_the_selection_rule(self) -> None:
+        """Select → review → stop; roll-out only after confirm, in a later turn; kept off-plan."""
+        rule = "is always `select_series` → `review_selection` → stop and show the review"
+        assert rule in _SHIPPED.read_text()
+        assert (
+            "roll-out comes only after `confirm_selection`, in a later turn" in _SHIPPED.read_text()
+        )
+        stripped = settings.without_plan_first(_SHIPPED.read_text())
+        assert stripped is not None
+        assert rule in stripped
+
     def test_the_plan_step_and_off_plan_rules(self) -> None:
         """Real parameter names only; a [MedMCP] note means re-plan."""
         text = _SHIPPED.read_text()

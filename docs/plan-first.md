@@ -146,7 +146,11 @@ stack pool (`MEDMCP_STACK_POOL=0`) no tool list is known, so no step is checked.
 
 A step whose tool requires inputs must show them: `inputs: {}`, or a required
 input left `""`, `[]` or as a placeholder (`"<path from step 1>"`), is refused
-(rehearsal U1, U4, U5, D7).
+(rehearsal U1, U4, U5, D7). A plan that selects series (`select_series`) may not
+also roll out over them — any stack step that is not a lookup (index,
+summarize, check, query, review, flow diagram, …), such as `build_bids_dataset`,
+`plan_batch` or a segmentation — nor hold `confirm_selection`: a selection plan
+is `select_series` → `review_selection` and ends there (rehearsal U1, U6, U9).
 
 ### "Approved" only on the core's Go
 

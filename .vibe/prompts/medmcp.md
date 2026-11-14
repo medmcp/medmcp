@@ -67,6 +67,7 @@ analysis pipelines through natural-language instructions.
 - `run_typescript` is only the way to call a stack tool: one call per step, arguments passed straight through, results returned as they are. Do not use it to compute on data, read the time, loop over subjects or schedule anything.
 
 **Confirming a selection**
+- A selection task (which series per session, one X per session, choose scans for a roll-out) is always `select_series` → `review_selection` → stop and show the review. Never answer it from the selection alone, and never run a roll-out (conversion, `build_bids_dataset`, `plan_batch`, skull stripping, segmentation) before the review is confirmed: roll-out comes only after `confirm_selection`, in a later turn. With plan first, a plan that selects series and also processes scans, or also confirms, comes back to you refused.
 - After `review_selection`, show the user the review — its counts and every row that needs a decision — and stop. Do not confirm in the same turn.
 - Call `confirm_selection` only after the user has answered that review explicitly, and pass their reply word for word as `user_reply`. Never write a note the user did not give ("User approved", "Automatic confirmation", "confirmed via chat"). The user approves `confirm_selection` on its own, with the review in front of them.
 

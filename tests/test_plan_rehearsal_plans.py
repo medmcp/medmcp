@@ -5,7 +5,8 @@ answering "approved" without a card (see ``test_plan_guards``):
 
 * required inputs left empty — ``{}``, ``""``, ``[]`` or a placeholder like
   ``"<selection_path from previous step>"`` (U1, U4, U5, D7);
-* parameters the tools do not take, whatever the spelling of the tool (U7, U9).
+* selection plans that roll out before (or without) the review, or confirm in the
+  same plan as they select (U1, U6, U9).
 
 The schemas are the cohort and dicom stacks' real ones, cut down to their
 parameter names and ``required`` lists (select_series keeps its ``$defs``).
@@ -200,3 +201,97 @@ class TestUnknownParameters:
             tmp_path,
         )
         assert any("select_series has no parameter 'dataset_dir'" in p for p in problems)
+
+
+class TestSelectionPlans:
+    """A selection plan is select → review, and ends there."""
+
+    def _select(self, ws: Path) -> JsonDict:
+        return {
+            "action": "Select",
+            "tool": "select_series",
+            "inputs": {"index_path": str(ws), "criteria": {"sequence": ["T2"]}, "name": "t2"},
+        }
+
+    def _review(self, ws: Path) -> JsonDict:
+        return {
+            "action": "Review",
+            "tool": "review_selection",
+            "inputs": {"manifest_path": str(ws / ".medmcp" / "t2_series.csv"), "roles": ["T2"]},
+        }
+
+    def test_u2_select_then_review_passes(self, tmp_path: Path) -> None:
+        """The shape every selection plan should have."""
+        index = {"action": "Index", "tool": "index_dataset", "inputs": {"dataset_dir": "/d"}}
+        steps = [index, self._select(tmp_path), self._review(tmp_path)]
+        assert _problems(steps, tmp_path) == []
+
+    def test_u1_rollout_before_the_review_is_refused(self, tmp_path: Path) -> None:
+        """U1: build_bids_dataset between select_series and review_selection."""
+        bids = {
+            "action": "Convert",
+            "tool": "build_bids_dataset",
+            "inputs": {"dicom_root": "/d", "output_dir": "/d/bids"},
+        }
+        steps = [self._select(tmp_path), bids, self._review(tmp_path)]
+        (problem,) = _problems(steps, tmp_path)
+        assert "step 2 (build_bids_dataset) processes scans" in problem
+        assert "ends there" in problem
+
+    def test_u6_rollout_without_a_review_is_refused(self, tmp_path: Path) -> None:
+        """U6: plan_batch straight after select_series."""
+        batch: JsonDict = {
+            "action": "Batch",
+            "tool": "medmcp-cohort_plan_batch",
+            "inputs": {"cohort_path": "/c", "scans_dir": "/s", "inputs": {}, "output_dir": "/o"},
+        }
+        (problem,) = _problems([self._select(tmp_path), batch], tmp_path)
+        assert "step 2 (medmcp-cohort_plan_batch) processes scans" in problem
+
+    def test_rollout_after_the_review_is_refused_too(self, tmp_path: Path) -> None:
+        """Roll-out needs the person's confirmation, which no selection plan holds."""
+        convert = {
+            "action": "Convert",
+            "tool": "convert_dcm_to_nifti",
+            "inputs": {"input_dir": "/d", "output_dir": "/o"},
+        }
+        steps = [self._select(tmp_path), self._review(tmp_path), convert]
+        (problem,) = _problems(steps, tmp_path)
+        assert "convert_dcm_to_nifti" in problem
+
+    def test_select_and_confirm_are_never_one_plan(self, tmp_path: Path) -> None:
+        """Selecting and confirming in one plan skips the person's look at the review."""
+        confirm = {
+            "action": "Confirm",
+            "tool": "confirm_selection",
+            "inputs": {"review_path": "/r.csv", "user_reply": "yes"},
+        }
+        (problem,) = _problems([self._select(tmp_path), confirm], tmp_path)
+        assert "select_series and confirm_selection cannot be in the same plan" in problem
+
+    def test_rollout_without_a_selection_is_not_judged_here(self, tmp_path: Path) -> None:
+        """A conversion plan that selects nothing is an ordinary plan."""
+        convert = {
+            "action": "Convert",
+            "tool": "build_bids_dataset",
+            "inputs": {"dicom_root": "/d", "output_dir": "/d/bids"},
+        }
+        assert _problems([convert], tmp_path) == []
+
+    def test_lookups_and_actions_without_a_tool_may_join_a_selection(self, tmp_path: Path) -> None:
+        """Index, summarize, check, flow diagram, shell and prose steps are not roll-out."""
+        steps: list[JsonDict] = [
+            {"action": "Index", "tool": "index_dataset", "inputs": {"dataset_dir": "/d"}},
+            {"action": "Sum", "tool": "summarize_dataset", "inputs": {"index_path": "/d"}},
+            self._select(tmp_path),
+            self._review(tmp_path),
+            {"action": "Check", "tool": "check_dataset", "inputs": {"index_path": "/d"}},
+            {
+                "action": "Flow",
+                "tool": "flow_diagram",
+                "inputs": {"sources": ["/d/a.json"], "output_dir": "/o"},
+            },
+            {"action": "Make the folder", "tool": "bash"},
+            {"action": "Show the review to the user"},
+        ]
+        assert _problems(steps, tmp_path) == []

@@ -87,6 +87,24 @@ PLAN_TOOL_NAMES: frozenset[str] = frozenset(
 # is what the person decides on, and they decide after reading it.
 REVIEW_TOOL = "review_selection"
 CONFIRM_TOOL = "confirm_selection"
+SELECT_TOOL = "select_series"
+
+# Stack tools that only read, list or select — never a roll-out over a selection.
+# Anything else a stack offers (conversion, BIDS, segmentation, plan_batch, …) is
+# processing, which a plan that selects series must not hold: the selection is
+# reviewed first, and rolled out over only once the person has confirmed it.
+_LOOKUP_TOOLS: frozenset[str] = frozenset(
+    {
+        "flow_diagram",
+        "ingest_table",
+        "define_cohort",
+        "label_statistics",
+    }
+)
+_LOOKUP_PREFIX = re.compile(
+    r"(?:^|_)(?:list|describe|inspect|explore|query|summarize|check|index|select|review|identify)_"
+)
+
 # The verdicts the core hands the plan tool (broker op ``plan_verdict``).
 VERDICT_GO = "go"
 VERDICT_REFUSED = "refused"
@@ -327,6 +345,7 @@ def parse_plan(raw: object, *, plan_id: str = "") -> Plan:
             "with the review, show it to the user and stop; confirm only after the user "
             "has answered, in a plan of its own"
         )
+    problems.extend(_selection_problems(steps))
     output_dir = _text(args.get("output_dir"), "output_dir", problems)
     if output_dir and not output_dir.startswith("/"):
         problems.append("output_dir must be an absolute path")
@@ -344,6 +363,49 @@ def parse_plan(raw: object, *, plan_id: str = "") -> Plan:
         estimated_time=estimated_time,
         questions=questions,
     )
+
+
+def _is_lookup(step_tool: str) -> bool:
+    """Whether a step's tool only reads, lists or selects (see :data:`_LOOKUP_TOOLS`)."""
+    bare = _bare_tool(step_tool)
+    if any(bare == t or bare.endswith(f"_{t}") for t in _LOOKUP_TOOLS):
+        return True
+    return bool(_LOOKUP_PREFIX.search(bare))
+
+
+def _selection_problems(steps: list[PlanStep]) -> list[str]:
+    """Why a plan that selects series cannot be shown as it is (``[]``: it can).
+
+    A selection is select_series → review_selection → show the review and stop;
+    the person confirms in a later turn (confirm_selection, a plan of its own),
+    and only then is anything rolled out over it.
+    """
+    named = [(n, st.tool) for n, st in enumerate(steps, start=1) if st.tool]
+    if not any(_names(t, SELECT_TOOL) for _, t in named):
+        return []
+    problems: list[str] = []
+    if any(_names(t, CONFIRM_TOOL) for _, t in named):
+        problems.append(
+            f"{SELECT_TOOL} and {CONFIRM_TOOL} cannot be in the same plan: select, run "
+            f"{REVIEW_TOOL}, show the review to the user and stop; confirm only after the "
+            "user has answered, in a plan of its own"
+        )
+    rollout = [
+        f"step {n} ({t})"
+        for n, t in named
+        if t.strip().removeprefix("tools.") not in _BUILTIN_STEP_TOOLS
+        and not _is_lookup(t)
+        and not _names(t, CONFIRM_TOOL)
+    ]
+    if rollout:
+        problems.append(
+            f"{', '.join(rollout)} processes scans, but this plan selects series: a "
+            f"selection plan is {SELECT_TOOL} then {REVIEW_TOOL}, and ends there — show "
+            "the review and stop. Roll-out (conversion, BIDS, segmentation, plan_batch) "
+            f"comes only after the user confirmed the selection ({CONFIRM_TOOL}), in a "
+            "later plan"
+        )
+    return problems
 
 
 # ── Matching calls against an approved plan ──────────────────────────────────

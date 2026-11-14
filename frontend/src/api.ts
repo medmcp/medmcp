@@ -72,10 +72,35 @@ export async function fetchWorkspaceRoot(): Promise<string> {
   return ((await res.json()) as { root: string }).root
 }
 
-export async function fetchTree(): Promise<TreeNode[]> {
-  const res = await check(await fetch('/api/tree'))
-  const body = (await res.json()) as { tree: TreeNode[] }
-  return body.tree
+/** One entry of a folder listing as the server sends it (see /api/tree/dir). */
+interface DirEntry {
+  id: string
+  name: string
+  dir?: boolean
+  has_children?: boolean
+  size?: number
+}
+
+/** One level of the explorer tree: folder `path`'s entries, and how many it has in all. */
+export interface DirListing {
+  path: string
+  children: TreeNode[]
+  total: number
+}
+
+/** The entries of workspace folder `path` ("" = the root); subfolders come unloaded. */
+export async function fetchDir(path: string): Promise<DirListing> {
+  const res = await check(await fetch(`/api/tree/dir?path=${encodeURIComponent(path)}`))
+  const body = (await res.json()) as { path: string; children: DirEntry[]; total: number }
+  return {
+    path: body.path,
+    total: body.total,
+    children: body.children.map((e) =>
+      e.dir
+        ? { id: e.id, name: e.name, children: [], hasChildren: e.has_children ?? false }
+        : { id: e.id, name: e.name, size: e.size },
+    ),
+  }
 }
 
 export function rawUrl(path: string): string {
@@ -94,14 +119,40 @@ export async function deletePath(path: string): Promise<void> {
   await check(await fetch(`/api/files?path=${encodeURIComponent(path)}`, { method: 'DELETE' }))
 }
 
-export async function uploadFile(file: File, dir: string): Promise<void> {
+/**
+ * POST a form with upload progress (fetch cannot report it). Resolves to the
+ * JSON body; rejects with the server's `detail` as the message.
+ */
+function postForm(url: string, form: FormData, onBytes?: (sent: number) => void): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', url)
+    xhr.responseType = 'json'
+    if (onBytes) xhr.upload.onprogress = (e) => onBytes(e.loaded)
+    xhr.onload = () => {
+      if (xhr.status === 401) window.location.reload()
+      const body = xhr.response as { detail?: unknown } | null
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body)
+        return
+      }
+      const detail = typeof body?.detail === 'string' ? body.detail : ''
+      reject(new Error(detail || xhr.statusText || `HTTP ${xhr.status}`))
+    }
+    xhr.onerror = () => reject(new Error('the connection to the server failed'))
+    xhr.onabort = () => reject(new Error('the upload was cancelled'))
+    xhr.send(form)
+  })
+}
+
+export async function uploadFile(
+  file: File,
+  dir: string,
+  onBytes?: (sent: number) => void,
+): Promise<void> {
   const form = new FormData()
   form.append('file', file)
-  const res = await fetch(`/api/files/upload?dir=${encodeURIComponent(dir)}`, {
-    method: 'POST',
-    body: form,
-  })
-  await check(res)
+  await postForm(`/api/files/upload?dir=${encodeURIComponent(dir)}`, form, onBytes)
 }
 
 /** One file to upload and the workspace folder it goes into ("" = root). */
@@ -110,32 +161,86 @@ export interface UploadItem {
   dir: string
 }
 
+/** How far an upload has got. */
+export interface UploadProgress {
+  doneFiles: number
+  totalFiles: number
+  sentBytes: number
+  totalBytes: number
+}
+
+/** A file that did not upload, and the server's (or the network's) reason. */
+export interface UploadFailure {
+  path: string
+  reason: string
+}
+
 /**
- * Upload several files, a few requests at a time; `onProgress` reports files
- * done so far. Resolves to the failure count. Each item names its own target
- * folder, so a dropped or picked folder tree is recreated by the caller.
+ * Upload several files, a few requests at a time, reporting files and bytes
+ * done so far. Resolves to the files that failed, each with its reason. Each
+ * item names its own target folder, so a dropped or picked folder tree is
+ * recreated by the caller.
  */
 export async function uploadFiles(
   items: UploadItem[],
-  onProgress: (done: number, total: number) => void,
-): Promise<number> {
+  onProgress: (p: UploadProgress) => void,
+): Promise<UploadFailure[]> {
+  const totalBytes = items.reduce((sum, i) => sum + i.file.size, 0)
+  const sent = new Array<number>(items.length).fill(0)
+  let sentBytes = 0
   let next = 0
-  let done = 0
-  let failed = 0
+  let doneFiles = 0
+  const failures: UploadFailure[] = []
+  const report = () =>
+    onProgress({ doneFiles, totalFiles: items.length, sentBytes, totalBytes })
   const worker = async () => {
     while (next < items.length) {
-      const item = items[next++]
+      const index = next++
+      const item = items[index]
       if (!item) continue
-      try {
-        await uploadFile(item.file, item.dir)
-      } catch {
-        failed++
+      const setSent = (n: number) => {
+        sentBytes += n - (sent[index] ?? 0)
+        sent[index] = n
+        report()
       }
-      onProgress(++done, items.length)
+      try {
+        await uploadFile(item.file, item.dir, setSent)
+        setSent(item.file.size)
+      } catch (e) {
+        failures.push({
+          path: item.dir ? `${item.dir}/${item.file.name}` : item.file.name,
+          reason: e instanceof Error ? e.message : String(e),
+        })
+      }
+      doneFiles++
+      report()
     }
   }
   await Promise.all(Array.from({ length: Math.min(4, items.length) }, worker))
-  return failed
+  return failures
+}
+
+/** What the server unpacked from an uploaded zip. */
+export interface ZipResult {
+  path: string
+  files: number
+  dirs: number
+  bytes: number
+}
+
+/** Upload a .zip that the server unpacks into `dir`; `onBytes` reports bytes sent. */
+export async function uploadZip(
+  file: File,
+  dir: string,
+  onBytes: (sent: number) => void,
+): Promise<ZipResult> {
+  const form = new FormData()
+  form.append('file', file)
+  return (await postForm(
+    `/api/files/upload-zip?dir=${encodeURIComponent(dir)}`,
+    form,
+    onBytes,
+  )) as ZipResult
 }
 
 /** Start a browser download of a file, or of a folder as a .zip. */

@@ -69,6 +69,12 @@ user control:
   for a read-only command (`ls`, `cat`, `grep`, …) in your workspace; it ends
   with the chat. Reading a file inside the workspace needs no approval; outside
   it, it asks first.
+- **Go on a plan approves what the plan shows, nothing more.** With plan first
+  (on by default) the agent proposes a plan before it acts; Go approves the stack
+  calls it lists, with paths inside the ones the plan names, and `mkdir -p` of its
+  output folder, until the next plan. Any other call asks, marked "Not in the
+  plan"; code the assistant wrote, an overwrite or a path outside the workspace
+  always asks. See [docs/plan-first.md](docs/plan-first.md).
 - **What approving a command grants.** A shell command runs with the agent's
   rights. In a `docker compose` install the agent has its own container: the
   workspace, its own configuration read-only, and nothing else — no Docker

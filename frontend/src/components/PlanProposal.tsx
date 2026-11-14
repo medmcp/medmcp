@@ -33,6 +33,7 @@ export const PlanProposalCard = memo(function PlanProposalCard({
   state,
   steps,
   canDecide,
+  idle,
   onGo,
   onChange,
 }: {
@@ -42,6 +43,8 @@ export const PlanProposalCard = memo(function PlanProposalCard({
   steps: Record<number, PlanStepStatus>
   /** False while the socket is down: an answer could not reach the agent. */
   canDecide: boolean
+  /** The agent's turn is over (nothing streaming). */
+  idle: boolean
   onGo: () => void
   onChange: (text: string) => void
 }) {
@@ -49,11 +52,11 @@ export const PlanProposalCard = memo(function PlanProposalCard({
   const [text, setText] = useState('')
   const toolSteps = plan.steps.map((s, i) => (s.tool ? i : -1)).filter((i) => i >= 0)
   // A step without a tool (e.g. "summarise") has nothing to tick on; it counts as
-  // done once every tool step is.
+  // done once every tool step is and the agent has finished its turn.
   const allToolsDone = toolSteps.length > 0 && toolSteps.every((i) => steps[i] === 'completed')
   const status = (i: number): PlanStepStatus | 'pending' => {
     if (steps[i]) return steps[i]
-    if (state === 'approved' && !plan.steps[i].tool && allToolsDone) return 'completed'
+    if (state === 'approved' && !plan.steps[i].tool && allToolsDone && idle) return 'completed'
     return 'pending'
   }
   const done = plan.steps.filter((_, i) => status(i) === 'completed').length

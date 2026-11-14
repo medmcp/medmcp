@@ -1009,6 +1009,7 @@ export const Chat = memo(function Chat({
                   state={state}
                   steps={planSteps[tc.toolCallId] ?? {}}
                   canDecide={status === 'open' && planRequest?.planId === tc.toolCallId}
+                  idle={!busy}
                   onGo={planGo}
                   onChange={planChange}
                 />

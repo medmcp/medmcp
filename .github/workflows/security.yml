@@ -25,9 +25,12 @@ jobs:
           # the whole OpenTelemetry set): slow parsing of an inbound tracestate
           # header on an instrumented server. Nothing here parses inbound trace
           # headers (vibe only exports), and the fix needs a version mistralai's
-          # range excludes; drop it when vibe's pin moves.
+          # range excludes; drop it when vibe's pin moves. CVE-2026-126360 is the
+          # same class (ReDoS in TraceContextTextMapPropagator.extract on an inbound
+          # traceparent value) in the same pinned package: vibe never extracts
+          # inbound trace context.
           uvx pip-audit==2.10.1 --strict --require-hashes --disable-pip \
-            --ignore-vuln CVE-2026-114603 -r requirements.txt
+            --ignore-vuln CVE-2026-114603 --ignore-vuln CVE-2026-126360 -r requirements.txt
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "24"

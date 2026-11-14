@@ -84,12 +84,16 @@ default-groups = ["dev"]
 # mcp likewise (CVE-2026-116685, client headers follow a redirect to another host;
 # CVE-2026-116686, a tool's output schema makes the client fetch URLs and files);
 # 1.30 is a minor release of the same API. pyasn1 likewise (CVE-2026-119194..7,
-# quadratic decoding), a bug-fix release.
+# quadratic decoding), a bug-fix release. soupsieve likewise (CVE-2026-126190..3,
+# polynomial/exponential matching and parsing of CSS selectors): vibe converts
+# fetched web pages with BeautifulSoup, i.e. untrusted HTML; beautifulsoup4 only
+# requires soupsieve>1.2.
 override-dependencies = [
     "certifi>=2026.10.19",
     "gitpython>=3.2.1",
     "mcp>=1.30.0,<2",
     "pyasn1>=0.6.5",
+    "soupsieve>=4.1",
 ]
 
 

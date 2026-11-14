@@ -27,6 +27,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Fixed
 
+- Chat: a stack call whose arguments its tool's schema rejects (a nested list where the tool takes a string or a list of strings) is turned back to the assistant by the path guard; before, vibe rejected it after the hook and the whole turn ended with `Core rejected durable input`. See [docs/plan-first.md](docs/plan-first.md).
 - Stacks: reinstalling a stack that is already running (a new image under the same name) now stops the running copy, so the next call uses the new image. Before, the old copy kept serving its old tools until it went idle.
 - Stacks: after a stack is updated or reinstalled under the same image name, the assistant sees its new tools. Before, it kept the previous tool list for up to a day, so a newly added tool such as `check_dataset` could not be found.
 - Stacks: installing a stack from the catalog or by image works again with `docker compose`; since 0.7.2 the docker guard refused the image lookup.

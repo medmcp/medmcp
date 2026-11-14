@@ -201,6 +201,34 @@ def _plan_note_op(req: JsonDict) -> JsonDict:
     return {"note": _plan_notes.take(str(req.get("tool") or ""), args)}
 
 
+def _tool_schema_op(req: JsonDict) -> JsonDict:
+    """Broker op ``tool_schema``: the input schema of a stack tool, if the pool knows it.
+
+    The path guard asks for it to send a call whose arguments the schema rejects
+    back to the model (:mod:`medmcp.pathguard`). *tool* is the route the harness
+    names the call by (``mcp_medmcp_cohort.select_series``) or MedMCP's
+    ``<stack>_<tool>``. ``None`` when no stack's known tool list has it: nothing
+    is started to find out.
+    """
+    route = str(req.get("tool") or "")
+    if _pool is None or not route:
+        return {"schema": None}
+    group, dot, tool = route.partition(".")
+    # Longest name first so a stack whose name prefixes another cannot mis-bind.
+    for stack in sorted(_pool.known_stacks(), key=len, reverse=True):
+        if dot:
+            if harness.mcp_group(stack) != group:
+                continue
+            name = tool
+        elif route.startswith(f"{stack}_"):
+            name = route[len(stack) + 1 :]
+        else:
+            continue
+        schema = (_pool.known_tools(stack) or {}).get(name)
+        return {"schema": schema}
+    return {"schema": None}
+
+
 def _with_note(
     stack: str, tool: str, result: mcp_types.CallToolResult, note: str
 ) -> mcp_types.CallToolResult:
@@ -347,7 +375,11 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
             settings.backend_socket_path(),
             _approvals.spend,
             _after_stack_call,
-            ops={"check_plan": _check_plan_op, "plan_note": _plan_note_op},
+            ops={
+                "check_plan": _check_plan_op,
+                "plan_note": _plan_note_op,
+                "tool_schema": _tool_schema_op,
+            },
         )
         try:
             await _broker.start()

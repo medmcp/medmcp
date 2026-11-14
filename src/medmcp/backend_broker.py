@@ -25,10 +25,12 @@ Response (broker → proxy)::
     {"id": 2, "ok": true, "result": <CallToolResult.model_dump>}
     {"id": 2, "ok": false, "error": "stack 'x' is not installed"}
 
-Two more ops answer the core's own agent-side helpers, not a stack, and run
+Three more ops answer the core's own agent-side helpers, not a stack, and run
 nothing: ``check_plan`` (the plan tool asks whether the core refused to show a
-plan, and why) and ``plan_note`` (the plan-note hook asks what to add to a tool
-result). The server supplies them as *ops*; see :mod:`medmcp.plan`.
+plan, and why), ``plan_note`` (the plan-note hook asks what to add to a tool
+result) and ``tool_schema`` (the path guard asks for a stack tool's input
+schema). The server supplies them as *ops*; see :mod:`medmcp.plan` and
+:mod:`medmcp.pathguard`.
 
 Sampling relay is intentionally omitted in v1 (no stack uses MCP sampling).
 
@@ -103,7 +105,8 @@ class BackendBroker:
                 (never without an *authorize*): it may act on the result and
                 returns the one to relay.
             ops: Further ops answered by the server itself, by name; they read
-                core state and run nothing (``check_plan``, ``plan_note``).
+                core state and run nothing (``check_plan``, ``plan_note``,
+                ``tool_schema``).
         """
         self._ops = dict(ops or {})
         self._pool = pool

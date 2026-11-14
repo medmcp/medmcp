@@ -387,6 +387,10 @@ class BackendPool:
         known = self._known.get(name)
         return dict(known) if known is not None else None
 
+    def known_stacks(self) -> list[str]:
+        """The stacks whose tool lists the pool holds (see :meth:`known_tools`)."""
+        return list(self._known)
+
     def output_schema(self, name: str, tool: str) -> JsonDict | None:
         """The output schema *tool* of stack *name* declared when last listed, if any."""
         return self._outputs.get(name, {}).get(tool)

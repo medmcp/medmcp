@@ -40,6 +40,8 @@ dependencies = [
     "mcp>=1.28",
     # Chat export renders the transcript's Markdown server-side (raw HTML off).
     "markdown-it-py>=3",
+    # The path guard checks a stack call's arguments against the tool's schema.
+    "jsonschema>=4.18",
 ]
 
 [project.urls]
@@ -69,7 +71,8 @@ quality = [
     "ruff>=0.17.1",
     "pyright>=1.1.414",
     "pre-commit>=4.7.0",
-    "types-pyyaml>=6.0.12.20260906"
+    "types-pyyaml>=6.0.12.20260906",
+    "types-jsonschema>=4.23",
 ]
 dev = [
     { include-group = "test" },

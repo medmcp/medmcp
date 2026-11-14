@@ -146,6 +146,30 @@ stack pool (`MEDMCP_STACK_POOL=0`) no plan is checked. The plan tool learns why
 the core refused a plan from the broker (`check_plan`, keyed by the plan's
 arguments); with no broker to ask it lets the plan through, as before.
 
+### Calls are checked against the real tools too
+
+The same tool lists catch a call whose arguments the tool's schema rejects
+(rehearsal D7: `select_series` with `sequence: [["T2", "STIR"]]`). vibe 2.26
+validates the arguments a `pre_tool` hook lets through once more, and an invalid
+set there does not fail the call: the harness rejects it as an invalid command
+and the whole turn ends with `Core rejected durable input`. (The sandbox's own
+check before the hook lets an invalid call through when the schema uses the
+`$defs`/`$ref` pydantic writes for a nested argument, so such a call reaches the
+hook.) A denial is the one hook answer that
+skips that check, so the path guard (`medmcp-pathguard`) validates every stack
+call against the schema the pool holds (the broker's `tool_schema` op) and
+denies an invalid one:
+
+> select_series arguments are invalid: criteria.sequence[0]: ['T2', 'STIR'] is
+> not of type 'string'. Expected: criteria.sequence takes string or array of
+> string.
+
+This denial is not capped like a path denial, since letting the call through
+ends the turn. A tool with no known schema, no broker to ask, or any error while
+checking allows the call as before. Under vibe 2.26.1 a call made from
+`run_typescript` gets only `tool_skipped: Tool execution was skipped by Runtime
+policy.` back from a denial, not its reason (the chat shows the reason).
+
 ## Truncated tool results
 
 A tool result too large for the context reaches the model truncated, with the

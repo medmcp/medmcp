@@ -25,11 +25,25 @@ this hook invisibly, burning tokens with nothing on screen. After
 through to the dialog, where a human can see what it is stuck on. Silent infinite
 retry would make this feature worse than not having it.
 
+It also turns back a call whose arguments the tool's input schema rejects. vibe
+2.26 validates the arguments a ``pre_tool`` hook lets through (its
+``effective_arguments``) against the tool's schema once more, and an invalid set
+there is not a tool error: the core rejects it as an invalid command and the
+whole turn dies (the sandbox's own check before the hook lets an invalid call
+through when the schema uses the ``$defs``/``$ref`` pydantic writes for a nested
+argument, as ``select_series``'s criteria do). A
+denial is the one answer that skips that check, so the guard validates the call
+against the stack's schema as the pool last listed it (the broker's
+``tool_schema`` op) and denies with what is wrong and what the parameter takes.
+That denial is not capped: letting an invalid call through ends the turn. No
+schema known, or anything going wrong while checking, allows as before.
+
 The hook contract is "exit 0 and print a JSON object on stdout", so every failure
 path here still prints ``{"decision": "allow"}``: a broken guard must never be
 able to block work.
 """
 
+import asyncio
 import contextlib
 import hashlib
 import json
@@ -37,6 +51,9 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, cast
+
+from jsonschema import Draft202012Validator, exceptions, validators
+from jsonschema.exceptions import ValidationError
 
 from medmcp import harness, plan
 from medmcp.pathcheck import PathFinding, check_tool_call_paths
@@ -164,6 +181,137 @@ def container_stack_names() -> list[str]:
         return []
 
 
+# Bounds on the "Expected:" hint: nesting rendered, alternatives listed, length.
+_HINT_DEPTH = 3
+_HINT_ENUM = 8
+_HINT_CHARS = 300
+
+
+def _resolve_ref(schema: dict[str, Any], root: dict[str, Any]) -> dict[str, Any]:
+    """*schema* with a local ``$ref`` (``#/$defs/X``) followed, else unchanged."""
+    ref = schema.get("$ref")
+    if not isinstance(ref, str) or not ref.startswith("#/"):
+        return schema
+    node: Any = root
+    for part in ref[2:].split("/"):
+        try:
+            node = node[part.replace("~1", "/").replace("~0", "~")]
+        except (KeyError, TypeError):
+            return schema
+    return cast("dict[str, Any]", node) if isinstance(node, dict) else schema
+
+
+def schema_hint(schema: object, root: dict[str, Any], depth: int = 0) -> str:
+    """A short, readable rendering of what *schema* accepts ("string or array of string")."""
+    if not isinstance(schema, dict):
+        return "any value"
+    node = _resolve_ref(cast("dict[str, Any]", schema), root)
+    if depth >= _HINT_DEPTH:
+        return "…"
+    for key in ("anyOf", "oneOf"):
+        options = node.get(key)
+        if isinstance(options, list):
+            hints = [schema_hint(o, root, depth + 1) for o in cast("list[object]", options)]
+            return " or ".join(dict.fromkeys(hints))
+    if "const" in node:
+        return json.dumps(node["const"])
+    enum = node.get("enum")
+    if isinstance(enum, list):
+        values = [json.dumps(v) for v in cast("list[object]", enum)]
+        more = ", …" if len(values) > _HINT_ENUM else ""
+        return "one of " + ", ".join(values[:_HINT_ENUM]) + more
+    kind = node.get("type")
+    if isinstance(kind, list):
+        return " or ".join(str(k) for k in cast("list[object]", kind))
+    if kind == "array":
+        items = node.get("items")
+        return f"array of {schema_hint(items, root, depth + 1)}" if items else "array"
+    if kind == "object" or "properties" in node:
+        props = node.get("properties")
+        if isinstance(props, dict) and props:
+            names = list(cast("dict[str, Any]", props))
+            more = ", …" if len(names) > _HINT_ENUM else ""
+            return "object with " + ", ".join(names[:_HINT_ENUM]) + more
+        return "object"
+    return str(kind) if isinstance(kind, str) else "any value"
+
+
+def _where(path: list[object]) -> str:
+    """A JSON path as the model wrote it: ``criteria.sequence[0]``; the root is "(arguments)"."""
+    out = ""
+    for part in path:
+        out += f"[{part}]" if isinstance(part, int) else (f".{part}" if out else str(part))
+    return out or "(arguments)"
+
+
+def _holds(error: ValidationError, target: ValidationError) -> bool:
+    """True if *target* is *error* or one of the errors under it (``anyOf`` branches)."""
+    return error is target or any(_holds(sub, target) for sub in error.context)
+
+
+def schema_problem(tool: str, tool_input: object, schema: dict[str, Any]) -> str | None:
+    """Why *tool_input* does not satisfy *schema*, written for the model; ``None`` if it does.
+
+    Names the most specific error (``best_match``) and, as the hint, what the
+    argument it sits under takes — the top-level error's schema, so a value that
+    fits none of an ``anyOf`` is shown all the shapes it may take.
+    """
+    validator = validators.validator_for(schema, default=Draft202012Validator)(schema)
+    errors = list(validator.iter_errors(cast("Any", tool_input)))
+    if not errors:
+        return None
+    # best_match is unannotated in the stubs; it returns one of the errors.
+    deep = cast("ValidationError", exceptions.best_match(errors))  # pyright: ignore[reportUnknownMemberType]
+    top = next((e for e in errors if _holds(e, deep)), deep)
+    if top.validator == "required":
+        required = ", ".join(repr(r) for r in cast("list[object]", top.validator_value))
+        expected = f"{_where(list(top.absolute_path))} requires {required}"
+    else:
+        expected = f"{_where(list(top.absolute_path))} takes " + schema_hint(top.schema, schema)
+    if len(expected) > _HINT_CHARS:
+        expected = expected[: _HINT_CHARS - 1] + "…"
+    return (
+        f"{tool} arguments are invalid: {_where(list(deep.absolute_path))}: {deep.message}. "
+        f"Expected: {expected}.\n\n"
+        "Nobody refused this call and the tool did not run. Fix only this argument, "
+        f"keep every other argument exactly as it was, and call {tool} again now."
+    )
+
+
+def _known_schema(route: str) -> dict[str, Any] | None:
+    """The input schema of the stack tool *route* names, from the core; ``None`` if unknown.
+
+    Asked over the broker (``tool_schema``), which answers from the tool lists the
+    stack pool keeps (``.vibe/state/tool_schemas.json``) and starts nothing. vibe's
+    own tools are never asked about: the harness validates those itself.
+    """
+    group, dot, _tool = route.partition(".")
+    if (
+        not route
+        or route in harness.BUILTIN_ROUTES
+        or route in harness.HARNESS_TOOLS
+        or (dot and group == "vibe")
+    ):
+        return None
+    response = asyncio.run(plan.ask_core("tool_schema", {"tool": route}, timeout=3.0))
+    schema = response.get("schema") if response is not None else None
+    return cast("dict[str, Any]", schema) if isinstance(schema, dict) else None
+
+
+def check_schema(route: str, tool_input: object) -> dict[str, Any] | None:
+    """A denial for a call its tool's schema rejects; ``None`` to go on (also on any error)."""
+    try:
+        schema = _known_schema(route)
+        if schema is None:
+            return None
+        tool = route.partition(".")[2] or route
+        problem = schema_problem(tool, tool_input, schema)
+    except Exception as exc:
+        print(f"medmcp-pathguard: schema check skipped: {exc}", file=sys.stderr)
+        return None
+    return {"decision": "deny", "reason": problem} if problem else None
+
+
 def decide(invocation: dict[str, Any]) -> dict[str, Any]:
     """Return the hook response for one ``pre_tool`` invocation."""
     # The harness names a tool by route (``mcp_medmcp_neuro.skull_strip``,
@@ -177,6 +325,11 @@ def decide(invocation: dict[str, Any]) -> dict[str, Any]:
         return {"decision": "allow"}
     session_id = str(invocation.get("session_id") or "")
     tool_input = invocation.get("tool_input")
+
+    # First: an invalid call let through here would end the turn, not fail the call.
+    denial = check_schema(str(invocation.get("tool_name") or ""), tool_input)
+    if denial is not None:
+        return denial
 
     # The agent's cwd is the workspace (session/new is started there); the env var
     # is preferred so the two cannot disagree if that ever changes.

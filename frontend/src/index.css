@@ -240,6 +240,12 @@ button:hover {
   font-variant-numeric: tabular-nums;
 }
 
+.job-pill-state {
+  flex: none;
+  opacity: 0.8;
+  font-variant-numeric: tabular-nums;
+}
+
 .job-pill-dot {
   flex: none;
   width: 7px;

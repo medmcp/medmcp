@@ -26,9 +26,11 @@ function label(job: JobInfo): string {
   return job.name || `${job.stack.replace(/^medmcp-/, '')} · ${job.tool}`
 }
 
-function elapsed(startedAt: string | null): string {
-  if (!startedAt) return ''
-  const sec = Math.max(0, (Date.now() - Date.parse(startedAt)) / 1000)
+/** How long the job ran: until now while running, until it ended otherwise. */
+function elapsed(job: JobInfo): string {
+  if (!job.started_at) return ''
+  const end = job.status === 'running' || !job.finished_at ? Date.now() : Date.parse(job.finished_at)
+  const sec = Math.max(0, (end - Date.parse(job.started_at)) / 1000)
   const h = Math.floor(sec / 3600)
   const m = Math.floor((sec % 3600) / 60)
   return h ? `${h} h ${m} min` : `${m} min`
@@ -130,8 +132,8 @@ export function JobPill() {
               </div>
               <div className="job-row-detail">
                 {job.progress?.text && <span>{job.progress.text}</span>}
-                <span>{elapsed(job.started_at)}</span>
-                {job.session && <span>from “{job.session}”</span>}
+                <span>{elapsed(job)}</span>
+                {job.session_title && <span>from “{job.session_title}”</span>}
               </div>
               {job.status === 'running' && (
                 <button className="btn-text" onClick={() => void onStop(job)}>

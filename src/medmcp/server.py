@@ -2482,6 +2482,10 @@ async def get_jobs() -> JsonDict:
         entry = job.public()
         if job.running:
             entry["progress"] = jobs.read_progress(_jobs.workspace, job.id)
+        # The chat's name for the jobs list; ``session`` itself is an id.
+        entry["session_title"] = (
+            await asyncio.to_thread(sessions.chat_title, job.session) if job.session else None
+        ) or ""
         out.append(entry)
     return {"enabled": True, "jobs": out, "max": settings.max_jobs()}
 

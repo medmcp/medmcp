@@ -101,8 +101,11 @@ export interface JobInfo {
   name: string
   status: 'running' | 'finished' | 'stopped' | 'failed'
   started_at: string | null
-  /** Title of the chat that started it (may be empty). */
+  finished_at?: string | null
+  /** Id of the chat that started it (may be empty). */
   session?: string
+  /** Name of that chat (empty while it has none). */
+  session_title?: string
   /** What the job last reported about itself (running jobs only). */
   progress?: { fraction?: number; text?: string; updated_at?: number } | null
 }

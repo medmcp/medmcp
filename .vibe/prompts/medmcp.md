@@ -147,7 +147,12 @@ analysis pipelines through natural-language instructions.
   and ties shown) and `confirm_selection` with the user; a flow diagram of the
   selection → `flow_diagram`. Do not list the folder with
   `ls`/`find`, do not read sidecar or DICOM files one by one, and do not compute
-  dates, intervals or counts yourself: the tools return them.
+  dates, intervals or counts yourself: the tools return them. Never open the
+  index files in `.medmcp/` (`series_index.csv`, `sessions.csv`, …) with
+  `read_file`, `grep`, `awk` or Python: intervals per subject and on average come
+  from `summarize_dataset` (its intervals table), counts and subsets from
+  `select_series` (by sequence, plane, contrast, description, visit). If neither
+  answers the question, say what is missing instead of reading the index.
 - A value the tools report as `unknown` stays unknown: say so, and say what
   would settle it. Never fill it in from a file name or a guess.
 - Do not write Python scripts to select, filter or sort a cohort; use the cohort

@@ -22,6 +22,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Provenance: a chat's record names each stack's image digest and the MedMCP version.
 - Stacks: background jobs. A stack can declare a job runner in its image label; an approved call of one of its job tools (an nnU-Net training) then runs in its own container, which keeps running when the chat is idle or closed, when another GPU stack is used and when MedMCP restarts. One job at a time by default (`MEDMCP_MAX_JOBS`); `MEDMCP_STACK_JOBS=0` turns jobs off.
 - Jobs: `/api/jobs` lists, shows and stops them; the Tool stacks window shows running jobs with a Stop button; a job's start, image and arguments are recorded in the provenance of the chat that approved it.
+- Files: Upload → Zip archive… unpacks a `.zip` on the server into the chosen folder, for when the browser hands over no files from a folder (snap or flatpak Firefox through the desktop portal). Every entry is checked before anything is written: absolute paths, `..`, links, device files and encrypted entries are refused, and an archive over 100,000 files or 64 GB unpacked is refused with the reason (`POST /api/files/upload-zip`).
 
 ### Fixed
 
@@ -33,6 +34,9 @@ Notable, user-visible changes to MedMCP. Format follows
 - Workflows: a plan no longer fails to load for a workflow whose output folder has a default.
 - Workflows: a run lists the files it wrote when the output path was chosen by the caller; it showed none before.
 - Provenance: the record of a chat run from an image names the commit the image was built from; it was empty. Images must be built with `MEDMCP_REVISION`, as the release and `:main` builds are.
+- Files: the explorer opens at once on a large workspace. It loads one folder level at a time (`GET /api/tree/dir`) instead of the whole workspace (which took more than two minutes on ~100 datasets), and after a change refreshes only the folders it touched. A folder lists up to 5,000 entries (it was 500) and says how many more there are.
+- Files: the header has a labelled **Upload** button with a menu (Files…, Folder…, Zip archive…) and a labelled **New folder** button instead of four look-alike icons. A new folder is named at the top of its folder and scrolled into view. A failed upload lists each file with the server's reason, a folder selection with no files says so, and progress shows files and bytes. A desktop drop names and highlights the folder it lands in.
+- Files: the first click on a folder opens it; it was lost because every row was remounted on each explorer render.
 
 ### Security
 

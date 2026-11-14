@@ -7,7 +7,8 @@ Exposed as the ``medmcp`` console script::
     medmcp distill <session>    # save a replayable workflow from the raw log
     medmcp replay  <name> -i in_1=path ...       # replay a workflow on new inputs
     medmcp replay  <name> --batch batch_plan.csv # roll it out over a cohort manifest
-    medmcp replay  <name> --batch sel_series.csv --role in_1=FLAIR  # ... or a selection
+    medmcp replay  <name> --batch sel_series.csv              # ... or a one-input selection
+    medmcp replay  <name> --batch sel_confirmed.csv --role in_1=FLAIR --role in_2=T1+contrast
     medmcp workflows            # list personal workflows
     medmcp delete   <name>      # delete a personal workflow
     medmcp export   <name>      # write a shareable <name>.workflow.yaml
@@ -178,6 +179,9 @@ async def _recorded_batch(
         cwd=cwd,
         labels=binding.labels,
         manifest_path=manifest.resolve(),
+        confirmed_selection=(
+            binding.confirmation.summary() if binding.confirmation is not None else None
+        ),
         output_root=binding.output_root,
         image_identity=settings.image_identity,
         # The command line has no preview screen; typing the command is the
@@ -281,8 +285,8 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         default=[],
         metavar="in_N=ROLE",
-        help="with a select_series manifest: which series feeds an input, "
-        "e.g. in_1=FLAIR in_2=T1+contrast (repeatable)",
+        help="with a selection: which series feeds an input, one of the roles of a "
+        "confirm_selection manifest, e.g. in_1=FLAIR in_2=T1+contrast (repeatable)",
     )
     replay_p.add_argument(
         "--output-root",

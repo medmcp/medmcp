@@ -190,6 +190,24 @@ def render_report(record: JsonDict) -> str:
         lines.append(
             f"- **Manifest:** `{manifest.get('path')}` (sha256 `{manifest.get('sha256')}`)"
         )
+        selection = cast("JsonDict", manifest.get("confirmed_selection") or {})
+        if selection:
+            source = cast("JsonDict", selection.get("source_manifest") or {})
+            index = cast("JsonDict", selection.get("index") or {})
+            lines.append(
+                f"- **Confirmed selection:** `{selection.get('path')}` "
+                f"(sha256 `{selection.get('sha256')}`), confirmed at "
+                f"{selection.get('confirmed_at') or '?'} under review rule set "
+                f"{selection.get('rule_version') or '?'}, {selection.get('overrides', 0)} "
+                f"override(s), {selection.get('excluded', 0)} subject-session(s) left out"
+            )
+            lines.append(
+                f"  - from the selection `{source.get('path') or '?'}` "
+                f"(sha256 `{source.get('sha256') or '?'}`) of the index "
+                f"`{index.get('path') or '?'}` (sha256 `{index.get('sha256') or '?'}`)"
+            )
+            if selection.get("error"):
+                lines.append(f"  - **Note:** {selection.get('error')}")
     if record.get("output_root"):
         lines.append(f"- **Output folder:** `{record.get('output_root')}`")
     confirmation = cast("JsonDict", record.get("confirmation") or {})

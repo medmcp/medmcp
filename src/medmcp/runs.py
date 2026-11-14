@@ -31,6 +31,10 @@ progress, small, rewritten after every step) each run has a folder
 - ``recipe.yaml`` — the workflow exactly as it ran (it can be edited or deleted
   afterwards; the run keeps its own copy).
 - ``manifest.csv`` — the cohort plan or selection the items came from, as given.
+- ``confirmation.json`` — for a confirmed selection, its ``confirm_selection``
+  record (who decided which series fills which role, under which rules); the
+  run record cites it with its hash and the source manifest and index hashes
+  it names.
 
 See :mod:`medmcp.runrecord` for how the environment and checksums are gathered.
 """
@@ -73,6 +77,7 @@ RECORD_VERSION: int = 1
 RUN_FILE = "run.json"
 RECIPE_FILE = "recipe.yaml"
 MANIFEST_FILE = "manifest.csv"
+CONFIRMATION_FILE = "confirmation.json"
 
 
 def _now_iso() -> str:
@@ -637,6 +642,7 @@ class RunManager:
         confine_to: Path | None = None,
         labels: list[str] | None = None,
         manifest_path: Path | None = None,
+        confirmed_selection: JsonDict | None = None,
         confirmation: JsonDict | None = None,
         output_root: str = "",
         image_identity: runrecord.ImageIdentity | None = None,
@@ -646,9 +652,12 @@ class RunManager:
         *confine_to* is handed to :func:`medmcp.replay.run_batch`: a step naming a
         path outside it fails instead of running. *labels* name the items
         (``subject[/session]``), *manifest_path* is the plan or selection they
-        came from (copied into the run folder), *confirmation* says who started
-        the run, and *image_identity* resolves each stack's image digest for the
-        record's environment.
+        came from (copied into the run folder), *confirmed_selection* the checked
+        summary of its ``confirm_selection`` record when it is a confirmed
+        selection (:meth:`medmcp.batchplan.Confirmation.summary`; the record is
+        copied too), *confirmation* says who started the run, and
+        *image_identity* resolves each stack's image digest for the record's
+        environment.
         """
         names = labels or []
         record = RunRecord(
@@ -679,6 +688,7 @@ class RunManager:
                 confine_to,
                 manifest_path,
                 image_identity,
+                confirmed_selection,
             ),
             name=f"replay-run-{record.id}",
         )
@@ -692,6 +702,7 @@ class RunManager:
         servers: list[JsonDict],
         manifest_path: Path | None,
         image_identity: runrecord.ImageIdentity | None,
+        confirmed_selection: JsonDict | None = None,
     ) -> None:
         """Write what is known before the first step: recipe, manifest, environment.
 
@@ -715,6 +726,10 @@ class RunManager:
                 record.manifest["copy"] = MANIFEST_FILE
             except OSError as exc:
                 record.manifest["error"] = f"could not be copied: {exc.strerror or exc}"
+            if confirmed_selection is not None:
+                record.manifest["confirmed_selection"] = self._copy_confirmation(
+                    folder, confirmed_selection, record.manifest.get("sha256")
+                )
         try:
             record.environment = runrecord.environment(
                 recipe, servers, image_identity=image_identity
@@ -722,6 +737,30 @@ class RunManager:
         except Exception as exc:  # a docker hiccup must not stop the run
             log.warning("could not record the environment of run %s", record.id, exc_info=True)
             record.environment = {"error": str(exc)}
+
+    @staticmethod
+    def _copy_confirmation(folder: Path, summary: JsonDict, manifest_sha256: object) -> JsonDict:
+        """Copy a confirmed selection's record into the run folder and say what was copied.
+
+        The record and the manifest were checked when the run started; the
+        copies are hashed again, and a difference is written down rather than
+        hidden (the run is already under way).
+        """
+        entry: JsonDict = {**summary, "copy": None}
+        problems: list[str] = []
+        if manifest_sha256 != summary.get("confirmed_csv_sha256"):
+            problems.append("the copied manifest does not have the confirmed SHA-256")
+        try:
+            data = Path(str(summary.get("path"))).read_bytes()
+            (folder / CONFIRMATION_FILE).write_bytes(data)
+            entry["copy"] = CONFIRMATION_FILE
+            if hashlib.sha256(data).hexdigest() != summary.get("sha256"):
+                problems.append("the confirmation record changed after the run was checked")
+        except OSError as exc:
+            problems.append(f"the confirmation record could not be copied: {exc.strerror or exc}")
+        if problems:
+            entry["error"] = "; ".join(problems)
+        return entry
 
     async def _checksum_item(self, record: RunRecord, index: int) -> None:
         """Hash what item *index* read and wrote, off the event loop."""
@@ -750,6 +789,7 @@ class RunManager:
         confine_to: Path | None,
         manifest_path: Path | None,
         image_identity: runrecord.ImageIdentity | None,
+        confirmed_selection: JsonDict | None = None,
     ) -> None:
         record = live.record
         # Checksums run beside the items that follow rather than between them;
@@ -791,7 +831,9 @@ class RunManager:
 
         try:
             await _to_thread(
-                lambda: self._open_folder(record, recipe, servers, manifest_path, image_identity)
+                lambda: self._open_folder(
+                    record, recipe, servers, manifest_path, image_identity, confirmed_selection
+                )
             )
             self._save_folder(record)
             results = await replay.run_batch(

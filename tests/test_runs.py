@@ -354,6 +354,33 @@ async def test_run_folder_is_a_self_contained_record(
     assert not folder.exists()
 
 
+def test_a_confirmation_that_no_longer_matches_is_written_down(tmp_path: Path) -> None:
+    """The run is under way when the copies are made: a difference is recorded, not hidden."""
+    import hashlib
+
+    folder = tmp_path / "run"
+    folder.mkdir()
+    record_file = tmp_path / "sel_confirmed.json"
+    record_file.write_text('{"kind": "medmcp-cohort confirm_selection"}')
+    summary: JsonDict = {
+        "path": str(record_file),
+        "sha256": hashlib.sha256(record_file.read_bytes()).hexdigest(),
+        "confirmed_csv_sha256": "a" * 64,
+    }
+    same = runs.RunManager._copy_confirmation(folder, summary, "a" * 64)
+    assert same["copy"] == runs.CONFIRMATION_FILE and "error" not in same
+    assert (folder / runs.CONFIRMATION_FILE).read_bytes() == record_file.read_bytes()
+
+    record_file.write_text("{}")
+    changed = runs.RunManager._copy_confirmation(folder, summary, "b" * 64)
+    assert "does not have the confirmed SHA-256" in changed["error"]
+    assert "changed after the run was checked" in changed["error"]
+
+    record_file.unlink()
+    gone = runs.RunManager._copy_confirmation(folder, summary, "a" * 64)
+    assert gone["copy"] is None and "could not be copied" in gone["error"]
+
+
 def test_load_full_falls_back_to_the_index_for_an_old_run(tmp_path: Path) -> None:
     """A run recorded before folders existed still loads, with what the index knows."""
     record = runs.RunRecord(

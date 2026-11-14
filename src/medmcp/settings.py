@@ -42,7 +42,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from medmcp import agentbox, jobspec, posture, signing
+from medmcp import agentbox, jobspec, posture, signing, workspace_note
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict
 from medmcp.statefile import atomic_write_json, atomic_write_toml, read_json
 from medmcp.workflow import list_workflows
@@ -510,6 +510,10 @@ def _load_stack_manifests() -> list[JsonDict]:
             entry["job"] = runner.manifest()
         elif raw.get("job") is not None:
             _audit.warning("stack manifest %s: job declaration ignored (malformed)", path.name)
+        # A stack that indexes folders of scans says so (medmcp.workspace_note).
+        index = workspace_note.parse_dataset_index(name, raw.get("dataset_index"))
+        if index is not None:
+            entry["dataset_index"] = index.manifest()
         manifests.append(entry)
     return manifests
 
@@ -609,6 +613,7 @@ def load_mcp_servers() -> list[JsonDict]:
                     "startup_timeout_sec",
                     "idle_ttl_sec",
                     "gpu",
+                    "dataset_index",
                 ):
                     if srv.get(key) is not None:
                         entry[key] = srv[key]
@@ -1688,6 +1693,8 @@ def write_prompt_variant(prompt_id: str, rule: str) -> bool:
 # Label carrying a stack's launch metadata. JSON value, e.g.:
 #   {"name": "medmcp-neuro", "gpu": true, "tool_timeout_sec": 7200,
 #    "skills_path": "/app/src/medmcp_neuro/skills"}
+# Optional: "job" (a runner for long calls, see medmcp.jobspec) and "dataset_index"
+# (the stack indexes folders of scans, see medmcp.workspace_note).
 STACK_LABEL: str = "org.medmcp.stack"
 _STACK_NAME_RE: re.Pattern[str] = re.compile(r"[a-z0-9][a-z0-9-]*")
 
@@ -2028,6 +2035,10 @@ def install_stack_image(
         entry["job"] = runner.manifest()
     elif meta.get("job") is not None:
         report("The image's job declaration is malformed; installing without jobs.")
+
+    index = workspace_note.parse_dataset_index(name, meta.get("dataset_index"))
+    if index is not None:
+        entry["dataset_index"] = index.manifest()
 
     # Skills live inside the image but the agent loads them from the core fs, so
     # extract them next to the manifest and point skills_path there.

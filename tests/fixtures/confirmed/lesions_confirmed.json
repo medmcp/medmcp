@@ -1,4 +1,5 @@
 {
+ "medmcp_selection_confirmation": 1,
  "kind": "medmcp-cohort confirm_selection",
  "confirmed_at": "2026-11-14T12:50:20+00:00",
  "note": "fixture for the core's roll-out tests",
@@ -72,7 +73,7 @@
    "note": ""
   }
  ],
- "core_role_labels": [
+ "role_labels": [
   "T1-contrast",
   "T1+contrast",
   "FLAIR"

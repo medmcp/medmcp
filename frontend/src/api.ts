@@ -323,7 +323,7 @@ export async function fetchRuns(
   return (await res.json()) as { runs: RunSummary[]; live: string[] }
 }
 
-/** Turn a manifest CSV — a plan_batch plan or a select_series selection — into
+/** Turn a manifest CSV — a batch plan or a selection of scans — into
  *  batch rows for this workflow. `mapping` assigns a column (plan) or a series
  *  role (selection) to inputs the server could not place by itself. */
 export async function batchFromPlan(

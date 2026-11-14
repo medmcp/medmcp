@@ -271,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     replay_p.add_argument(
         "--batch",
         metavar="PLAN_CSV",
-        help="roll out over a plan_batch manifest CSV instead of one input set",
+        help="roll out over a batch plan or selection CSV instead of one input set",
     )
     replay_p.add_argument(
         "--map",
@@ -286,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         metavar="in_N=ROLE",
         help="with a selection: which series feeds an input, one of the roles of a "
-        "confirm_selection manifest, e.g. in_1=FLAIR in_2=T1+contrast (repeatable)",
+        "confirmed selection, e.g. in_1=FLAIR in_2=T1+contrast (repeatable)",
     )
     replay_p.add_argument(
         "--output-root",

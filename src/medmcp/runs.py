@@ -31,7 +31,7 @@ progress, small, rewritten after every step) each run has a folder
 - ``recipe.yaml`` — the workflow exactly as it ran (it can be edited or deleted
   afterwards; the run keeps its own copy).
 - ``manifest.csv`` — the cohort plan or selection the items came from, as given.
-- ``confirmation.json`` — for a confirmed selection, its ``confirm_selection``
+- ``confirmation.json`` — for a confirmed selection, its confirmation
   record (who decided which series fills which role, under which rules); the
   run record cites it with its hash and the source manifest and index hashes
   it names.
@@ -45,6 +45,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import re
 import secrets
 import shutil
 from collections.abc import Callable
@@ -91,6 +92,10 @@ def _seconds_between(started: str, finished: str) -> float | None:
     except ValueError:
         return None
     return round(delta.total_seconds(), 3)
+
+
+# The only shape accepted where an id names a path to delete: no dots, no slashes.
+_RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 
 def new_run_id() -> str:
@@ -552,12 +557,18 @@ def load_full(run_id: str, *, root: Path | None = None) -> RunRecord | None:
 
 
 def delete_run(run_id: str, *, root: Path | None = None) -> bool:
-    """Remove a record and its folder; ``False`` when there was none."""
-    shutil.rmtree(run_folder(run_id, root=root), ignore_errors=True)
+    """Remove a record and its folder; ``False`` when there was none.
+
+    Only a run's own id names something to delete: the id arrives from a URL,
+    and ``..`` would name the folder above.
+    """
+    if not _RUN_ID_RE.fullmatch(run_id):
+        return False
     try:
         run_path(run_id, root=root).unlink()
     except FileNotFoundError:
         return False
+    shutil.rmtree(run_folder(run_id, root=root), ignore_errors=True)
     return True
 
 
@@ -653,7 +664,7 @@ class RunManager:
         path outside it fails instead of running. *labels* name the items
         (``subject[/session]``), *manifest_path* is the plan or selection they
         came from (copied into the run folder), *confirmed_selection* the checked
-        summary of its ``confirm_selection`` record when it is a confirmed
+        summary of its confirmation record when it is a confirmed
         selection (:meth:`medmcp.batchplan.Confirmation.summary`; the record is
         copied too), *confirmation* says who started the run, and
         *image_identity* resolves each stack's image digest for the record's

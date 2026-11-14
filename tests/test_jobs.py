@@ -459,3 +459,18 @@ def test_progress_that_does_not_parse_is_ignored(tmp_path: Path) -> None:
         path.write_text(content)
         assert jobs.read_progress(str(tmp_path), "j") is None
     assert jobs.read_progress(str(tmp_path), "missing") is None
+
+
+def test_progress_is_read_from_a_regular_file_only(tmp_path: Path) -> None:
+    """A pipe or a link left in place of the progress file is ignored, not read."""
+    import os
+
+    target = jobs.progress_path(str(tmp_path), "piped")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(target)
+    assert jobs.read_progress(str(tmp_path), "piped") is None
+
+    secret = tmp_path / "secret.json"
+    secret.write_text('{"fraction": 0.5, "text": "not yours"}')
+    jobs.progress_path(str(tmp_path), "linked").symlink_to(secret)
+    assert jobs.read_progress(str(tmp_path), "linked") is None

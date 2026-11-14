@@ -214,7 +214,7 @@ def test_output_goes_under_the_output_root_per_subject() -> None:
 
 
 def test_the_plans_output_dir_column_is_used_without_a_root() -> None:
-    """``plan_batch`` planned a folder per subject; a file output lands inside it."""
+    """The plan has a folder per subject; a file output lands inside it."""
     binding = batchplan.runs_from_manifest(_file_output_recipe(), _plan(True))
     assert binding.runs[0]["in_2"] == "/ws/planned/1/consensus_gt_RAS.nii.gz"
     assert binding.output_root == ""
@@ -258,13 +258,13 @@ def test_folder_part_cannot_leave_its_folder() -> None:
     assert batchplan.folder_part("..") == "item"
 
 
-# ── selection manifests (select_series) ──────────────────────────────────────
+# ── selection manifests ──────────────────────────────────────────────────────
 
 
 def _series(
     subject: str, session: str, sequence: str, contrast: str, path: str, **extra: str
 ) -> dict[str, str]:
-    """One row of a ``select_series`` manifest (the columns the roll-out reads)."""
+    """One row of a selection manifest (the columns the roll-out reads)."""
     return {
         "subject_id": subject,
         "session_id": session,
@@ -378,11 +378,11 @@ def test_a_plain_selection_is_refused_for_several_inputs() -> None:
                 _two_input_recipe(), rows, role_map=role_map, output_root="/ws/out"
             )
         assert caught.value.inputs == ["in_1", "in_2"]
-        assert "review_selection and confirm_selection first" in str(caught.value)
+        assert "reviewed and confirmed first" in str(caught.value)
 
 
 def _confirmed(subject: str, session: str, role: str, path: str, **extra: str) -> dict[str, str]:
-    """One row of a ``confirm_selection`` manifest: a selection row plus its ``role``."""
+    """One row of a confirmed selection: a selection row plus its ``role``."""
     sequence, _, rest = role.partition("+")
     contrast = "yes" if rest else ("no" if role.endswith("-contrast") else "unknown")
     return {
@@ -493,7 +493,7 @@ def test_selection_roles_lists_what_can_be_assigned() -> None:
 
 
 def test_parse_role() -> None:
-    """The notation of select_series' require_in_session, plus a plane."""
+    """The notation of a role, plus a plane."""
     assert batchplan.parse_role("T1+contrast") == batchplan.Role("T1", "yes")
     assert batchplan.parse_role("T1-contrast") == batchplan.Role("T1", "no")
     assert batchplan.parse_role("T1?contrast") == batchplan.Role("T1", "unknown")
@@ -519,10 +519,10 @@ def test_bind_manifest_reads_either_kind_and_resolves_relative_paths(tmp_path: P
     assert batchplan.bind_manifest(_one_input_recipe(), plan).kind == "plan"
 
 
-# ── confirmed selections (confirm_selection) ─────────────────────────────────
+# ── confirmed selections ─────────────────────────────────────────────────────
 #
-# tests/fixtures/confirmed/ holds what the cohort stack wrote (medmcp-cohort
-# 759e3db: review_selection then confirm_selection with one override) for three
+# tests/fixtures/confirmed/ holds what a stack wrote (medmcp-cohort 759e3db, one
+# override; the record carries the core's marker and role_labels) for three
 # subjects and the roles T1, T1+contrast, FLAIR: the source selection
 # lesions_series.csv, the confirmed lesions_confirmed.csv and its record
 # lesions_confirmed.json (paths in the record rewritten to /workspace/study).
@@ -635,8 +635,8 @@ def test_a_confirmed_selection_without_its_record_is_refused(tmp_path: Path) -> 
     record = folder / "lesions_confirmed.json"
     text = record.read_text()
 
-    record.write_text(text.replace("medmcp-cohort confirm_selection", "something else"))
-    with pytest.raises(batchplan.ConfirmationError, match="not a confirm_selection record"):
+    record.write_text(text.replace('"medmcp_selection_confirmation": 1', '"some_other_record": 1'))
+    with pytest.raises(batchplan.ConfirmationError, match="not a confirmation record"):
         batchplan.load_manifest(manifest)
 
     record.unlink()
@@ -658,7 +658,7 @@ def test_a_confirmed_selection_without_its_record_is_refused(tmp_path: Path) -> 
 def test_the_unconfirmed_source_selection_is_refused_for_several_inputs(tmp_path: Path) -> None:
     """The same selection before confirmation: refused, with what to do instead."""
     source = _study(tmp_path) / "lesions_series.csv"
-    with pytest.raises(batchplan.NeedsConfirmationError, match="confirm_selection first"):
+    with pytest.raises(batchplan.NeedsConfirmationError, match="reviewed and confirmed first"):
         batchplan.bind_manifest(_three_input_recipe(), source, role_map=ROLES, output_root="/o")
     with pytest.raises(batchplan.NeedsConfirmationError):
         batchplan.check_run_manifest(source, _three_input_recipe())
@@ -684,7 +684,7 @@ def test_a_one_input_roll_out_takes_a_plain_selection_or_one_confirmed_role(
 
 
 def test_a_plan_is_not_held_to_the_selection_rules(tmp_path: Path) -> None:
-    """A plan_batch manifest of several inputs binds as before, with no record."""
+    """A batch plan of several inputs binds as before, with no record."""
     plan = tmp_path / "batch_plan.csv"
     plan.write_text(
         "subject,flair,mask,status,reason\n"

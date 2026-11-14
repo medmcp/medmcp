@@ -361,7 +361,7 @@ def test_a_confirmation_that_no_longer_matches_is_written_down(tmp_path: Path) -
     folder = tmp_path / "run"
     folder.mkdir()
     record_file = tmp_path / "sel_confirmed.json"
-    record_file.write_text('{"kind": "medmcp-cohort confirm_selection"}')
+    record_file.write_text('{"medmcp_selection_confirmation": 1}')
     summary: JsonDict = {
         "path": str(record_file),
         "sha256": hashlib.sha256(record_file.read_bytes()).hexdigest(),
@@ -394,3 +394,16 @@ def test_load_full_falls_back_to_the_index_for_an_old_run(tmp_path: Path) -> Non
     full = runs.load_full(record.id, root=tmp_path)
     assert full is not None and full.to_dict(full=True)["environment"] == {}
     assert runs.load_full("nope", root=tmp_path) is None
+
+
+def test_deleting_a_run_never_leaves_the_runs_folder(tmp_path: Path) -> None:
+    """An id that is not a run id (``..``, ``.``) deletes nothing."""
+    root = tmp_path / "state" / "runs"
+    root.mkdir(parents=True)
+    keep = tmp_path / "state" / "keep.txt"
+    keep.write_text("config")
+    (root / "other.json").write_text("{}")
+    for bad in ("..", ".", "../state", "a/b", ""):
+        assert runs.delete_run(bad, root=root) is False
+    assert keep.read_text() == "config"
+    assert (root / "other.json").exists()

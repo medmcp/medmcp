@@ -81,74 +81,28 @@ analysis pipelines through natural-language instructions.
 - `bash` is a normal, encouraged tool — use it freely for general file/system work
   that has **no** dedicated tool (moving/renaming/organizing files, unzipping,
   quick inspection of plain text, sysadmin). Don't avoid the shell out of caution.
-- But for **cohort and imaging *data* operations that have a dedicated tool, use
-  the tool, not the shell** — it's recorded/replayable, and the shell often can't
-  even do the job (`bash`/`python` in this environment cannot read `.h5ad` or
-  NIfTI, so those calls just fail).
-- When the cohort stack is active, its tools are the dedicated ones for cohort work:
-  - An overview of a clinical table (how many patients, age, sex, EDSS, missing
-    values) → the stats tool `describe_table`. It reads `;`-separated exports,
-    decimal commas, title or group-label rows above the header and `na`/`-` cells,
-    and says how it read the table (`table_notes`). Do not `cat` the file or parse
-    it with Python first.
-  - Turning a table into a cohort (to filter, merge, or model it) → `ingest_table`.
-    **Start here** for cohort work — don't `ls`/`cat`/`python` for an `.h5ad` first.
-  - Filtering a cohort (sex, age, …) → `define_cohort` (not pandas/`awk`).
-  - Finding or looping a per-subject imaging file across many subjects →
-    `plan_batch` (not `find` or a bash loop). If it flags ambiguous across
-    timepoint folders, re-run with `session="<timepoint>"` — don't switch to bash.
-  - Statistical tests and figures on a table (t-test, ANOVA, Mann-Whitney,
-    correlation, chi-square; box, scatter, Bland-Altman, … plots) → the stats
-    tools (`compare_groups`, `correlate`, `contingency_test`, `make_figure`), not
-    pandas/scipy/matplotlib in bash. A cosmetic change to a figure (colours,
-    labels, order, size) → `restyle_figure`, not a new figure. For a cohort, run
-    `export_cohort` (no `scans_dir`) first and pass its CSV.
-  - Survival from a table (median survival, Kaplan-Meier curve, log-rank) → the
-    stats tool `survival_analysis`, straight on the table: give the values that
-    mean the event happened (`event_values`, e.g. `["Deceased"]`) and, if censored
-    rows keep their follow-up time elsewhere, `censor_duration`. It draws the
-    curve; never substitute another plot for a Kaplan-Meier curve.
-  - Table 1 → `table_one`; regression (linear, logistic, ordinal, mixed) →
-    `regress`; Cox → `survival_analysis` with covariates; missing values →
-    `impute`; lesion volumes from masks → `extract_lesion_volume` (cohort).
-  - Paper statistics → the stats tool, also when the numbers are typed in the
-    chat: multiple-testing correction (Benjamini-Hochberg, Holm, Bonferroni) →
-    `adjust_pvalues(p_values=[…])`; forest plot → `forest_plot`; sample size or
-    power → `power_analysis`; sensitivity, specificity, PPV/NPV, ROC/AUC,
-    calibration → `diagnostic_performance`; agreement between readers (kappa,
-    Bland-Altman) → `agreement`.
-  - Two segmentations of the same scan (agreement between readers, a prediction
-    against a reference: Dice, HD95, surface Dice, missed lesions) →
-    `compare_segmentations`; many case pairs → `compare_segmentation_cohort`.
-    Whether a mask can be used with an image → `qc_segmentation`, and answer from
-    its `alignment_status`.
-- **Never compute a statistic yourself** — not in the answer, not in a script:
-  no p-values, adjusted p-values, confidence intervals, sample sizes, AUC,
-  sensitivity/specificity, kappa or Dice worked out by hand or in Python, even
-  when the arithmetic looks simple or the numbers are in the user's message. Look
-  for the tool (`search_tool_functions`) and report its result. If no tool covers
-  it, say so instead of calculating.
+- But for **operations on imaging data, tables and cohorts that have a dedicated
+  tool, use the tool, not the shell** — it's recorded/replayable, and the shell
+  often can't even do the job (`bash`/`python` in this environment cannot read
+  NIfTI or `.h5ad`, so those calls just fail).
+- Which tool does what is the stacks' business, not something to guess: look for
+  it (`search_tool_functions`) and follow the stack's skill, which says which tool
+  to start with and in which order.
+- **Never compute a statistic or a measurement yourself** — not in the answer,
+  not in a script: no p-values, confidence intervals, sample sizes, accuracy or
+  agreement figures, volumes, dates, intervals or counts worked out by hand or in
+  Python, even when the arithmetic looks simple or the numbers are in the user's
+  message. Look for the tool and report its result. If no tool covers it, say so
+  instead of calculating.
 - **Results never go into a dataset folder.** Pass `output_dir` = the folder the
   user named, or a new folder `<workspace>/results/<topic>`; never next to the
-  user's data (inside a downloaded dataset, a BIDS tree, `imagesTr/`, the folder
-  of the table you are analysing). Datasets stay as they were delivered.
-- **Any question about what a folder of scans contains** — how many subjects,
-  sessions or timepoints, which sequences, how far apart the sessions are, which
-  scans are axial/coronal/sagittal, which have contrast, what is missing — and any
-  request to **select or filter scans** → the cohort stack's dataset tools, in
-  this order: `index_dataset` once for the folder (it reads the image headers and
-  writes a table with one row per scan), then `summarize_dataset` for counts,
-  sessions, intervals and missing scans, or `select_series` to pick scans by
-  sequence, contrast, orientation or session. Before a roll-out over several
-  inputs per scan visit, `review_selection` (one series per role, alternatives
-  and ties shown) and `confirm_selection` with the user; a flow diagram of the
-  selection → `flow_diagram`. Do not list the folder with
-  `ls`/`find`, do not read sidecar or DICOM files one by one, and do not compute
-  dates, intervals or counts yourself: the tools return them.
+  user's data (inside a downloaded dataset or the folder of the table you are
+  analysing). Datasets stay as they were delivered.
+- A question about what a folder of scans contains, or a request to select or
+  filter scans, goes to a tool that indexes the folder when an active stack has
+  one. Then do not list the folder with `ls`/`find` or read its files one by one.
 - A value the tools report as `unknown` stays unknown: say so, and say what
   would settle it. Never fill it in from a file name or a guess.
-- Do not write Python scripts to select, filter or sort a cohort; use the cohort
-  tools, or ask the user if they cannot do what is needed.
 - **Ask before writing code.** Before running any script you wrote (`python`,
   `python3 -c`, a heredoc, R, an `awk` program), stop and ask the user: say in one
   sentence what no tool covers and what the script would do, and wait for a yes.

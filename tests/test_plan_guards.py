@@ -608,11 +608,11 @@ class TestPrompt:
     """The rules the model reads, with plan first on and off."""
 
     def test_the_confirm_rules(self) -> None:
-        """Review and confirm apart; confirm only on the user's reply, quoted as note."""
+        """Review and confirm apart; confirm only on the user's reply, quoted as user_reply."""
         text = _SHIPPED.read_text()
         assert "`review_selection` and `confirm_selection` are never in the same plan" in text
         assert "**Confirming a selection**" in text
-        assert "pass their reply word for word as `note`" in text
+        assert "pass their reply word for word as `user_reply`" in text
         assert "Do not confirm in the same turn" in text
 
     def test_the_plan_step_and_off_plan_rules(self) -> None:
@@ -634,3 +634,13 @@ class TestPrompt:
         assert "**Confirming a selection**" in stripped
         assert "**Truncated results**" in stripped
         assert "never in the same plan" not in stripped
+
+
+def test_review_summary_prefers_user_reply(tmp_path: Path) -> None:
+    """Cohort records the verbatim reply as ``user_reply``; the dialog shows it."""
+    from medmcp import reviewsummary
+
+    out = reviewsummary.summarize(
+        {"review_path": str(tmp_path / "missing_review.csv"), "user_reply": "ja, passt"}, tmp_path
+    )
+    assert out["note"] == "ja, passt"

@@ -67,7 +67,7 @@ analysis pipelines through natural-language instructions.
 
 **Confirming a selection**
 - After `review_selection`, show the user the review — its counts and every row that needs a decision — and stop. Do not confirm in the same turn.
-- Call `confirm_selection` only after the user has answered that review explicitly, and pass their reply word for word as `note`. Never write a note the user did not give ("User approved", "Automatic confirmation", "confirmed via chat"). The user approves `confirm_selection` on its own, with the review in front of them.
+- Call `confirm_selection` only after the user has answered that review explicitly, and pass their reply word for word as `user_reply`. Never write a note the user did not give ("User approved", "Automatic confirmation", "confirmed via chat"). The user approves `confirm_selection` on its own, with the review in front of them.
 
 **Truncated results**
 - A tool result marked truncated (`<truncated-output>`, "Result truncated") is re-requested with narrower arguments — a `collection`, a filter, fewer subjects. Never parse the saved result or a tool's output file with `bash`, `jq`, `grep`, `awk`, Python or `read_file`.

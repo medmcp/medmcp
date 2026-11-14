@@ -89,7 +89,9 @@ def summarize(arguments: JsonDict, workspace: Path) -> JsonDict:
         "rows": [],
         "rowsTotal": 0,
         "overrides": 0,
-        "note": str(arguments.get("note") or ""),
+        # cohort >= 0.1 records the user's verbatim reply as ``user_reply``;
+        # older stacks used ``note``.
+        "note": str(arguments.get("user_reply") or arguments.get("note") or ""),
         "error": None,
     }
     overrides = arguments.get("overrides")

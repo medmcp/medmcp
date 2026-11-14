@@ -448,7 +448,7 @@ function ReviewSummary({ review }: { review: SelectionReview }) {
         <div className="approval-review-sub">No row needs a decision.</div>
       )}
       <div className="approval-review-note">
-        Note to be recorded: {review.note ? <q>{review.note}</q> : <em>none</em>}
+        User's reply to be recorded: {review.note ? <q>{review.note}</q> : <em>none</em>}
       </div>
     </div>
   )

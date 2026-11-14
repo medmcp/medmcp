@@ -56,7 +56,7 @@ Never covered by a Go:
   the core from the `<name>_review.json` beside the file the call names: the
   number of rows per status (ok, only derived, needs a decision, multiple
   stations, missing), up to ten of the rows that need a decision with their
-  candidate series, how many decisions the call passes, and the note it would
+  candidate series, how many decisions the call passes, and the user's reply (`user_reply`) it would
   record. A review that cannot be read (missing, not a review, outside the
   workspace) is said so in the dialog. `confirm_selection` is also never
   allowed "for the rest of this chat";

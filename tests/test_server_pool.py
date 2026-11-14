@@ -191,9 +191,13 @@ def test_jobs_api_lists_stops_and_forgets(
     assert client.post("/api/jobs/0123456789ab/stop").status_code == 404
 
     monkeypatch.setattr(server, "_jobs", _manager_stub([_a_job()]))
+    titles = {"chat-1": "Hippocampus training"}
+    monkeypatch.setattr(server.sessions, "chat_title", titles.get)
     body = client.get("/api/jobs").json()
     assert body["enabled"] is True and body["max"] == 1
     assert body["jobs"][0]["status"] == "running" and body["jobs"][0]["session"] == "chat-1"
+    # The pill names the chat, never shows its id.
+    assert body["jobs"][0]["session_title"] == "Hippocampus training"
     assert client.get("/api/jobs/0123456789ab").json()["logs"] == "epoch 3\n"
     assert client.get("/api/jobs/ffffffffffff").status_code == 404
     assert client.delete("/api/jobs/0123456789ab").status_code == 409  # still running

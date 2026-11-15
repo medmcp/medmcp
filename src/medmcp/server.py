@@ -100,7 +100,7 @@ from medmcp import (
     workflow,
 )
 from medmcp.acp import PROJECT_ROOT, JsonDict, VibeAcpClient
-from medmcp.backend_broker import BackendBroker
+from medmcp.backend_broker import BackendBroker, CoreOp
 from medmcp.backend_pool import BackendPool, BackendSpec
 from medmcp.reasoning import ThoughtStripper
 from medmcp.workspace_note import (
@@ -166,6 +166,9 @@ _approvals: approvals.ApprovalLedger = approvals.ApprovalLedger()
 # Background jobs (see ``jobs.py``): containers the core starts for an approved
 # stack call and leaves running. None when stacks cannot run jobs here.
 _jobs: jobs.JobManager | None = None
+# Ops the broker answers from this process for the agent-side helpers (the path
+# guard, the LLM shim); each handler registers itself where it is defined.
+_core_ops: dict[str, CoreOp] = {}
 
 
 def _active_server(name: str) -> JsonDict | None:
@@ -282,7 +285,11 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
                 max_jobs=settings.max_jobs,
             )
         _broker = BackendBroker(
-            _pool, settings.backend_socket_path(), _approvals.spend, _after_stack_call
+            _pool,
+            settings.backend_socket_path(),
+            _approvals.spend,
+            _after_stack_call,
+            ops=_core_ops,
         )
         try:
             await _broker.start()

@@ -5,6 +5,10 @@ export interface ConfirmOptions {
   body?: string
   /** Label of the confirming button (default "Delete"). */
   action?: string
+  /** Label of the button that declines (default "Cancel"). */
+  cancel?: string
+  /** "primary" for a step that destroys nothing (default "danger"). */
+  tone?: 'danger' | 'primary'
 }
 
 /** Ask the person to confirm a destructive step; resolves true when they do. */

@@ -24,6 +24,19 @@ What a Go covers, and what it never covers:
 * Never anything else: a call outside the plan goes to the ordinary approval
   dialog, flagged as not in the plan.
 
+What a stack declares about its tools refines this (:class:`ToolHints`):
+
+* A **lookup** — a tool whose standard MCP annotations say ``readOnlyHint: true``
+  — may run without a dialog while a plan is in force, even if no step names it,
+  as long as every path it is given lies in a path the plan shows.
+* A tool annotated ``destructiveHint: true`` always asks, even when a step names it.
+* A tool the stack lists under ``requires_user_reply`` (in its label or manifest,
+  see :func:`parse_requires_user_reply`) is never covered by a Go nor by "for the
+  rest of this chat"; its dialog says the assistant must quote the user's reply.
+
+Hints a stack does not give change nothing: an unannotated tool is treated as
+before.
+
 The tool says "approved" only on the core's word. The core keeps a verdict for
 each plan it decided — Go, or refused with the problems — keyed by the plan
 (:func:`plan_key`); the tool takes it over the broker (``plan_verdict``), and a
@@ -43,14 +56,18 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import os
-from collections.abc import Mapping
+import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
 from medmcp import harness
 from medmcp.pathcheck import classify_role
+
+log: logging.Logger = logging.getLogger(__name__)
 
 JsonDict = dict[str, Any]
 
@@ -74,6 +91,20 @@ VERDICT_REFUSED = "refused"
 
 # The approval dialog's note on a call outside the approved plan.
 OFF_PLAN_REASON = "Not in the plan you approved."
+
+# Why a call a step names is shown anyway (the approval dialog's note), and what
+# the plan card and the agent are told about such a step, by kind.
+ASK_DESTRUCTIVE = "destructive"
+ASK_USER_REPLY = "user_reply"
+ASK_REASONS: dict[str, str] = {
+    ASK_DESTRUCTIVE: "This tool can delete or overwrite data, so it always asks.",
+    ASK_USER_REPLY: "This tool needs the user's own reply, so it always asks.",
+}
+# The approval dialog's note on a tool that requires the user's reply.
+USER_REPLY_NOTE = (
+    "This tool needs your own answer. The assistant must ask you in the chat and quote "
+    "your reply word for word; approve only if the reply it quotes is yours."
+)
 
 # Bounds that keep a plan a plan: something a person reads in a few seconds.
 MAX_STEPS = 12
@@ -469,11 +500,155 @@ def match_call(plan: Plan, stack: str, tool: str, args: JsonDict, workspace: Pat
     return None
 
 
+# ── What stacks declare about their tools ────────────────────────────────────
+
+# The label/manifest key a stack lists its user-reply tools under.
+USER_REPLY_KEY = "requires_user_reply"
+# Tool names are plain identifiers, as for a dataset index (medmcp.workspace_note).
+_TOOL_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
+MAX_USER_REPLY_TOOLS = 32
+
+
+def parse_requires_user_reply(stack: str, raw: object, *, quiet: bool = False) -> tuple[str, ...]:
+    """Read a ``requires_user_reply`` declaration: the tools that need the user's reply.
+
+    The shape, in the image label ``org.medmcp.stack`` or the manifest::
+
+        {"name": "<stack>", "requires_user_reply": ["confirm_selection"]}
+
+    Each entry must be a plain identifier (letters, digits, ``_``; a letter
+    first). An entry that is not is dropped, a declaration that is not a list is
+    dropped whole, and either is logged (unless *quiet*). At most
+    :data:`MAX_USER_REPLY_TOOLS` names are kept.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        if not quiet:
+            log.warning("stack %s: %s is not a list; ignored", stack, USER_REPLY_KEY)
+        return ()
+    names: list[str] = []
+    for item in cast("list[object]", raw):
+        if isinstance(item, str) and _TOOL_NAME_RE.fullmatch(item):
+            if item not in names:
+                names.append(item)
+        elif not quiet:
+            log.warning(
+                "stack %s: %s entry %r ignored (not a tool name)", stack, USER_REPLY_KEY, item
+            )
+    if len(names) > MAX_USER_REPLY_TOOLS:
+        if not quiet:
+            log.warning(
+                "stack %s: %s lists %d tools; keeping the first %d",
+                stack,
+                USER_REPLY_KEY,
+                len(names),
+                MAX_USER_REPLY_TOOLS,
+            )
+        names = names[:MAX_USER_REPLY_TOOLS]
+    return tuple(names)
+
+
+def user_reply_tools(servers: Iterable[Mapping[str, Any]]) -> dict[str, frozenset[str]]:
+    """Each server's ``requires_user_reply`` tools by server name (none: left out)."""
+    out: dict[str, frozenset[str]] = {}
+    for server in servers:
+        name = str(server.get("name") or "")
+        tools = parse_requires_user_reply(name, server.get(USER_REPLY_KEY), quiet=True)
+        if name and tools:
+            out[name] = frozenset(tools)
+    return out
+
+
+@dataclass(frozen=True)
+class ToolHints:
+    """What a stack declared about one tool, as the approval flow reads it.
+
+    ``read_only``, ``destructive``, ``idempotent`` and ``open_world`` are the
+    standard MCP tool annotations (``readOnlyHint`` …) as the tool gave them —
+    ``None`` when it did not. ``user_reply`` says the stack lists the tool under
+    ``requires_user_reply``.
+
+    The MCP defaults for absent hints (``destructiveHint`` and ``openWorldHint``
+    default to true) are deliberately not applied: a stack that annotates nothing
+    keeps the behaviour it had before annotations were read.
+    """
+
+    read_only: bool | None = None
+    destructive: bool | None = None
+    idempotent: bool | None = None
+    open_world: bool | None = None
+    user_reply: bool = False
+
+    @classmethod
+    def from_annotations(
+        cls, annotations: Mapping[str, object] | None, *, user_reply: bool = False
+    ) -> ToolHints:
+        """Hints from a tool's annotation mapping (``{"readOnlyHint": true, …}``)."""
+        raw = annotations or {}
+
+        def flag(key: str) -> bool | None:
+            value = raw.get(key)
+            return value if isinstance(value, bool) else None
+
+        return cls(
+            read_only=flag("readOnlyHint"),
+            destructive=flag("destructiveHint"),
+            idempotent=flag("idempotentHint"),
+            open_world=flag("openWorldHint"),
+            user_reply=user_reply,
+        )
+
+    @property
+    def always_asks(self) -> str:
+        """Why the tool asks even when a step names it (an :data:`ASK_REASONS` key) or ``""``."""
+        if self.user_reply:
+            return ASK_USER_REPLY
+        if self.destructive is True:
+            return ASK_DESTRUCTIVE
+        return ""
+
+    @property
+    def lookup(self) -> bool:
+        """Whether a call may run under a plan without a step naming it.
+
+        Read-only by its own word, not destructive, not reaching outside
+        (``openWorldHint: true``), and not one that needs the user's reply.
+        """
+        return (
+            self.read_only is True
+            and self.destructive is not True
+            and self.open_world is not True
+            and not self.user_reply
+        )
+
+
+def lookup_fits_plan(plan: Plan, args: JsonDict, workspace: Path) -> bool:
+    """Whether every path a lookup is given lies in a path *plan* shows.
+
+    The plan's paths are every step's inputs and outputs and its ``output_dir``
+    (or anything inside one of them; the workspace root and ``/`` only cover
+    themselves). A lookup with no path arguments fits.
+    """
+    anchors: list[Path] = []
+    for step in plan.steps:
+        anchors.extend(_anchors(plan, step, workspace, output=False))
+    return all(
+        _covered(_resolve(value, workspace), anchors, workspace) for _, value in _path_values(args)
+    )
+
+
 # ── The MCP server ───────────────────────────────────────────────────────────
 
 
-def approval_text(plan: Plan) -> str:
-    """What the tool returns once the person said Go."""
+def approval_text(plan: Plan, asks: Mapping[int, str] | None = None) -> str:
+    """What the tool returns once the person said Go.
+
+    *asks* marks the steps (by index) whose tool asks the user again anyway (see
+    :class:`ToolHints`): the agent is told so, and for a tool that needs the
+    user's reply, to ask in the chat and quote the answer before calling it.
+    """
+    asks = asks or {}
     lines = [
         "The user approved this plan (Go). Carry out exactly these steps, in order, "
         "without asking again; then give a short summary. If anything not listed here "
@@ -482,10 +657,36 @@ def approval_text(plan: Plan) -> str:
     ]
     for n, step in enumerate(plan.steps, start=1):
         tool = f" [{step.tool}]" if step.tool else ""
-        lines.append(f"{n}. {step.action}{tool}")
+        lines.append(f"{n}. {step.action}{tool}{_ask_suffix(asks.get(n - 1, ''))}")
     if plan.output_dir:
         lines.append(f"Results go into {plan.output_dir}.")
     return "\n".join(lines)
+
+
+def _ask_suffix(kind: str) -> str:
+    if kind == ASK_USER_REPLY:
+        return (
+            " — needs the user's own reply: ask them in the chat first, then quote their "
+            "reply word for word when you call it; the user is asked to approve it again"
+        )
+    if kind == ASK_DESTRUCTIVE:
+        return " — the user is asked to approve this call again (it can delete or overwrite data)"
+    return ""
+
+
+def parse_asks(raw: object) -> dict[int, str]:
+    """Step marks as they travel over the broker (``{"2": "user_reply"}``), validated."""
+    out: dict[int, str] = {}
+    if not isinstance(raw, dict):
+        return out
+    for key, kind in cast("dict[object, object]", raw).items():
+        try:
+            index = int(str(key))
+        except ValueError:
+            continue
+        if index >= 0 and isinstance(kind, str) and kind in ASK_REASONS:
+            out[index] = kind
+    return out
 
 
 def _not_shown(problems: list[str]) -> str:
@@ -506,7 +707,8 @@ def tool_result(arguments: object, verdict: Mapping[str, object] | None) -> tupl
     """The text the tool returns for *arguments*, and whether it is an error.
 
     *verdict* is the core's word on this plan (broker op ``plan_verdict``):
-    ``{"verdict": "go"}`` once the person said Go to exactly this plan's card,
+    ``{"verdict": "go", "asks": {...}}`` once the person said Go to exactly this
+    plan's card (``asks``: the steps that ask again, see :func:`parse_asks`),
     ``{"verdict": "refused", "problems": [...]}`` when the core would not show
     it. Only a Go gives the approval text. A plan the tool itself cannot read
     (:func:`parse_plan`) says what to fix; anything else — no verdict, no core
@@ -518,7 +720,8 @@ def tool_result(arguments: object, verdict: Mapping[str, object] | None) -> tupl
         return _not_shown(exc.problems), True
     kind = verdict.get("verdict") if verdict is not None else None
     if kind == VERDICT_GO:
-        return approval_text(plan), False
+        asks = parse_asks(verdict.get("asks")) if verdict is not None else {}
+        return approval_text(plan, asks), False
     if kind == VERDICT_REFUSED:
         raw = verdict.get("problems") if verdict is not None else None
         problems = [str(p) for p in cast("list[object]", raw)] if isinstance(raw, list) else []

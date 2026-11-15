@@ -131,6 +131,8 @@ PROVENANCE_ENABLED_PATH: Path = VIBE_HOME / "provenance_enabled.json"
 EXPLAIN_ENABLED_PATH: Path = VIBE_HOME / "explain_enabled.json"
 # Persists the plan-first on/off preference; defaults to off when absent.
 PLAN_FIRST_PATH: Path = VIBE_HOME / "plan_first.json"
+# Forces plan first on or off, whatever the saved preference says.
+PLAN_FIRST_ENV_VAR: str = "MEDMCP_PLAN_FIRST"
 
 # Directory of container-stack manifests (``stacks.d/<name>.toml``). Each manifest
 # declares a stack launched as a container (``command = "docker"``, ``args = [...]``)
@@ -516,6 +518,10 @@ def _load_stack_manifests() -> list[JsonDict]:
         index = workspace_note.parse_dataset_index(name, raw.get("dataset_index"))
         if index is not None:
             entry["dataset_index"] = index.manifest()
+        # Tools that need the user's own reply, never covered by a standing approval.
+        user_reply = plan.parse_requires_user_reply(name, raw.get(plan.USER_REPLY_KEY))
+        if user_reply:
+            entry[plan.USER_REPLY_KEY] = list(user_reply)
         manifests.append(entry)
     return manifests
 
@@ -619,6 +625,9 @@ def load_mcp_servers() -> list[JsonDict]:
                 ):
                     if srv.get(key) is not None:
                         entry[key] = srv[key]
+                user_reply = plan.parse_requires_user_reply(name, srv.get(plan.USER_REPLY_KEY))
+                if user_reply:
+                    entry[plan.USER_REPLY_KEY] = list(user_reply)
                 servers[name] = entry
 
     # ── 2. Container-stack manifests (stacks.d/*.toml) ───────────────────────
@@ -1763,8 +1772,9 @@ def write_prompt_variant(prompt_id: str, rule: str | None, *, plan_first: bool =
 # Label carrying a stack's launch metadata. JSON value, e.g.:
 #   {"name": "medmcp-neuro", "gpu": true, "tool_timeout_sec": 7200,
 #    "skills_path": "/app/src/medmcp_neuro/skills"}
-# Optional: "job" (a runner for long calls, see medmcp.jobspec) and "dataset_index"
-# (the stack indexes folders of scans, see medmcp.workspace_note).
+# Optional: "job" (a runner for long calls, see medmcp.jobspec), "dataset_index"
+# (the stack indexes folders of scans, see medmcp.workspace_note) and
+# "requires_user_reply" (tools that need the user's own reply, see medmcp.plan).
 STACK_LABEL: str = "org.medmcp.stack"
 _STACK_NAME_RE: re.Pattern[str] = re.compile(r"[a-z0-9][a-z0-9-]*")
 
@@ -2110,6 +2120,13 @@ def install_stack_image(
     if index is not None:
         entry["dataset_index"] = index.manifest()
 
+    # Tools that need the user's own reply (medmcp.plan); malformed entries dropped.
+    user_reply = plan.parse_requires_user_reply(name, meta.get(plan.USER_REPLY_KEY))
+    if user_reply:
+        entry[plan.USER_REPLY_KEY] = list(user_reply)
+    elif meta.get(plan.USER_REPLY_KEY) is not None:
+        report("The image's requires_user_reply declaration is malformed; ignored.")
+
     # Skills live inside the image but the agent loads them from the core fs, so
     # extract them next to the manifest and point skills_path there.
     in_image_skills = meta.get("skills_path")
@@ -2268,7 +2285,16 @@ def load_plan_first_enabled() -> bool:
     before it calls anything (see :mod:`medmcp.plan`). Off — the default — nothing
     changes: the plan tool is not offered, the prompt asks for a ``todo`` list and
     every call is approved as it comes.
+
+    :data:`PLAN_FIRST_ENV_VAR` set to on/off overrides the saved preference (a
+    headless deploy has no settings drawer); unset or anything else, the file
+    ``$VIBE_HOME/plan_first.json`` (``{"enabled": true}``) decides.
     """
+    forced = os.environ.get(PLAN_FIRST_ENV_VAR, "").strip().lower()
+    if forced in {"1", "true", "yes", "on"}:
+        return True
+    if forced in {"0", "false", "no", "off"}:
+        return False
     return _load_flag(PLAN_FIRST_PATH, default=False)
 
 

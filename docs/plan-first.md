@@ -63,6 +63,72 @@ Never covered by a Go:
 
 The approval lasts until the agent proposes another plan or the chat is closed.
 
+## What stacks declare about their tools
+
+The core knows no stack's tools by name. Two declarations a stack may make refine
+what a Go covers; a stack that makes neither behaves exactly as above.
+
+### MCP tool annotations
+
+A stack may annotate its tools with the standard MCP hints in `tools/list`
+(`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`). Only hints
+a tool gives explicitly count; the MCP defaults for absent ones are not applied.
+
+- **Lookups.** While a plan is in force, a call to a tool annotated
+  `readOnlyHint: true` runs without a dialog even when no step names it, as long
+  as every path it is given lies in a path the plan shows (any step's inputs or
+  outputs, the output folder, or inside one of them; no path arguments at all
+  also fits). Not a lookup: a tool that is also `destructiveHint: true` or
+  `openWorldHint: true`, one listed under `requires_user_reply`, a call that needs
+  a look (an overwrite, a path outside the workspace), code the assistant wrote,
+  vibe's own tools, and an external server's tools. A lookup is recorded as
+  `{"plan_id", "lookup": true}`; it does not tick a step.
+- **Destructive tools.** A tool annotated `destructiveHint: true` always asks,
+  even when a step names it. The dialog says it is a step of the plan and why it
+  is shown; the card marks the step ("asks again"), and the agent is told so in
+  the Go.
+- `idempotentHint` is kept but changes nothing yet.
+
+The annotations come from the stack pool (`MEDMCP_STACK_POOL=1`): it keeps each
+stack's hints from its last tool list in `.vibe/state/tool_annotations.json`, so
+they survive the backend being reaped and a restart, and reading them never warms
+a stack. Without the pool no annotations are known: there are no lookups, and a
+listed destructive tool is covered by the Go like any other.
+
+### `requires_user_reply`
+
+A stack may list tools that need the user's own answer — a confirmation the
+assistant must not give on the user's behalf — in its image label
+`org.medmcp.stack` (or its `stacks.d` manifest / entry-point config), next to
+`dataset_index`:
+
+```json
+{"name": "medmcp-example",
+ "requires_user_reply": ["confirm_selection"]}
+```
+
+Entries are plain identifiers (letters, digits, `_`; a letter first), at most 32.
+An entry that is not one is dropped, a value that is not a list is dropped whole,
+and both are logged; the stack installs either way.
+
+Such a tool is never covered by a plan's Go, is never a lookup, and is never
+offered (or covered by) "allow for the rest of this chat" — with plan first on or
+off. Its dialog says: the assistant must ask in the chat and quote the user's
+reply word for word; approve only if the quoted reply is yours. A plan step that
+names it is marked on the card, and the Go the agent receives tells it to ask the
+user first and quote the reply.
+
+## Turning it on without the UI
+
+The setting is the file `$VIBE_HOME/plan_first.json` — `/app/.vibe/plan_first.json`
+in the core image — holding `{"enabled": true}`. The environment variable
+`MEDMCP_PLAN_FIRST` overrides it: `1`/`true`/`yes`/`on` forces plan first on,
+`0`/`false`/`no`/`off` forces it off, unset or empty leaves the file in charge.
+Both compose files pass `MEDMCP_PLAN_FIRST` through to the core. Set it before the
+core starts (`docker run -e MEDMCP_PLAN_FIRST=1 …`): the core reads it at boot
+(to start its broker without the stack pool) and on every chat connection. While
+the variable forces a value, the drawer's switch cannot change it.
+
 ## "Approved" only on the core's Go
 
 The core provides one tool, `propose_plan`, from its own MCP server
@@ -124,7 +190,8 @@ A chat's run log (`run.jsonl`) records:
 - `{"event": "plan_decision", "plan_id", "decision": "go" | "change", "correction"}`;
 - on each tool call decided while plan first is on, `"plan"`:
   `{"plan_id", "step": n}` for a planned call, `{"plan_id", "off_plan": true}`
-  for a call outside the plan (`plan_id` null when no plan had been approved).
+  for a call outside the plan (`plan_id` null when no plan had been approved),
+  `{"plan_id", "lookup": true}` for a read-only lookup inside the plan's paths.
 
 The session report lists each plan with its answer and marks every call as a plan
 step or **not in the plan**. Distilled workflows leave the plan out.

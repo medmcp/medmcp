@@ -87,7 +87,13 @@ export interface PlanProposal {
   output_dir?: string
   estimated_time?: string
   questions?: string[]
+  /** Steps whose tool asks again after Go (index → why), from the core. */
+  asks?: Record<string, PlanStepAsk>
 }
+
+/** Why a step's call is put to the person even after Go: the stack declared its
+ *  tool destructive (MCP annotation) or as needing the user's own reply. */
+export type PlanStepAsk = 'destructive' | 'user_reply'
 
 /** Where a plan stands: waiting for Go/Change, approved, corrected, or neither. */
 export type PlanDecisionState = 'pending' | 'approved' | 'changed' | 'cancelled'
@@ -113,6 +119,9 @@ export interface PermissionRequest {
   paths?: PathFinding[]
   /** Plan first: whether this call is in the approved plan (null when off). */
   plan?: PlanNote | null
+  /** Set when the stack declares the tool needs the user's own reply: what the
+   *  dialog says about it. */
+  userReply?: string | null
 }
 
 /** One prior chat session, as served by GET /api/sessions. */
@@ -434,9 +443,16 @@ export type ServerFrame =
       risks?: RiskTag[]
       paths?: PathFinding[]
       plan?: PlanNote | null
+      userReply?: string | null
     }
   /** Plan first: a proposed plan waiting for Go or Change. */
-  | { type: 'plan_request'; requestId: number; toolCallId: string; plan: PlanProposal }
+  | {
+      type: 'plan_request'
+      requestId: number
+      toolCallId: string
+      plan: PlanProposal
+      asks?: Record<string, PlanStepAsk>
+    }
   | { type: 'plan_status'; planId: string; status: 'approved' | 'changed' | 'cancelled' }
   | {
       type: 'plan_progress'

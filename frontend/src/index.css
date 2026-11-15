@@ -4625,6 +4625,13 @@ textarea.wf-input {
   overflow-wrap: anywhere;
 }
 
+/* A step whose call is put to the person again after Go. */
+.plan-asks {
+  display: block;
+  font-size: 11px;
+  color: var(--warn);
+}
+
 .plan-failed .plan-mark {
   color: var(--red-tint);
 }
@@ -4681,6 +4688,13 @@ textarea.wf-input {
 }
 
 .approval-offplan {
+  color: var(--warn);
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+}
+
+/* A tool the stack says needs the person's own reply: answered call by call. */
+.approval-userreply {
   color: var(--warn);
   background: rgba(251, 191, 36, 0.08);
   border: 1px solid rgba(251, 191, 36, 0.3);

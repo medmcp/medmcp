@@ -1,5 +1,11 @@
 import { memo, useState } from 'react'
-import type { PlanDecisionState, PlanProposal, PlanStepStatus } from '../types'
+import type { PlanDecisionState, PlanProposal, PlanStepAsk, PlanStepStatus } from '../types'
+
+/** What the card says about a step that asks again after Go. */
+const ASK_LABEL: Record<PlanStepAsk, string> = {
+  destructive: 'asks again: can delete or overwrite data',
+  user_reply: 'asks again: needs your own reply',
+}
 
 const STEP_MARK: Record<PlanStepStatus | 'pending', string> = {
   completed: '✓',
@@ -105,6 +111,9 @@ export const PlanProposalCard = memo(function PlanProposalCard({
                 )}
                 {s.outputs && s.outputs.length > 0 && (
                   <span className="plan-io">→ {s.outputs.join(', ')}</span>
+                )}
+                {plan.asks?.[String(i)] && (
+                  <span className="plan-asks">{ASK_LABEL[plan.asks[String(i)]]}</span>
                 )}
               </span>
             </li>

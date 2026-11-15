@@ -394,14 +394,15 @@ function PermissionCard({
       {perm.plan &&
         (perm.plan.inPlan ? (
           <div className="approval-plan approval-inplan">
-            Step {(perm.plan.step ?? 0) + 1} of the plan you approved — shown because it needs a
-            look.
+            Step {(perm.plan.step ?? 0) + 1} of the plan you approved —{' '}
+            {perm.plan.reason || 'shown because it needs a look.'}
           </div>
         ) : (
           <div className="approval-plan approval-offplan">
             <strong>Not in the plan.</strong> {perm.plan.reason}
           </div>
         ))}
+      {perm.userReply && <div className="approval-plan approval-userreply">{perm.userReply}</div>}
       {perm.explanation ? (
         <div className="approval-explanation">{perm.explanation}</div>
       ) : perm.explaining ? (
@@ -701,7 +702,10 @@ export const Chat = memo(function Chat({
         case 'plan_request':
           pendingPlanId = frame.toolCallId
           setPlanRequest({ requestId: frame.requestId, planId: frame.toolCallId })
-          setPlanProposals((p) => ({ ...p, [frame.toolCallId]: frame.plan }))
+          setPlanProposals((p) => ({
+            ...p,
+            [frame.toolCallId]: { ...frame.plan, asks: frame.asks ?? frame.plan.asks },
+          }))
           setPlanStates((p) => ({ ...p, [frame.toolCallId]: 'pending' }))
           break
         case 'plan_status':
@@ -730,6 +734,7 @@ export const Chat = memo(function Chat({
             risks: frame.risks,
             paths: frame.paths,
             plan: frame.plan,
+            userReply: frame.userReply,
           })
           break
         case 'permission_update':

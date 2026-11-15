@@ -182,6 +182,8 @@ class _PlanVerdict:
     verdict: str
     problems: list[str] = field(default_factory=lambda: cast("list[str]", []))
     on_take: Callable[[], None] | None = None
+    # The steps that ask again after Go (index → kind; see medmcp.plan.ToolHints).
+    asks: dict[int, str] = field(default_factory=lambda: cast("dict[int, str]", {}))
 
 
 _plan_verdicts: dict[str, list[_PlanVerdict]] = {}
@@ -216,7 +218,11 @@ def _plan_verdict_op(req: JsonDict) -> JsonDict:
         _plan_verdicts[key] = live
     if verdict.on_take is not None:
         verdict.on_take()
-    return {"verdict": verdict.verdict, "problems": verdict.problems}
+    return {
+        "verdict": verdict.verdict,
+        "problems": verdict.problems,
+        "asks": {str(i): kind for i, kind in verdict.asks.items()},
+    }
 
 
 def _core_ops() -> dict[str, Callable[[JsonDict], JsonDict]]:
@@ -349,7 +355,11 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     if settings.stack_pool_enabled():
         # Proxy children read MEDMCP_WORKSPACE for their fallback cwd; export it.
         os.environ.setdefault("MEDMCP_WORKSPACE", str(WORKSPACE_ROOT))
-        _pool = BackendPool(resolve_spec=_resolve_backend_spec, cwd=str(WORKSPACE_ROOT))
+        _pool = BackendPool(
+            resolve_spec=_resolve_backend_spec,
+            cwd=str(WORKSPACE_ROOT),
+            annotation_cache=settings.VIBE_STATE_DIR / "tool_annotations.json",
+        )
         if settings.stack_jobs_enabled():
             _jobs = jobs.JobManager(
                 workspace=str(WORKSPACE_ROOT),
@@ -2702,8 +2712,10 @@ async def delete_job(job_id: str) -> JsonDict:
 #     {"type": "permission_update", "requestId": int,
 #      "explanation": str | None, "risks": [...]}
 #       (a permission_request also carries "plan": {"inPlan": bool, "planId": str | None,
-#        "step": int | None, "reason": str} while plan-first is on)
-#     {"type": "plan_request", "requestId": int, "toolCallId": str, "plan": {...}}
+#        "step": int | None, "reason": str} while plan-first is on, and "userReply":
+#        str | None — set for a tool the stack lists under requires_user_reply)
+#     {"type": "plan_request", "requestId": int, "toolCallId": str, "plan": {...},
+#      "asks": {"<step index>": "destructive" | "user_reply"}}
 #     {"type": "plan_status", "planId": str, "status": "approved" | "changed" | "cancelled"}
 #     {"type": "plan_progress", "planId": str, "step": int, "toolCallId": str,
 #      "status": "running" | "completed" | "failed"}
@@ -3249,6 +3261,9 @@ class _ChatConnection:
         self._plan_awaiting_tool: planfirst.Plan | None = None
         self._pending_plans: dict[int, planfirst.Plan] = {}
         self._plan_calls: dict[str, tuple[str, int | None]] = {}
+        # Tools each stack lists under requires_user_reply (see medmcp.plan): never
+        # covered by a plan's Go nor by "for the rest of this chat".
+        self._user_reply_tools = planfirst.user_reply_tools(servers)
         self._prompt_task: asyncio.Task[None] | None = None
         # The session/prompt RPC of the current turn. It outlives a cancelled
         # prompt task: vibe-acp ends the turn only after it handles session/cancel,
@@ -3957,20 +3972,57 @@ class _ChatConnection:
         # needs a look (an overwrite, a path outside the workspace) or runs code the
         # assistant wrote. Every other call is put to the person, marked as not in
         # the plan.
+        # What the stack declared about this tool (MCP annotations from its tool
+        # list, requires_user_reply from its label): hints never seen change nothing.
+        hints = self._tool_hints(stack, tool)
+        external = any(s.get("name") == stack and s.get("url") for s in self.servers)
         plan_note: JsonDict | None = None
         if self._plan_first:
             step = self._plan_step_for(stack, tool, tool_call)
             covered = step is not None and "assistant_code" not in rule_keys
             plan_id = self._plan.id if self._plan is not None else None
+            offered = {o.get("optionId") for o in options}
+            asks = hints.always_asks
             if covered and plan_id is not None and step is not None:
                 self._note_plan_call(tc_id, cached, plan_id, step)
-                offered = {o.get("optionId") for o in options}
-                if not _call_needs_a_look(rule_keys, path_findings) and "allow_once" in offered:
+                if (
+                    not asks
+                    and not _call_needs_a_look(rule_keys, path_findings)
+                    and "allow_once" in offered
+                ):
                     _audit.info("permission covered by the approved plan: %s", title)
                     await self._resolve_permission(req_id_raw, title, cached, "allow_once")
                     await self._send_plan_progress(tc_id, "running")
                     return
-                plan_note = {"inPlan": True, "planId": plan_id, "step": step, "reason": ""}
+                if asks:
+                    _audit.info("plan step asks anyway (%s): %s", asks, title)
+                plan_note = {
+                    "inPlan": True,
+                    "planId": plan_id,
+                    "step": step,
+                    "reason": planfirst.ASK_REASONS.get(asks, ""),
+                }
+            elif (
+                self._plan is not None
+                and plan_id is not None
+                and stack != "builtin"
+                and not external
+                and hints.lookup
+                and "assistant_code" not in rule_keys
+                and not _call_needs_a_look(rule_keys, path_findings)
+                and "allow_once" in offered
+                and planfirst.lookup_fits_plan(
+                    self._plan,
+                    pathcheck.coerce_arguments(tool_call.get("rawInput")),
+                    WORKSPACE_ROOT,
+                )
+            ):
+                # A lookup (read-only by the stack's own annotation) inside the
+                # plan's paths: it reads what the plan already shows, writes nothing.
+                self._note_plan_call(tc_id, cached, plan_id, None, lookup=True)
+                _audit.info("read-only lookup inside the approved plan: %s", title)
+                await self._resolve_permission(req_id_raw, title, cached, "allow_once")
+                return
             else:
                 self._note_plan_call(tc_id, cached, plan_id, None)
                 plan_note = {
@@ -3991,9 +4043,15 @@ class _ChatConnection:
         # The plan tool never: its "approved" is the core's Go on its card, nothing else.
         # Not for an external server: each call sends data off the premises, and
         # its arguments carry no paths that would bring the dialog back.
-        external = any(s.get("name") == stack and s.get("url") for s in self.servers)
         plan_tool = stack == planfirst.PLAN_SERVER or planfirst.is_plan_tool(f"{stack}_{tool}")
-        if stack != "builtin" and not external and not plan_tool and _stack_tool_approval_enabled():
+        # Nor a tool that needs the user's own reply: each call is answered on its own.
+        if (
+            stack != "builtin"
+            and not external
+            and not plan_tool
+            and not hints.user_reply
+            and _stack_tool_approval_enabled()
+        ):
             needs_look = _call_needs_a_look(rule_keys, path_findings)
             offered = {o.get("optionId") for o in options}
             off_plan = plan_note is not None and not plan_note["inPlan"] and self._plan is not None
@@ -4032,6 +4090,7 @@ class _ChatConnection:
                 "risks": explain.resolve_risks(_merge_keys(rule_keys, risk_keys)),
                 "paths": path_findings,
                 "plan": plan_note,
+                "userReply": planfirst.USER_REPLY_NOTE if hints.user_reply else None,
             }
         )
         if explaining:
@@ -4066,7 +4125,7 @@ class _ChatConnection:
             option_id = None
         if option_id == _SESSION_APPROVE_OPTION:
             self._read_only_granted = True
-        if option_id == _STACK_TOOL_CHAT_OPTION and plan_tool:
+        if option_id == _STACK_TOOL_CHAT_OPTION and (plan_tool or hints.user_reply):
             option_id = "allow_once"  # never offered for it; never a grant either
         elif option_id == _STACK_TOOL_CHAT_OPTION:
             # vibe never sees MedMCP's own option: it is answered for this call only.
@@ -4092,14 +4151,67 @@ class _ChatConnection:
         args = pathcheck.coerce_arguments(tool_call.get("rawInput"))
         return planfirst.match_call(approved, stack, tool, args, WORKSPACE_ROOT)
 
+    def _tool_hints(self, stack: str, tool: str) -> planfirst.ToolHints:
+        """What *stack* declared about *tool*: its MCP annotations and requires_user_reply.
+
+        The annotations are the ones the stack pool kept from the stack's last tool
+        list (never warming it); without the pool, or before the stack was listed,
+        there are none and the tool is treated as unannotated.
+        """
+        if stack == "builtin" or not tool:
+            return planfirst.ToolHints()
+        annotations = None
+        if _pool is not None:
+            annotations = (_pool.known_annotations(stack) or {}).get(tool)
+        return planfirst.ToolHints.from_annotations(
+            annotations, user_reply=tool in self._user_reply_tools.get(stack, frozenset())
+        )
+
+    def _plan_step_asks(self, proposal: planfirst.Plan) -> dict[int, str]:
+        """The steps of *proposal* whose tool asks again even after Go, by index.
+
+        A step's tool is matched against every active stack's tools the core has
+        hints for (requires_user_reply, or annotations the pool kept).
+        """
+        candidates: set[tuple[str, str]] = set()
+        for server in self.servers:
+            name = str(server.get("name") or "")
+            if not name:
+                continue
+            candidates.update((name, t) for t in self._user_reply_tools.get(name, frozenset()))
+            if _pool is not None:
+                candidates.update((name, t) for t in _pool.known_annotations(name) or {})
+        asks: dict[int, str] = {}
+        for index, step in enumerate(proposal.steps):
+            if not step.tool:
+                continue
+            for stack, tool in sorted(candidates):
+                if planfirst.step_names_tool(step.tool, stack, tool):
+                    kind = self._tool_hints(stack, tool).always_asks
+                    if kind:
+                        asks[index] = kind
+                        break
+        return asks
+
     def _note_plan_call(
-        self, tc_id: str, cached: JsonDict, plan_id: str | None, step: int | None
+        self,
+        tc_id: str,
+        cached: JsonDict,
+        plan_id: str | None,
+        step: int | None,
+        *,
+        lookup: bool = False,
     ) -> None:
-        """Remember (and mark for provenance) which step of which plan a call is."""
+        """Remember (and mark for provenance) which step of which plan a call is.
+
+        A *lookup* is a read-only call inside the plan's paths that no step names.
+        """
         if tc_id:
             self._plan_calls[tc_id] = (plan_id or "", step)
         record: JsonDict = {"plan_id": plan_id}
-        if step is None:
+        if lookup:
+            record["lookup"] = True
+        elif step is None:
             record["off_plan"] = True
         else:
             record["step"] = step + 1
@@ -4177,12 +4289,15 @@ class _ChatConnection:
         fut: asyncio.Future[str | None] = loop.create_future()
         self._pending_perms[req_id] = fut
         self._pending_plans[req_id] = proposal
+        asks = self._plan_step_asks(proposal)
         await self._send(
             {
                 "type": "plan_request",
                 "requestId": req_id,
                 "toolCallId": tc_id,
                 "plan": proposal.to_json(),
+                # Steps that will ask again after Go (index → kind, see medmcp.plan).
+                "asks": {str(i): kind for i, kind in asks.items()},
             }
         )
         try:
@@ -4207,6 +4322,7 @@ class _ChatConnection:
                     time.monotonic(),
                     planfirst.VERDICT_GO,
                     on_take=partial(self._put_plan_in_force, proposal),
+                    asks=asks,
                 ),
             )
             option: str | None = allow

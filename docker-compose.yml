@@ -153,6 +153,9 @@ services:
       # warm across calls and hides pool-machinery tools (warmup) from the model.
       # 1/true to enable; empty = off (legacy per-call spawn).
       MEDMCP_STACK_POOL: "${MEDMCP_STACK_POOL:-}"
+      # Plan first (docs/plan-first.md): 1 forces it on, 0 off; empty = the
+      # setting saved from the drawer (off by default).
+      MEDMCP_PLAN_FIRST: "${MEDMCP_PLAN_FIRST:-}"
       # Background jobs: a stack tool that declares one (an nnU-Net training)
       # runs in its own container, which outlives the chat and the pool. 0 turns
       # them off; MEDMCP_MAX_JOBS is how many may run at once (default 1).

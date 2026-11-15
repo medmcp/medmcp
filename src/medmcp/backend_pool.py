@@ -37,11 +37,14 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 import mcp.types as mcp_types
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+from medmcp.statefile import atomic_write_json, read_json
 
 log: logging.Logger = logging.getLogger(__name__)
 
@@ -51,6 +54,30 @@ JsonDict = dict[str, Any]
 # it load heavy resources (model weights, CUDA context) at pre-warm time rather
 # than on the first real call. Unmodified stacks simply don't expose it.
 WARMUP_TOOL: str = "warmup"
+
+# The standard MCP tool annotations (``Tool.annotations`` in tools/list) the pool
+# keeps per tool: hints a stack gives about what a tool does. Only explicit
+# booleans are kept; an absent hint stays absent (see :meth:`BackendPool.known_annotations`).
+ANNOTATION_HINTS: tuple[str, ...] = (
+    "readOnlyHint",
+    "destructiveHint",
+    "idempotentHint",
+    "openWorldHint",
+)
+
+
+def tool_hints(tool: mcp_types.Tool) -> dict[str, bool]:
+    """The explicit boolean annotation hints *tool* declares (absent ones left out)."""
+    annotations = tool.annotations
+    if annotations is None:
+        return {}
+    out: dict[str, bool] = {}
+    for hint in ANNOTATION_HINTS:
+        value = getattr(annotations, hint, None)
+        if isinstance(value, bool):
+            out[hint] = value
+    return out
+
 
 # How often the idle reaper sweeps for TTL-expired / dead backends.
 _REAPER_INTERVAL_SEC: float = 15.0
@@ -287,6 +314,7 @@ class BackendPool:
         max_warm_gpu: int = 1,
         cwd: str | None = None,
         reaper_interval_sec: float = _REAPER_INTERVAL_SEC,
+        annotation_cache: Path | None = None,
     ) -> None:
         """Create an empty pool.
 
@@ -298,8 +326,14 @@ class BackendPool:
                 Clamped to at least 1.
             cwd: Working directory passed to every backend (the workspace root).
             reaper_interval_sec: How often the idle reaper sweeps.
+            annotation_cache: A JSON file that keeps each stack's tool annotations
+                across restarts; see :meth:`known_annotations`.
         """
         self._resolve = resolve_spec
+        self._annotation_cache = annotation_cache
+        # Each stack's tool annotations as last listed, kept after its backend is
+        # reaped: the approval flow reads them without warming the stack.
+        self._annotations: dict[str, dict[str, dict[str, bool]]] = self._load_annotations()
         self._max_warm_gpu = max(1, max_warm_gpu)
         self._cwd = cwd
         self._reaper_interval = reaper_interval_sec
@@ -360,7 +394,49 @@ class BackendPool:
     async def list_tools(self, name: str) -> list[mcp_types.Tool]:
         """Return the tools advertised by stack *name*, warming it if needed."""
         backend = await self.ensure(name)
-        return await backend.list_tools()
+        tools = await backend.list_tools()
+        self._remember(name, tools)
+        return tools
+
+    def known_annotations(self, name: str) -> dict[str, dict[str, bool]] | None:
+        """Stack *name*'s tool annotations as last listed (tool → hints), never warming it.
+
+        Each tool maps to the hints it declared explicitly (``readOnlyHint`` …, see
+        :data:`ANNOTATION_HINTS`); a tool that declared none maps to ``{}``.
+        ``None`` when the pool has never listed the stack's tools. Survives the
+        backend's eviction and, with an ``annotation_cache`` file, a restart.
+        """
+        known = self._annotations.get(name)
+        return {tool: dict(hints) for tool, hints in known.items()} if known is not None else None
+
+    def _remember(self, name: str, tools: list[mcp_types.Tool]) -> None:
+        listed = {t.name: tool_hints(t) for t in tools if t.name != WARMUP_TOOL}
+        if self._annotations.get(name) == listed:
+            return
+        self._annotations[name] = listed
+        if self._annotation_cache is not None:
+            try:
+                atomic_write_json(self._annotation_cache, cast("JsonDict", self._annotations))
+            except OSError as exc:
+                log.debug("could not write the tool annotation cache: %s", exc)
+
+    def _load_annotations(self) -> dict[str, dict[str, dict[str, bool]]]:
+        cache = self._annotation_cache
+        data = read_json(cache) if cache is not None else None
+        out: dict[str, dict[str, dict[str, bool]]] = {}
+        for stack, tools in (data or {}).items():
+            if not isinstance(tools, dict):
+                continue
+            out[str(stack)] = {
+                str(tool): {
+                    k: v
+                    for k, v in cast("JsonDict", hints).items()
+                    if k in ANNOTATION_HINTS and isinstance(v, bool)
+                }
+                for tool, hints in cast("JsonDict", tools).items()
+                if isinstance(hints, dict)
+            }
+        return out
 
     async def prewarm(self, names: Iterable[str]) -> dict[str, str | None]:
         """Warm each named stack now (activation hook); never raises.
@@ -438,6 +514,7 @@ class BackendPool:
         except Exception as exc:
             log.debug("warmup tool-list for %s failed: %s", backend.spec.name, exc)
             return
+        self._remember(backend.spec.name, tools)
         if any(t.name == WARMUP_TOOL for t in tools):
             try:
                 await backend.call(WARMUP_TOOL, {})

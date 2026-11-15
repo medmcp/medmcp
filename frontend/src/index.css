@@ -501,6 +501,29 @@ button:hover {
   font-variant-numeric: tabular-nums;
 }
 
+/* An explorer message with its dismiss button; a failed upload lists each file. */
+.panel-notice,
+.panel-error-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.panel-notice {
+  color: var(--ok);
+}
+
+.panel-error-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  max-height: 140px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
 /* A desktop file drag is over the explorer: outline the drop area. */
 .panel-body.drop-target {
   outline: 2px dashed var(--blue-l);

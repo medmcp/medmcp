@@ -22,6 +22,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Provenance: a chat's record names each stack's image digest and the MedMCP version.
 - Stacks: background jobs. A stack can declare a job runner in its image label; an approved call of one of its job tools (an nnU-Net training) then runs in its own container, which keeps running when the chat is idle or closed, when another GPU stack is used and when MedMCP restarts. One job at a time by default (`MEDMCP_MAX_JOBS`); `MEDMCP_STACK_JOBS=0` turns jobs off.
 - Jobs: `/api/jobs` lists, shows and stops them; the Tool stacks window shows running jobs with a Stop button; a job's start, image and arguments are recorded in the provenance of the chat that approved it.
+- Explorer: a `.zip` chosen with Upload (or dropped on the file list) can be unpacked on the server: the explorer asks "Unpack here?", and "Keep as .zip" uploads the archive as before. This is the way in when the browser hands over no files from a folder (snap or flatpak Firefox through the desktop portal). Every entry is checked before anything is written: absolute paths, `..`, links, device files and encrypted entries are refused, and so is an archive over 100,000 files or 64 GB unpacked, with the reason (`POST /api/files/upload-zip`).
 
 ### Changed
 
@@ -52,6 +53,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Explorer: the file list opens at once on a large workspace. It loads one folder at a time (`GET /api/tree/dir`) instead of walking the whole workspace first, and after a change refreshes only the folders it touched. A folder lists up to 5,000 entries (it was 500) and ends with a line saying how many more there are.
 - Explorer: the first click on a folder opens it; it was lost because every row was rebuilt between mouse down and mouse up.
 - Explorer: New folder works when the selected folder has been scrolled out of view: the name field is scrolled into view at the top of that folder. Before, nothing appeared and no folder was made.
+- Explorer: a failed upload names each file with the server's reason (e.g. "a link with that name exists") instead of only a count, and the message stays until dismissed; it was cleared by the refresh that followed. A folder pick or drop that arrives without any files says so and suggests a .zip.
 
 ### Security
 

@@ -135,32 +135,67 @@ export interface UploadItem {
   dir: string
 }
 
+/** A file that did not upload, and the server's (or the network's) reason. */
+export interface UploadFailure {
+  path: string
+  reason: string
+}
+
 /**
  * Upload several files, a few requests at a time; `onProgress` reports files
- * done so far. Resolves to the failure count. Each item names its own target
- * folder, so a dropped or picked folder tree is recreated by the caller.
+ * done so far. Resolves to the files that failed, each with its reason. Each
+ * item names its own target folder, so a dropped or picked folder tree is
+ * recreated by the caller.
  */
 export async function uploadFiles(
   items: UploadItem[],
   onProgress: (done: number, total: number) => void,
-): Promise<number> {
+): Promise<UploadFailure[]> {
   let next = 0
   let done = 0
-  let failed = 0
+  const failures: UploadFailure[] = []
   const worker = async () => {
     while (next < items.length) {
       const item = items[next++]
       if (!item) continue
       try {
         await uploadFile(item.file, item.dir)
-      } catch {
-        failed++
+      } catch (e) {
+        failures.push({
+          path: item.dir ? `${item.dir}/${item.file.name}` : item.file.name,
+          // A dropped connection rejects fetch with a TypeError ("Failed to fetch").
+          reason:
+            e instanceof TypeError
+              ? 'the connection to the server failed'
+              : e instanceof Error
+                ? e.message
+                : String(e),
+        })
       }
       onProgress(++done, items.length)
     }
   }
   await Promise.all(Array.from({ length: Math.min(4, items.length) }, worker))
-  return failed
+  return failures
+}
+
+/** What the server unpacked from an uploaded zip. */
+export interface ZipResult {
+  path: string
+  files: number
+  dirs: number
+  bytes: number
+}
+
+/** Upload a .zip that the server checks and unpacks into `dir` ("" = root). */
+export async function uploadZip(file: File, dir: string): Promise<ZipResult> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch(`/api/files/upload-zip?dir=${encodeURIComponent(dir)}`, {
+    method: 'POST',
+    body: form,
+  })
+  return (await (await check(res)).json()) as ZipResult
 }
 
 /** Start a browser download of a file, or of a folder as a .zip. */

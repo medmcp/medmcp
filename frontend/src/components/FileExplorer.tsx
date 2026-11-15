@@ -5,8 +5,16 @@ import { createPortal } from 'react-dom'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { Tree } from 'react-arborist'
 import type { NodeApi, NodeRendererProps, TreeApi } from 'react-arborist'
-import { deletePath, downloadPath, fetchDir, mkdir, renamePath, uploadFiles } from '../api'
-import type { DirListing, UploadItem } from '../api'
+import {
+  deletePath,
+  downloadPath,
+  fetchDir,
+  mkdir,
+  renamePath,
+  uploadFiles,
+  uploadZip,
+} from '../api'
+import type { DirListing, UploadFailure, UploadItem } from '../api'
 import { setDraggedFilePath } from '../dragState'
 import { classify } from '../fileKinds'
 import { DRAG_PATH_MIME, type TreeNode } from '../types'
@@ -21,6 +29,7 @@ import {
   TableIcon,
   RefreshIcon,
   UploadIcon,
+  XIcon,
 } from './icons'
 
 interface FileExplorerProps {
@@ -39,6 +48,7 @@ function parentDir(path: string): string {
 }
 
 function joinPath(dir: string, name: string): string {
+  if (!name) return dir
   return dir ? `${dir}/${name}` : name
 }
 
@@ -49,6 +59,24 @@ function pickedItems(list: FileList | null, dir: string): UploadItem[] {
     const sub = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : ''
     return { file, dir: joinPath(dir, sub) }
   })
+}
+
+function isZip(name: string): boolean {
+  return name.toLowerCase().endsWith('.zip')
+}
+
+/** Said when a folder pick or drop arrives without a single file. */
+const NO_FILES_HINT =
+  'The browser handed over no files from that folder (a sandboxed browser, such as ' +
+  'snap or flatpak Firefox, may do this). Pack the folder as a .zip and upload that: ' +
+  'it is unpacked here.'
+
+/** A failure to show, with per-file reasons when there are several. */
+interface ExplorerError {
+  message: string
+  details?: string[]
+  /** Reported by a failed tree load; the next working load clears it. */
+  fromLoad?: boolean
 }
 
 /** Whether a drag carries files from outside the browser (not one of our own rows). */
@@ -343,13 +371,11 @@ export const FileExplorer = memo(function FileExplorer({
   }, [data])
   const [rootLoaded, setRootLoaded] = useState(false)
   const [loading, setLoading] = useState<ReadonlySet<string>>(new Set())
-  // `fromLoad`: reported by a failed listing; the next working one clears it.
-  const [errorState, setErrorState] = useState<{ message: string; fromLoad?: boolean } | null>(
-    null,
-  )
-  const error = errorState?.message ?? null
-  const setError = (message: string | null) =>
-    setErrorState(message === null ? null : { message })
+  const [error, setErrorState] = useState<ExplorerError | null>(null)
+  const setError = (message: string | null, details?: string[]) =>
+    setErrorState(message === null ? null : { message, details })
+  // What the last zip upload unpacked; shown until dismissed or the next upload.
+  const [notice, setNotice] = useState<string | null>(null)
   const [size, setSize] = useState({ width: 280, height: 400 })
   // The context menu: for a row, or for the empty space (node null) as file managers have it.
   const [menu, setMenu] = useState<{ x: number; y: number; node: NodeApi<TreeNode> | null } | null>(
@@ -363,7 +389,12 @@ export const FileExplorer = memo(function FileExplorer({
   const newFolderParent = useRef('')
   // Bumped to name a freshly inserted new-folder row once it is rendered.
   const [pendingEdit, setPendingEdit] = useState(0)
-  const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null)
+  // `unpacking`: the zip the server is receiving and unpacking.
+  const [uploading, setUploading] = useState<{
+    done: number
+    total: number
+    unpacking?: string
+  } | null>(null)
   // Folder a desktop drag currently hovering the tree would upload into; null when none.
   const [dropDir, setDropDir] = useState<string | null>(null)
   // Read inside the mount-once observer effect without re-subscribing.
@@ -507,9 +538,9 @@ export const FileExplorer = memo(function FileExplorer({
    * the tree has loaded it, else its nearest loaded parent (which gains the new
    * subfolder). Folders not loaded yet are fetched when they are opened.
    */
-  const uploadedDirs = (items: UploadItem[]): string[] => {
+  const uploadedDirs = (targets: string[]): string[] => {
     const dirs = new Set<string>()
-    for (const dir of new Set(items.map((i) => i.dir))) {
+    for (const dir of new Set(targets)) {
       let d = dir
       while (d && !findNode(dataRef.current, d)?.loaded) d = parentDir(d)
       dirs.add(d)
@@ -517,18 +548,72 @@ export const FileExplorer = memo(function FileExplorer({
     return [...dirs]
   }
 
-  const startUpload = (items: UploadItem[]) => {
+  /**
+   * Upload `items` into `dir`. With `offerUnpack`, a .zip picked or dropped
+   * there itself (not one inside a picked folder) can instead be unpacked on
+   * the server; the person is asked, and declining uploads the .zip as it is.
+   */
+  const startUpload = async (items: UploadItem[], dir: string, offerUnpack: boolean) => {
     if (items.length === 0) return
+    let zips = offerUnpack ? items.filter((i) => i.dir === dir && isZip(i.file.name)) : []
+    if (zips.length > 0) {
+      const what = zips.length === 1 ? (zips[0]?.file.name ?? '') : `${zips.length} zip archives`
+      const unpack = await confirmDialog(`Unpack ${what} here?`, {
+        body:
+          `The server checks every entry and unpacks into ${dir ? `${dir}/` : 'the workspace'}. ` +
+          '"Keep as .zip" uploads the archive file itself.',
+        action: 'Unpack',
+        cancel: 'Keep as .zip',
+        tone: 'primary',
+      })
+      if (!unpack) zips = []
+    }
+    const files = items.filter((i) => !zips.includes(i))
+    const total = items.length
     setError(null)
-    setUploading({ done: 0, total: items.length })
-    void uploadFiles(items, (done, total) => setUploading({ done, total }))
-      .then((failed) => {
-        if (failed > 0) setError(`failed to upload ${failed} of ${items.length} file(s)`)
-      })
-      .finally(() => {
-        setUploading(null)
-        void loadDirs(uploadedDirs(items))
-      })
+    setNotice(null)
+    setUploading({ done: 0, total })
+    const failures: UploadFailure[] = await uploadFiles(files, (done) =>
+      setUploading({ done, total }),
+    )
+    const unpacked: string[] = []
+    for (const [n, { file }] of zips.entries()) {
+      setUploading({ done: files.length + n, total, unpacking: file.name })
+      try {
+        const res = await uploadZip(file, dir)
+        unpacked.push(`${res.files} file(s) from ${file.name}`)
+      } catch (e) {
+        failures.push({
+          path: joinPath(dir, file.name),
+          reason: `not unpacked: ${e instanceof Error ? e.message : String(e)}`,
+        })
+      }
+    }
+    setUploading(null)
+    if (unpacked.length > 0) {
+      setNotice(`Unpacked ${unpacked.join(', ')} into ${dir ? `${dir}/` : 'the workspace'}.`)
+    }
+    const [only] = failures
+    if (failures.length === 1 && only) {
+      setError(`${only.path}: ${only.reason}`)
+    } else if (failures.length > 1) {
+      setError(
+        `${failures.length} of ${total} file(s) did not upload:`,
+        failures.map((f) => `${f.path}: ${f.reason}`),
+      )
+    }
+    // Only the folders the upload touched; an unpacked zip changed its target.
+    void loadDirs(uploadedDirs([...items.map((i) => i.dir), ...(zips.length > 0 ? [dir] : [])]))
+  }
+
+  /** Files from a picker; a folder pick that hands over nothing says so. */
+  const onPicked = (list: FileList | null, fromFolder: boolean) => {
+    const items = pickedItems(list, pickDir.current)
+    if (items.length === 0) {
+      if (fromFolder) setError(NO_FILES_HINT)
+      return
+    }
+    void startUpload(items, pickDir.current, !fromFolder)
   }
 
   // Files and folders dragged in from the desktop. A picker cannot offer files
@@ -554,7 +639,12 @@ export const FileExplorer = memo(function FileExplorer({
     // Both must be read now, synchronously: the DataTransfer is emptied after the event.
     const entries = Array.from(e.dataTransfer.items).map((item) => item.webkitGetAsEntry())
     const files = Array.from(e.dataTransfer.files)
-    void droppedItems(entries, files, dir).then(startUpload)
+    void droppedItems(entries, files, dir)
+      .then((items) => {
+        if (items.length === 0 && (entries.length > 0 || files.length > 0)) setError(NO_FILES_HINT)
+        else void startUpload(items, dir, true)
+      })
+      .catch((e: unknown) => setError(`could not read the dropped items: ${String(e)}`))
   }
 
   // Delete one or more paths: drop them from the tree immediately so they vanish
@@ -707,7 +797,7 @@ export const FileExplorer = memo(function FileExplorer({
           multiple
           hidden
           onChange={(e) => {
-            startUpload(pickedItems(e.target.files, pickDir.current))
+            onPicked(e.target.files, false)
             e.target.value = ''
           }}
         />
@@ -716,14 +806,16 @@ export const FileExplorer = memo(function FileExplorer({
           type="file"
           hidden
           onChange={(e) => {
-            startUpload(pickedItems(e.target.files, pickDir.current))
+            onPicked(e.target.files, true)
             e.target.value = ''
           }}
         />
       </div>
       {uploading ? (
         <div className="panel-status" role="status">
-          Uploading {uploading.done} of {uploading.total} file(s)…
+          {uploading.unpacking
+            ? `Uploading ${uploading.unpacking} and unpacking it on the server…`
+            : `Uploading ${uploading.done} of ${uploading.total} file(s)…`}
         </div>
       ) : (
         dropDir !== null && (
@@ -732,7 +824,32 @@ export const FileExplorer = memo(function FileExplorer({
           </div>
         )
       )}
-      {error && <div className="panel-error">{error}</div>}
+      {notice && !uploading && (
+        <div className="panel-status panel-notice" role="status">
+          <span>{notice}</span>
+          <button className="btn-icon" aria-label="Dismiss" onClick={() => setNotice(null)}>
+            <XIcon size={12} />
+          </button>
+        </div>
+      )}
+      {error && (
+        <div className="panel-error" role="alert">
+          <div className="panel-error-head">
+            <span>{error.message}</span>
+            <button className="btn-icon" aria-label="Dismiss" onClick={() => setErrorState(null)}>
+              <XIcon size={12} />
+            </button>
+          </div>
+          {error.details && error.details.length > 0 && (
+            <ul className="panel-error-list">
+              {error.details.slice(0, 8).map((d) => (
+                <li key={d}>{d}</li>
+              ))}
+              {error.details.length > 8 && <li>… and {error.details.length - 8} more</li>}
+            </ul>
+          )}
+        </div>
+      )}
       <div
         className={`panel-body${dropDir !== null ? ' drop-target' : ''}`}
         ref={containerRef}

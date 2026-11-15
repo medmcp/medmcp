@@ -100,7 +100,7 @@ from medmcp import (
     workflow,
 )
 from medmcp.acp import PROJECT_ROOT, JsonDict, VibeAcpClient
-from medmcp.backend_broker import BackendBroker
+from medmcp.backend_broker import BackendBroker, CoreOp
 from medmcp.backend_pool import BackendPool, BackendSpec
 from medmcp.reasoning import ThoughtStripper
 from medmcp.workspace_note import (
@@ -166,6 +166,9 @@ _approvals: approvals.ApprovalLedger = approvals.ApprovalLedger()
 # Background jobs (see ``jobs.py``): containers the core starts for an approved
 # stack call and leaves running. None when stacks cannot run jobs here.
 _jobs: jobs.JobManager | None = None
+# Ops the broker answers from this process for the agent-side helpers (the path
+# guard, the LLM shim); each handler registers itself where it is defined.
+_core_ops: dict[str, CoreOp] = {}
 
 
 def _active_server(name: str) -> JsonDict | None:
@@ -201,6 +204,36 @@ async def _after_stack_call(
         return result
     session = approval.session if isinstance(approval, approvals.Approval) else ""
     return await jobs.after_call(_jobs, stack, tool, args, session, result, _record_job)
+
+
+def _tool_schema_op(req: JsonDict) -> JsonDict:
+    """Broker op ``tool_schema``: a stack tool's input schema, if the pool knows it.
+
+    The path guard asks for it to turn back a call whose arguments the schema
+    rejects (:func:`medmcp.pathguard.check_schema`). *tool* is the route the
+    harness names the call by (``mcp_<stack>.<tool>``) or MedMCP's
+    ``<stack>_<tool>``. ``None`` when no known tool list has it: nothing is
+    started to find out.
+    """
+    route = str(req.get("tool") or "")
+    if _pool is None or not route:
+        return {"schema": None}
+    group, dot, tool = route.partition(".")
+    # Longest name first so a stack whose name prefixes another cannot mis-bind.
+    for stack in sorted(_pool.known_stacks(), key=len, reverse=True):
+        if dot:
+            if harness.mcp_group(stack) != group:
+                continue
+            name = tool
+        elif route.startswith(f"{stack}_"):
+            name = route[len(stack) + 1 :]
+        else:
+            continue
+        return {"schema": (_pool.known_tools(stack) or {}).get(name)}
+    return {"schema": None}
+
+
+_core_ops["tool_schema"] = _tool_schema_op
 
 
 def _resolve_backend_spec(name: str) -> BackendSpec | None:
@@ -274,7 +307,11 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     if settings.stack_pool_enabled():
         # Proxy children read MEDMCP_WORKSPACE for their fallback cwd; export it.
         os.environ.setdefault("MEDMCP_WORKSPACE", str(WORKSPACE_ROOT))
-        _pool = BackendPool(resolve_spec=_resolve_backend_spec, cwd=str(WORKSPACE_ROOT))
+        _pool = BackendPool(
+            resolve_spec=_resolve_backend_spec,
+            cwd=str(WORKSPACE_ROOT),
+            schema_cache=settings.VIBE_STATE_DIR / "tool_schemas.json",
+        )
         if settings.stack_jobs_enabled():
             _jobs = jobs.JobManager(
                 workspace=str(WORKSPACE_ROOT),
@@ -282,7 +319,11 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
                 max_jobs=settings.max_jobs,
             )
         _broker = BackendBroker(
-            _pool, settings.backend_socket_path(), _approvals.spend, _after_stack_call
+            _pool,
+            settings.backend_socket_path(),
+            _approvals.spend,
+            _after_stack_call,
+            ops=_core_ops,
         )
         try:
             await _broker.start()

@@ -176,6 +176,28 @@ def _active_server(name: str) -> JsonDict | None:
     return next((s for s in settings.active_servers() if s["name"] == name), None)
 
 
+# The path guard's recent denials of stack calls, until the LLM shim hands their
+# reasons to the model (see pathguard.DenialNotes).
+_denials: pathguard.DenialNotes = pathguard.DenialNotes()
+
+
+def _record_denial_op(req: JsonDict) -> JsonDict:
+    """Broker op ``record_denial``: the path guard denied a stack call, and why."""
+    tool, reason = str(req.get("tool") or ""), str(req.get("reason") or "")
+    if tool and reason:
+        _denials.add(tool, reason)
+    return {}
+
+
+def _take_denial_op(req: JsonDict) -> JsonDict:
+    """Broker op ``take_denial``: the reason of the oldest live denial of a tool, taken."""
+    return {"reason": _denials.take(str(req.get("tool") or ""))}
+
+
+_core_ops["record_denial"] = _record_denial_op
+_core_ops["take_denial"] = _take_denial_op
+
+
 def _record_job(started: jobs.Started) -> None:
     """Write a started job into the provenance of the chat that approved it."""
     job = started.job

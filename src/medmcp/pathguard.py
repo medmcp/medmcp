@@ -41,6 +41,13 @@ or anything going wrong while checking allows as before.
 The hook contract is "exit 0 and print a JSON object on stdout", so every failure
 path here still prints ``{"decision": "allow"}``: a broken guard must never be
 able to block work.
+
+A stack tool is called from ``run_typescript``, and under vibe 2.26.1 that
+program -- so the model -- gets only ``tool_skipped`` back from a denial, never
+its reason. So every denial of a stack call is also left with the core
+(:class:`DenialNotes`, broker op ``record_denial``), and the LLM shim adds the
+reason to the result the model reads (:func:`medmcp.llmshim.note_denied_calls`).
+Local models only: a cloud model does not go through the shim.
 """
 
 import contextlib
@@ -48,6 +55,8 @@ import hashlib
 import json
 import os
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -355,16 +364,88 @@ def decide(invocation: dict[str, Any]) -> dict[str, Any]:
     return {"decision": "deny", "reason": build_reason(errors, workspace)}
 
 
+# Longest denial reason the core keeps for the shim; the guard's own run to a few
+# hundred characters.
+_MAX_REASON = 4000
+
+
+class DenialNotes:
+    """The guard's recent denials of stack calls, until the LLM shim takes them.
+
+    Held by the core. The guard hands each denial over (``record_denial``); the
+    shim, finding a skipped call in the next request to the model, takes the
+    oldest live denial of the tool the program's error names (``take_denial``).
+    The tool name is all both sides can see -- the shim has the program's error,
+    not the arguments the program built -- so two chats denied the same tool in
+    the same moment could swap reasons. Denials expire after *ttl_sec* and at most
+    *limit* are kept, so one nobody took cannot resurface much later.
+    """
+
+    def __init__(
+        self,
+        ttl_sec: float = 120.0,
+        limit: int = 100,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """Keep up to *limit* denials, each for *ttl_sec*."""
+        self._ttl = ttl_sec
+        self._limit = limit
+        self._clock = clock
+        self._denials: list[tuple[float, str, str]] = []
+
+    def _live(self) -> list[tuple[float, str, str]]:
+        now = self._clock()
+        self._denials = [d for d in self._denials if now - d[0] < self._ttl]
+        return self._denials
+
+    def add(self, tool: str, reason: str) -> None:
+        """Record that a call of *tool* (its bare name) was denied for *reason*."""
+        live = self._live()
+        live.append((self._clock(), tool, reason[:_MAX_REASON]))
+        del live[: max(0, len(live) - self._limit)]
+
+    def take(self, tool: str) -> str | None:
+        """The reason of the oldest live denial of *tool*, removed; ``None`` if none."""
+        for i, (_, name, reason) in enumerate(self._live()):
+            if name == tool:
+                del self._denials[i]
+                return reason
+        return None
+
+
+def record_denial(invocation: dict[str, Any], response: dict[str, Any]) -> None:
+    """Hand a stack call's denial to the core for the LLM shim; best-effort.
+
+    Only MCP routes (``mcp_<stack>.<tool>``): those are called from
+    ``run_typescript``, whose program never sees the reason. The harness's own
+    tools are called directly and their denial reason reaches the model as is.
+    """
+    if response.get("decision") != "deny":
+        return
+    group, dot, tool = str(invocation.get("tool_name") or "").partition(".")
+    if not dot or not group.startswith("mcp_"):
+        return
+    from medmcp import brokerclient  # only on a denial: keep the common path lean
+
+    brokerclient.ask_sync("record_denial", {"tool": tool, "reason": str(response["reason"])})
+
+
 def main() -> int:
     """Read a ``pre_tool`` invocation on stdin, print the decision on stdout."""
     response: dict[str, Any] = {"decision": "allow"}
+    invocation: dict[str, Any] = {}
     try:
         parsed = json.loads(sys.stdin.read() or "{}")
         if isinstance(parsed, dict):
-            response = decide(cast("dict[str, Any]", parsed))
+            invocation = cast("dict[str, Any]", parsed)
+            response = decide(invocation)
     except Exception as exc:
         print(f"medmcp-pathguard: {exc}", file=sys.stderr)
         response = {"decision": "allow"}
+    try:
+        record_denial(invocation, response)
+    except Exception as exc:  # the decision stands whether or not the core heard of it
+        print(f"medmcp-pathguard: denial not recorded: {exc}", file=sys.stderr)
     json.dump(response, sys.stdout)
     return 0
 

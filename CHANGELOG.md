@@ -48,6 +48,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Workflows: a plan no longer fails to load for a workflow whose output folder has a default.
 - Workflows: a run lists the files it wrote when the output path was chosen by the caller; it showed none before.
 - Provenance: the record of a chat run from an image names the commit the image was built from; it was empty. Images must be built with `MEDMCP_REVISION`, as the release and `:main` builds are.
+- Chat: when the path guard turns back a stack call (an input file that does not exist), a local model now reads why. Under vibe 2.26.1 the call, made from `run_typescript`, only reported "Tool execution was skipped by Runtime policy"; the LLM shim now adds the guard's reason to that result. The reason is matched to the call by tool name and recency (the oldest unclaimed denial of that tool from the last two minutes). Cloud models do not go through the shim and still see only the skip. Reproduce with `just e2e-denial-reason IMAGE`.
 
 ### Security
 

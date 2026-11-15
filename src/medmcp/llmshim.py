@@ -53,6 +53,15 @@ This shim sits between vibe and Ollama and applies these repairs:
    next parameter or the end of the invoke; and a ``tool.parameter`` invoke with
    no parameters gives its text to that parameter when the tool declares it.
 
+7. **Denial reasons** (both modes). A stack tool is called from
+   ``run_typescript``, and when MedMCP's path guard denies the call (a path that
+   does not exist, say) the program -- and so the model -- gets only
+   ``tool_skipped: Tool execution was skipped by Runtime policy.`` back from vibe
+   2.26.1, never the reason. The guard leaves its reason with the core; a fresh
+   tool result holding that error gets the reason for the tool it names added as
+   ``[MedMCP] <reason>`` (:func:`note_denied_calls`), and the same note again
+   whenever the result is sent again later in the chat.
+
 **Relay mode** (``MEDMCP_SHIM_RELAY``). ``live`` (default): reasoning and
 ``content`` deltas stream straight through, so the answer appears as it is
 written; only ``tool_calls`` deltas are withheld until the turn is known to be
@@ -86,13 +95,16 @@ import os
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from pathlib import Path
 from typing import Any, cast
 
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+
+from medmcp import brokerclient
 
 log: logging.Logger = logging.getLogger(__name__)
 
@@ -257,6 +269,97 @@ def _rename_tool_calls(message: JsonDict, renames: Mapping[str, str]) -> None:
         if isinstance(name, str) and name in renames:
             fn["name"] = renames[name]
         fn["arguments"] = sanitize_arguments(fn.get("arguments"))
+
+
+# A stack call the path guard denied, as the program's error reaches the model: the
+# error's stack names the tool (``... [as pick]``). One match per error.
+_SKIPPED_CALL = re.compile(
+    r"tool_skipped: Tool execution was skipped by Runtime policy\."
+    r"(?:(?!tool_skipped: ).){0,2000}?\[as ([A-Za-z0-9_$]+)\]",
+    re.DOTALL,
+)
+DENIAL_PREFIX = "[MedMCP] "
+# Notes added to tool results, by tool_call_id, replayed on every later request.
+_DENIAL_MEMO_LIMIT = 500
+
+TakeDenial = Callable[[str], Awaitable[str | None]]
+
+
+def _message_text(message: JsonDict) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            str(cast("JsonDict", part).get("text") or "")
+            for part in cast("list[object]", content)
+            if isinstance(part, dict)
+        )
+    return ""
+
+
+def _append_note(message: JsonDict, note: str) -> None:
+    content = message.get("content")
+    if isinstance(content, list):
+        cast("list[object]", content).append({"type": "text", "text": note})
+    else:
+        text = content if isinstance(content, str) else ""
+        message["content"] = f"{text}\n\n{note}" if text else note
+
+
+async def note_denied_calls(payload: JsonDict, memo: dict[str, str], take: TakeDenial) -> None:
+    """Add the path guard's reasons to tool results that only say a call was skipped.
+
+    A result after the last assistant message is fresh: for each skipped call in
+    it, *take* is asked for the reason for the tool its error names (the core's
+    ``take_denial``), and the reasons found are added as ``[MedMCP] <reason>`` and
+    kept in *memo* under the result's ``tool_call_id``. vibe sends the history as
+    it recorded it, so an older result gets the note from *memo* again; one from
+    before the shim started stays as it is.
+    """
+    raw_messages = payload.get("messages")
+    if not isinstance(raw_messages, list):
+        return
+    messages = [
+        cast("JsonDict", m) for m in cast("list[object]", raw_messages) if isinstance(m, dict)
+    ]
+    last_assistant = max(
+        (i for i, m in enumerate(messages) if m.get("role") == "assistant"), default=-1
+    )
+    for i, message in enumerate(messages):
+        if message.get("role") != "tool":
+            continue
+        text = _message_text(message)
+        if "tool_skipped" not in text:
+            continue
+        call_id = str(message.get("tool_call_id") or "")
+        note = memo.get(call_id) if call_id else None
+        if note is None and i > last_assistant:
+            reasons = [r for tool in _SKIPPED_CALL.findall(text) if (r := await take(tool))]
+            if reasons:
+                note = "\n\n".join(DENIAL_PREFIX + r for r in reasons)
+                if call_id:
+                    memo[call_id] = note
+                    for stale in list(memo)[: max(0, len(memo) - _DENIAL_MEMO_LIMIT)]:
+                        del memo[stale]
+        if note:
+            _append_note(message, note)
+
+
+def _core_socket() -> Path:
+    """The broker socket as the core binds it (beside the core, not in the agent)."""
+    from medmcp import settings  # the settings module is large; only when asked
+
+    return settings.backend_socket_path()
+
+
+async def take_denial_from_core(tool: str) -> str | None:
+    """The reason of the path guard's oldest live denial of *tool*, from the core's broker."""
+    response = await brokerclient.ask(
+        "take_denial", {"tool": tool}, timeout=2.0, socket=_core_socket()
+    )
+    reason = response.get("reason") if response is not None else None
+    return reason if isinstance(reason, str) and reason else None
 
 
 def repair_request(payload: JsonDict, renames: Mapping[str, str]) -> JsonDict:
@@ -771,8 +874,13 @@ def create_app(
     tool_mode: str = DEFAULT_TOOL_MODE,
     keepalive_sec: float = DEFAULT_KEEPALIVE_SEC,
     seed: int | None = None,
+    take_denial: TakeDenial = take_denial_from_core,
 ) -> FastAPI:
-    """Build the shim ASGI app forwarding to ``upstream``; ``seed`` turns on seeded sampling."""
+    """Build the shim ASGI app forwarding to ``upstream``; ``seed`` turns on seeded sampling.
+
+    *take_denial* answers which reason the path guard gave for denying a tool's
+    call (repair 7); by default the core's broker is asked.
+    """
     if relay not in RELAY_MODES:
         raise ValueError(f"unknown relay mode {relay!r}; expected one of {RELAY_MODES}")
     if tool_mode not in TOOL_MODES:
@@ -785,6 +893,7 @@ def create_app(
     )
     inverse = _inverse(mapping)
     base = upstream.rstrip("/")
+    denial_memo: dict[str, str] = {}
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Response:  # pyright: ignore[reportUnusedFunction]
@@ -796,6 +905,10 @@ def create_app(
             return JSONResponse({"error": {"message": "invalid payload"}}, status_code=400)
 
         payload = repair_request(cast("JsonDict", raw), mapping)
+        try:
+            await note_denied_calls(payload, denial_memo, take_denial)
+        except Exception:
+            log.exception("could not add the path guard's denial reasons")
         sampling_seed = None if seed is None else conversation_seed(payload, seed)
         model = str(payload.get("model") or "")
         url = f"{base}/v1/chat/completions"

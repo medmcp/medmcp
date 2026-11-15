@@ -21,7 +21,7 @@ from collections.abc import Collection
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
-from medmcp import harness, provenance, workflow
+from medmcp import harness, plan, provenance, workflow
 from medmcp.pathcheck import looks_like_path
 from medmcp.toolresult import looks_failed, parse_structured_blob
 from medmcp.workflow import Recipe, RecipeStep, StackRequirement, WorkflowInput
@@ -153,7 +153,12 @@ def _iter_tool_calls(messages: list[JsonDict]) -> list[tuple[str, JsonDict, str]
             # routes still names ``vibe.todo``; translate on the way in.
             name = harness.canonical_tool_name(str(fn.get("name") or ""))
             call_id = str(tc.get("id") or "")
-            if not name or call_id not in results or harness.is_harness_tool(name):
+            if (
+                not name
+                or call_id not in results
+                or harness.is_harness_tool(name)
+                or plan.is_plan_tool(name)
+            ):
                 continue
             try:
                 args = cast("JsonDict", json.loads(str(fn.get("arguments") or "{}")))

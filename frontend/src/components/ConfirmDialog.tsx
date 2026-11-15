@@ -52,9 +52,13 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
               {pending.body && <p>{pending.body}</p>}
               <div className="modal-actions">
                 <button type="button" className="btn-text" autoFocus onClick={() => settle(false)}>
-                  Cancel
+                  {pending.cancel ?? 'Cancel'}
                 </button>
-                <button type="button" className="btn-danger" onClick={() => settle(true)}>
+                <button
+                  type="button"
+                  className={pending.tone === 'primary' ? 'btn-primary' : 'btn-danger'}
+                  onClick={() => settle(true)}
+                >
                   {pending.action ?? 'Delete'}
                 </button>
               </div>

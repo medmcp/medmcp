@@ -199,6 +199,12 @@ export function SettingsDrawer({
                 checked={state.explain_tools}
                 onChange={(v) => apply({ ...state, explain_tools: v })}
               />
+              <Row
+                label="Plan first"
+                hint="Shows a short plan before each task; Go approves its steps."
+                checked={state.plan_first}
+                onChange={(v) => apply({ ...state, plan_first: v })}
+              />
               <div className="settings-row">
                 <div className="settings-row-text">
                   <div className="settings-row-label">Model</div>

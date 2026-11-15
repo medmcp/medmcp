@@ -25,6 +25,8 @@ export interface ToolCallState {
   /** The path guard turned this call back before it ran: the agent corrects the
    *  path and retries, so it renders as a quiet note rather than a failure. */
   pathGuardRetry?: boolean
+  /** Plan first: the call was not in the approved plan (it asked, flagged). */
+  offPlan?: boolean
 }
 
 /** A risk tag resolved by the server from the fixed taxonomy. */
@@ -57,6 +59,42 @@ export interface PathFinding {
   entry_total: number
 }
 
+/** How a pending call relates to the plan (plan first, see src/medmcp/plan.py). */
+export interface PlanNote {
+  /** The call is one of the approved plan's steps (shown anyway: it needs a look). */
+  inPlan: boolean
+  planId: string | null
+  /** Zero-based step index when `inPlan`. */
+  step: number | null
+  /** Why it is flagged, e.g. "Not in the plan you approved." */
+  reason: string
+}
+
+/** One step of a proposed plan. */
+export interface PlanStep {
+  action: string
+  tool?: string
+  inputs?: Record<string, unknown>
+  outputs?: string[]
+}
+
+/** A plan the agent proposed: what it understood and the calls it will make.
+ *  `id` is the plan tool call that proposed it. */
+export interface PlanProposal {
+  id: string
+  understanding: string
+  steps: PlanStep[]
+  output_dir?: string
+  estimated_time?: string
+  questions?: string[]
+}
+
+/** Where a plan stands: waiting for Go/Change, approved, corrected, or neither. */
+export type PlanDecisionState = 'pending' | 'approved' | 'changed' | 'cancelled'
+
+/** One step's progress after Go, as its tool call moves on. */
+export type PlanStepStatus = 'running' | 'completed' | 'failed'
+
 /** A permission request awaiting the user's decision. */
 export interface PermissionRequest {
   requestId: number
@@ -73,6 +111,8 @@ export interface PermissionRequest {
   risks?: RiskTag[]
   /** Existence check on the call's path arguments; empty when it takes none. */
   paths?: PathFinding[]
+  /** Plan first: whether this call is in the approved plan (null when off). */
+  plan?: PlanNote | null
 }
 
 /** One prior chat session, as served by GET /api/sessions. */
@@ -135,6 +175,8 @@ export interface CatalogEntry {
 export interface SettingsState {
   explain_tools: boolean
   record_provenance: boolean
+  /** The agent proposes a plan (Go / Change) before each task. */
+  plan_first: boolean
   /** Selected GPU (CDI device id) for container stacks; "all" = every GPU. */
   gpu: string
   /** GPU the LLM container was created with (deploy-time; read-only here). */
@@ -391,6 +433,17 @@ export type ServerFrame =
       explaining?: boolean
       risks?: RiskTag[]
       paths?: PathFinding[]
+      plan?: PlanNote | null
+    }
+  /** Plan first: a proposed plan waiting for Go or Change. */
+  | { type: 'plan_request'; requestId: number; toolCallId: string; plan: PlanProposal }
+  | { type: 'plan_status'; planId: string; status: 'approved' | 'changed' | 'cancelled' }
+  | {
+      type: 'plan_progress'
+      planId: string
+      step: number
+      toolCallId: string
+      status: PlanStepStatus
     }
   | {
       type: 'permission_update'

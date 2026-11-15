@@ -39,6 +39,9 @@ Notable, user-visible changes to MedMCP. Format follows
 - Workflows: a plan no longer fails to load for a workflow whose output folder has a default.
 - Workflows: a run lists the files it wrote when the output path was chosen by the caller; it showed none before.
 - Provenance: the record of a chat run from an image names the commit the image was built from; it was empty. Images must be built with `MEDMCP_REVISION`, as the release and `:main` builds are.
+- Explorer: the file list opens at once on a large workspace. It loads one folder at a time (`GET /api/tree/dir`) instead of walking the whole workspace first, and after a change refreshes only the folders it touched. A folder lists up to 5,000 entries (it was 500) and ends with a line saying how many more there are.
+- Explorer: the first click on a folder opens it; it was lost because every row was rebuilt between mouse down and mouse up.
+- Explorer: New folder works when the selected folder has been scrolled out of view: the name field is scrolled into view at the top of that folder. Before, nothing appeared and no folder was made.
 
 ### Security
 

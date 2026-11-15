@@ -629,6 +629,90 @@ async def get_tree() -> JsonDict:
     return {"tree": root.get("children", [])}
 
 
+# One explorer folder level; the explorer asks for a folder's level when it is
+# opened, so a large one is still listed whole (it renders virtualized).
+_DIR_MAX_ENTRIES: int = 5000
+
+
+def _dir_has_children(path: Path) -> bool:
+    """Whether folder *path* holds anything the explorer would show (reads one entry)."""
+    try:
+        with os.scandir(path) as it:
+            return any(e.name not in _SKIP_DIRS for e in it)
+    except OSError:
+        return False
+
+
+def _dir_entry_node(entry: os.DirEntry[str], rel_dir: str) -> JsonDict:
+    """One entry of a folder listing: folders say whether they hold anything, files their size."""
+    path = Path(entry.path)
+    rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
+    node: JsonDict = {"id": rel, "name": entry.name}
+    leaves = entry.is_symlink() and _link_leaves_tree(path)
+    try:
+        is_dir = entry.is_dir()
+    except OSError:
+        is_dir = False
+    if is_dir:
+        node["dir"] = True
+        node["has_children"] = not leaves and _dir_has_children(path)
+    elif not leaves:
+        with contextlib.suppress(OSError):
+            node["size"] = entry.stat().st_size
+    return node
+
+
+def _list_dir(rel: str) -> JsonDict:
+    """One level of the explorer tree under workspace folder *rel* ("" = the root)."""
+    parts = [p for p in Path(rel).parts if p not in {"", "."}]
+    if ".." in parts:
+        raise HTTPException(status_code=400, detail="'..' is not allowed")
+    _safe_path(rel)  # confinement: the folder must resolve inside the workspace
+    rel_dir = "/".join(parts)
+    # Listed under the name it was asked by, so ids match the parent's listing
+    # when the path passes through a link inside the workspace.
+    path = WORKSPACE_ROOT.joinpath(*parts)
+    # A link leaving the workspace, or pointing back at its own ancestor, is not
+    # looked through at any depth (the tree shows such a folder as empty).
+    through_link = any(
+        _link_leaves_tree(WORKSPACE_ROOT.joinpath(*parts[: i + 1])) for i in range(len(parts))
+    )
+    if any(p in _SKIP_DIRS for p in parts) or through_link:
+        return {"path": rel_dir, "children": [], "total": 0}
+    if not path.is_dir():
+        raise HTTPException(status_code=404, detail="folder not found")
+    try:
+        with os.scandir(path) as it:
+            entries = [e for e in it if e.name not in _SKIP_DIRS]
+    except PermissionError:
+        entries = []
+
+    def is_dir(e: os.DirEntry[str]) -> bool:
+        try:
+            return e.is_dir()
+        except OSError:
+            return False
+
+    entries.sort(key=lambda e: (not is_dir(e), e.name.lower()))
+    shown = entries[:_DIR_MAX_ENTRIES]
+    return {
+        "path": rel_dir,
+        "children": [_dir_entry_node(e, rel_dir) for e in shown],
+        "total": len(entries),
+    }
+
+
+@app.get("/api/tree/dir")
+async def get_tree_dir(path: str = "") -> JsonDict:
+    """Return one level of the explorer tree: the entries of folder ``path``.
+
+    Folders carry ``dir`` and ``has_children`` (their own entries are fetched when
+    they are opened), files their ``size``. ``total`` counts every entry, so a
+    listing cut at the cap can say how many were left out.
+    """
+    return await asyncio.to_thread(_list_dir, path)
+
+
 @app.api_route("/api/raw/{rel_path:path}", methods=["GET", "HEAD"])
 async def get_raw(rel_path: str) -> FileResponse:
     """Serve a file's raw bytes (viewer content, downloads).

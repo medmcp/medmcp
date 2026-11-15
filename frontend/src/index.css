@@ -551,6 +551,19 @@ button:hover {
   font-size: 13px;
 }
 
+/* The last row of a folder cut at the listing cap: says how many were left out. */
+.tree-more {
+  cursor: default;
+  font-style: italic;
+  color: var(--muted);
+}
+
+.tree-loading {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .ctx-menu {
   position: fixed;
   z-index: 30;

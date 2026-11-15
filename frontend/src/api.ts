@@ -72,10 +72,35 @@ export async function fetchWorkspaceRoot(): Promise<string> {
   return ((await res.json()) as { root: string }).root
 }
 
-export async function fetchTree(): Promise<TreeNode[]> {
-  const res = await check(await fetch('/api/tree'))
-  const body = (await res.json()) as { tree: TreeNode[] }
-  return body.tree
+/** One entry of a folder listing as the server sends it (see /api/tree/dir). */
+interface DirEntry {
+  id: string
+  name: string
+  dir?: boolean
+  has_children?: boolean
+  size?: number
+}
+
+/** One level of the explorer tree: folder `path`'s entries, and how many it has in all. */
+export interface DirListing {
+  path: string
+  children: TreeNode[]
+  total: number
+}
+
+/** The entries of workspace folder `path` ("" = the root); subfolders come unloaded. */
+export async function fetchDir(path: string): Promise<DirListing> {
+  const res = await check(await fetch(`/api/tree/dir?path=${encodeURIComponent(path)}`))
+  const body = (await res.json()) as { path: string; children: DirEntry[]; total: number }
+  return {
+    path: body.path,
+    total: body.total,
+    children: body.children.map((e) =>
+      e.dir
+        ? { id: e.id, name: e.name, children: [], hasChildren: e.has_children ?? false }
+        : { id: e.id, name: e.name, size: e.size },
+    ),
+  }
 }
 
 export function rawUrl(path: string): string {

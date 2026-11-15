@@ -229,6 +229,11 @@ compose-down:
 compose-logs:
     MEDMCP_WORKSPACE="${MEDMCP_WORKSPACE:-$(pwd)/data}" docker compose logs -f --tail=100
 
+# A stack call its tool's schema rejects is turned back instead of ending the
+# chat turn (prints FIXED or BROKEN for the given core image). Needs docker.
+e2e-invalid-args IMAGE="medmcp-core:dev":
+    uv run python tests/e2e/invalid_args.py --image {{IMAGE}}
+
 # End-to-end isolation check of the compose install against a built core image
 # (agent container, egress gateway, broker approvals, docker guard). Needs docker.
 e2e-isolation IMAGE="medmcp-core:dev":

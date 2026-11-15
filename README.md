@@ -39,7 +39,7 @@ To build from source or run without Docker, see **[CONTRIBUTING.md](CONTRIBUTING
 
 ## Features
 
-- **Chat & agent**: ask for an analysis in plain language; the agent picks and runs the tools.
+- **Chat & agent**: ask for an analysis in plain language; the agent picks and runs the tools. Optionally it shows a short plan first that you answer with Go or Change ([docs/plan-first.md](docs/plan-first.md)).
 - **File explorer and image viewer**: browse your data and view medical images (`.nii.gz`, `.mgz`, `.nrrd`, ...) with segmentation and map overlays, a label legend and intensity windows, plus other files (`.pdf`, `.csv`, ...). Label names come from the `<name>_labels.csv` table a stack writes beside its `<name>_dseg` segmentation; the viewer has no label-name table of its own.
 - **Workflows**: turn a chat into a workflow you can replay on new data and share, or roll out over a cohort ([docs/rollout.md](docs/rollout.md)).
 - **Tool stacks**: install new imaging capabilities from the UI. For stack authors: [background jobs](docs/stack-jobs.md), [dataset index](docs/stack-dataset-index.md).

@@ -238,3 +238,8 @@ e2e-invalid-args IMAGE="medmcp-core:dev":
 # (agent container, egress gateway, broker approvals, docker guard). Needs docker.
 e2e-isolation IMAGE="medmcp-core:dev":
     uv run python tests/e2e/isolation.py --image {{IMAGE}}
+
+# A local model is told why the path guard turned a stack call back (prints
+# FIXED or BROKEN for the given core image). Needs docker.
+e2e-denial-reason IMAGE="medmcp-core:dev":
+    uv run python tests/e2e/denial_reason.py --image {{IMAGE}}

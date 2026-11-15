@@ -79,6 +79,16 @@ def _isolate_stacks_d(  # pyright: ignore[reportUnusedFunction]  # autouse fixtu
 
 
 @pytest.fixture(autouse=True)
+def _isolate_plan_first(  # pyright: ignore[reportUnusedFunction]  # autouse fixture, invoked by pytest
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[None]:
+    """Read the plan-first switch from an empty state dir: off, its default."""
+    state = tmp_path_factory.mktemp("plan_first_state")
+    with patch("medmcp.settings.PLAN_FIRST_PATH", state / "plan_first.json"):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_model_choice(  # pyright: ignore[reportUnusedFunction]  # autouse fixture, invoked by pytest
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[None]:

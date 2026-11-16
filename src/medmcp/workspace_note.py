@@ -244,7 +244,11 @@ def find_dataset_dirs(
 
     for match in _ABS_PATH_RE.findall(text):
         add(Path(match.rstrip(".,;:)!?")))
-    flat = " ".join(_tokens(text))
+    # A folder is named by the words of the prompt, not by the parts of a path
+    # written in it: "results to /ws/stack-tests/run-5/" names no "stack-tests".
+    # The path itself was handled above (and is skipped there when it does not
+    # exist yet, as an output folder usually does not).
+    flat = " ".join(_tokens(_ABS_PATH_RE.sub(" ", text)))
     prompt_tokens = set(flat.split())
     try:
         top_level = sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))

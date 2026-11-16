@@ -51,7 +51,9 @@ bound it, not a count.
 Never covered by a Go:
 
 - **vibe's own tools** — the shell (even `mkdir`), file writes and edits — and
-  **code the assistant wrote**: they ask on their own, as before;
+  **code the assistant wrote**: they ask on their own, as before, with no plan
+  note (a plan cannot cover them, so "Not in the plan" would tell the person
+  nothing);
 - a call that would **overwrite** a file or reach **outside the workspace**: it
   is shown, marked as a step of the plan;
 - the workspace root or `/` as a plan path: they cover only themselves, never
@@ -124,7 +126,8 @@ A chat's run log (`run.jsonl`) records:
 - `{"event": "plan_decision", "plan_id", "decision": "go" | "change", "correction"}`;
 - on each tool call decided while plan first is on, `"plan"`:
   `{"plan_id", "step": n}` for a planned call, `{"plan_id", "off_plan": true}`
-  for a call outside the plan (`plan_id` null when no plan had been approved).
+  for a stack call outside the plan (`plan_id` null when no plan had been
+  approved). vibe's own tools get no `"plan"`.
 
 The session report lists each plan with its answer and marks every call as a plan
 step or **not in the plan**. Distilled workflows leave the plan out.

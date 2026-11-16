@@ -461,15 +461,38 @@ class TestApprovalScope:
         await chat.propose(1, args, "go")
         await chat.ask(2, "bash", {"command": "python3 -c 'print(1)'"})
         (dialog,) = chat.frames("permission_request")
-        assert dialog["plan"]["inPlan"] is False
+        assert dialog["plan"] is None
+        assert chat.answer(2) == REJECT
 
     async def test_a_shell_call_is_never_covered(self, chat: _Harness, tmp_path: Path) -> None:
         """Go approves only the listed stack calls: even mkdir of the output folder asks."""
         await chat.propose(1, _plan_args(tmp_path), "go")
         await chat.ask(2, "bash", {"command": f"mkdir -p {tmp_path / 'results' / 'sessions'}"})
-        (dialog,) = chat.frames("permission_request")
-        assert dialog["plan"]["inPlan"] is False
+        assert len(chat.frames("permission_request")) == 1
+        assert chat.answer(2) == REJECT
         assert chat.frames("plan_progress") == []
+
+    async def test_a_shell_call_is_not_called_off_plan(
+        self, chat: _Harness, tmp_path: Path
+    ) -> None:
+        """A shell call or file write asks as always, without "Not in the plan".
+
+        A plan cannot cover vibe's own tools, so the off-plan note would be on
+        nearly every shell call, including a step the card itself shows.
+        """
+        args = _plan_args(
+            tmp_path,
+            steps=[{"action": "Create the output folder", "tool": "bash"}],
+        )
+        await chat.propose(1, args, "go")
+        cached: JsonDict = {"toolName": "bash", "status": "pending"}
+        chat.conn._tool_calls["c2"] = cached
+        await chat.ask(2, "bash", {"command": f"mkdir -p {tmp_path / 'results'}"})
+        await chat.ask(3, "write_file", {"path": str(tmp_path / "results" / "list.txt")})
+        first, second = chat.frames("permission_request")
+        assert first["plan"] is None
+        assert second["plan"] is None
+        assert "plan" not in cached
 
     async def test_a_planned_call_that_overwrites_still_asks(
         self, chat: _Harness, tmp_path: Path

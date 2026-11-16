@@ -3955,10 +3955,12 @@ class _ChatConnection:
         )
         # Plan first: a call the approved plan lists runs on the plan's Go, unless it
         # needs a look (an overwrite, a path outside the workspace) or runs code the
-        # assistant wrote. Every other call is put to the person, marked as not in
-        # the plan.
+        # assistant wrote. Every other stack call is put to the person, marked as not
+        # in the plan. vibe's own tools (the shell, file writes) are no plan's to
+        # cover: they ask as they always do, without a plan note, so the person is
+        # not told "not in the plan" about a step the card may well show.
         plan_note: JsonDict | None = None
-        if self._plan_first:
+        if self._plan_first and stack != "builtin":
             step = self._plan_step_for(stack, tool, tool_call)
             covered = step is not None and "assistant_code" not in rule_keys
             plan_id = self._plan.id if self._plan is not None else None

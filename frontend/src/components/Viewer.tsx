@@ -265,7 +265,7 @@ async function fetchPair(
 /** Load *path* into `nv` as the base volume (replace = true) or as an added
  *  overlay, from the volume cache. Niivue takes the file type from `name`.
  *  Returns the file's ETag ('' when unknown), which changes when a tool
- *  rewrites the file. Throws an Error whose message is the reason, worded for
+ *  rewrites the file; a header/image pair returns both files' ETags. Throws an Error whose message is the reason, worded for
  *  the viewer. */
 async function loadVolume(
   nv: Niivue,
@@ -316,7 +316,8 @@ async function addVolume(
     } finally {
       URL.revokeObjectURL(imgUrl)
     }
-    return ''
+    // Rewriting either file makes it another image.
+    return hdr.etag && img.etag ? `${hdr.etag} ${img.etag}` : ''
   }
   const entry = await fetchVolume(rawUrl(path), /\.nii\.gz$/i.test(name))
   // Niivue reads `buffer` straight through and takes the format from `name`,

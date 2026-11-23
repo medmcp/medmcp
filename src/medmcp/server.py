@@ -636,17 +636,8 @@ async def get_tree() -> JsonDict:
 _DIR_MAX_ENTRIES: int = 5000
 
 
-def _dir_has_children(path: Path) -> bool:
-    """Whether folder *path* holds anything the explorer would show (reads one entry)."""
-    try:
-        with os.scandir(path) as it:
-            return any(e.name not in _SKIP_DIRS for e in it)
-    except OSError:
-        return False
-
-
 def _dir_entry_node(entry: os.DirEntry[str], rel_dir: str) -> JsonDict:
-    """One entry of a folder listing: folders say whether they hold anything, files their size."""
+    """One entry of a folder listing: a folder is marked ``dir``, a file carries its size."""
     path = Path(entry.path)
     rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
     node: JsonDict = {"id": rel, "name": entry.name}
@@ -657,7 +648,6 @@ def _dir_entry_node(entry: os.DirEntry[str], rel_dir: str) -> JsonDict:
         is_dir = False
     if is_dir:
         node["dir"] = True
-        node["has_children"] = not leaves and _dir_has_children(path)
     elif not leaves:
         with contextlib.suppress(OSError):
             node["size"] = entry.stat().st_size
@@ -708,8 +698,8 @@ def _list_dir(rel: str) -> JsonDict:
 async def get_tree_dir(path: str = "") -> JsonDict:
     """Return one level of the explorer tree: the entries of folder ``path``.
 
-    Folders carry ``dir`` and ``has_children`` (their own entries are fetched when
-    they are opened), files their ``size``. ``total`` counts every entry, so a
+    Folders carry ``dir`` (their own entries are fetched when they are opened),
+    files their ``size``. ``total`` counts every entry, so a
     listing cut at the cap can say how many were left out.
     """
     return await asyncio.to_thread(_list_dir, path)

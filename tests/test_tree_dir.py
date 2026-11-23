@@ -55,8 +55,9 @@ class TestTreeDir:
         assert [n["name"] for n in body["children"]] == ["empty", "study", "A.nii", "b.txt"]
         assert body["total"] == 4
         nodes = {n["name"]: n for n in body["children"]}
-        assert nodes["study"] == {"id": "study", "name": "study", "dir": True, "has_children": True}
-        assert nodes["empty"]["has_children"] is False
+        # A folder says only that it is one: nothing below this level is read.
+        assert nodes["study"] == {"id": "study", "name": "study", "dir": True}
+        assert nodes["empty"] == {"id": "empty", "name": "empty", "dir": True}
         assert nodes["b.txt"] == {"id": "b.txt", "name": "b.txt", "size": 5}
 
     def test_lists_a_subfolder_with_full_ids(
@@ -72,12 +73,24 @@ class TestTreeDir:
             "size": 2,
         }
 
-    def test_a_folder_holding_only_skipped_entries_has_no_children(
+    def test_a_folder_holding_only_skipped_entries_lists_empty(
         self, workspace_root: Path, client: TestClient
     ) -> None:
-        """A folder showing nothing must not offer an expander."""
+        """Hidden folders are left out of a level and of its total."""
         (workspace_root / "proj" / "node_modules").mkdir(parents=True)
-        assert _listing(client)["proj"]["has_children"] is False
+        body = client.get("/api/tree/dir", params={"path": "proj"}).json()
+        assert body == {"path": "proj", "children": [], "total": 0}
+
+    def test_a_folder_that_vanished_is_a_404(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """The explorer tells a folder that is gone from a failed listing by the status."""
+        (workspace_root / "study").mkdir()
+        assert client.get("/api/tree/dir", params={"path": "study"}).status_code == 200
+        (workspace_root / "study").rmdir()
+        resp = client.get("/api/tree/dir", params={"path": "study"})
+        assert resp.status_code == 404
+        assert client.get("/api/tree/dir", params={"path": "study/sub-01"}).status_code == 404
 
     def test_rejects_traversal_and_missing_folders(
         self, workspace_root: Path, outside: Path, client: TestClient
@@ -97,7 +110,7 @@ class TestTreeDir:
         (workspace_root / "host").symlink_to(outside)
         (workspace_root / "secret").symlink_to(outside / "secret.txt")
         nodes = _listing(client)
-        assert nodes["host"]["has_children"] is False
+        assert nodes["host"] == {"id": "host", "name": "host", "dir": True}
         assert "size" not in nodes["secret"]
         assert client.get("/api/tree/dir", params={"path": "host"}).status_code == 400
 
@@ -112,7 +125,7 @@ class TestTreeDir:
         alias = _listing(client, "alias")
         assert list(alias) == ["loop", "a.nii"]
         assert alias["a.nii"]["id"] == "alias/a.nii"
-        assert alias["loop"]["has_children"] is False
+        assert alias["loop"] == {"id": "alias/loop", "name": "loop", "dir": True}
         assert client.get("/api/tree/dir", params={"path": "data/loop"}).json()["children"] == []
         # Nor deeper down, through the cycle.
         deeper = client.get("/api/tree/dir", params={"path": "data/loop/data"}).json()

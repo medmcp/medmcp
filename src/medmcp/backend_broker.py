@@ -25,7 +25,18 @@ Response (broker → proxy)::
     {"id": 2, "ok": true, "result": <CallToolResult.model_dump>}
     {"id": 2, "ok": false, "error": "stack 'x' is not installed"}
 
+Further ops are answered by the server itself, not by a stack: they read core
+state for an agent-side helper (the path guard, the LLM shim) and never run a
+tool. The server supplies them as *ops*, by name; a request for one needs no
+``stack``. The helpers ask with :mod:`medmcp.brokerclient`.
+
 Sampling relay is intentionally omitted in v1 (no stack uses MCP sampling).
+
+A call that was authorized may be followed by one more step in this process:
+``after_call`` is handed the call, what authorized it and its result, and returns
+the result to relay. The server uses it to start a background job a stack asked
+for (:mod:`medmcp.jobs`) — so that request can only ever ride on a call the
+person approved, and never on anything a connection to this socket says.
 """
 
 from __future__ import annotations
@@ -35,8 +46,11 @@ import contextlib
 import json
 import logging
 import os
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
+
+import mcp.types as mcp_types
 
 from medmcp.backend_pool import BackendError, BackendPool
 
@@ -50,6 +64,18 @@ JsonDict = dict[str, Any]
 STREAM_LIMIT: int = 32 * 1024 * 1024
 
 
+# Asked before a call: falsy refuses it; anything else is "approved", and is what
+# AfterCall is handed (the server returns the spent medmcp.approvals.Approval).
+Authorize = Callable[[str, str, JsonDict], object]
+# (stack, tool, args, what authorize returned, result) → the result to relay.
+AfterCall = Callable[
+    [str, str, JsonDict, object, mcp_types.CallToolResult], Awaitable[mcp_types.CallToolResult]
+]
+
+# An op the server answers itself: the request → the fields of the answer.
+CoreOp = Callable[[JsonDict], JsonDict]
+
+
 class BrokerRequestError(Exception):
     """Raised for a malformed broker request (reported back as ``ok: false``)."""
 
@@ -57,16 +83,37 @@ class BrokerRequestError(Exception):
 class BackendBroker:
     """Serves a :class:`BackendPool` to proxy shim processes over a unix socket."""
 
-    def __init__(self, pool: BackendPool, socket_path: Path) -> None:
+    def __init__(
+        self,
+        pool: BackendPool,
+        socket_path: Path,
+        authorize: Authorize | None = None,
+        after_call: AfterCall | None = None,
+        ops: Mapping[str, CoreOp] | None = None,
+    ) -> None:
         """Create a broker; call :meth:`start` to begin listening.
 
         Args:
             pool: The persistent backend pool to dispatch to (owned elsewhere — the
                 broker does not close it).
             socket_path: Path to the unix domain socket to bind.
+            authorize: Asked before every ``call_tool`` with (stack, tool, args); a
+                call it refuses is answered with an error and never run (the
+                server passes :meth:`medmcp.approvals.ApprovalLedger.spend`).
+            after_call: Run on the result of every call that *authorize* approved
+                (never without an *authorize*): it may act on the result and
+                returns the one to relay.
+            ops: Further ops answered by the server itself, by name. They read
+                core state and must never run a tool: anyone who can reach the
+                socket can send them, no approval asked.
         """
+        self._ops: dict[str, CoreOp] = dict(ops or {})
+        if self._ops.keys() & {"list_tools", "call_tool"}:
+            raise ValueError("a core op cannot replace list_tools or call_tool")
         self._pool = pool
         self._socket_path = socket_path
+        self._authorize = authorize
+        self._after_call = after_call
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -146,6 +193,8 @@ class BackendBroker:
         await self._send(writer, resp)
 
     async def _run_op(self, req_id: object, op: object, stack: object, req: JsonDict) -> JsonDict:
+        if isinstance(op, str) and op in self._ops:
+            return {**self._ops[op](req), "id": req_id, "ok": True}
         if not isinstance(stack, str) or not stack:
             raise BrokerRequestError("missing 'stack'")
 
@@ -162,7 +211,15 @@ class BackendBroker:
             if not isinstance(raw_args, dict):
                 raise BrokerRequestError("'args' must be an object")
             args: JsonDict = cast("JsonDict", raw_args)
+            approval: object = None
+            if self._authorize is not None:
+                approval = self._authorize(stack, tool, args)
+                if not approval:
+                    log.warning("broker refused unapproved call %s.%s", stack, tool)
+                    raise BrokerRequestError(f"{stack}.{tool} was not approved for these arguments")
             result = await self._pool.call(stack, tool, args)
+            if self._after_call is not None and approval:
+                result = await self._after_call(stack, tool, args, approval, result)
             return {"id": req_id, "ok": True, "result": result.model_dump(mode="json")}
 
         raise BrokerRequestError(f"unknown op {op!r}")

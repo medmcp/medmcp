@@ -11,12 +11,24 @@ import '@fontsource/jetbrains-mono/500.css'
 import 'katex/dist/katex.min.css'
 import './index.css'
 import App from './App.tsx'
+import { canUseApi } from './api.ts'
 import { ConfirmProvider } from './components/ConfirmDialog.tsx'
+import LoginScreen from './components/LoginScreen.tsx'
 
-// No StrictMode: its dev-only double-mount would open two chat WebSockets and
-// hence two vibe-acp sessions per page load.
-createRoot(document.getElementById('root')!).render(
-  <ConfirmProvider>
-    <App />
-  </ConfirmProvider>,
-)
+/** Show the workspace, or the login screen when it has a password this browser lacks. */
+async function boot() {
+  const allowed = await canUseApi()
+  // No StrictMode: its dev-only double-mount would open two chat WebSockets and
+  // hence two vibe-acp sessions per page load.
+  createRoot(document.getElementById('root')!).render(
+    allowed ? (
+      <ConfirmProvider>
+        <App />
+      </ConfirmProvider>
+    ) : (
+      <LoginScreen />
+    ),
+  )
+}
+
+void boot()

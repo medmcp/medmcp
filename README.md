@@ -29,6 +29,7 @@ MEDMCP_WORKSPACE="$HOME/medmcp-data" \
 Then open **http://localhost:8100**.
 
 - **Requirements:** Linux, an NVIDIA GPU (≥ 24 GB VRAM recommended) with driver ≥ R570, and Docker with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/).
+- **Shared machine:** add `MEDMCP_PASSWORD=…` to the start command so other accounts on it can't open the workspace.
 - **Stop:** `docker compose -f oci://ghcr.io/medmcp/compose:latest down`
 - **Update:** click *Update now* when the workspace announces a new release, or re-run the start command with `--pull always`.
 - **Pin a version:** replace `latest` with a release tag such as `v0.3.0`. Release tags are never moved.
@@ -39,9 +40,9 @@ To build from source or run without Docker, see **[CONTRIBUTING.md](CONTRIBUTING
 ## Features
 
 - **Chat & agent**: ask for an analysis in plain language; the agent picks and runs the tools.
-- **File explorer and image viewer**: browse your data and view medical images (`.nii.gz`, `.mgz`, `.nrrd`, ...) with segmentation and map overlays, a label legend and intensity windows, plus other files (`.pdf`, `.csv`, ...). Label names come from the `<name>_labels.csv` table a stack writes beside its `<name>_dseg` segmentation; the viewer has no label-name table of its own.
-- **Workflows**: turn a chat into a workflow you can replay on new data and share.
-- **Tool stacks**: install new imaging capabilities from the UI.
+- **File explorer and image viewer**: browse your data and view medical images (`.nii.gz`, `.mgz`, `.nrrd`, ...) with segmentation and map overlays, a label legend, intensity windows and zoom, plus other files (`.pdf`, `.csv`, ...). Label names come from the `<name>_labels.csv` table a stack writes beside its `<name>_dseg` segmentation; the viewer has no label-name table of its own.
+- **Workflows**: turn a chat into a workflow you can replay on new data and share, or roll out over a cohort ([docs/rollout.md](docs/rollout.md)).
+- **Tool stacks**: install new imaging capabilities from the UI. For stack authors: [background jobs](docs/stack-jobs.md), [dataset index](docs/stack-dataset-index.md).
 - **Model choice**: switch between seven local models, or optionally use a cloud model with your own API key.
 
 ## Security

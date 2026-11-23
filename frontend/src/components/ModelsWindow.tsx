@@ -5,6 +5,7 @@ import { deleteLocalModel, fetchCloudModel, fetchLocalModels } from '../api'
 import { MODEL_LOGOS } from '../modelLogos'
 import type { LocalModelRow, LocalModelsState } from '../types'
 import { XIcon } from './icons'
+import { modalLayer } from '../modalLayer'
 
 interface ModelsWindowProps {
   open: boolean
@@ -144,7 +145,7 @@ export function ModelsWindow({ open, onClose }: ModelsWindowProps) {
   return (
     <>
       <div className="modal-backdrop" onClick={onClose} />
-      <div className="extwin" role="dialog">
+      <div ref={modalLayer} className="extwin" role="dialog" aria-modal="true" aria-label="Models">
         <div className="panel-header">
           <span>Models</span>
           <span className="panel-actions">
@@ -232,6 +233,7 @@ export function ModelsWindow({ open, onClose }: ModelsWindowProps) {
         createPortal(
           <div className="modal-backdrop over-window" onClick={() => setConsent(null)}>
             <div
+              ref={modalLayer}
               className="modal"
               role="dialog"
               aria-modal="true"

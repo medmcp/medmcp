@@ -15,6 +15,11 @@
   --card2: #1e2333;
   --border: rgba(255, 255, 255, 0.07);
   --border2: rgba(255, 255, 255, 0.12);
+  /* The edge of a field, a select, a checkbox or a filter chip: often the only
+     thing that says it is one, so it is 3:1 against the surface it sits on
+     (3.5:1 on each of the four), where --border2 is 1.4:1. Hairlines between
+     panels and rows stay on --border / --border2. */
+  --control-border: rgba(255, 255, 255, 0.38);
   --muted: #99a1b4;
   --muted2: #c6ccdb;
   --text: #e4e8f0;
@@ -22,6 +27,13 @@
   --warn: #fbbf24;
   --mono: 'JetBrains Mono', ui-monospace, monospace;
   --sans: 'Inter', system-ui, sans-serif;
+  /* The icon family's chevron and tick for places CSS draws them (a disclosure
+     marker, a checkbox, a select): the shapes of components/icons.tsx at the
+     12px size. The first two are masks, coloured by the element; a select's
+     arrow is a background image, so its colour (--muted) is in the image. */
+  --icon-chevron-right: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 18l6-6-6-6'/%3E%3C/svg%3E");
+  --icon-check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6L9 17l-5-5'/%3E%3C/svg%3E");
+  --icon-chevron-down-muted: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2399a1b4' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   font-family: var(--sans);
   font-size: 14px;
   color-scheme: dark;
@@ -56,6 +68,64 @@ body,
   background: transparent;
 }
 
+/* A checkbox in the family: the toggle's fills and the icon set's tick, in place
+   of the browser's. Still an <input type="checkbox">. */
+input[type='checkbox'] {
+  appearance: none;
+  flex: none;
+  display: inline-grid;
+  place-content: center;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border: 1px solid var(--control-border);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  vertical-align: -3px;
+  cursor: pointer;
+}
+
+input[type='checkbox']::before {
+  content: '';
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  mask: var(--icon-check) center / 12px 12px no-repeat;
+  -webkit-mask: var(--icon-check) center / 12px 12px no-repeat;
+  opacity: 0;
+}
+
+input[type='checkbox']:checked {
+  background: var(--blue);
+  border-color: rgba(127, 168, 245, 0.35);
+}
+
+input[type='checkbox']:checked::before {
+  opacity: 1;
+}
+
+input[type='checkbox']:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+input[type='checkbox']:focus-visible {
+  outline: 2px solid var(--blue-xl);
+  outline-offset: 2px;
+}
+
+/* A select keeps the browser's list and loses its arrow for the family's
+   chevron. :not([multiple]) also lifts this above the one-class rules that
+   set a select's background and padding. */
+select:not([multiple]) {
+  appearance: none;
+  background-image: var(--icon-chevron-down-muted);
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 12px 12px;
+  padding-right: 26px;
+}
+
 button {
   font: inherit;
   font-size: 12.5px;
@@ -75,6 +145,46 @@ button {
 button:hover {
   background: rgba(255, 255, 255, 0.05);
   border-color: rgba(255, 255, 255, 0.22);
+}
+
+/* Pressed: one step past the hover wash. An inset shadow rather than a
+   background, so it lies over whatever the button's own fill is — the blue and
+   red buttons as well as the plain ones — and it lands at once, where the hover
+   fades in. Buttons drawn as plain text or as a whole row have no box to wash;
+   they dim instead. */
+button:active:not(:disabled) {
+  box-shadow: inset 0 0 0 100px rgba(255, 255, 255, 0.07);
+  transition-duration: 0s;
+}
+
+button:active:is(
+    .btn-text,
+    .model-name,
+    .session-open,
+    .show-archived-btn,
+    .json-toggle,
+    .wf-output-link,
+    .wf-itemrow,
+    .wf-derived-toggle,
+    .vs-advanced-toggle,
+    .settings-advanced-toggle,
+    .ext-mcp-token-mode,
+    .ext-mcp-replace
+  ):not(:disabled) {
+  box-shadow: none;
+  opacity: 0.7;
+}
+
+.session-row:has(.session-open:active) {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+/* A button that cannot be used says so, whatever its class: dimmed, and out of
+   the pointer's reach so none of the hover rules below can light it up. */
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+  pointer-events: none;
 }
 
 .btn-primary {
@@ -118,10 +228,21 @@ button:hover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 4px;
+  flex: none;
+  /* A fixed, even square: 24 around a 14px icon, 20 around a 12px one, so the
+     icon is centred on whole pixels at either size. Sized by padding, the box
+     followed the icon and came out odd. */
+  width: 24px;
+  height: 24px;
+  padding: 0;
   border-color: transparent;
   color: var(--muted);
   border-radius: 6px;
+}
+
+.btn-icon:has(> svg[width='12']) {
+  width: 20px;
+  height: 20px;
 }
 
 .btn-icon:hover {
@@ -211,6 +332,175 @@ button:hover {
   box-shadow: 0 0 0 3px rgba(58, 99, 204, 0.25);
 }
 
+/* Background jobs pill (JobPill.tsx): pulses while a job runs, stays green or
+ * red after one ends until it has been looked at. */
+.job-pill-box {
+  position: relative;
+}
+
+.job-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 420px;
+  padding: 3px 10px 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: rgba(127, 168, 245, 0.1);
+  border: 1px solid rgba(127, 168, 245, 0.3);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.job-pill-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.job-pill-state {
+  flex: none;
+  opacity: 0.8;
+  font-variant-numeric: tabular-nums;
+}
+
+.job-pill-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--blue-l);
+}
+
+.job-pill-running .job-pill-dot {
+  animation: job-pulse 1.6s ease-in-out infinite;
+}
+
+.job-pill-done {
+  border-color: rgba(74, 222, 128, 0.45);
+}
+
+.job-pill-done .job-pill-dot {
+  background: var(--ok);
+}
+
+.job-pill-failed {
+  border-color: rgba(230, 100, 100, 0.55);
+}
+
+.job-pill-failed .job-pill-dot {
+  background: var(--red-tint);
+}
+
+.job-pill-bar {
+  flex: none;
+  width: 48px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(127, 168, 245, 0.2);
+}
+
+.job-pill-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--blue-l);
+}
+
+@keyframes job-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(58, 99, 204, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(58, 99, 204, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .job-pill-running .job-pill-dot {
+    animation: none;
+  }
+}
+
+.job-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 50;
+  width: 360px;
+  padding: 8px;
+  background: var(--card2);
+  border: 1px solid rgba(127, 168, 245, 0.25);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.job-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 8px;
+  padding: 6px;
+  border-radius: 6px;
+  background: rgba(127, 168, 245, 0.06);
+}
+
+.job-row-main {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.job-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-row-detail {
+  grid-column: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 11px;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
+.job-row .btn-text {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+}
+
+.job-status {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.8;
+}
+
+.job-status-failed {
+  color: var(--red-tint);
+}
+
+.job-status-finished {
+  color: var(--ok);
+}
+
+.job-pop-note {
+  font-size: 11px;
+  opacity: 0.6;
+  padding: 2px 4px;
+}
+
 .app-main {
   flex: 1;
   min-height: 0;
@@ -255,8 +545,10 @@ button:hover {
   justify-content: space-between;
   gap: 8px;
   /* Fixed height so all four panel headers line up regardless of whether they
-     hold buttons/menus (taller) or just a title; content centers vertically. */
-  min-height: 44px;
+     hold buttons/menus (taller) or just a title; content centers vertically.
+     45, not 44: less the padding and the 1px rule that leaves 32 inside, an
+     even height for the 24px icon buttons to centre in on whole pixels. */
+  min-height: 45px;
   padding: 6px 14px;
   background: var(--dark2);
   border-bottom: 1px solid var(--border);
@@ -300,7 +592,9 @@ button:hover {
 .panel-actions a {
   display: inline-flex;
   align-items: center;
-  padding: 4px;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
   color: var(--muted);
   border-radius: 6px;
 }
@@ -308,6 +602,10 @@ button:hover {
 .panel-actions a:hover {
   color: var(--text);
   background: rgba(255, 255, 255, 0.05);
+}
+
+.panel-actions a:active {
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .panel-body {
@@ -330,6 +628,60 @@ button:hover {
   padding: 6px 14px;
   border-bottom: 1px solid var(--border);
   font-variant-numeric: tabular-nums;
+}
+
+/* The explorer's drop-target and upload-progress line: over the tree's bottom
+   edge, so showing or hiding it never moves a row, and transparent to the
+   pointer, so a drop on it reaches the row beneath. */
+.explorer-body {
+  position: relative;
+}
+
+.panel-status-float {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  pointer-events: none;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text);
+  background: var(--card2);
+  border-top: 1px solid var(--border2);
+  border-bottom: none;
+}
+
+/* While the pointer is near the bottom edge the line moves out of its way. */
+.panel-status-float.at-top {
+  top: 0;
+  bottom: auto;
+  border-top: none;
+  border-bottom: 1px solid var(--border2);
+}
+
+/* An explorer message with its dismiss button; a failed upload lists each file. */
+.panel-notice,
+.panel-error-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.panel-notice {
+  color: var(--ok);
+}
+
+.panel-error-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  max-height: 140px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 /* A desktop file drag is over the explorer: outline the drop area. */
@@ -365,6 +717,14 @@ button:hover {
   color: var(--text);
 }
 
+/* The folder a desktop file drag would upload into (the line at the panel's
+   bottom edge names it; this shows it where the pointer is). */
+.tree-row.drop-into {
+  background: rgba(58, 99, 204, 0.28);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--blue-l);
+}
+
 .tree-icon {
   display: inline-flex;
   flex-shrink: 0;
@@ -380,6 +740,19 @@ button:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: 13px;
+}
+
+/* The last row of a folder cut at the listing cap: says how many were left out. */
+.tree-more {
+  cursor: default;
+  font-style: italic;
+  color: var(--muted);
+}
+
+.tree-loading {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .ctx-menu {
@@ -410,6 +783,12 @@ button:hover {
 .ctx-menu button:hover {
   background: rgba(255, 255, 255, 0.06);
   color: var(--text);
+}
+
+/* A destructive entry says so before it is pointed at, as Delete does in the
+   workflow panel. */
+.ctx-menu button.danger {
+  color: var(--red-tint);
 }
 
 .ctx-menu button.danger:hover {
@@ -572,16 +951,10 @@ button:hover {
   cursor: pointer;
 }
 
-.vs-check input {
-  accent-color: var(--blue-l);
-  width: 15px;
-  height: 15px;
-}
-
 .vs-select {
   background: var(--dark2);
   color: var(--text);
-  border: 1px solid var(--border2);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   padding: 3px 8px;
   font-size: 12px;
@@ -677,6 +1050,32 @@ button:hover {
 .niivue-dropzone {
   position: relative;
   display: flex;
+}
+
+/* Load failures, laid over the top of the canvas so they never resize it. */
+.volume-errors {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  background: var(--dark2);
+}
+
+.volume-errors .panel-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* The viewer's keys (slice stepping, `o`, space, zoom) only fire while this
+   dropzone holds focus, and clicking the chat or the tree silently takes it
+   away. Nothing said so before, which made the shortcut list look broken.
+   Inset so the ring sits inside the pane instead of over its neighbours. */
+.niivue-dropzone:focus-visible {
+  outline: 1px solid var(--blue-xl);
+  outline-offset: -1px;
 }
 
 .niivue-dropzone.drag-over::after {
@@ -860,8 +1259,9 @@ button:hover {
   color: var(--muted2);
 }
 .data-sort {
-  margin-left: 6px;
-  font-size: 9px;
+  display: inline-flex;
+  margin-left: 4px;
+  vertical-align: -2px;
   color: var(--blue-xl);
 }
 .data-empty {
@@ -914,9 +1314,14 @@ button:hover {
   color: var(--text);
 }
 .json-caret {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
   width: 14px;
   color: var(--muted);
+}
+
+.json-caret.open svg {
+  transform: rotate(90deg);
 }
 .json-row {
   padding-left: 14px;
@@ -1023,7 +1428,7 @@ button:hover {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  padding: 18px;
+  padding: 18px 18px 34px;
   max-width: 860px;
   width: 100%;
   margin: 0 auto;
@@ -1235,8 +1640,11 @@ button:hover {
   margin: 2px 0;
 }
 
+/* A task list's boxes are read-only (the renderer disables them); they show
+   their state at full strength all the same. */
 .bubble-ai li > input[type='checkbox'] {
   margin-right: 6px;
+  opacity: 1;
 }
 
 .bubble-ai blockquote {
@@ -1298,10 +1706,12 @@ button:hover {
   font-size: 12.5px;
 }
 
+/* Shown while the model works before anything is visible (a local model can
+   reason for many seconds before its first word or a plan card). */
 .thinking {
   color: var(--muted);
-  letter-spacing: 4px;
-  font-size: 10px;
+  font-size: 13px;
+  line-height: 16px;
   margin-left: 38px;
   animation: blink 1.6s ease-in-out infinite;
 }
@@ -1400,8 +1810,16 @@ button.model-name:hover {
 
 .chat-input-row {
   display: flex;
-  gap: 10px;
-  padding: 12px 18px 16px;
+  /* Lets the "Viewing …" line take a row of its own under the message box
+   * without a second hairline border. */
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 12px 18px 8px;
+  /* The page's ? button (.help-fab) sits in the bottom-right corner, 46px wide
+     with its inset. While this row reaches that corner its right padding grows
+     to keep Send clear of it; once the panel is wide enough for the centred
+     row to end short of the corner it is the plain 18px again. */
+  padding-right: clamp(18px, calc(46px - (100% - 860px) / 2), 46px);
   border-top: 1px solid var(--border);
   flex-shrink: 0;
   max-width: 860px;
@@ -1409,12 +1827,58 @@ button.model-name:hover {
   margin: 0 auto;
 }
 
+/* The file the next message is about. The row is always there, empty or not,
+ * so opening a file, dropping it or sending never moves the message box.
+ * Indented to the box's text edge (1px border + 14px padding). */
+.chat-viewing {
+  flex: 0 0 100%;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  height: 20px;
+  padding-left: 15px;
+  font-size: 11.5px;
+  line-height: 20px;
+  color: var(--muted);
+}
+
+.chat-viewing-label {
+  flex: none;
+}
+
+/* A long name loses its head, not its extension: the box is laid out right to
+ * left so the ellipsis lands on the left, and <bdi> keeps the name itself in
+ * reading order. */
+.chat-viewing-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.chat-input-row .chat-viewing-clear {
+  flex: none;
+  align-self: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+}
+
+.chat-input-row .chat-viewing-clear:focus-visible {
+  outline: 2px solid var(--blue-xl);
+  outline-offset: -1px;
+  color: var(--text);
+}
+
 .chat-input-row textarea {
   flex: 1;
   resize: none;
   background: var(--card);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 10px;
   padding: 9px 14px;
   font: inherit;
@@ -1429,7 +1893,7 @@ button.model-name:hover {
 
 .chat-input-row textarea:focus {
   outline: none;
-  border-color: rgba(127, 168, 245, 0.4);
+  border-color: var(--blue-xl);
 }
 
 .chat-input-row button {
@@ -1495,20 +1959,64 @@ button.model-name:hover {
   margin-left: auto;
 }
 
-.tool-card details {
-  margin-top: 5px;
+/* A running call's age, after its status. */
+.tool-elapsed {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
 }
 
+/* A disclosure row is 24px to click (14px of text, 5px above and below), where
+   it used to be the 14px of its text. The space above the first row and below
+   the last is the same as before; rows that follow one another sit 5px further
+   apart. */
 .tool-card summary {
   cursor: pointer;
   color: var(--muted);
   font-size: 11.5px;
   font-weight: 500;
+  line-height: 14px;
+  padding: 5px 0;
   user-select: none;
+}
+
+/* The last row's lower padding lies inside the card's own. */
+.tool-card > details:last-child:not([open]),
+.tool-card > .tool-group-call:last-child > details:not([open]),
+.tool-card > .tool-group-call:last-child > details > details:last-child:not([open]) {
+  margin-bottom: -5px;
 }
 
 .tool-card summary:hover {
   color: var(--text);
+}
+
+/* The family's chevron in place of the browser's triangle; it turns when the
+   row is open. */
+.tool-card summary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  list-style: none;
+}
+
+.tool-card summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-card summary::before {
+  content: '';
+  flex: none;
+  width: 12px;
+  height: 12px;
+  background: currentColor;
+  mask: var(--icon-chevron-right) center / 12px 12px no-repeat;
+  -webkit-mask: var(--icon-chevron-right) center / 12px 12px no-repeat;
+  transition: transform 0.12s ease;
+}
+
+.tool-card details[open] > summary::before {
+  transform: rotate(90deg);
 }
 
 .tool-group-call > details > summary {
@@ -1520,8 +2028,9 @@ button.model-name:hover {
   font-size: 12.5px;
 }
 
-.tool-group-call > details > summary::-webkit-details-marker {
-  display: none;
+/* A call's row leads with its status dot, as before, not a chevron. */
+.tool-group-call > details > summary::before {
+  content: none;
 }
 
 .tool-group-call > details > summary .status-dot {
@@ -1550,7 +2059,7 @@ button.model-name:hover {
   font-family: var(--mono);
   font-size: 11.5px;
   line-height: 1.55;
-  margin: 6px 0 2px;
+  margin: 1px 0 2px;
   color: var(--muted2);
 }
 
@@ -1612,30 +2121,32 @@ button.model-name:hover {
 
 .approval-btns {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
 }
 
-.abtn-approve {
-  background: rgba(43, 79, 163, 0.3);
-  color: var(--blue-xl);
-  border: 1px solid rgba(127, 168, 245, 0.25);
+.approval-btns button {
+  min-height: 28px;
+  padding-top: 0;
+  padding-bottom: 0;
+  text-align: left;
+  overflow-wrap: anywhere;
 }
 
-.abtn-approve:hover {
-  background: rgba(43, 79, 163, 0.45);
-  border-color: rgba(127, 168, 245, 0.4);
-}
-
-.abtn-reject {
+.abtn-plain {
   background: rgba(255, 255, 255, 0.05);
-  color: var(--muted);
-  border: 1px solid var(--border);
+  color: var(--muted2);
 }
 
-.abtn-reject:hover {
+.abtn-plain:hover {
   color: var(--text);
   background: rgba(255, 255, 255, 0.08);
+}
+
+.approval-btns button:focus-visible {
+  outline: 2px solid var(--blue-xl);
+  outline-offset: 2px;
 }
 
 /* ── Risk chips (website badge pattern) ── */
@@ -1685,6 +2196,7 @@ button.model-name:hover {
   flex-direction: column;
   gap: 3px;
   font-size: 11.5px;
+  line-height: 16px;
 }
 
 .approval-paths li {
@@ -1694,11 +2206,16 @@ button.model-name:hover {
   min-width: 0;
 }
 
+/* An icon now, not a character: a box as tall as the line beside it, with the
+   icon centred in it, so it does not hang off the text baseline. */
 .path-mark {
   flex: none;
-  width: 11px;
-  text-align: center;
-  font-weight: 700;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 16px;
 }
 
 .path-param {
@@ -1723,8 +2240,8 @@ button.model-name:hover {
   color: var(--muted2);
 }
 
-.path-info .path-mark {
-  color: var(--ok);
+.approval-paths .path-summary {
+  color: var(--muted);
 }
 
 .path-warning .path-mark,
@@ -1811,7 +2328,7 @@ button.model-name:hover {
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--blue-l);
+  color: var(--blue-xl);
   margin: 20px 0 4px;
 }
 
@@ -1841,7 +2358,7 @@ button.model-name:hover {
 }
 
 .settings-advanced-toggle.open {
-  color: var(--blue-l);
+  color: var(--blue-xl);
 }
 
 .settings-advanced-toggle:hover {
@@ -1910,6 +2427,11 @@ button.model-name:hover {
   opacity: 0.45;
 }
 
+/* The row is already dimmed as a whole; its switch does not dim twice. */
+.settings-row.disabled .toggle:disabled {
+  opacity: 1;
+}
+
 /* Whole-pixel line boxes. With `normal` (≈1.2 → 15.6px) and 11.5px × 1.5
    (17.25px), rows land on fractional offsets, and a switch that starts at
    y.75 rasterises its track edges and its round knob unevenly: the geometry is
@@ -1926,7 +2448,9 @@ button.model-name:hover {
      general muted grey. */
   color: var(--muted2);
   line-height: 17px;
-  margin-top: 2px;
+  /* 3, not 2: label 16 + 3 + hint 17 + the row's 20 of padding is 56, an even
+     height for the 20px switch to centre in on whole pixels. */
+  margin-top: 3px;
 }
 
 /* Install-a-stack field + per-stack uninstall action. */
@@ -2066,6 +2590,7 @@ button.model-name:hover {
 }
 
 .session-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 9px;
@@ -2076,6 +2601,43 @@ button.model-name:hover {
 
 .session-row:hover {
   background: rgba(255, 255, 255, 0.04);
+}
+
+/* Opens the chat. Looks like the title it wraps; its ::after covers the row, so
+   the whole row is its hit area and carries its focus ring. */
+.session-open,
+.session-open:hover {
+  display: flex;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+
+/* As wide as the row allows, as it was before it sat in a button: sized to its
+   text, its clip edge falls on a fraction of a pixel and shaves the last glyph. */
+.session-open .session-title {
+  flex: 1;
+}
+
+.session-open::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+}
+
+.session-open:focus-visible {
+  outline: none;
+}
+
+.session-open:focus-visible::after {
+  outline: 2px solid var(--blue-xl);
+  outline-offset: -2px;
 }
 
 /* The open chat. A background wash alone was too close to :hover to pick out
@@ -2153,7 +2715,10 @@ button.model-name:hover {
   width: 100%;
 }
 
+/* Above the open button's stretched hit area. */
 .session-actions {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 1px;
@@ -2161,7 +2726,11 @@ button.model-name:hover {
   opacity: 0;
 }
 
-.session-row:hover .session-actions {
+/* Shown for the keyboard as for the pointer. :focus-visible rather than
+   :focus-within, because opening the menu puts focus on a row, and after a
+   click that must not light up one row's actions. */
+.session-row:hover .session-actions,
+.session-row:has(:focus-visible) .session-actions {
   opacity: 1;
 }
 
@@ -2373,7 +2942,7 @@ button.model-name:hover {
   font-family: var(--mono);
   background: var(--dark2);
   color: var(--text);
-  border: 1px solid var(--border2);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   padding: 6px 9px;
   width: 100%;
@@ -2452,11 +3021,9 @@ textarea.wf-input {
 }
 
 .wf-req-status {
-  display: inline-block;
-  width: 1em;
+  display: inline-flex;
   margin-right: 5px;
-  font-weight: 700;
-  text-align: center;
+  vertical-align: -2px;
 }
 
 .wf-req-pin {
@@ -2471,7 +3038,7 @@ textarea.wf-input {
 }
 
 .wf-req-status.missing {
-  color: var(--red);
+  color: var(--red-tint);
 }
 
 .wf-req-status.mismatch {
@@ -2645,7 +3212,7 @@ textarea.wf-input {
 }
 
 .wf-batch-rm {
-  width: 22px;
+  width: 20px;
   flex: none;
 }
 
@@ -2657,7 +3224,7 @@ textarea.wf-input {
   font-family: var(--mono);
   background: var(--dark2);
   color: var(--text);
-  border: 1px solid var(--border2);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   padding: 5px 8px;
 }
@@ -2868,18 +3435,6 @@ textarea.wf-input {
   overflow: auto;
 }
 
-/* Resolved arguments of a step in the editor's "what will run" list. */
-.wf-args-inline {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 10px;
-  margin-left: 6px;
-  font-family: var(--mono);
-  font-size: 10.5px;
-  color: var(--muted);
-  word-break: break-all;
-}
-
 .wf-actions-secondary {
   display: inline-flex;
   flex-wrap: wrap;
@@ -2960,11 +3515,12 @@ textarea.wf-input {
 
 /* Per-row pre-flight verdict in the run editor (✓ ready, ⚠ overwrite, ✗ missing). */
 .wf-batch-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 16px;
+  height: 16px;
   flex: none;
-  text-align: center;
-  font-size: 12px;
-  line-height: 16px;
 }
 
 .wf-batch-status.ok {
@@ -3206,7 +3762,7 @@ textarea.wf-input {
   flex: 1 1 220px;
   min-width: 0;
   background: var(--card);
-  border: 1px solid var(--border2);
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   color: var(--text);
   font-family: inherit;
@@ -3229,7 +3785,7 @@ textarea.wf-input {
   align-items: center;
   gap: 6px;
   background: transparent;
-  border: 1px solid var(--border2);
+  border: 1px solid var(--control-border);
   border-radius: 999px;
   color: var(--muted);
   cursor: pointer;
@@ -3255,6 +3811,13 @@ textarea.wf-input {
 
 .market-msg {
   margin: 10px 16px 0;
+}
+
+.market-job {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .market-body {
@@ -3404,8 +3967,12 @@ textarea.wf-input {
 
 .plan-mark {
   flex: none;
-  width: 11px;
-  text-align: center;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 18px;
   font-weight: 700;
   color: var(--muted);
 }
@@ -3661,6 +4228,10 @@ textarea.wf-input {
 
 .ext-mcp-consent li {
   margin-bottom: 8px;
+}
+
+.ext-mcp-understood input {
+  margin-top: 1px;
 }
 
 .ext-mcp-understood {
@@ -4087,15 +4658,9 @@ textarea.wf-input {
   flex: 1;
 }
 
-/* 4D: play/pause, a frame slider and the count, centred on the row. The button
-   is 14px icon + 2px padding = 18px, the row's line height, so it sits on
-   whole pixels. */
+/* 4D: play/pause, a frame slider and the count, centred on the row. */
 .status-frame {
   align-items: center;
-}
-
-.status-frame .btn-icon {
-  padding: 2px;
 }
 
 .frame-slider {
@@ -4184,7 +4749,7 @@ textarea.wf-input {
   width: 100%;
   box-sizing: border-box;
   background: var(--dark);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   padding: 3px 6px;
   color: var(--text);
@@ -4247,7 +4812,7 @@ textarea.wf-input {
 .label-legend-search {
   margin: 6px 8px 2px;
   background: var(--dark);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   padding: 4px 8px;
   color: var(--text);
@@ -4359,4 +4924,184 @@ textarea.wf-input {
 .tool-file .btn-text {
   padding: 1px 6px;
   font-size: 11px;
+}
+
+/* Login: the screen a browser sees until it presents the workspace password. */
+.login {
+  height: 100%;
+  background: var(--dark);
+}
+
+.login-input {
+  width: 100%;
+  margin-top: 14px;
+  padding: 8px 10px;
+  background: var(--dark2);
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  color: var(--text);
+  font: 13px/16px var(--mono);
+}
+
+.confirm-dialog p.login-error {
+  color: var(--red-tint);
+}
+
+/* ── Shortcuts: the ? button and its window ──────────────────────────────── */
+
+/* Fixed to the page, in the strip the chat composer keeps free beside Send.
+   Above the panels, below every backdrop (the lowest is .drawer-backdrop, 20),
+   so it never floats over a drawer, a window or a dialog. Even dimensions, as
+   every centred control here (see the switch). */
+.help-fab {
+  position: fixed;
+  right: 10px;
+  /* Level with Send: the composer's padding plus the "Viewing …" row below it. */
+  bottom: 32px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--muted);
+  background: var(--card);
+  border: 1px solid var(--border2);
+  border-radius: 50%;
+}
+
+.help-fab:hover,
+.help-fab:focus-visible {
+  color: var(--text);
+  background: var(--card2);
+  border-color: var(--border2);
+}
+
+.help-fab:focus-visible {
+  outline: 2px solid var(--blue-xl);
+  outline-offset: 2px;
+}
+
+/* Two columns, so the whole list shows without scrolling: the viewer on the
+   left, everything else on the right. One column when the window is narrow. */
+.sc-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 32px;
+}
+
+/* The about text spans both columns, above the shortcuts. */
+.sc-about {
+  grid-column: 1 / -1;
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sc-about .settings-section:first-child {
+  margin-top: 2px;
+}
+
+.sc-about .settings-section {
+  margin-top: 14px;
+}
+
+.sc-about p,
+.sc-about li {
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--muted2);
+}
+
+.sc-about p {
+  margin: 0;
+}
+
+.sc-about ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.sc-about li + li {
+  margin-top: 4px;
+}
+
+.sc-group .settings-section {
+  margin-top: 14px;
+}
+
+.sc-col > .sc-group:first-child .settings-section {
+  margin-top: 2px;
+}
+
+.sc-group-hint {
+  font-size: 11.5px;
+  color: var(--muted2);
+  line-height: 16px;
+  margin: 8px 0 0;
+}
+
+.sc-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 28px;
+}
+
+.sc-action {
+  font-size: 13px;
+  line-height: 16px;
+}
+
+.sc-keys {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+@media (max-width: 560px) {
+  .sc-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* The window takes focus when it opens (see ShortcutsWindow); it is not a
+   control, so it shows no ring for it. */
+.sc-body:focus {
+  outline: none;
+}
+
+.scwin kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 15px;
+  white-space: nowrap;
+  padding: 1px 6px;
+  color: var(--muted2);
+  background: var(--card2);
+  border: 1px solid var(--border2);
+  border-radius: 4px;
+}
+
+/* ── Reduced motion ──────────────────────────────────────────────────────── */
+
+/* Nothing loops or slides in for someone who asked for less motion. What each
+   animation was saying is still said by something that holds still: a busy dot
+   keeps its colour, the volume spinner its ring and its "Loading volume…", the
+   thinking dots stay on screen, a running workflow bar keeps its highlight. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+  }
+
+  /* The install bar is a sweep, not a measure: stopped mid-sweep it would read
+     as "40% done". Full and dimmed reads as "working". */
+  .install-bar-fill {
+    width: 100%;
+    opacity: 0.45;
+  }
 }

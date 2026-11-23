@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import importlib
 import io
 import json
@@ -46,16 +47,19 @@ import shutil
 import time
 import zipfile
 from collections.abc import AsyncGenerator, Coroutine, Iterator
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from urllib.parse import quote
 
+import mcp.types as mcp_types
 import uvicorn
 from fastapi import (
     FastAPI,
     HTTPException,
     Query,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -68,17 +72,25 @@ from tree_sitter import Language, Node, Parser
 
 from medmcp import (
     __version__,
+    access,
+    agentbox,
+    approvals,
     batchplan,
     chat_export,
     distill,
     explain,
+    gateway,
     harness,
+    jobs,
     localmodels,
     origincheck,
     pathcheck,
     pathguard,
+    previewgrant,
     provenance,
     replay,
+    riskcheck,
+    runrecord,
     runs,
     sessions,
     settings,
@@ -89,10 +101,18 @@ from medmcp import (
     workflow,
 )
 from medmcp.acp import PROJECT_ROOT, JsonDict, VibeAcpClient
-from medmcp.backend_broker import BackendBroker
+from medmcp.backend_broker import BackendBroker, CoreOp
 from medmcp.backend_pool import BackendPool, BackendSpec
 from medmcp.reasoning import ThoughtStripper
-from medmcp.workspace_note import build_workspace_note, display_content_text, strip_workspace_note
+from medmcp.workspace_note import (
+    build_dataset_notes,
+    build_workspace_note,
+    dataset_indexes,
+    display_content_text,
+    strip_workspace_note,
+)
+from medmcp.zipupload import MAX_BYTES as ZIP_MAX_BYTES
+from medmcp.zipupload import ZipRejectedError, unpack_into
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
 log: logging.Logger = logging.getLogger(__name__)
@@ -127,6 +147,11 @@ _SKIP_DIRS: frozenset[str] = frozenset(
 )
 _TREE_MAX_DEPTH: int = 12
 _TREE_MAX_ENTRIES_PER_DIR: int = 500
+# Served by /api/raw under a CSP sandbox: these can carry script that would
+# otherwise run with this origin when opened directly.
+_SCRIPTABLE_SUFFIXES: frozenset[str] = frozenset(
+    {".html", ".htm", ".xhtml", ".shtml", ".svg", ".svgz", ".xml", ".xsl", ".xslt"}
+)
 
 # ── Persistent stack pool + broker (Layer 1; MEDMCP_STACK_POOL) ───────────────
 # Created at startup only when the pool is enabled; None otherwise (the legacy
@@ -138,17 +163,121 @@ _broker: BackendBroker | None = None
 # Replay runs in flight (see ``runs.py``). A run is a task in this process with a
 # record on disk; sockets attach to it and detach from it without affecting it.
 _runs: runs.RunManager = runs.RunManager()
+# Stack calls approved in a chat, each spendable once by the broker: anything
+# that reaches the broker socket without one is refused (see medmcp.approvals).
+_approvals: approvals.ApprovalLedger = approvals.ApprovalLedger()
+# Background jobs (see ``jobs.py``): containers the core starts for an approved
+# stack call and leaves running. None when stacks cannot run jobs here.
+_jobs: jobs.JobManager | None = None
+# Ops the broker answers from this process for the agent-side helpers (the path
+# guard, the LLM shim); each handler registers itself where it is defined.
+_core_ops: dict[str, CoreOp] = {}
+
+
+def _active_server(name: str) -> JsonDict | None:
+    """An active stack's discovered server entry, or ``None``."""
+    return next((s for s in settings.active_servers() if s["name"] == name), None)
+
+
+# The path guard's recent denials of stack calls, until the LLM shim hands their
+# reasons to the model (see pathguard.DenialNotes).
+_denials: pathguard.DenialNotes = pathguard.DenialNotes()
+
+
+def _record_denial_op(req: JsonDict) -> JsonDict:
+    """Broker op ``record_denial``: the path guard denied a stack call, and why."""
+    tool, reason = str(req.get("tool") or ""), str(req.get("reason") or "")
+    if tool and reason:
+        _denials.add(tool, reason)
+    return {}
+
+
+def _take_denial_op(req: JsonDict) -> JsonDict:
+    """Broker op ``take_denial``: the reason of the oldest live denial of a tool, taken."""
+    return {"reason": _denials.take(str(req.get("tool") or ""))}
+
+
+_core_ops["record_denial"] = _record_denial_op
+_core_ops["take_denial"] = _take_denial_op
+
+
+def _record_job(started: jobs.Started) -> None:
+    """Write a started job into the provenance of the chat that approved it."""
+    job = started.job
+    if not job.session or not settings.load_provenance_enabled():
+        return
+    provenance.record_job_started(
+        job.session,
+        job_id=job.id,
+        server=job.stack,
+        tool=job.tool,
+        arguments=job.arguments or {},
+        image=job.image,
+        image_id=job.image_id,
+        image_digest=started.image_digest,
+        command=started.command,
+        container=jobs.jobspec.container_name(job.id),
+        gpu=job.gpu,
+    )
+
+
+async def _after_stack_call(
+    stack: str, tool: str, args: JsonDict, approval: object, result: mcp_types.CallToolResult
+) -> mcp_types.CallToolResult:
+    """Broker hook: start the job an approved call's result asks for (if any)."""
+    if _jobs is None:
+        return result
+    session = approval.session if isinstance(approval, approvals.Approval) else ""
+    return await jobs.after_call(_jobs, stack, tool, args, session, result, _record_job)
+
+
+def _tool_schema_op(req: JsonDict) -> JsonDict:
+    """Broker op ``tool_schema``: a stack tool's input schema, if the pool knows it.
+
+    The path guard asks for it to turn back a call whose arguments the schema
+    rejects (:func:`medmcp.pathguard.check_schema`). *tool* is the route the
+    harness names the call by (``mcp_<stack>.<tool>``) or MedMCP's
+    ``<stack>_<tool>``. ``None`` when no known tool list has it: nothing is
+    started to find out.
+    """
+    route = str(req.get("tool") or "")
+    if _pool is None or not route:
+        return {"schema": None}
+    group, dot, tool = route.partition(".")
+    # Longest name first so a stack whose name prefixes another cannot mis-bind.
+    for stack in sorted(_pool.known_stacks(), key=len, reverse=True):
+        if dot:
+            if harness.mcp_group(stack) != group:
+                continue
+            name = tool
+        elif route.startswith(f"{stack}_"):
+            name = route[len(stack) + 1 :]
+        else:
+            continue
+        return {"schema": (_pool.known_tools(stack) or {}).get(name)}
+    return {"schema": None}
+
+
+_core_ops["tool_schema"] = _tool_schema_op
 
 
 def _resolve_backend_spec(name: str) -> BackendSpec | None:
     """Map an active stack name to its persistent-backend launch spec (pool callback)."""
-    entry = settings.build_backend_registry(settings.active_servers()).get(name)
+    servers = settings.active_servers()
+    entry = settings.build_backend_registry(servers).get(name)
     if entry is None:
         return None
+    args = [str(a) for a in cast("list[Any]", entry["args"])]
+    # Only the pooled backend is told the core runs jobs: its results come back
+    # through the broker, which is what acts on a job request. A stack spawned
+    # any other way (replay, the proxy's fallback) keeps its work in-container.
+    declared = next((s.get("job") for s in servers if s["name"] == name), None)
+    if _jobs is not None and declared and Path(str(entry["command"])).name == "docker":
+        args = jobs.offer_args(args)
     return BackendSpec(
         name=name,
         command=str(entry["command"]),
-        args=[str(a) for a in cast("list[Any]", entry["args"])],
+        args=args,
         env={str(k): str(v) for k, v in cast("JsonDict", entry["env"]).items()},
         gpu=bool(entry["gpu"]),
         idle_ttl_sec=float(entry["idle_ttl_sec"]),
@@ -160,7 +289,29 @@ def _resolve_backend_spec(name: str) -> BackendSpec | None:
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     """Start the stack pool + broker on boot (when enabled); tear them down on exit."""
-    global _pool, _broker
+    global _pool, _broker, _gateway, _jobs
+    _audit.info("workspace password %s", "required" if access.required() else "not set")
+    _audit.info(
+        "agent runs %s",
+        "in its own container" if agentbox.isolation_enabled() else "as a child process",
+    )
+    # The isolated agent's only way out, listening before the agent can start;
+    # a core that cannot set it up leaves the agent unstartable, not unconfined.
+    if _agent_launcher is not None:
+        try:
+            box = await asyncio.to_thread(_agent_launcher.prepare)
+            # The agent's network reaches this server too; nothing on it may use the UI.
+            access.refuse_network(box.subnet)
+            _gateway = gateway.EgressGateway(box.gateway_host)
+            await _gateway.start()
+            agentbox.set_gateway_base(_gateway.base_url)
+        except Exception:
+            _audit.exception("agent isolation unavailable; the agent will not start")
+    # Before any agent can run: fingerprint the legacy transcripts, so one that
+    # appears in the agent-writable logs volume later is never replayed.
+    recorded = await asyncio.to_thread(provenance.record_legacy_transcripts)
+    if recorded:
+        _audit.info("recorded %d legacy transcript(s)", recorded)
     # A run record still marked "running" was cut off by the previous process.
     interrupted = await asyncio.to_thread(runs.reconcile_interrupted)
     if interrupted:
@@ -178,11 +329,29 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         if outcome is None and await asyncio.to_thread(update.updater_pending)
         else None
     )
+    # Stack manifests mount ``${MEDMCP_WORKSPACE}``, expanded from the environment
+    # when they are loaded, and proxy children read it for their fallback cwd.
+    # Assigned, not setdefault, so a relative value becomes the resolved path.
+    os.environ["MEDMCP_WORKSPACE"] = str(WORKSPACE_ROOT)
     if settings.stack_pool_enabled():
-        # Proxy children read MEDMCP_WORKSPACE for their fallback cwd; export it.
-        os.environ.setdefault("MEDMCP_WORKSPACE", str(WORKSPACE_ROOT))
-        _pool = BackendPool(resolve_spec=_resolve_backend_spec, cwd=str(WORKSPACE_ROOT))
-        _broker = BackendBroker(_pool, settings.backend_socket_path())
+        _pool = BackendPool(
+            resolve_spec=_resolve_backend_spec,
+            cwd=str(WORKSPACE_ROOT),
+            schema_cache=settings.VIBE_STATE_DIR / "tool_schemas.json",
+        )
+        if settings.stack_jobs_enabled():
+            _jobs = jobs.JobManager(
+                workspace=str(WORKSPACE_ROOT),
+                resolve_server=_active_server,
+                max_jobs=settings.max_jobs,
+            )
+        _broker = BackendBroker(
+            _pool,
+            settings.backend_socket_path(),
+            _approvals.spend,
+            _after_stack_call,
+            ops=_core_ops,
+        )
         try:
             await _broker.start()
             # Proxied config + backends.json exist from boot, before any tool call.
@@ -199,12 +368,22 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
         await _runs.shutdown()
+        # An isolated agent is a sibling container, not part of the compose
+        # project: left running, it would outlive the core and hold its network.
+        with contextlib.suppress(Exception):
+            await _client.stop()
         if _broker is not None:
             await _broker.aclose()
         if _pool is not None:
             await _pool.aclose()
+        if _gateway is not None:
+            await _gateway.aclose()
+        # Job containers are left running on purpose: they are found again by
+        # their labels when a core next starts (see medmcp.jobs).
         _broker = None
         _pool = None
+        _gateway = None
+        _jobs = None
 
 
 async def _update_check_loop() -> None:
@@ -286,8 +465,54 @@ class OriginGuard:
         await response(scope, receive, send)
 
 
+class AccessGuard:
+    """Refuse the isolated agent's network outright, and requests without the password.
+
+    The origin check keeps other sites out, but lets a request with no ``Origin``
+    through — every non-browser client. The agent container can reach this port
+    over the network it shares with the core, and loopback is shared by every
+    account on the machine (the password, when set). See :mod:`medmcp.access`.
+    Pure ASGI for the same reason as :class:`OriginGuard`: the WebSocket upgrade
+    is refused before ``accept``.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        """Wrap *app*, checking the peer and the password on every request and upgrade."""
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Pass the request through, or refuse it without reaching the route."""
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        client = scope.get("client")
+        if access.peer_refused(client[0] if client else None):
+            await self._refuse(scope, receive, send, "agent network", 403)
+            return
+        if not access.needs_password(str(scope.get("path", ""))):
+            await self.app(scope, receive, send)
+            return
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
+        if access.authorized(headers):
+            await self.app(scope, receive, send)
+            return
+        await self._refuse(scope, receive, send, "no password", 401)
+
+    @staticmethod
+    async def _refuse(scope: Scope, receive: Receive, send: Send, reason: str, code: int) -> None:
+        _audit.warning("refused %s %s: %s", scope["type"], scope.get("path", ""), reason)
+        if scope["type"] == "websocket":
+            await receive()
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        response = JSONResponse({"detail": reason}, status_code=code)
+        await response(scope, receive, send)
+
+
 app = FastAPI(title="MedMCP Workspace", lifespan=_lifespan)
-# Outermost, so a refused request never reaches a route or a static file.
+# Outermost, so a refused request never reaches a route or a static file: the
+# origin check first, then the peer and the password.
+app.add_middleware(AccessGuard)
 app.add_middleware(OriginGuard)
 
 # One vibe-acp subprocess shared by every websocket connection. The subprocess
@@ -297,7 +522,25 @@ app.add_middleware(OriginGuard)
 # model's API key — is needed; this process holds them so the operator does not
 # have to plumb one into the deployment by hand. Passed as a provider, re-read
 # on every (re)start.
-_client: VibeAcpClient = VibeAcpClient(extra_env=settings.agent_secret_env)
+# With MEDMCP_AGENT_ISOLATION=container it runs in a sibling container that has
+# no docker socket, no state volume, a read-only view of its own config and no
+# route out but this process's egress gateway, which holds the credentials — so
+# the agent gets placeholders (see medmcp.agentbox, medmcp.gateway); otherwise as
+# a child of this process, with the credentials themselves.
+_agent_launcher: agentbox.ContainerLauncher | None = (
+    agentbox.ContainerLauncher(os.environ.get("MEDMCP_WORKSPACE") or str(WORKSPACE_ROOT))
+    if agentbox.isolation_enabled()
+    else None
+)
+_client: VibeAcpClient = VibeAcpClient(
+    extra_env=(
+        (lambda: gateway.placeholder_env(settings.agent_secret_env()))
+        if _agent_launcher is not None
+        else settings.agent_secret_env
+    ),
+    launcher=_agent_launcher,
+)
+_gateway: gateway.EgressGateway | None = None
 
 # Live websocket connections, so a settings-triggered vibe restart can close
 # them (each client auto-reconnects into a fresh session on the new process).
@@ -327,13 +570,39 @@ def _safe_path(rel: str) -> Path:
     return resolved
 
 
+def _safe_entry(rel: str) -> Path:
+    """Like :func:`_safe_path`, but the last component is kept as it is.
+
+    For operations on the entry itself — delete, rename, upload — where following
+    a final symlink would act on whatever it points at, possibly outside the
+    workspace. The folder holding the entry is resolved and confined as usual.
+    """
+    name = Path(rel).name
+    if name in {"", ".", ".."}:
+        return _safe_path(rel)
+    return _safe_path(str(Path(rel).parent)) / name
+
+
+def _link_leaves_tree(path: Path) -> bool:
+    """Whether *path* is a symlink the explorer must not look through.
+
+    One pointing outside the workspace would list the host's files; one pointing
+    at its own ancestor would recurse to the depth limit.
+    """
+    if not path.is_symlink():
+        return False
+    real = path.resolve()
+    return not real.is_relative_to(WORKSPACE_ROOT) or path.parent.resolve().is_relative_to(real)
+
+
 def _tree_node(path: Path, depth: int) -> JsonDict:
     """Build one explorer-tree node (recursing into directories)."""
     rel = str(path.relative_to(WORKSPACE_ROOT))
     node: JsonDict = {"id": rel, "name": path.name}
+    leaves = _link_leaves_tree(path)
     if path.is_dir():
         children: list[JsonDict] = []
-        if depth < _TREE_MAX_DEPTH:
+        if depth < _TREE_MAX_DEPTH and not leaves:
             try:
                 entries = sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
             except PermissionError:
@@ -342,7 +611,7 @@ def _tree_node(path: Path, depth: int) -> JsonDict:
             for child in shown[:_TREE_MAX_ENTRIES_PER_DIR]:
                 children.append(_tree_node(child, depth + 1))
         node["children"] = children
-    else:
+    elif not leaves:
         with contextlib.suppress(OSError):
             node["size"] = path.stat().st_size
     return node
@@ -363,20 +632,153 @@ async def get_tree() -> JsonDict:
     return {"tree": root.get("children", [])}
 
 
+# One explorer folder level; the explorer asks for a folder's level when it is
+# opened, so a large one is still listed whole (it renders virtualized).
+_DIR_MAX_ENTRIES: int = 5000
+
+
+def _dir_entry_node(entry: os.DirEntry[str], rel_dir: str) -> JsonDict:
+    """One entry of a folder listing: a folder is marked ``dir``, a file carries its size."""
+    path = Path(entry.path)
+    rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
+    node: JsonDict = {"id": rel, "name": entry.name}
+    leaves = entry.is_symlink() and _link_leaves_tree(path)
+    try:
+        is_dir = entry.is_dir()
+    except OSError:
+        is_dir = False
+    if is_dir:
+        node["dir"] = True
+    elif not leaves:
+        with contextlib.suppress(OSError):
+            node["size"] = entry.stat().st_size
+    return node
+
+
+def _list_dir(rel: str) -> JsonDict:
+    """One level of the explorer tree under workspace folder *rel* ("" = the root)."""
+    parts = [p for p in Path(rel).parts if p not in {"", "."}]
+    if ".." in parts:
+        raise HTTPException(status_code=400, detail="'..' is not allowed")
+    _safe_path(rel)  # confinement: the folder must resolve inside the workspace
+    rel_dir = "/".join(parts)
+    # Listed under the name it was asked by, so ids match the parent's listing
+    # when the path passes through a link inside the workspace.
+    path = WORKSPACE_ROOT.joinpath(*parts)
+    # A link leaving the workspace, or pointing back at its own ancestor, is not
+    # looked through at any depth (the tree shows such a folder as empty).
+    through_link = any(
+        _link_leaves_tree(WORKSPACE_ROOT.joinpath(*parts[: i + 1])) for i in range(len(parts))
+    )
+    if any(p in _SKIP_DIRS for p in parts) or through_link:
+        return {"path": rel_dir, "children": [], "total": 0}
+    if not path.is_dir():
+        raise HTTPException(status_code=404, detail="folder not found")
+    try:
+        with os.scandir(path) as it:
+            entries = [e for e in it if e.name not in _SKIP_DIRS]
+    except PermissionError:
+        entries = []
+
+    def is_dir(e: os.DirEntry[str]) -> bool:
+        try:
+            return e.is_dir()
+        except OSError:
+            return False
+
+    entries.sort(key=lambda e: (not is_dir(e), e.name.lower()))
+    shown = entries[:_DIR_MAX_ENTRIES]
+    return {
+        "path": rel_dir,
+        "children": [_dir_entry_node(e, rel_dir) for e in shown],
+        "total": len(entries),
+    }
+
+
+@app.get("/api/tree/dir")
+async def get_tree_dir(path: str = "") -> JsonDict:
+    """Return one level of the explorer tree: the entries of folder ``path``.
+
+    Folders carry ``dir`` (their own entries are fetched when they are opened),
+    files their ``size``. ``total`` counts every entry, so a
+    listing cut at the cap can say how many were left out.
+    """
+    return await asyncio.to_thread(_list_dir, path)
+
+
+class _VolumeFileResponse(FileResponse):
+    """``FileResponse`` reading in chunks sized for a volume, not a web page.
+
+    Starlette's default is 64 KiB, which makes 3,600 read/await/send rounds of a
+    225 MB CT, each one an anyio worker-thread hop. 1 MiB is what the upload and
+    zip paths in this module already use.
+    """
+
+    chunk_size = 1024 * 1024
+
+
+def _if_none_match(header: str | None, etag: str) -> bool:
+    """Whether an ``If-None-Match`` value matches *etag*.
+
+    Weak comparison, which is what RFC 9110 prescribes for this header: the
+    ``W/`` prefix is ignored on both sides and ``*`` matches any representation
+    we hold. Splitting the list on commas is safe for the tags we issue (a
+    quoted md5 of mtime and size, with no comma in it).
+    """
+    if not header or not etag:
+        return False
+    if header.strip() == "*":
+        return True
+    want = etag.removeprefix("W/")
+    return any(tag.strip().removeprefix("W/") == want for tag in header.split(","))
+
+
 @app.api_route("/api/raw/{rel_path:path}", methods=["GET", "HEAD"])
-async def get_raw(rel_path: str) -> FileResponse:
+async def get_raw(rel_path: str, request: Request, optional: bool = False) -> Response:
     """Serve a file's raw bytes (viewer content, downloads).
 
     ``no-cache`` because a tool rewrites files in place: without it a browser
     treats a response for a days-old file as fresh for hours (heuristic
     freshness off ``Last-Modified``) and keeps showing the overlay from before
-    the segmentation ran. HEAD is answered so the viewer's own volume cache can
-    revalidate with headers instead of refetching a 24 MB volume.
+    the segmentation ran. ``no-cache`` means "revalidate", not "do not store",
+    so an ``If-None-Match`` round trip is the whole cost of being sure a cached
+    volume is still current — provided we answer it. Starlette's
+    ``FileResponse`` reads only ``If-Range``, so without the branch below every
+    revalidation re-sent the entire file, which for a 225 MB CT is the
+    difference between a reload that is instant and one that is not. HEAD is
+    answered too, as it was before conditional requests worked here.
+
+    ``?optional=1`` answers a missing file with 204 instead of 404, for a file
+    the caller only uses if it is there (a label map's name table): a browser
+    logs every 404 to its console as an error, whatever the page does with it.
+    The path is checked against the workspace either way.
     """
     path = _safe_path(rel_path)
     if not path.is_file():
+        if optional:
+            return Response(status_code=204, headers={"Cache-Control": "no-cache"})
         raise HTTPException(status_code=404, detail="file not found")
-    return FileResponse(path, headers={"Cache-Control": "no-cache"})
+    headers = {"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"}
+    if path.suffix.lower() in _SCRIPTABLE_SUFFIXES:
+        # Opened directly in a tab, a workspace HTML or SVG file would otherwise
+        # run with this origin and could drive /ws/chat and /ws/replay. The
+        # viewer's iframe is sandboxed the same way, so nothing it shows changes.
+        headers["Content-Security-Policy"] = "sandbox allow-scripts"
+    # Stat once, here: it gives the validators before the response is sent (so
+    # they can be compared) and spares Starlette its own stat in a worker thread.
+    response = _VolumeFileResponse(path, headers=headers, stat_result=path.stat())
+    etag = response.headers.get("etag", "")
+    if _if_none_match(request.headers.get("if-none-match"), etag):
+        # The client's copy is current. A 304 carries the validators and no body.
+        return Response(
+            status_code=304,
+            headers={
+                "Cache-Control": headers["Cache-Control"],
+                "ETag": etag,
+                "Last-Modified": response.headers.get("last-modified", ""),
+            },
+        )
+    return response
 
 
 # The kernel writes a mount path's space, tab, newline and backslash as octal
@@ -535,12 +937,12 @@ class RenamePayload(BaseModel):
 @app.post("/api/files/rename")
 async def post_rename(payload: RenamePayload) -> JsonDict:
     """Rename or move a file/directory inside the workspace."""
-    src = _safe_path(payload.path)
-    dst = _safe_path(payload.new_path)
+    src = _safe_entry(payload.path)
+    dst = _safe_entry(payload.new_path)
     _refuse_mount_point(src)
-    if not src.exists():
+    if not (src.exists() or src.is_symlink()):
         raise HTTPException(status_code=404, detail="source not found")
-    if dst.exists():
+    if dst.exists() or dst.is_symlink():
         raise HTTPException(status_code=409, detail="target already exists")
     dst.parent.mkdir(parents=True, exist_ok=True)
     src.rename(dst)
@@ -550,13 +952,13 @@ async def post_rename(payload: RenamePayload) -> JsonDict:
 @app.delete("/api/files")
 async def delete_file(path: str) -> JsonDict:
     """Delete a file or directory (recursive). The UI confirms before calling."""
-    target = _safe_path(path)
+    target = _safe_entry(path)
     if target == WORKSPACE_ROOT:
         raise HTTPException(status_code=400, detail="refusing to delete the workspace root")
     _refuse_mount_point(target)
-    if not target.exists():
+    if not (target.exists() or target.is_symlink()):
         raise HTTPException(status_code=404, detail="not found")
-    if target.is_dir():
+    if target.is_dir() and not target.is_symlink():
         await asyncio.to_thread(shutil.rmtree, target)
     else:
         target.unlink()
@@ -572,10 +974,64 @@ async def post_upload(file: UploadFile, dir: str = "") -> JsonDict:
     if name in {"", ".", ".."}:
         raise HTTPException(status_code=400, detail="invalid file name")
     target = target_dir / name
-    with target.open("wb") as fh:
+    try:
+        # O_NOFOLLOW: a symlink under that name would take the upload wherever
+        # it points, outside the workspace included.
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o666)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise HTTPException(status_code=400, detail="a link with that name exists") from exc
+        if exc.errno == errno.EISDIR:
+            raise HTTPException(status_code=409, detail="a folder with that name exists") from exc
+        raise
+    with os.fdopen(fd, "wb") as fh:
         while chunk := await file.read(1024 * 1024):
             await asyncio.to_thread(fh.write, chunk)
     return {"ok": True, "path": str(target.relative_to(WORKSPACE_ROOT))}
+
+
+def _one_line(text: str) -> str:
+    """*text* with anything unprintable replaced, so it cannot break a log line."""
+    return "".join(c if c.isprintable() else "?" for c in text)
+
+
+@app.post("/api/files/upload-zip")
+async def post_upload_zip(file: UploadFile, dir: str = "") -> JsonDict:
+    """Unpack an uploaded ``.zip`` into ``dir`` (workspace-relative).
+
+    For when the browser cannot hand over a folder. Every member is checked
+    before anything is written (no absolute paths, ``..``, links or device files;
+    file-count and size caps), nothing that exists is replaced — an archive
+    naming an existing file is refused whole — and a failed unpack leaves the
+    folder as it was. Every outcome, refusals included, is audit-logged.
+    """
+    try:
+        target_dir = _safe_path(dir)
+        # The multipart parser has already spooled the upload to a seekable
+        # temporary file, which is all zipfile needs: read it from there.
+        if file.size is not None and file.size > ZIP_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="the archive is too large")
+        try:
+            done = await asyncio.to_thread(unpack_into, file.file, target_dir)
+        except ZipRejectedError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    except HTTPException as exc:
+        _audit.info(
+            "zip upload refused (%d): %s into %s: %s",
+            exc.status_code,
+            _one_line(file.filename or "?"),
+            _one_line(dir or "."),
+            _one_line(str(exc.detail)),
+        )
+        raise
+    rel = "" if target_dir == WORKSPACE_ROOT else str(target_dir.relative_to(WORKSPACE_ROOT))
+    _audit.info(
+        "zip upload: %s, %d file(s) into %s",
+        _one_line(file.filename or "?"),
+        done.files,
+        _one_line(rel or "."),
+    )
+    return {"ok": True, "path": rel, "files": done.files, "dirs": done.dirs, "bytes": done.bytes}
 
 
 # ── Settings API ───────────────────────────────────────────
@@ -702,6 +1158,44 @@ def _apply_stack_change() -> None:
     """Re-discover stacks and re-sync vibe-acp config after an install/uninstall."""
     settings.load_mcp_servers.cache_clear()
     settings.sync_servers_to_vibe_config(settings.active_servers())
+
+
+class LoginPayload(BaseModel):
+    """Request body: the workspace password."""
+
+    password: str
+
+
+@app.post("/api/login")
+async def post_login(payload: LoginPayload, response: Response) -> JsonDict:
+    """Log this browser in: trade the password for a cookie.
+
+    The one ``/api`` route that answers without the password (see
+    :mod:`medmcp.access`). The cookie holds a value derived from the password,
+    is ``HttpOnly`` so page script never holds it, and ``SameSite=Strict`` so no
+    other site's request carries it.
+    """
+    if not access.required():
+        return {"ok": True}
+    if not access.password_matches(payload.password.strip()):
+        _audit.warning("login refused: wrong password")
+        raise HTTPException(status_code=403, detail="wrong password")
+    response.set_cookie(
+        access.COOKIE_NAME,
+        access.cookie_value(),
+        max_age=access.COOKIE_MAX_AGE_SEC,
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+    _audit.info("browser logged in")
+    return {"ok": True}
+
+
+@app.get("/api/access")
+async def get_access() -> JsonDict:
+    """Answer 200 when the request may use the API (the guard refuses it otherwise)."""
+    return {"ok": True}
 
 
 @app.get("/healthz")
@@ -928,6 +1422,9 @@ async def post_stack_install(payload: StackInstallPayload) -> JsonDict:
             status_code=409,
             detail={"needs_network_consent": True, "name": exc.name, "image": exc.image},
         ) from exc
+    except signing.SignatureError as exc:
+        _audit.warning("stack install refused: %s", exc)
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -937,7 +1434,9 @@ async def post_stack_install(payload: StackInstallPayload) -> JsonDict:
     await asyncio.to_thread(_apply_stack_change)
     _audit.info("stack installed: %s (%s)", name, payload.image)
     await _restart_vibe()
-    await _apply_pool_changes({name}, set())
+    # A reinstall replaces the image under a running backend: drop it, so the
+    # next start runs the new image instead of the pool serving the old one.
+    await _apply_pool_changes({name}, {name})
     return {"name": name, "restarted": True}
 
 
@@ -995,7 +1494,7 @@ async def ws_stack_install(ws: WebSocket) -> None:
             await asyncio.to_thread(_apply_stack_change)
             _audit.info("stack installed: %s (%s)", name, image)
             await _restart_vibe()
-            await _apply_pool_changes({name}, set())
+            await _apply_pool_changes({name}, {name})  # drop a backend on the old image
             await queue.put({"type": "done", "name": name})
         except settings.NetworkConsentRequiredError as exc:
             await queue.put({"type": "needs_network_consent", "name": exc.name, "image": exc.image})
@@ -1656,6 +2155,11 @@ def _confined_input_paths(inputs: dict[str, str]) -> dict[str, str]:
     return {key: _confined_input_path(value) for key, value in inputs.items()}
 
 
+# What each preview showed, so that a run starts only from one (see
+# medmcp.previewgrant): replay-preview issues a token, /ws/replay redeems it.
+_preview_grants = previewgrant.PreviewGrants()
+
+
 class ReplayPreviewPayload(BaseModel):
     """Request body for previewing a replay's resolved steps.
 
@@ -1663,25 +2167,6 @@ class ReplayPreviewPayload(BaseModel):
     """
 
     runs: list[dict[str, str]]
-
-
-def _input_argument_names(recipe: workflow.Recipe) -> dict[str, str]:
-    """Map each ``in_N`` to the argument name it is first used as.
-
-    The path checker classifies a path by its *parameter name* — ``input_path``
-    must exist, ``output_dir`` need not — and the input's own name (``in_1``)
-    says nothing. The first step argument that references the placeholder gives
-    the role the tool assigns it.
-    """
-    names: dict[str, str] = {}
-    for step in recipe.steps:
-        for key, value in step.arguments.items():
-            if not isinstance(value, str):
-                continue
-            for ref in replay.unresolved_refs(value):
-                inner = ref[4:-1].strip() if ref.startswith("dir(") and ref.endswith(")") else ref
-                names.setdefault(inner, key)
-    return names
 
 
 def _preflight_item(
@@ -1693,17 +2178,25 @@ def _preflight_item(
     """Everything the run screen wants to say about one item before it runs.
 
     ``error`` is the engine's own validation (a missing input, an uninstalled
-    stack). ``findings`` are the path checks on the *bound inputs* — the files
-    the person just pointed at — reported with the role the tool gives them, so
-    a missing scan is an error and an output folder that already holds results
-    is a warning about overwriting, not a false alarm.
+    stack, an output that would overwrite an input). ``findings`` are the path
+    checks on the *bound inputs* — the files the person just pointed at —
+    reported with the role the tool gives them, so a missing scan is an error
+    and an output folder that already holds results is a warning about
+    overwriting, not a false alarm. An output whose folder does not exist yet
+    is not an error here: the run creates it.
     """
-    error = replay.validate(recipe, inputs, servers)
+    error = replay.validate(recipe, inputs, servers, base=WORKSPACE_ROOT)
     if error is not None:
         return {"ok": False, "error": error, "findings": []}
     bound = replay.apply_input_defaults(recipe, inputs)
     checked = {arg_names.get(name, name): value for name, value in bound.items()}
     findings = pathcheck.check_tool_call_paths(checked, WORKSPACE_ROOT, containerized=True)
+    for finding in findings:
+        if finding["role"] == "output" and finding["status"] == "parent_missing":
+            finding["status"] = "ok"
+            finding["severity"] = "info"
+            finding["note"] = "the folder will be created"
+            finding["nearest"], finding["entries"], finding["entry_total"] = "", [], 0
     blocking = any(f["severity"] == "error" for f in findings)
     return {
         "ok": not blocking,
@@ -1719,21 +2212,41 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
     Inputs are bound now; cross-step refs (``{{stepM.*}}``) resolve at runtime,
     so they intentionally still show as placeholders in the preview. Every item
     is pre-flighted (see :func:`_preflight_item`) so a typo in one of forty rows
-    is caught here rather than by the tool, after the stacks were spawned.
+    is caught here rather than by the tool, after the stacks were spawned. An
+    item whose output would land on one of its inputs, or on another item's
+    output, is refused with the reason — never offered with a warning.
+
+    When something can run, the answer carries a ``token``: the only way to
+    start this run on ``/ws/replay``, valid for ``expires_in`` seconds, once,
+    for this recipe and exactly the rows that passed (see
+    :mod:`medmcp.previewgrant`).
     """
 
     def _preview() -> JsonDict:
-        recipe = workflow.load_workflow(name)
+        recipe, recipe_sha256 = workflow.load_workflow_with_digest(name)
         bindings_list = [_confined_input_paths(dict(r)) for r in payload.runs]
         servers = settings.active_servers()
-        arg_names = _input_argument_names(recipe)
+        arg_names = workflow.input_argument_names(recipe)
         items = [
             {"index": i, **_preflight_item(recipe, b, servers, arg_names)}
             for i, b in enumerate(bindings_list)
         ]
+        # Two rows that would write to the same place: neither runs until they
+        # are told apart (the engine refuses them too, see replay.run_batch).
+        clashes = replay.batch_output_collisions(recipe, bindings_list, base=WORKSPACE_ROOT)
+        for index, reason in clashes.items():
+            if items[index]["error"] is None:
+                items[index].update(ok=False, error=reason)
         first_ok = next((i for i, item in enumerate(items) if item["error"] is None), None)
+        no_token: JsonDict = {"token": None, "expires_in": None}
         if first_ok is None and items:
-            return {"ok": False, "error": items[0]["error"], "steps": [], "items": items}
+            return {
+                "ok": False,
+                "error": items[0]["error"],
+                "steps": [],
+                "items": items,
+                **no_token,
+            }
         # Same defaults the run will use, so the preview shows what will actually
         # be sent rather than an unresolved placeholder the user never filled in.
         first = bindings_list[first_ok] if first_ok is not None else {}
@@ -1747,12 +2260,26 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
             }
             for i, s in enumerate(recipe.steps, start=1)
         ]
-        ready = sum(1 for item in items if item["ok"])
+        # The run refuses these too (replay.paths_outside); saying so here keeps
+        # an imported recipe that writes outside the workspace from looking runnable.
+        for step in steps:
+            outside = replay.paths_outside(step["arguments"], WORKSPACE_ROOT)
+            if outside:
+                error = f"step {step['index']} names a path outside the workspace: " + ", ".join(
+                    outside
+                )
+                return {"ok": False, "error": error, "steps": steps, "items": items, **no_token}
+        runnable = [b for b, item in zip(bindings_list, items, strict=True) if item["ok"]]
+        # What the Run button sends is the rows that passed, so that is what the
+        # token admits.
+        token = _preview_grants.issue(name, recipe_sha256, runnable) if runnable else None
         return {
-            "ok": ready > 0,
-            "error": None if ready > 0 else "no item can run",
+            "ok": bool(runnable),
+            "error": None if runnable else "no item can run",
             "steps": steps,
             "items": items,
+            "token": token,
+            "expires_in": _preview_grants.ttl_s if token else None,
         }
 
     try:
@@ -1764,38 +2291,191 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
 
 
 class BatchFromPlanPayload(BaseModel):
-    """Request body: a workspace-relative ``plan_batch`` manifest CSV."""
+    """Request body: a workspace-relative batch plan or selection CSV.
+
+    ``column_map`` names the manifest column for a recipe input the automatic
+    matching could not place; ``output_root`` is the folder results go under
+    (one sub-folder per subject). Left empty, the manifest's own ``output_dir``
+    column decides, and failing that ``results/<workflow>`` in the workspace.
+    """
 
     plan_csv: str
+    column_map: dict[str, str] = Field(default_factory=dict[str, str])
+    role_map: dict[str, str] = Field(default_factory=dict[str, str])
+    """For a selection manifest: which series feeds which input, e.g.
+    ``{"in_1": "FLAIR", "in_2": "T1+contrast"}``."""
+    output_root: str = ""
+
+
+def _default_output_root(recipe: workflow.Recipe) -> Path:
+    """Where a roll-out writes when nobody said: ``results/<workflow>`` in the workspace."""
+    return WORKSPACE_ROOT / "results" / recipe.name
+
+
+def _confined_output_root(value: str) -> Path:
+    """An output root given by the client, as an absolute path inside the workspace.
+
+    Raises:
+        ValueError: the folder resolves outside :data:`WORKSPACE_ROOT`.
+    """
+    path = Path(value)
+    resolved = (path if path.is_absolute() else WORKSPACE_ROOT / path).resolve()
+    if not resolved.is_relative_to(WORKSPACE_ROOT):
+        raise ValueError(f"output folder is outside the workspace: {value!r}")
+    return resolved
+
+
+def _bind_selection(
+    recipe: workflow.Recipe,
+    rows: list[dict[str, str]],
+    payload: BatchFromPlanPayload,
+    confirmation: batchplan.Confirmation | None,
+) -> JsonDict:
+    """Bind a selection manifest: one run per series, or per subject-session.
+
+    When the workflow reads several files and the roles are not all known, the
+    answer carries the roles the selection offers (``roles``) and the inputs
+    still to assign (``unmapped``), so the editor can ask instead of guessing.
+    A confirmed selection (already checked against its record) offers its
+    ``role`` labels and carries the record's summary as ``confirmation``; a
+    multi-input workflow over a plain selection is refused (``refused``).
+    """
+    root: Path | None = None
+    if payload.output_root.strip():
+        root = _confined_output_root(payload.output_root.strip())
+    elif batchplan.output_inputs(recipe):
+        root = _default_output_root(recipe)
+    offered = batchplan.selection_roles(rows)
+    plan_path = Path(_confined_input_path(payload.plan_csv))
+    confirmed = confirmation.summary() if confirmation is not None else None
+    try:
+        binding = batchplan.runs_from_selection(
+            recipe,
+            rows,
+            role_map=payload.role_map or None,
+            output_root=root,
+            base_dir=batchplan.dataset_dir(plan_path),
+        )
+    except batchplan.NeedsConfirmationError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "refused": True,
+            "kind": "selection",
+            "runs": [],
+            "skipped": [],
+            "roles": offered,
+        }
+    except batchplan.NeedsRolesError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "kind": "selection",
+            "runs": [],
+            "skipped": [],
+            "roles": offered,
+            "unmapped": exc.unmapped,
+            "role_map": exc.role_map,
+            "confirmation": confirmed,
+        }
+    except batchplan.BatchPlanError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "kind": "selection",
+            "runs": [],
+            "skipped": [],
+            "roles": offered,
+            "confirmation": confirmed,
+        }
+    return {
+        "ok": True,
+        "error": None,
+        "kind": "selection",
+        "confirmation": confirmed,
+        "runs": [_confined_input_paths(r) for r in binding.runs],
+        "labels": binding.labels,
+        "skipped": binding.skipped,
+        "roles": offered,
+        "role_map": binding.role_map,
+        "output_inputs": binding.output_inputs,
+        "output_root": binding.output_root,
+    }
 
 
 @app.post("/api/workflows/{name}/batch-from-plan")
 async def post_batch_from_plan(name: str, payload: BatchFromPlanPayload) -> JsonDict:
-    """Turn a ``plan_batch`` manifest into ready-to-run batch bindings for a workflow.
+    """Turn a batch plan into ready-to-run batch bindings for a workflow.
 
-    Reads the cohort manifest CSV (written by the cohort stack's ``plan_batch``),
-    maps each ``ok`` row's resolved files onto the recipe's ``{{in_N}}`` inputs, and
+    Reads the manifest CSV a stack wrote for a cohort roll-out,
+    maps each ``ok`` row's resolved files onto the recipe inputs a tool reads, and
     returns the per-subject runs that pre-fill the batch editor — so the user
     reviews the binding list instead of hand-entering one row per subject. Flagged
     rows (missing/ambiguous) are returned separately to be resolved, never run.
+
+    Inputs a tool *writes* are not read from the manifest's file columns: each
+    item gets its own folder under the output root (see
+    :mod:`medmcp.batchplan`). When an input cannot be matched, the answer names
+    the columns to choose from (``columns``/``unmapped``) so the editor can ask.
+
+    A selection manifest (one row per selected series) is accepted on the
+    same route and bound by :func:`_bind_selection`; a confirmed one
+    only while it matches its record, else it is refused with the reason.
     """
 
     def _build() -> JsonDict:
         recipe = workflow.load_workflow(name)
         try:
-            rows = batchplan.read_manifest(_confined_input_path(payload.plan_csv))
-        except OSError as exc:
+            rows, confirmation = batchplan.load_manifest(_confined_input_path(payload.plan_csv))
+        except (OSError, UnicodeDecodeError) as exc:
             return {"ok": False, "error": f"cannot read plan: {exc}", "runs": [], "skipped": []}
+        except batchplan.ConfirmationError as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "refused": True,
+                "kind": "selection",
+                "runs": [],
+                "skipped": [],
+            }
+        if batchplan.is_selection(rows):
+            return _bind_selection(recipe, rows, payload, confirmation)
+        columns = batchplan.role_columns(rows)
+        has_plan_dirs = bool(rows) and "output_dir" in rows[0]
+        root: Path | None = None
+        if payload.output_root.strip():
+            root = _confined_output_root(payload.output_root.strip())
+        elif not has_plan_dirs and batchplan.output_inputs(recipe):
+            root = _default_output_root(recipe)
         try:
-            binding = batchplan.runs_from_manifest(recipe, rows)
+            binding = batchplan.runs_from_manifest(
+                recipe, rows, column_map=payload.column_map or None, output_root=root
+            )
         except batchplan.BatchPlanError as exc:
-            return {"ok": False, "error": str(exc), "runs": [], "skipped": []}
+            readable = [
+                i.name for i in recipe.inputs if i.name not in batchplan.output_inputs(recipe)
+            ]
+            guessed = batchplan.infer_column_map(recipe, rows)
+            return {
+                "ok": False,
+                "error": str(exc),
+                "runs": [],
+                "skipped": [],
+                "columns": columns,
+                "unmapped": [n for n in readable if n not in {**guessed, **payload.column_map}],
+                "column_map": {**guessed, **payload.column_map},
+            }
         return {
             "ok": True,
             "error": None,
+            "kind": "plan",
             "runs": [_confined_input_paths(r) for r in binding.runs],
+            "labels": binding.labels,
             "skipped": binding.skipped,
             "column_map": binding.column_map,
+            "columns": columns,
+            "output_inputs": binding.output_inputs,
+            "output_root": binding.output_root,
         }
 
     try:
@@ -1812,6 +2492,13 @@ class ReplayStartRequest(BaseModel):
     name: str = ""
     runs: list[dict[str, str]] = Field(default_factory=list[dict[str, str]])
     attach: str = ""
+    labels: list[str] = Field(default_factory=list[str])
+    """Who each item is (``subject[/session]``), aligned with ``runs``."""
+    manifest: str = ""
+    """The workspace path of the plan or selection the rows came from, if any."""
+    output_root: str = ""
+    preview_token: str = ""
+    """The ``token`` the preview of exactly these rows returned; required to start."""
 
 
 @app.websocket("/ws/replay")
@@ -1820,7 +2507,8 @@ async def ws_replay(ws: WebSocket) -> None:
 
     First client message, one of:
 
-    - ``{"name": str, "runs": [{in_N: value}, ...]}`` starts a new run;
+    - ``{"name": str, "runs": [{in_N: value}, ...], "preview_token": str}``
+      starts a new run;
 
       each entry is one full input binding and the recipe runs once per
       entry, sequentially. A failed item does not stop the remaining items.
@@ -1835,7 +2523,10 @@ async def ws_replay(ws: WebSocket) -> None:
 
     SECURITY: the replay engine calls MCP tools directly, bypassing the
     vibe-acp permission flow — the client must show the resolved-steps preview
-    (``/replay-preview``) and get an explicit confirmation before starting.
+    (``/replay-preview``) and get an explicit confirmation before starting. A
+    start must carry that preview's token, for this workflow, this version of
+    its recipe and exactly these rows; anything else is refused and audit-logged
+    before a step runs (see :mod:`medmcp.previewgrant`).
     Inputs are confined to the workspace here regardless (see
     :func:`_confined_input_path`), since a binding arriving on this socket has
     had no permission prompt between it and the tool call.
@@ -1870,16 +2561,63 @@ async def ws_replay(ws: WebSocket) -> None:
                 await ws.send_json({"type": "result", "ok": False, "error": "no inputs to run"})
                 return
             try:
-                recipe = await asyncio.to_thread(workflow.load_workflow, first.name)
+                recipe, recipe_sha256 = await asyncio.to_thread(
+                    workflow.load_workflow_with_digest, first.name
+                )
             except FileNotFoundError as exc:
                 await ws.send_json({"type": "result", "ok": False, "error": str(exc)})
                 return
+            # The recipe just read, these rows: exactly what a preview showed, or
+            # nothing runs.
+            try:
+                grant = _preview_grants.redeem(
+                    first.preview_token, first.name, recipe_sha256, bindings
+                )
+            except previewgrant.GrantRefusedError as exc:
+                _audit.warning("replay refused: %s: %s", first.name, exc)
+                await ws.send_json({"type": "result", "ok": False, "error": str(exc)})
+                return
             servers = await asyncio.to_thread(settings.active_servers)
+            manifest_path: Path | None = None
+            if first.manifest.strip():
+                with contextlib.suppress(ValueError):
+                    manifest_path = Path(_confined_input_path(first.manifest.strip()))
+            # The rows were bound earlier; the manifest they came from is checked
+            # again now, so a confirmed selection edited since (or a plain one
+            # under a multi-input workflow) cannot start a run.
+            selection: batchplan.Confirmation | None = None
+            if manifest_path is not None:
+                try:
+                    selection = await asyncio.to_thread(
+                        batchplan.check_run_manifest, manifest_path, recipe, bindings
+                    )
+                except batchplan.BatchPlanError as exc:
+                    _audit.warning("replay refused: %s", exc)
+                    await ws.send_json({"type": "result", "ok": False, "error": str(exc)})
+                    return
             record = _runs.start(
                 recipe=recipe,
                 runs=bindings,
                 servers=servers,
                 cwd=str(WORKSPACE_ROOT),
+                confine_to=WORKSPACE_ROOT,
+                labels=first.labels,
+                manifest_path=manifest_path,
+                confirmed_selection=selection.summary() if selection is not None else None,
+                output_root=first.output_root,
+                image_identity=settings.image_identity,
+                confirmation={
+                    # One person owns a workspace; there is no account to name.
+                    # What can be said is how the start reached the server and
+                    # that these exact rows were shown in the preview (a start
+                    # without its token never gets here).
+                    "by": "workspace user",
+                    "authenticated": access.required(),
+                    "client": ws.client.host if ws.client is not None else None,
+                    "previewed": True,
+                    "previewed_at": grant.issued_at,
+                    "confirmed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                },
                 on_finished=lambda r: _audit.info(
                     "replay finished: %s run=%s status=%s", r.workflow, r.id, r.status
                 ),
@@ -1959,10 +2697,50 @@ async def get_runs(
 @app.get("/api/runs/{run_id}")
 async def get_run(run_id: str) -> JsonDict:
     """One run's full record: every item, every step, what each produced."""
-    record = await asyncio.to_thread(runs.load_run, run_id)
+    record = await asyncio.to_thread(_runs.full, run_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"no run {run_id!r}")
-    return {**record.to_dict(), "live": _runs.is_live(run_id)}
+    return {**record.to_dict(full=True), "live": _runs.is_live(run_id)}
+
+
+@app.get("/api/runs/{run_id}/export")
+async def export_run(run_id: str, format: Literal["json", "md"] = "json") -> Response:
+    """One run as a single file: the full record as JSON, or as a Markdown report.
+
+    The JSON is the run folder's ``run.json`` with the manifest's text inlined,
+    so the one file carries the recipe, the environment, every item's steps,
+    results and checksums, and the plan or selection the items came from.
+    """
+
+    def _export() -> tuple[str, str] | None:
+        record = _runs.full(run_id)
+        if record is None:
+            return None
+        payload = record.to_dict(full=True)
+        if format == "md":
+            return runrecord.render_report(payload), "text/markdown; charset=utf-8"
+        copy = runs.run_folder(run_id) / runs.MANIFEST_FILE
+        if payload.get("manifest") and copy.is_file():
+            with contextlib.suppress(OSError, UnicodeDecodeError):
+                payload["manifest"] = {**payload["manifest"], "text": copy.read_text("utf-8")}
+        record_copy = runs.run_folder(run_id) / runs.CONFIRMATION_FILE
+        manifest = cast("JsonDict", payload.get("manifest") or {})
+        selection = cast("JsonDict", manifest.get("confirmed_selection") or {})
+        if selection and record_copy.is_file():
+            with contextlib.suppress(OSError, ValueError):
+                selection = {**selection, "record": json.loads(record_copy.read_text("utf-8"))}
+                payload["manifest"] = {**manifest, "confirmed_selection": selection}
+        return json.dumps(payload, indent=1), "application/json"
+
+    result = await asyncio.to_thread(_export)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"no run {run_id!r}")
+    body, media_type = result
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="run-{run_id}.{format}"'},
+    )
 
 
 @app.post("/api/runs/{run_id}/cancel")
@@ -1981,6 +2759,82 @@ async def delete_run(run_id: str) -> JsonDict:
         raise HTTPException(status_code=409, detail="run is still in progress")
     if not await asyncio.to_thread(runs.delete_run, run_id):
         raise HTTPException(status_code=404, detail=f"no run {run_id!r}")
+    return {"ok": True}
+
+
+# ── Background jobs ────────────────────────────────────────
+
+
+def _job_manager() -> jobs.JobManager:
+    if _jobs is None:
+        raise HTTPException(status_code=404, detail="background jobs are not enabled here")
+    return _jobs
+
+
+@app.get("/api/jobs")
+async def get_jobs() -> JsonDict:
+    """This workspace's background jobs, running and finished (newest first).
+
+    Read off the job containers themselves, so jobs started before this core
+    did are listed too. ``max`` is how many may run at once on this machine.
+    """
+    if _jobs is None:
+        return {"enabled": False, "jobs": [], "max": 0}
+    try:
+        listed = await asyncio.to_thread(_jobs.list)
+    except jobs.JobError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    out: list[JsonDict] = []
+    for job in listed:
+        entry = job.public()
+        if job.running:
+            entry["progress"] = await asyncio.to_thread(jobs.read_progress, _jobs.workspace, job.id)
+        # The chat's name for the jobs list; ``session`` itself is an id.
+        entry["session_title"] = (
+            await asyncio.to_thread(sessions.chat_title, job.session) if job.session else None
+        ) or ""
+        out.append(entry)
+    return {"enabled": True, "jobs": out, "max": settings.max_jobs()}
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job(job_id: str, tail: int = 200) -> JsonDict:
+    """One job and the last lines its container wrote."""
+    manager = _job_manager()
+    try:
+        job = await asyncio.to_thread(manager.get, job_id)
+        logs = await asyncio.to_thread(manager.logs, job_id, tail)
+    except jobs.JobError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {**job.public(), "logs": _clip_output(logs)}
+
+
+@app.post("/api/jobs/{job_id}/stop")
+async def post_stop_job(job_id: str) -> JsonDict:
+    """Stop a running job (it gets a moment to save its state first)."""
+    manager = _job_manager()
+    try:
+        job = await asyncio.to_thread(manager.stop, job_id)
+    except jobs.JobError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _audit.info("job stopped from the UI: %s", job_id)
+    return job.public()
+
+
+@app.delete("/api/jobs/{job_id}")
+async def delete_job(job_id: str) -> JsonDict:
+    """Forget a finished job (removes its container). A running one must be stopped first."""
+    manager = _job_manager()
+    try:
+        job = await asyncio.to_thread(manager.get, job_id)
+    except jobs.JobError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if job.running:
+        raise HTTPException(status_code=409, detail="job is still running")
+    try:
+        await asyncio.to_thread(manager.remove, job_id)
+    except jobs.JobError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"ok": True}
 
 
@@ -2182,8 +3036,23 @@ _AUTO_APPROVE_OPTIONS = frozenset({"allow_always", "allow_always_permanent"})
 # The permanent variant stays hidden: nothing is ever written to config.toml.
 _SESSION_APPROVE_OPTION = "allow_always"
 
+# A stack tool approved "for the rest of this chat". The option is MedMCP's own,
+# not one of vibe's: vibe is always answered ``allow_once`` for the call in hand,
+# so nothing is recorded outside this connection and the grant dies with the chat.
+# Each later call still passes the path guard, is still granted to the broker one
+# call at a time, and still asks when it would overwrite a file or reach outside
+# the workspace (see :func:`_call_needs_a_look`).
+_STACK_TOOL_CHAT_OPTION = "medmcp_allow_tool_for_chat"
+
+# Kill switch: ``MEDMCP_STACK_TOOL_APPROVAL=0`` restores strict per-call approval.
+STACK_TOOL_APPROVAL_ENV_VAR = "MEDMCP_STACK_TOOL_APPROVAL"
+
 # Kill switch: ``MEDMCP_READ_ONLY_APPROVAL=0`` restores strict per-call approval.
 READ_ONLY_APPROVAL_ENV_VAR = "MEDMCP_READ_ONLY_APPROVAL"
+# Code the assistant wrote itself (a Python heredoc, ``Rscript``, a ``.py`` it
+# writes): ``ask`` (default) shows every such call on its own, never covered by a
+# chat-long approval; ``deny`` refuses it without asking, so only tools run.
+ASSISTANT_CODE_ENV_VAR = "MEDMCP_ASSISTANT_CODE"
 
 # Session patterns (as vibe's bash tool builds them) for commands that only read.
 # Each is ``<command> *``: vibe splits a compound command into its parts and asks
@@ -2220,6 +3089,36 @@ def _read_only_approval_enabled() -> bool:
     """Whether read-only shell commands may be approved for the rest of a chat (default on)."""
     value = os.environ.get(READ_ONLY_APPROVAL_ENV_VAR, "").strip().lower()
     return value not in {"0", "false", "no", "off"}
+
+
+def _assistant_code_denied() -> bool:
+    """Whether code the assistant wrote itself is refused outright (default: asked)."""
+    return os.environ.get(ASSISTANT_CODE_ENV_VAR, "").strip().lower() in {"deny", "off", "0", "no"}
+
+
+def _stack_tool_approval_enabled() -> bool:
+    """Whether a stack tool may be approved for the rest of a chat (default on)."""
+    value = os.environ.get(STACK_TOOL_APPROVAL_ENV_VAR, "").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _call_needs_a_look(rule_keys: list[str], path_findings: list[Any]) -> bool:
+    """Whether one stack call must be shown even though its tool is approved for the chat.
+
+    The chat-long approval covers a tool doing its ordinary work inside the
+    workspace. A call that would overwrite an existing file, touch a path outside
+    the workspace, or whose paths could not be resolved is a different decision
+    from the one the person made, so it is put to them again. So is a call that
+    starts a background job: each one runs for hours with its own arguments.
+    """
+    if "outside_workspace" in rule_keys or "background_job" in rule_keys:
+        return True
+    for finding in path_findings:
+        if finding.get("severity") == "error":
+            return True
+        if finding.get("status") in {"will_overwrite", "outside_workspace"}:
+            return True
+    return False
 
 
 _REDIRECT_OPERATORS = frozenset({">&", "<&", ">", ">>", "<", "&>", "&>>", ">|"})
@@ -2260,6 +3159,78 @@ def _redirects_are_harmless(command: str) -> bool:
     return not root.has_error and harmless(root)
 
 
+# Node types a granted read-only command may consist of. Anything else —
+# command or process substitution, subshells, variable expansion, functions,
+# heredocs — makes the core ask again.
+_PLAIN_COMMAND_NODES = frozenset(
+    {
+        "program",
+        "pipeline",
+        "list",
+        "redirected_statement",
+        "command",
+        "command_name",
+        "word",
+        "string",
+        "string_content",
+        "raw_string",
+        "number",
+        "concatenation",
+        "file_redirect",
+        "|",
+        "&&",
+        "||",
+        ";",
+        '"',
+    }
+)
+
+
+def _is_read_only_command(command: str, workspace: Path) -> bool:
+    """Whether *command* only reads files inside *workspace*.
+
+    Every simple command in it (across pipes, ``;``, ``&&`` and ``||``) must be one
+    of :data:`_READ_ONLY_SESSION_PATTERNS`, every redirect harmless (see
+    :func:`_redirects_are_harmless`), and every absolute path argument inside the
+    workspace; ``..``, ``~`` and anything but plain words disqualify it. Parsed with
+    the same bash grammar vibe uses; a command that does not parse is not read-only.
+    """
+    if not command.strip() or not _redirects_are_harmless(command):
+        return False
+    try:
+        tsbash: Any = importlib.import_module("tree_sitter_bash")
+        parser = Parser(Language(cast("object", tsbash.language())))
+        root = parser.parse(command.encode("utf-8")).root_node
+    except Exception:
+        return False
+    if root.has_error:
+        return False
+    allowed = {p.removesuffix(" *") for p in _READ_ONLY_SESSION_PATTERNS}
+    root_dir = workspace.resolve()
+
+    def ok(node: Node) -> bool:
+        if node.type not in _PLAIN_COMMAND_NODES:
+            return False
+        if node.type == "file_redirect":
+            return True  # already vetted by _redirects_are_harmless
+        if node.type == "command":
+            name = node.child_by_field_name("name")
+            if name is None or (name.text or b"").decode("utf-8") not in allowed:
+                return False
+            for arg in node.children:
+                if arg == name or arg.type == "file_redirect":
+                    continue
+                # Quotes only group; '/etc/"passwd"' is the path /etc/passwd.
+                word = (arg.text or b"").decode("utf-8").replace('"', "").replace("'", "")
+                if word.startswith("~") or ".." in word.split("/"):
+                    return False
+                if word.startswith("/") and not Path(word).resolve().is_relative_to(root_dir):
+                    return False
+        return all(ok(child) for child in node.children)
+
+    return ok(root)
+
+
 def _read_only_session_label(option: JsonDict, command: str | None = None) -> str | None:
     """Label for a session approval of *option*, or None if it is not read-only.
 
@@ -2294,8 +3265,9 @@ def _read_only_session_label(option: JsonDict, command: str | None = None) -> st
         if pattern not in _READ_ONLY_SESSION_PATTERNS:
             return None
         patterns.append(str(pattern))
-    commands = ", ".join(p.removesuffix(" *") for p in patterns)
-    return f"Allow {commands} for this chat"
+    # The grant covers every read-only command in the chat (see _handle_permission),
+    # so the label names that, not the one command in hand.
+    return "Allow reading files in this chat"
 
 
 def _visible_permission_options(
@@ -2353,6 +3325,23 @@ def _workspace_note(viewed_path: str) -> str:
 # goes out anyway, and for it to confirm a session/close.
 TURN_CANCEL_TIMEOUT: float = 15.0
 SESSION_CLOSE_TIMEOUT: float = 10.0
+# How long to wait for vibe-acp to take in a ``cancelled`` approval before the
+# turn is interrupted (see ``_settle_cancelled_permissions``).
+PERMISSION_SETTLE_TIMEOUT: float = 5.0
+# How long a resume waits for the socket that last held the chat to finish
+# closing it: the cancelled turn's end, then the session/close.
+SESSION_HANDOVER_TIMEOUT: float = TURN_CANCEL_TIMEOUT + SESSION_CLOSE_TIMEOUT + 5.0
+
+# Sessions a closing socket is still releasing in vibe-acp, by vibe session id.
+# A resume of one waits for the event: vibe 2.26 attaches a session that is
+# still open a second time instead of refusing, and the close under way would
+# then take the new socket's session and queue with it.
+_closing_sessions: dict[str, asyncio.Event] = {}
+
+
+def _is_permission_request(msg: JsonDict) -> bool:
+    """Whether a vibe-acp frame asks for an approval (and so awaits an answer)."""
+    return msg.get("method") == "session/request_permission"
 
 
 class _ChatConnection:
@@ -2401,6 +3390,15 @@ class _ChatConnection:
         # Relays unsolicited frames before the first prompt (see start_idle_pump).
         self._idle_pump: asyncio.Task[None] | None = None
         self._pending_perms: dict[int, asyncio.Future[str | None]] = {}
+        # Set when a cancelled turn's open approval was answered ``cancelled``:
+        # the interrupt must wait until vibe-acp has taken that answer in.
+        self._permission_cancelled = False
+        # Set once the user allows a read-only command for the rest of the chat:
+        # from then on every read-only command (any of _READ_ONLY_SESSION_PATTERNS,
+        # with the same redirect rules) is allowed without asking again.
+        self._read_only_granted = False
+        # Stack tools the person approved for the rest of this chat, as (stack, tool).
+        self._granted_stack_tools: set[tuple[str, str]] = set()
         self._prompt_task: asyncio.Task[None] | None = None
         # The session/prompt RPC of the current turn. It outlives a cancelled
         # prompt task: vibe-acp ends the turn only after it handles session/cancel,
@@ -2463,19 +3461,29 @@ class _ChatConnection:
         resumed session is never purged on close — it already has history the
         user came back to view.
         """
-        await self._stop_idle_pump()
-        await self._cancel_prompt()
-        for task in [*self._explain_tasks, *self._title_tasks]:
-            task.cancel()
-        # Release vibe-acp's lease on the session. Without session/close it stays
-        # "open" in vibe-acp until a restart, so coming back to this chat fails
-        # session/load and silently lands in a new, empty chat instead.
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(
-                _client.request("session/close", {"sessionId": self.session_id}),
-                timeout=SESSION_CLOSE_TIMEOUT,
-            )
-        _client.unregister_session(self.session_id)
+        # Registered before the first await, so a socket resuming this chat (a
+        # page reload) finds it and waits instead of loading a session that is
+        # still being closed.
+        released = asyncio.Event()
+        _closing_sessions[self.session_id] = released
+        try:
+            await self._stop_idle_pump()
+            await self._cancel_prompt()
+            for task in [*self._explain_tasks, *self._title_tasks]:
+                task.cancel()
+            # Release vibe-acp's lease on the session. Without session/close it
+            # stays "open" in vibe-acp until a restart, and vibe 2.26 attaches an
+            # open session a second time on session/load — every frame twice.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    _client.request("session/close", {"sessionId": self.session_id}),
+                    timeout=SESSION_CLOSE_TIMEOUT,
+                )
+            _client.unregister_session(self.session_id)
+        finally:
+            if _closing_sessions.get(self.session_id) is released:
+                del _closing_sessions[self.session_id]
+            released.set()
         if not self._prompted and not self._resumed:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(
@@ -2492,10 +3500,65 @@ class _ChatConnection:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+            await self._settle_cancelled_permissions()
             with contextlib.suppress(Exception):
                 await _client.notify("session/cancel", {"session_id": self.session_id})
             await self._await_turn_end()
             await self._drain_stale_frames()
+
+    async def _settle_cancelled_permissions(self) -> None:
+        """Let vibe-acp take in a ``cancelled`` approval before the turn is interrupted.
+
+        vibe 2.26 journals the answer to an approval and the interrupt of its
+        turn independently. Sent back to back, the interrupt can drop the pending
+        approval first and the answer is then recorded against nothing: the
+        session store is invalid from there on — "A turn is already running" for
+        every later prompt, and the chat can no longer be loaded or listed. So
+        an approval open at cancel time (answered in ``_handle_permission``) or
+        still queued is answered here, and the interrupt goes out only once
+        vibe-acp has moved on: the next frame of the turn, or its end. Frames
+        read while waiting belong to the cancelled turn and are discarded.
+        """
+        answered = self._permission_cancelled
+        self._permission_cancelled = False
+        rpc = self._prompt_rpc
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + PERMISSION_SETTLE_TIMEOUT
+        while True:
+            while not self.queue.empty():
+                try:
+                    msg = self.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                answered = await self._cancel_stale_permission(msg)
+            if not answered or rpc is None or rpc.done():
+                return
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                log.warning(
+                    "vibe-acp did not take a cancelled approval within %ss",
+                    PERMISSION_SETTLE_TIMEOUT,
+                )
+                return
+            get_task = asyncio.create_task(self.queue.get())
+            await asyncio.wait(
+                {get_task, rpc}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+            )
+            if get_task.done():
+                answered = await self._cancel_stale_permission(get_task.result())
+            else:
+                # Cancelling a parked Queue.get leaves the queue untouched.
+                get_task.cancel()
+
+    async def _cancel_stale_permission(self, msg: JsonDict) -> bool:
+        """Answer *msg* ``cancelled`` if it asks for an approval; say whether it did."""
+        if not _is_permission_request(msg):
+            return False
+        req_id = msg.get("id")
+        if isinstance(req_id, int):
+            with contextlib.suppress(Exception):
+                await _client.respond(req_id, {"outcome": {"outcome": "cancelled"}})
+        return True
 
     async def _await_turn_end(self) -> None:
         """Wait (bounded) for vibe-acp to answer the cancelled turn's session/prompt.
@@ -2528,11 +3591,7 @@ class _ChatConnection:
                 msg = self.queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            if msg.get("method") == "session/request_permission":
-                req_id = msg.get("id")
-                if isinstance(req_id, int):
-                    with contextlib.suppress(Exception):
-                        await _client.respond(req_id, {"outcome": {"outcome": "cancelled"}})
+            await self._cancel_stale_permission(msg)
 
     async def _send(self, msg: JsonDict) -> None:
         """Send one frame to the browser, ignoring a just-closed socket."""
@@ -2606,6 +3665,7 @@ class _ChatConnection:
                             self.canonical_id,
                             servers=self.servers,
                             model_name=self.model_name,
+                            image_identity=settings.image_identity,
                         )
                     )
         # Frames can still trickle in between a cancel and this prompt
@@ -2616,22 +3676,37 @@ class _ChatConnection:
             "session_id": self.session_id,
             "prompt": [{"type": "text", "text": text}],
         }
+        # Notes ride as their own content blocks flagged `automatic`: vibe orders
+        # them after the user's text and keeps them out of auto-title derivation.
+        # lstrip() because vibe joins blocks with a blank line — the persisted text
+        # stays byte-identical to the old appended format, so strip_workspace_note
+        # keeps working on every transcript vintage. Every note starts with
+        # "[workspace context:", so that one pattern removes them all.
+        notes: list[str] = []
         if viewed_path is not None:
-            # The note rides as its own content block flagged `automatic`: vibe
-            # orders it after the user's text and keeps it out of auto-title
-            # derivation. lstrip() because vibe joins blocks with a blank line —
-            # the persisted text stays byte-identical to the old appended format,
-            # so strip_workspace_note keeps working on every transcript vintage.
-            cast("list[JsonDict]", params["prompt"]).append(
-                {
-                    "type": "text",
-                    "text": _workspace_note(viewed_path).lstrip(),
-                    "_meta": {"automatic": True},
-                }
+            notes.append(_workspace_note(viewed_path).lstrip())
+        # What an active stack's index already says about a folder the prompt
+        # names, or that none exists yet. Only for stacks that declare such an
+        # index; reading it is a few stat calls and one small JSON file, off the
+        # event loop like every other disk access.
+        with contextlib.suppress(Exception):
+            viewed_abs = _resolve_input_path(viewed_path) if viewed_path is not None else None
+            dataset_notes = await asyncio.to_thread(
+                build_dataset_notes,
+                text,
+                viewed_abs,
+                WORKSPACE_ROOT,
+                dataset_indexes(self.servers),
+            )
+            if dataset_notes:
+                notes.append(dataset_notes)
+        if notes:
+            cast("list[JsonDict]", params["prompt"]).extend(
+                {"type": "text", "text": note, "_meta": {"automatic": True}} for note in notes
             )
             # user_display_content is persisted with the turn and echoed back in
             # replayed user_message_chunk frames, so resumed transcripts show the
-            # user's text without the note (no stripping needed on that path).
+            # user's text without the notes (no stripping needed on that path).
             params["_meta"] = {
                 "user_display_content": {
                     "version": "1",
@@ -2985,13 +4060,34 @@ class _ChatConnection:
             await _client.respond(req_id_raw, {"outcome": {"outcome": "cancelled"}})
             return
 
+        # One "allow looking at files" covers every read-only command in this chat.
+        # vibe offers its session option only for some of them (a file argument
+        # gets path-scoped options, which are never shown), so the core reads the
+        # command itself; the session option, when offered, is chosen so vibe
+        # stops asking for that pattern too.
+        # Only the shell: another tool's ``command`` argument is not a shell command.
+        called_stack, _called_tool = provenance.split_tool_name(
+            str(tool_call.get("toolName") or title), self._server_names
+        )
+        if (
+            self._read_only_granted
+            and called_stack == "builtin"
+            and isinstance(command, str)
+            and _is_read_only_command(command, WORKSPACE_ROOT)
+            and not riskcheck.runs_assistant_code("bash", {"command": command})
+        ):
+            ids = {o.get("optionId") for o in options}
+            choice = _SESSION_APPROVE_OPTION if _SESSION_APPROVE_OPTION in ids else "allow_once"
+            if choice in ids:
+                await self._resolve_permission(req_id_raw, title, cached, choice)
+                return
+
         # Reuse a previously generated explanation (vibe-acp can re-request
         # permission for the same tool call); otherwise generate one
         # concurrently after showing the dialog — the approval box must never
         # wait on the Ollama round-trip, which can take seconds while the
         # model is still busy with the agent's own generation.
         explanation = cast("str | None", tool_call.get("humanReadable"))
-        risk_keys: list[str] = cast("list[str]", tool_call.get("risks") or [])
         explaining = explanation is None and settings.load_explain_enabled()
 
         # Existence check on the call's path arguments. Deterministic and local, so
@@ -3023,6 +4119,64 @@ class _ChatConnection:
                 ", ".join(f"{f['param']}={f['value']!r} ({f['status']})" for f in path_findings),
             )
 
+        # Rule-based labels from the call itself: shown whatever the model says,
+        # and the model's own labels can only add to them (see medmcp.riskcheck).
+        rule_keys = riskcheck.signals(
+            str(tool_call.get("toolName") or title),
+            pathcheck.coerce_arguments(tool_call.get("rawInput")),
+            path_findings,
+        )
+        # Code the assistant wrote itself is never run on a standing approval: with
+        # MEDMCP_ASSISTANT_CODE=deny it is refused here, otherwise it is put to the
+        # user on its own, labelled as such.
+        if "assistant_code" in rule_keys and _assistant_code_denied():
+            _audit.warning(
+                "assistant-written code refused (%s=deny): %s", ASSISTANT_CODE_ENV_VAR, title
+            )
+            offered = {o.get("optionId") for o in options}
+            await self._resolve_permission(
+                req_id_raw, title, cached, "reject_once" if "reject_once" in offered else None
+            )
+            return
+        # A call that starts a background job says so, whatever the model says.
+        job_stack, job_tool = provenance.split_tool_name(
+            str(tool_call.get("toolName") or title), self._server_names
+        )
+        if _jobs is not None and _jobs.declares(job_stack, job_tool):
+            rule_keys = _merge_keys(rule_keys, ["background_job"])
+
+        # A stack tool can be approved once for the rest of the chat. Calls it then
+        # covers are answered here; anything that needs a look is still shown, and
+        # is shown without the chat-long option.
+        stack, tool = provenance.split_tool_name(
+            str(tool_call.get("toolName") or title), self._server_names
+        )
+        # Not for an external server: each call sends data off the premises, and
+        # its arguments carry no paths that would bring the dialog back.
+        external = any(s.get("name") == stack and s.get("url") for s in self.servers)
+        if stack != "builtin" and not external and _stack_tool_approval_enabled():
+            needs_look = _call_needs_a_look(rule_keys, path_findings)
+            offered = {o.get("optionId") for o in options}
+            if (stack, tool) in self._granted_stack_tools and not needs_look:
+                if "allow_once" in offered:
+                    _audit.info(
+                        "permission covered by this chat's approval of %s/%s: %s",
+                        stack,
+                        tool,
+                        title,
+                    )
+                    await self._resolve_permission(req_id_raw, title, cached, "allow_once")
+                    return
+            elif not needs_look and "allow_once" in offered:
+                options = [
+                    *options,
+                    {
+                        "optionId": _STACK_TOOL_CHAT_OPTION,
+                        "name": f"Allow {tool} in this chat",
+                        "kind": "allow_always",
+                    },
+                ]
+
         _audit.info("permission requested: %s", title)
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[str | None] = loop.create_future()
@@ -3035,12 +4189,16 @@ class _ChatConnection:
                 "options": options,
                 "explanation": explanation,
                 "explaining": explaining,
-                "risks": explain.resolve_risks(risk_keys),
+                # Only the labels the fixed rules give: one that rests on the model's
+                # reading of the call alone is not shown.
+                "risks": explain.resolve_risks(rule_keys),
                 "paths": path_findings,
             }
         )
         if explaining:
-            task = asyncio.create_task(self._explain_permission(req_id_raw, tool_call, cached))
+            task = asyncio.create_task(
+                self._explain_permission(req_id_raw, tool_call, cached, rule_keys)
+            )
             self._explain_tasks.add(task)
             task.add_done_callback(self._explain_tasks.discard)
         try:
@@ -3053,6 +4211,9 @@ class _ChatConnection:
             # this JSON-RPC response; answer "cancelled" before propagating or
             # its agent loop hangs and rejects every later prompt. The shield
             # keeps a second cancel from abandoning the write mid-flight.
+            # The interrupt that follows waits for vibe-acp to take this answer
+            # in (_settle_cancelled_permissions).
+            self._permission_cancelled = True
             with contextlib.suppress(Exception):
                 await asyncio.shield(self._resolve_permission(req_id_raw, title, cached, None))
             raise
@@ -3067,9 +4228,31 @@ class _ChatConnection:
                 "permission decision %r was not offered; cancelling: %s", option_id, title
             )
             option_id = None
+        if option_id == _SESSION_APPROVE_OPTION:
+            self._read_only_granted = True
+        if option_id == _STACK_TOOL_CHAT_OPTION:
+            # vibe never sees MedMCP's own option: it is answered for this call only.
+            self._granted_stack_tools.add((stack, tool))
+            _audit.info("stack tool approved for the rest of this chat: %s/%s", stack, tool)
+            option_id = "allow_once"
         await self._resolve_permission(req_id_raw, title, cached, option_id)
 
-    async def _explain_permission(self, req_id: int, tool_call: JsonDict, cached: JsonDict) -> None:
+    def _grant_stack_call(self, tool_call: JsonDict) -> None:
+        """Let the broker run the stack call just approved, once, as approved."""
+        name = str(tool_call.get("toolName") or tool_call.get("title") or "")
+        stack, tool = provenance.split_tool_name(name, self._server_names)
+        if stack == "builtin":
+            return
+        _approvals.grant(
+            stack,
+            tool,
+            pathcheck.coerce_arguments(tool_call.get("rawInput")),
+            session=self.canonical_id,
+        )
+
+    async def _explain_permission(
+        self, req_id: int, tool_call: JsonDict, cached: JsonDict, rule_keys: list[str]
+    ) -> None:
         """Generate the LLM explanation for an already-shown permission dialog.
 
         Runs concurrently with the open approval box; the result is pushed as
@@ -3095,7 +4278,7 @@ class _ChatConnection:
                     "type": "permission_update",
                     "requestId": req_id,
                     "explanation": explanation,
-                    "risks": explain.resolve_risks(risk_keys),
+                    "risks": explain.resolve_risks(rule_keys),
                 }
             )
 
@@ -3111,6 +4294,8 @@ class _ChatConnection:
             _audit.info("permission decision: %s -> %s", title, option_id)
             decision = option_id
             outcome = {"outcome": "selected", "optionId": option_id}
+            if option_id.startswith("allow"):
+                self._grant_stack_call(cached)
         if cached:
             cached["decision"] = decision
 
@@ -3124,6 +4309,11 @@ class _ChatConnection:
 
 
 # ── Sessions API ───────────────────────────────────────────
+
+
+def _merge_keys(rules: list[str], model: list[str]) -> list[str]:
+    """Rule-based risk keys first, then any the model adds; the model removes none."""
+    return [*rules, *(k for k in model if k not in rules)]
 
 
 def _retrying_frame(msg: JsonDict) -> JsonDict:
@@ -3296,8 +4486,10 @@ async def fork_session(session_id: str) -> JsonDict:
     """Branch the live chat: fork its whole history into a new session.
 
     Uses vibe's ``session/fork`` (vibe ≥2.23), which copies the transcript into
-    a fresh session without attaching it; the browser then opens the fork via
-    the normal resume flow. The fork is registered in the UI session registry
+    a fresh session; the browser then opens the fork via the normal resume
+    flow. vibe 2.26 leaves the fork attached, and the ``session/load`` of that
+    resume would attach it a second time — every live frame relayed twice — so
+    the fork is closed here first. The fork is registered in the UI session registry
     immediately — the entry names it *and* keeps the chain-collapse folding
     from hiding it (forks carry the same ``parent_session_id`` backlink as
     compaction continuations). Requires the chat to be open (vibe only forks
@@ -3318,6 +4510,11 @@ async def fork_session(session_id: str) -> JsonDict:
     if not new_id:
         raise HTTPException(status_code=502, detail="fork returned no session id")
     _audit.info("chat branched: %s -> %s", session_id, new_id)
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(
+            _client.request("session/close", {"sessionId": new_id}),
+            timeout=SESSION_CLOSE_TIMEOUT,
+        )
 
     def _register() -> None:
         entry = sessions.get_entry(session_id)
@@ -3531,9 +4728,21 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
             tip = await asyncio.to_thread(
                 lambda: provenance.vibe_chain_tip(resume, stop_ids=_chain_stop_ids(resume))
             )
-            queue = _client.register_session(tip)
+            # A socket that held this chat a moment ago (a page reload) may still
+            # be ending its turn and closing the session: let it finish first.
+            closing = _closing_sessions.get(tip)
+            if closing is not None:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(closing.wait(), timeout=SESSION_HANDOVER_TIMEOUT)
             load_params: JsonDict = {"cwd": str(WORKSPACE_ROOT), "mcpServers": [], "sessionId": tip}
-            load = await _session_request("session/load", load_params)
+            if any(c.session_id == tip for c in _connections):
+                # Another socket is using this chat (a second tab): it is not
+                # stolen. vibe 2.26 would load it a second time rather than
+                # refuse, and this socket would take the other one's frames.
+                load: JsonDict = {"error": {"message": "session is open in another socket"}}
+            else:
+                queue = _client.register_session(tip)
+                load = await _session_request("session/load", load_params)
             if "error" in load and not any(c.session_id == tip for c in _connections):
                 # vibe-acp still holds the session though no socket uses it (a
                 # disconnect that predates session/close on close, or one cut
@@ -3545,7 +4754,8 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
                     )
                 load = await _session_request("session/load", load_params)
             if "error" in load:
-                _client.unregister_session(tip)
+                if queue is not None:
+                    _client.unregister_session(tip)
                 queue = None
             else:
                 session_id = tip
@@ -3613,11 +4823,11 @@ else:
 
 
 def main() -> None:
-    """Run the workspace server on localhost (no auth — do not expose).
+    """Run the workspace server on localhost (token-gated — do not expose).
 
     Binds 127.0.0.1 by default. In a container set ``MEDMCP_WORKSPACE_HOST=0.0.0.0``
-    so the published port is reachable — the no-auth posture is preserved by
-    publishing the port only to the host's loopback (``127.0.0.1:8100:8100``).
+    so the published port is reachable — publish it only to the host's loopback
+    (``127.0.0.1:8100:8100``); the password is not a reason to widen that.
     """
     # The medmcp.* loggers (title and explanation outcomes, settings warnings)
     # are otherwise dropped at the root logger's default WARNING level; uvicorn
@@ -3626,6 +4836,10 @@ def main() -> None:
         level=logging.INFO, format="%(levelname)s %(name)s: %(message)s", force=True
     )
     WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+    # Chat transcripts, provenance and workflows live here and are written with
+    # the default umask; on a shared host the directory keeps other users out.
+    with contextlib.suppress(OSError):
+        provenance.VIBE_HOME.chmod(0o700)
     host = os.environ.get("MEDMCP_WORKSPACE_HOST", "127.0.0.1")
     port = int(os.environ.get("MEDMCP_WORKSPACE_PORT", str(DEFAULT_PORT)))
     uvicorn.run(app, host=host, port=port)

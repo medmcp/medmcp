@@ -42,12 +42,13 @@ from urllib.parse import urlparse
 
 import httpx
 
-from medmcp import signing
+from medmcp import agentbox, jobspec, posture, signing, workspace_note
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict
 from medmcp.statefile import atomic_write_json, atomic_write_toml, read_json
 from medmcp.workflow import list_workflows
 
 log: logging.Logger = logging.getLogger(__name__)
+_audit: logging.Logger = logging.getLogger("medmcp.audit")
 
 # Ollama endpoint + model, used for the agent's auxiliary LLM calls
 # (tool-call explanations, chat titles) and the provenance manifest.
@@ -162,12 +163,48 @@ _POOL_ENV_KEYS: tuple[str, ...] = ("MEDMCP_BROKER_SOCK", "MEDMCP_WORKSPACE")
 
 
 def stack_pool_enabled() -> bool:
-    """Whether the persistent stack pool / pre-warm proxy is enabled (default off)."""
+    """Whether the persistent stack pool / pre-warm proxy is enabled (default off).
+
+    Always on for an isolated agent: its container has no docker socket, so the
+    broker in this process is the only way its stack calls can run.
+    """
+    if agentbox.isolation_enabled():
+        return True
     return os.environ.get("MEDMCP_STACK_POOL", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def stack_jobs_enabled() -> bool:
+    """Whether stacks may run background jobs (see :mod:`medmcp.jobs`).
+
+    On wherever the pool is: a job request rides on the result of a pooled call,
+    so without the pool there is nobody to act on one. ``MEDMCP_STACK_JOBS=0``
+    turns it off; stacks then run their long work the way they did before.
+    """
+    if os.environ.get("MEDMCP_STACK_JOBS", "").strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    return stack_pool_enabled()
+
+
+def max_jobs() -> int:
+    """How many background jobs may run at once on this machine (default one).
+
+    A job holds the GPU next to the model for hours; a second one is refused,
+    not queued, so nothing starts later than the approval that asked for it.
+    """
+    try:
+        return max(1, int(os.environ.get("MEDMCP_MAX_JOBS", "1")))
+    except ValueError:
+        return 1
+
+
 def backend_socket_path() -> Path:
-    """Unix socket the broker binds and the proxy connects to."""
+    """Unix socket the broker binds and the proxy connects to.
+
+    In the agent home when the agent is isolated, the one directory both
+    containers mount at the same path.
+    """
+    if agentbox.isolation_enabled():
+        return agentbox.AGENT_HOME / "backend.sock"
     return VIBE_HOME / "backend.sock"
 
 
@@ -440,13 +477,23 @@ def _load_stack_manifests() -> list[JsonDict]:
             continue
         args = [os.path.expandvars(str(a)) for a in cast("list[Any]", raw.get("args", []))]
         expanded_command = os.path.expandvars(command)
-        if Path(expanded_command).name == "docker":
-            args = _harden_stack_run_args(args)
+        # The core runs a manifest as written, so it may only start a container,
+        # with the hardening in place and nothing that undoes it.
+        if Path(expanded_command).name != "docker":
+            reason = f"command {command!r} is not docker"
+        elif raw.get("env"):
+            reason = "env is not allowed (it would reach the docker CLI in the core)"
+        else:
+            args = _harden_stack_run_args(posture.split_flag_values(args))
+            reason = posture.unsafe_stack_args(args)
+        if reason is not None:
+            _audit.warning("stack manifest %s refused: %s", path.name, reason)
+            continue
         entry: JsonDict = {
             "name": name,
             "command": expanded_command,
             "args": args,
-            "env": dict(cast("dict[str, str]", raw.get("env", {}))),
+            "env": {},
         }
         if raw.get("skills_path"):
             entry["skills_path"] = os.path.expandvars(str(raw["skills_path"]))
@@ -456,6 +503,17 @@ def _load_stack_manifests() -> list[JsonDict]:
             entry["startup_timeout_sec"] = raw["startup_timeout_sec"]
         if raw.get("idle_ttl_sec") is not None:
             entry["idle_ttl_sec"] = raw["idle_ttl_sec"]
+        # Only what makes the core offer jobs to this stack; the declaration a
+        # job is started from is read off the image (see medmcp.jobs).
+        runner = jobspec.parse_declaration(raw.get("job"))
+        if runner is not None:
+            entry["job"] = runner.manifest()
+        elif raw.get("job") is not None:
+            _audit.warning("stack manifest %s: job declaration ignored (malformed)", path.name)
+        # A stack that indexes folders of scans says so (medmcp.workspace_note).
+        index = workspace_note.parse_dataset_index(name, raw.get("dataset_index"))
+        if index is not None:
+            entry["dataset_index"] = index.manifest()
         manifests.append(entry)
     return manifests
 
@@ -555,6 +613,7 @@ def load_mcp_servers() -> list[JsonDict]:
                     "startup_timeout_sec",
                     "idle_ttl_sec",
                     "gpu",
+                    "dataset_index",
                 ):
                     if srv.get(key) is not None:
                         entry[key] = srv[key]
@@ -1343,7 +1402,26 @@ def agent_secret_env() -> dict[str, str]:
     Read afresh on each agent spawn (the client takes it as a callable), so a
     change takes effect on the restart every such change already triggers.
     """
-    return {**external_secret_env(), **cloud_model_env()}
+    return {**external_secret_env(), **cloud_model_env(), **_named_secret_env()}
+
+
+def _named_secret_env() -> dict[str, str]:
+    """Deployment-managed credentials the agent is configured to use, by name.
+
+    An external server or cloud model may name a variable the deployment sets
+    itself rather than store a token here. The agent's environment is otherwise
+    scrubbed of anything that looks like a credential, so the ones it is told to
+    read are handed over explicitly — only while what uses them is in force.
+    """
+    names: set[str] = set()
+    if external_mcp_enabled():
+        for srv in cast("list[JsonDict]", load_external_mcp()["servers"]):
+            if srv.get("active") and srv.get("api_key_env"):
+                names.add(str(srv["api_key_env"]))
+    cloud = active_cloud_model()
+    if cloud is not None and cloud.get("api_key_env"):
+        names.add(str(cloud["api_key_env"]))
+    return {name: os.environ[name] for name in sorted(names) if os.environ.get(name)}
 
 
 # ── Local model choice ───────────────────────────────────────────────────────
@@ -1610,11 +1688,13 @@ def write_prompt_variant(prompt_id: str, rule: str) -> bool:
 # ── Container-stack install / uninstall (UI-driven) ──────────────────────────
 # An installed container stack is just a stacks.d/<name>.toml manifest plus its
 # extracted skills. Metadata comes from the image's OCI label (read via
-# `docker inspect` — the image is never executed to introspect it).
+# `docker image inspect` — the image is never executed to introspect it).
 
 # Label carrying a stack's launch metadata. JSON value, e.g.:
 #   {"name": "medmcp-neuro", "gpu": true, "tool_timeout_sec": 7200,
 #    "skills_path": "/app/src/medmcp_neuro/skills"}
+# Optional: "job" (a runner for long calls, see medmcp.jobspec) and "dataset_index"
+# (the stack indexes folders of scans, see medmcp.workspace_note).
 STACK_LABEL: str = "org.medmcp.stack"
 _STACK_NAME_RE: re.Pattern[str] = re.compile(r"[a-z0-9][a-z0-9-]*")
 
@@ -1697,7 +1777,9 @@ def read_stack_label(image: str) -> JsonDict:
     except RuntimeError:
         _run_docker(["pull", image])
     fmt = '{{ index .Config.Labels "' + STACK_LABEL + '" }}'
-    raw = _run_docker(["inspect", "--format", fmt, image], timeout=30).stdout.strip()
+    # `image inspect`, not `inspect`: the generic form asks for a container of that
+    # name first, which the docker guard refuses rather than answering 404.
+    raw = _run_docker(["image", "inspect", "--format", fmt, image], timeout=30).stdout.strip()
     if not raw or raw == "<no value>":
         raise FileNotFoundError(f"{image} has no {STACK_LABEL} label (not a medmcp stack)")
     try:
@@ -1721,7 +1803,9 @@ def resolve_image_digest(image: str) -> str | None:
     if not image or any(c.isspace() for c in image) or not _image_present(image):
         return None
     try:
-        raw = _run_docker(["inspect", "--format", "{{json .RepoDigests}}", image], timeout=30)
+        raw = _run_docker(
+            ["image", "inspect", "--format", "{{json .RepoDigests}}", image], timeout=30
+        )
     except RuntimeError:
         return None
     try:
@@ -1739,6 +1823,41 @@ def resolve_image_digest(image: str) -> str | None:
         if rd_repo == repo:
             return digest
     return digests[0].partition("@")[2] if digests else None
+
+
+def image_identity(image: str) -> JsonDict:
+    """The digest and id of the local image *image*: ``{"digest": ..., "id": ...}``.
+
+    ``digest`` is the registry digest (``sha256:…``) of the repository *image*
+    names, ``None`` for an image that was built here and never pushed; ``id`` is
+    the content id every image has, which still tells two local builds apart.
+    Offline and best-effort like :func:`resolve_image_digest` (one ``docker image
+    inspect``, never a pull): both are ``None`` when the image is not present.
+    """
+    image = image.strip()
+    empty: JsonDict = {"digest": None, "id": None}
+    if not image or any(c.isspace() for c in image):
+        return empty
+    try:
+        raw = _run_docker(
+            ["image", "inspect", "--format", "{{json .RepoDigests}} {{.Id}}", image], timeout=30
+        )
+    except RuntimeError:
+        return empty
+    listing, _, image_id = raw.stdout.strip().rpartition(" ")
+    try:
+        parsed: object = json.loads(listing) if listing else []
+    except json.JSONDecodeError:
+        parsed = []
+    repo = signing.split_reference(image)[0]
+    digests = [
+        rd
+        for rd in cast("list[Any]", parsed if isinstance(parsed, list) else [])
+        if isinstance(rd, str) and "@sha256:" in rd
+    ]
+    matching = [rd for rd in digests if rd.partition("@")[0] == repo]
+    chosen = (matching or digests or [""])[0].partition("@")[2]
+    return {"digest": chosen or None, "id": image_id if image_id.startswith("sha256:") else None}
 
 
 def _extract_image_skills(image: str, in_image_path: str, into_dir: Path) -> None:
@@ -1815,6 +1934,20 @@ def _write_stack_manifest(name: str, entry: JsonDict) -> None:
     atomic_write_toml(STACKS_D_PATH / f"{name}.toml", entry)
 
 
+def unsigned_stacks_refused() -> bool:
+    """Whether stack images outside the signing policy are refused, not warned about.
+
+    Off until every published stack repository signs its images; a deployment
+    that installs only signed stacks can turn it on now.
+    """
+    return os.environ.get("MEDMCP_REQUIRE_SIGNED_STACKS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def install_stack_image(
     image: str, on_progress: ProgressFn | None = None, *, accept_network: bool = False
 ) -> str:
@@ -1850,6 +1983,11 @@ def install_stack_image(
     if signing.policy_for(image) is not None:
         verified = signing.verify_image(image)
         report(signing.describe(verified))
+    elif unsigned_stacks_refused():
+        raise signing.SignatureError(
+            f"{image} is not covered by the signing policy, and this workspace installs "
+            "signed stacks only (MEDMCP_REQUIRE_SIGNED_STACKS)"
+        )
     else:
         report("No signing policy covers this image; installing it unverified.")
         log.warning("stack image %s has no signing policy; installed unverified", image)
@@ -1890,6 +2028,17 @@ def install_stack_image(
         if isinstance(startup, (int, float)) and not isinstance(startup, bool)
         else DEFAULT_STACK_STARTUP_TIMEOUT_SEC
     )
+
+    # A stack that runs long work as a job (medmcp.jobs) says so in its label.
+    runner = jobspec.parse_declaration(meta.get("job"))
+    if runner is not None:
+        entry["job"] = runner.manifest()
+    elif meta.get("job") is not None:
+        report("The image's job declaration is malformed; installing without jobs.")
+
+    index = workspace_note.parse_dataset_index(name, meta.get("dataset_index"))
+    if index is not None:
+        entry["dataset_index"] = index.manifest()
 
     # Skills live inside the image but the agent loads them from the core fs, so
     # extract them next to the manifest and point skills_path there.
@@ -1942,6 +2091,9 @@ def list_installed_stacks() -> list[JsonDict]:
                 # Reported so the UI can show which stacks can reach off-machine;
                 # a stack with egress must not look like one without.
                 "network": stack_has_network(args),
+                "jobs": sorted(
+                    cast("list[str]", cast("JsonDict", m.get("job") or {}).get("tools", []))
+                ),
             }
         )
     return out
@@ -2005,9 +2157,9 @@ def discover_workflows() -> list[JsonDict]:
     return list_workflows(VIBE_HOME / "workflows")
 
 
-def _load_flag(path: Path) -> bool:
-    """Read an ``{"enabled": bool}`` preference file (default ``True`` when unset)."""
-    return bool((read_json(path) or {}).get("enabled", True))
+def _load_flag(path: Path, default: bool = True) -> bool:
+    """Read an ``{"enabled": bool}`` preference file (*default* when unset)."""
+    return bool((read_json(path) or {}).get("enabled", default))
 
 
 def _save_flag(path: Path, enabled: bool) -> None:
@@ -2026,8 +2178,12 @@ def save_provenance_enabled(enabled: bool) -> None:
 
 
 def load_explain_enabled() -> bool:
-    """Return whether tool-call explanations are enabled (default ``True``)."""
-    return _load_flag(EXPLAIN_ENABLED_PATH)
+    """Return whether tool-call explanations are enabled (default ``False``).
+
+    Off by default: the explanation comes from the same local model as the agent,
+    so it competes with the chat for it, and clinicians found the wait too long.
+    """
+    return _load_flag(EXPLAIN_ENABLED_PATH, default=False)
 
 
 def save_explain_enabled(enabled: bool) -> None:
@@ -2137,43 +2293,63 @@ _config_write_lock = threading.Lock()
 # model corrects itself before the call ever reaches the approval dialog (see
 # medmcp.pathguard). Registered here rather than left to hand-editing so it cannot
 # silently go missing from an install.
-PATHGUARD_HOOK_NAME = "medmcp-pathguard"
+PATHGUARD_HOOK_NAME = posture.PATHGUARD_HOOK_NAME
 
 
 def _ensure_pathguard_hook(vibe_home: Path) -> None:
-    """Register the path-guard ``pre_tool`` hook in ``<vibe_home>/hooks.toml``.
+    """Make ``<vibe_home>/hooks.toml`` hold the path-guard ``pre_tool`` hook, alone.
 
     Hooks live in their own file: vibe reads ``hooks.toml`` from each project root
     and from ``VIBE_HOME``, and never takes them from ``config.toml``. Since its
     file sources default to ``("user",)``, no project root is consulted at all and
-    ``VIBE_HOME`` is the one location that is always read.
-
-    Matched against every tool (no ``match``): ``write_file`` and ``edit`` take
-    paths just as the imaging stacks do. ``strict`` stays false so a hook that
-    fails to run is a passthrough — a broken guard must not be able to block work.
-    Any other hook in the file is preserved.
+    ``VIBE_HOME`` is the one location that is always read. Any other hook is
+    removed (see :func:`medmcp.posture.enforce_hooks`).
     """
-    path = vibe_home / "hooks.toml"
-    others: list[JsonDict] = []
-    if path.is_file():
-        try:
-            with path.open("rb") as fh:
-                raw = cast("list[JsonDict]", tomllib.load(fh).get("hooks", []))
-            others = [h for h in raw if h.get("name") != PATHGUARD_HOOK_NAME]
-        except (OSError, tomllib.TOMLDecodeError):
-            log.warning("could not read %s; rewriting it", path)
-    entry: JsonDict = {
-        "name": PATHGUARD_HOOK_NAME,
-        "type": "pre_tool",
-        "command": "medmcp-pathguard",
-        "timeout": 10.0,
-        "strict": False,
-        "description": (
-            "Refuse a tool call whose file paths do not resolve, handing the "
-            "reason back to the model so it can correct them."
-        ),
-    }
-    atomic_write_toml(path, {"hooks": [*others, entry]})
+    posture.enforce_hooks(vibe_home / "hooks.toml")
+
+
+# vibe caches each server's tool list for a day under a fingerprint of its launch
+# entry: command, args and the *names* of its env keys (values are left out). A
+# stack reinstalled or pulled under the same tag, or launched through the proxy
+# shim (whose entry never names the image), would keep its old tool list, and the
+# model would never see a new tool. So the image's content id goes into the name
+# of an env key, ``MEDMCP_STACK_REVISION_<12 hex>``, and the fingerprint changes
+# with the image. The value holds the full id.
+STACK_REVISION_ENV: str = "MEDMCP_STACK_REVISION"
+
+
+def _stack_revision(entry: JsonDict) -> str | None:
+    """Content id of a container stack's image, ``None`` for anything else."""
+    if Path(str(entry.get("command", ""))).name != "docker":
+        return None
+    args = cast("list[str]", entry.get("args") or [])
+    if not args:
+        return None
+    return cast("str | None", image_identity(args[-1]).get("id"))
+
+
+def stack_revision_key(revision: str) -> str:
+    """The env key name that carries *revision* (``sha256:…``) into vibe's fingerprint."""
+    return f"{STACK_REVISION_ENV}_{revision.removeprefix('sha256:')[:12]}"
+
+
+def _stamp_stack_revisions(entries: list[JsonDict], revisions: dict[str, str | None]) -> None:
+    """Replace any revision key in each entry's env with the current one (see above)."""
+    for entry in entries:
+        if entry.get("url"):
+            continue
+        revision = revisions.get(str(entry.get("name", "")))
+        env = {
+            k: v
+            for k, v in cast("dict[str, str]", entry.get("env") or {}).items()
+            if not k.startswith(STACK_REVISION_ENV)
+        }
+        if revision:
+            env[stack_revision_key(revision)] = revision
+        if env:
+            entry["env"] = env
+        else:
+            entry.pop("env", None)
 
 
 def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
@@ -2193,9 +2369,12 @@ def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
       hand-set custom id is in place.
     - ``skill_paths`` — the active stacks' skills; ``disabled_skills`` keeps every
       non-workflow entry.
-    - ``<vibe_home>/hooks.toml`` — the pathguard ``pre_tool`` hook.
+    - ``<vibe_home>/hooks.toml`` — the pathguard ``pre_tool`` hook, alone.
+    - the approval posture — ``default_agent``, ``auto_approve``, ``[tools.*]``
+      permissions, the agent profile and vibe's trusted folders are put back to
+      their pinned values (see :mod:`medmcp.posture`).
 
-    Tool permissions and everything else in the file are left untouched.
+    Everything else in the file is left untouched.
     """
     with _config_write_lock:
         _sync_servers_to_vibe_config_locked(servers)
@@ -2290,6 +2469,7 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
     # External servers are exempt: the pool exists to amortise process spawn and
     # CUDA init for local stacks, and there is no such cost to amortise for an
     # HTTP endpoint — routing one through a spawn-shim would only break it.
+    revisions = {e["name"]: _stack_revision(e) for e in new_entries if not e.get("url")}
     if stack_pool_enabled():
         _write_backend_registry([s for s in servers if not s.get("external")])
         ws_root = os.environ.get("MEDMCP_WORKSPACE") or None
@@ -2298,6 +2478,7 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
         ]
     else:
         _strip_pool_env(new_entries)
+    _stamp_stack_revisions(new_entries, revisions)
 
     cfg["mcp_servers"] = new_entries
 
@@ -2315,6 +2496,7 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
     if str(cfg.get("system_prompt_id", "")) in OWNED_SYSTEM_PROMPT_IDS:
         cfg["system_prompt_id"] = prompt_id
     _sync_agent_profile_prompt(prompt_id)
+    posture.enforce_agent_profile(AGENT_PROFILE_PATH)
 
     # Collect skills_path values from discovered servers and write them to
     # skill_paths so vibe-acp loads the bundled skill docs automatically.
@@ -2337,5 +2519,17 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
 
     # Hooks live in their own file next to the config, not inside it.
     _ensure_pathguard_hook(VIBE_HOME)
+    posture.enforce_trusted_folders(VIBE_HOME / "trusted_folders.toml")
+    posture.enforce_config(cfg)
 
     atomic_write_toml(config_path, cfg)
+    if agentbox.isolation_enabled():
+        # The agent reaches every endpoint through the core's egress gateway.
+        from medmcp import gateway
+
+        base = agentbox.gateway_base()
+        agentbox.publish_home(
+            VIBE_HOME,
+            agentbox.AGENT_HOME,
+            config=gateway.agent_config(cfg, base) if base else None,
+        )

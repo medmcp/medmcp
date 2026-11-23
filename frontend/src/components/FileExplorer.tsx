@@ -1,14 +1,23 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { createContext, memo, useContext, useEffect, useRef, useState } from 'react'
 import type { DragEvent as ReactDragEvent } from 'react'
-import { useConfirm } from '../confirm'
+import { useChoice, useConfirm } from '../confirm'
 import { createPortal } from 'react-dom'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { Tree } from 'react-arborist'
 import type { NodeApi, NodeRendererProps, TreeApi } from 'react-arborist'
-import { deletePath, downloadPath, fetchTree, mkdir, renamePath, uploadFiles } from '../api'
-import type { UploadItem } from '../api'
+import {
+  ApiError,
+  deletePath,
+  downloadPath,
+  fetchDir,
+  mkdir,
+  renamePath,
+  uploadFiles,
+  uploadZip,
+} from '../api'
+import type { DirListing, UploadFailure, UploadItem } from '../api'
 import { setDraggedFilePath } from '../dragState'
-import { classify } from '../fileKinds'
+import { classify, isVolumePath } from '../fileKinds'
 import { DRAG_PATH_MIME, type TreeNode } from '../types'
 import {
   FileIcon,
@@ -21,6 +30,7 @@ import {
   TableIcon,
   RefreshIcon,
   UploadIcon,
+  XIcon,
 } from './icons'
 
 interface FileExplorerProps {
@@ -31,6 +41,10 @@ interface FileExplorerProps {
   onSelectionChange?: (paths: string[]) => void
   /** True while a separator is being dragged; defer tree resize until it ends. */
   isResizing?: boolean
+  /** The file open in the viewer, or null — what an overlay would go on top of. */
+  overlayBase?: string | null
+  /** Overlay a file on `overlayBase`. */
+  onOverlay?: (path: string) => void
 }
 
 function parentDir(path: string): string {
@@ -39,6 +53,7 @@ function parentDir(path: string): string {
 }
 
 function joinPath(dir: string, name: string): string {
+  if (!name) return dir
   return dir ? `${dir}/${name}` : name
 }
 
@@ -51,10 +66,28 @@ function pickedItems(list: FileList | null, dir: string): UploadItem[] {
   })
 }
 
+function isZip(name: string): boolean {
+  return name.toLowerCase().endsWith('.zip')
+}
+
+/** Said when a folder pick or drop arrives without a single file. */
+const NO_FILES_HINT = 'No files arrived from that folder; upload it as a .zip instead.'
+
+/** A failure to show, with per-file reasons when there are several. */
+interface ExplorerError {
+  message: string
+  details?: string[]
+  /** Reported by a failed tree load; the next working load clears it. */
+  fromLoad?: boolean
+}
+
 /** Whether a drag carries files from outside the browser (not one of our own rows). */
 function carriesFiles(dt: DataTransfer): boolean {
   return Array.from(dt.types).includes('Files')
 }
+
+/** Pointer distance from the tree's bottom edge within which the drop line moves to the top. */
+const DROP_LINE_ZONE = 56
 
 /**
  * The workspace folder a drop at this point lands in: the folder row under the
@@ -129,9 +162,16 @@ function NodeRow({
   style,
   dragHandle,
   onMenu,
-}: NodeRendererProps<TreeNode> & {
-  onMenu: (e: ReactMouseEvent, node: NodeApi<TreeNode>) => void
-}) {
+  loading,
+  dropDir,
+}: NodeRendererProps<TreeNode> & RowExtras) {
+  if (node.data.more) {
+    return (
+      <div style={style} className="tree-row tree-more" aria-disabled="true">
+        <span className="tree-name">{node.data.name}</span>
+      </div>
+    )
+  }
   const isDir = !node.isLeaf
   // While the inline rename input is open the row must stop behaving like a row.
   // Leaving the drag handle attached makes a mouse-drag inside the input drag the
@@ -143,7 +183,9 @@ function NodeRow({
     <div
       ref={editing ? undefined : dragHandle}
       style={style}
-      className={`tree-row${node.isSelected ? ' selected' : ''}`}
+      className={`tree-row${node.isSelected ? ' selected' : ''}${
+        isDir && node.data.id === dropDir ? ' drop-into' : ''
+      }`}
       data-path={node.data.id}
       data-dir={isDir ? '' : undefined}
       onClick={() => {
@@ -203,8 +245,36 @@ function NodeRow({
           {node.data.name}
         </span>
       )}
+      {isDir && node.isOpen && loading.has(node.data.id) && (
+        <span className="tree-loading">loading…</span>
+      )}
     </div>
   )
+}
+
+/** What every row needs from the explorer, passed by context rather than props. */
+interface RowExtras {
+  onMenu: (e: ReactMouseEvent, node: NodeApi<TreeNode>) => void
+  /** Folders whose entries are being fetched. */
+  loading: ReadonlySet<string>
+  /** Folder a desktop drag would upload into; its row is marked. */
+  dropDir: string | null
+}
+
+const RowContext = createContext<RowExtras>({
+  onMenu: () => undefined,
+  loading: new Set(),
+  dropDir: null,
+})
+
+/**
+ * The row renderer handed to react-arborist. One stable component: an inline
+ * `(props) => <NodeRow …/>` is a new component type on every explorer render,
+ * so React remounts every row each time — and a row remounted between mousedown
+ * and mouseup loses the click (the first click on a folder did not open it).
+ */
+function Row(props: NodeRendererProps<TreeNode>) {
+  return <NodeRow {...props} {...useContext(RowContext)} />
 }
 
 /** Drop the nodes with the given ids from a tree (for optimistic delete). */
@@ -227,6 +297,69 @@ function insertIntoTree(nodes: TreeNode[], parentId: string, node: TreeNode): Tr
 
 /** The row a new folder is named in before it exists; never a real path. */
 const NEW_FOLDER_ID = '\u0000new-folder'
+/** Prefix of the row a capped listing ends with; never a real path. */
+const MORE_PREFIX = '\u0000more:'
+
+function findNode(nodes: TreeNode[], id: string): TreeNode | undefined {
+  for (const n of nodes) {
+    if (n.id === id) return n
+    if (n.children?.length && id.startsWith(`${n.id}/`)) {
+      const hit = findNode(n.children, id)
+      if (hit) return hit
+    }
+  }
+  return undefined
+}
+
+/**
+ * A folder's fresh entries, keeping what is already known below them: a loaded
+ * subfolder keeps its children (so open folders stay open and filled), and the
+ * new-folder row being named stays on top.
+ */
+function mergeChildren(old: TreeNode[] | undefined, fresh: TreeNode[]): TreeNode[] {
+  const prev = new Map((old ?? []).map((n) => [n.id, n]))
+  const merged = fresh.map((f) => {
+    const o = prev.get(f.id)
+    return f.children && o?.loaded ? { ...f, children: o.children, loaded: true } : f
+  })
+  const placeholder = prev.get(NEW_FOLDER_ID)
+  return placeholder ? [placeholder, ...merged] : merged
+}
+
+/** The tree with one folder's level replaced by a fresh listing of it. */
+function withListing(nodes: TreeNode[], listing: DirListing): TreeNode[] {
+  const kids = [...listing.children]
+  const hidden = listing.total - listing.children.length
+  if (hidden > 0) {
+    kids.push({ id: MORE_PREFIX + listing.path, name: `${hidden} more items not shown`, more: true })
+  }
+  if (!listing.path) return mergeChildren(nodes, kids)
+  return nodes.map((n) =>
+    n.id === listing.path
+      ? { ...n, children: mergeChildren(n.children, kids), loaded: true }
+      : n.children?.length && listing.path.startsWith(`${n.id}/`)
+        ? { ...n, children: withListing(n.children, listing) }
+        : n,
+  )
+}
+
+/**
+ * The folders among `nodes` and below that are shown open, i.e. reachable
+ * through open folders only. A folder that is open under a closed one is not
+ * shown, so it is left out: it is fetched afresh when the closed one is opened.
+ */
+function shownOpen(nodes: TreeNode[], isOpen: (id: string) => boolean): string[] {
+  const open: string[] = []
+  for (const n of nodes) {
+    if (!n.children || n.more || !isOpen(n.id)) continue
+    open.push(n.id, ...shownOpen(n.children, isOpen))
+  }
+  return open
+}
+
+function depth(path: string): number {
+  return path ? path.split('/').length : 0
+}
 
 /** Workspace file tree: open/rename/move/delete, upload (picker or desktop drop), download. */
 // Memoized so a separator drag — which re-renders the panel content every frame
@@ -238,10 +371,24 @@ export const FileExplorer = memo(function FileExplorer({
   refreshSignal,
   onSelectionChange,
   isResizing,
+  overlayBase,
+  onOverlay,
 }: FileExplorerProps) {
   const confirmDialog = useConfirm()
+  const chooseDialog = useChoice()
   const [data, setData] = useState<TreeNode[]>([])
-  const [error, setError] = useState<string | null>(null)
+  // Read by async loaders that would otherwise see the data of their closure.
+  const dataRef = useRef<TreeNode[]>([])
+  useEffect(() => {
+    dataRef.current = data
+  }, [data])
+  const [rootLoaded, setRootLoaded] = useState(false)
+  const [loading, setLoading] = useState<ReadonlySet<string>>(new Set())
+  const [error, setErrorState] = useState<ExplorerError | null>(null)
+  const setError = (message: string | null, details?: string[]) =>
+    setErrorState(message === null ? null : { message, details })
+  // What the last zip upload unpacked; shown until dismissed or the next upload.
+  const [notice, setNotice] = useState<string | null>(null)
   const [size, setSize] = useState({ width: 280, height: 400 })
   // The context menu: for a row, or for the empty space (node null) as file managers have it.
   const [menu, setMenu] = useState<{ x: number; y: number; node: NodeApi<TreeNode> | null } | null>(
@@ -253,38 +400,109 @@ export const FileExplorer = memo(function FileExplorer({
   const folderInputRef = useRef<HTMLInputElement>(null)
   const treeRef = useRef<TreeApi<TreeNode> | null>(null)
   const newFolderParent = useRef('')
-  const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null)
+  // Bumped to name a freshly inserted new-folder row once it is rendered.
+  const [pendingEdit, setPendingEdit] = useState(0)
+  // `unpacking`: the zip the server is receiving and unpacking.
+  const [uploading, setUploading] = useState<{
+    done: number
+    total: number
+    unpacking?: string
+  } | null>(null)
   // Folder a desktop drag currently hovering the tree would upload into; null when none.
   const [dropDir, setDropDir] = useState<string | null>(null)
+  // The line naming that folder sits at the bottom edge, and at the top while
+  // the pointer is near the bottom, so it never covers the row aimed at.
+  const [dropLineTop, setDropLineTop] = useState(false)
   // Read inside the mount-once observer effect without re-subscribing.
   const isResizingRef = useRef(isResizing)
   useEffect(() => {
     isResizingRef.current = isResizing
   }, [isResizing])
 
-  const reload = () => {
-    fetchTree()
-      .then((tree) => {
-        setData(tree)
-        setError(null)
-      })
-      .catch((e: unknown) => setError(String(e)))
+  // The newest request per folder, so an older answer arriving late is dropped.
+  const loadSeq = useRef(0)
+  const latestLoad = useRef(new Map<string, number>())
+
+  /**
+   * Fetch the given folders' levels and merge them in, parents first, so a
+   * subfolder's listing lands in the node its parent's listing kept. A folder
+   * that has vanished meanwhile leaves the tree quietly.
+   */
+  const loadDirs = async (paths: string[]): Promise<void> => {
+    const unique = [...new Set(paths)].sort((a, b) => depth(a) - depth(b))
+    if (unique.length === 0) return
+    const seq = ++loadSeq.current
+    for (const p of unique) latestLoad.current.set(p, seq)
+    setLoading((prev) => new Set([...prev, ...unique]))
+    const results = await Promise.allSettled(unique.map((p) => fetchDir(p)))
+    // A folder asked for again since belongs to that newer request: this answer
+    // must not replace the newer one, whichever of the two arrives first.
+    const mine = new Set(unique.filter((p) => latestLoad.current.get(p) === seq))
+    for (const p of mine) latestLoad.current.delete(p)
+    setLoading((prev) => new Set([...prev].filter((p) => !mine.has(p))))
+    const listings: DirListing[] = []
+    const gone = new Set<string>()
+    const failures: string[] = []
+    for (const [i, path] of unique.entries()) {
+      const r = results[i]
+      if (!r || !mine.has(path)) continue
+      if (r.status === 'fulfilled') listings.push(r.value)
+      else if (r.reason instanceof ApiError && r.reason.status === 404) gone.add(path)
+      else failures.push(String(r.reason))
+    }
+    setData((d) => removeFromTree(listings.reduce(withListing, d), gone))
+    const failure = failures.at(-1)
+    if (mine.has('')) {
+      setRootLoaded(true)
+      if (failure === undefined) setErrorState((e) => (e?.fromLoad ? null : e))
+    }
+    if (failure !== undefined) setErrorState({ message: failure, fromLoad: true })
   }
 
-  useEffect(reload, [])
+  const isOpen = (id: string) => treeRef.current?.isOpen(id) ?? false
+
+  /** Refresh the root and every folder shown open. */
+  const reload = () => {
+    void loadDirs(['', ...shownOpen(dataRef.current, isOpen)])
+  }
+
+  /**
+   * A folder was opened: fetch its level, and that of every folder shown open
+   * below it. Always, also when it was loaded before: while it was closed
+   * nothing refreshed it, and what it held then may be minutes old.
+   */
+  const onToggle = (id: string) => {
+    const node = findNode(dataRef.current, id)
+    if (!isOpen(id) || !node?.children || id === NEW_FOLDER_ID) return
+    void loadDirs([id, ...shownOpen(node.children, isOpen)])
+  }
+
+  // The root level, once mounted (deferred a tick, so the loader's state
+  // updates never run inside the effect itself).
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadDirs(['']), 0)
+    return () => window.clearTimeout(timer)
+  }, [])
+
+  // The latest reload, for the subscriptions below that are made once.
+  const reloadRef = useRef(reload)
+  useEffect(() => {
+    reloadRef.current = reload
+  })
 
   // Tool calls / replay steps bump refreshSignal; reload shortly after. The
   // cleanup-timer pattern collapses a burst of signals into one fetch.
   useEffect(() => {
     if (!refreshSignal) return
-    const timer = window.setTimeout(reload, 300)
+    const timer = window.setTimeout(() => reloadRef.current(), 300)
     return () => window.clearTimeout(timer)
   }, [refreshSignal])
 
   // Catch changes made outside the app (terminal, scripts) on tab focus.
   useEffect(() => {
-    window.addEventListener('focus', reload)
-    return () => window.removeEventListener('focus', reload)
+    const onFocus = () => reloadRef.current()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
   }, [])
 
   // Resize the (virtualized) tree to its container. While a separator is being
@@ -323,10 +541,11 @@ export const FileExplorer = memo(function FileExplorer({
     return () => cancelAnimationFrame(id)
   }, [isResizing])
 
-  const run = (op: Promise<void>) => {
-    op.then(reload).catch((e: unknown) => {
+  /** Run a change, then refresh only the folders it touched. */
+  const run = (op: Promise<void>, dirs: string[]) => {
+    op.then(() => loadDirs(dirs)).catch((e: unknown) => {
       setError(String(e))
-      reload()
+      void loadDirs(dirs)
     })
   }
 
@@ -345,18 +564,88 @@ export const FileExplorer = memo(function FileExplorer({
     folderInputRef.current?.click()
   }
 
-  const startUpload = (items: UploadItem[]) => {
+  /**
+   * The listed folders an upload changed: for each target folder, itself if
+   * the tree has loaded it, else its nearest loaded parent (which gains the new
+   * subfolder). Folders not loaded yet are fetched when they are opened.
+   */
+  const uploadedDirs = (targets: string[]): string[] => {
+    const dirs = new Set<string>()
+    for (const dir of new Set(targets)) {
+      let d = dir
+      while (d && !findNode(dataRef.current, d)?.loaded) d = parentDir(d)
+      dirs.add(d)
+    }
+    return [...dirs]
+  }
+
+  /**
+   * Upload `items` into `dir`. With `offerUnpack`, a .zip picked or dropped
+   * there itself (not one inside a picked folder) can instead be unpacked on
+   * the server; the person is asked, and may unpack, upload the .zip as it
+   * is, or cancel the upload altogether.
+   */
+  const startUpload = async (items: UploadItem[], dir: string, offerUnpack: boolean) => {
     if (items.length === 0) return
+    let zips = offerUnpack ? items.filter((i) => i.dir === dir && isZip(i.file.name)) : []
+    if (zips.length > 0) {
+      const what = zips.length === 1 ? (zips[0]?.file.name ?? '') : `${zips.length} zip archives`
+      const where = dir ? `${dir}/` : 'the workspace'
+      const choice = await chooseDialog(`Unpack ${what} into ${where}?`, {
+        body: 'Existing files are never replaced.',
+        action: 'Unpack',
+        alt: 'Keep as .zip',
+        tone: 'primary',
+      })
+      if (choice === null) return
+      if (choice === 'alt') zips = []
+    }
+    const files = items.filter((i) => !zips.includes(i))
+    const total = items.length
     setError(null)
-    setUploading({ done: 0, total: items.length })
-    void uploadFiles(items, (done, total) => setUploading({ done, total }))
-      .then((failed) => {
-        if (failed > 0) setError(`failed to upload ${failed} of ${items.length} file(s)`)
-      })
-      .finally(() => {
-        setUploading(null)
-        reload()
-      })
+    setNotice(null)
+    setUploading({ done: 0, total })
+    const failures: UploadFailure[] = await uploadFiles(files, (done) =>
+      setUploading({ done, total }),
+    )
+    const unpacked: string[] = []
+    for (const [n, { file }] of zips.entries()) {
+      setUploading({ done: files.length + n, total, unpacking: file.name })
+      try {
+        const res = await uploadZip(file, dir)
+        unpacked.push(`${res.files} file(s) from ${file.name}`)
+      } catch (e) {
+        failures.push({
+          path: joinPath(dir, file.name),
+          reason: `not unpacked: ${e instanceof Error ? e.message : String(e)}`,
+        })
+      }
+    }
+    setUploading(null)
+    if (unpacked.length > 0) {
+      setNotice(`Unpacked ${unpacked.join(', ')} into ${dir ? `${dir}/` : 'the workspace'}.`)
+    }
+    const [only] = failures
+    if (failures.length === 1 && only) {
+      setError(`${only.path}: ${only.reason}`)
+    } else if (failures.length > 1) {
+      setError(
+        `${failures.length} of ${total} file(s) did not upload:`,
+        failures.map((f) => `${f.path}: ${f.reason}`),
+      )
+    }
+    // Only the folders the upload touched; an unpacked zip changed its target.
+    void loadDirs(uploadedDirs([...items.map((i) => i.dir), ...(zips.length > 0 ? [dir] : [])]))
+  }
+
+  /** Files from a picker; a folder pick that hands over nothing says so. */
+  const onPicked = (list: FileList | null, fromFolder: boolean) => {
+    const items = pickedItems(list, pickDir.current)
+    if (items.length === 0) {
+      if (fromFolder) setError(NO_FILES_HINT)
+      return
+    }
+    void startUpload(items, pickDir.current, !fromFolder)
   }
 
   // Files and folders dragged in from the desktop. A picker cannot offer files
@@ -369,6 +658,8 @@ export const FileExplorer = memo(function FileExplorer({
     e.dataTransfer.dropEffect = 'copy'
     const dir = dropTargetDir(e.target)
     if (dir !== dropDir) setDropDir(dir)
+    const nearBottom = e.clientY > e.currentTarget.getBoundingClientRect().bottom - DROP_LINE_ZONE
+    if (nearBottom !== dropLineTop) setDropLineTop(nearBottom)
   }
   const onDragLeave = (e: ReactDragEvent<HTMLDivElement>) => {
     if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
@@ -382,7 +673,12 @@ export const FileExplorer = memo(function FileExplorer({
     // Both must be read now, synchronously: the DataTransfer is emptied after the event.
     const entries = Array.from(e.dataTransfer.items).map((item) => item.webkitGetAsEntry())
     const files = Array.from(e.dataTransfer.files)
-    void droppedItems(entries, files, dir).then(startUpload)
+    void droppedItems(entries, files, dir)
+      .then((items) => {
+        if (items.length === 0 && (entries.length > 0 || files.length > 0)) setError(NO_FILES_HINT)
+        else void startUpload(items, dir, true)
+      })
+      .catch((e: unknown) => setError(`could not read the dropped items: ${String(e)}`))
   }
 
   // Delete one or more paths: drop them from the tree immediately so they vanish
@@ -397,23 +693,46 @@ export const FileExplorer = memo(function FileExplorer({
     const focused = tree.focusedNode
     const node = focused?.isSelected ? focused : tree.selectedNodes.at(-1)
     if (!node || node.data.id === NEW_FOLDER_ID) return ''
+    if (node.data.more) return node.data.id.slice(MORE_PREFIX.length)
     return node.isLeaf ? parentDir(node.data.id) : node.data.id
   }
 
-  const startNewFolder = (parentId: string) => {
-    const placeholder: TreeNode = { id: NEW_FOLDER_ID, name: '', children: [] }
+  const startNewFolder = async (parentId: string) => {
     newFolderParent.current = parentId
+    // Load the parent first, so the row lands among its entries, not in an
+    // unloaded folder whose listing would then replace it.
+    const parent = parentId ? findNode(dataRef.current, parentId) : undefined
+    if (parent && !parent.loaded) await loadDirs([parentId])
+    const placeholder: TreeNode = { id: NEW_FOLDER_ID, name: '', children: [] }
     setData((d) => insertIntoTree(removeFromTree(d, new Set([NEW_FOLDER_ID])), parentId, placeholder))
-    // The row exists only after the re-render; arborist's own create() defers the same way.
-    setTimeout(() => {
+    setPendingEdit((n) => n + 1)
+  }
+
+  // The new-folder row exists only once the tree has rendered it: then open its
+  // parent, bring the row into view (at the top of its folder) and name it there.
+  // Without the scroll it could sit far off-screen in a long workspace.
+  useEffect(() => {
+    if (!pendingEdit) return
+    const frame = requestAnimationFrame(() => {
       const tree = treeRef.current
       if (!tree) return
-      if (parentId) tree.open(parentId)
+      const parentId = newFolderParent.current
+      if (parentId) {
+        tree.openParents(parentId)
+        tree.open(parentId)
+      }
+      // Focus moves to the new row first. Otherwise, when the selected folder
+      // was scrolled out of view, the scroll remounts its row, which takes the
+      // focus back as the tree's focused row; the name field loses it at once
+      // and the new folder is cancelled before it is ever seen.
+      tree.focus(NEW_FOLDER_ID, { scroll: false })
+      void tree.scrollTo(NEW_FOLDER_ID, 'center')
       void tree.edit(NEW_FOLDER_ID).then((res) => {
         if (res.cancelled) setData((d) => removeFromTree(d, new Set([NEW_FOLDER_ID])))
       })
     })
-  }
+    return () => cancelAnimationFrame(frame)
+  }, [pendingEdit])
 
   const deleteMany = (ids: string[]) => {
     if (ids.length === 0) return
@@ -422,7 +741,7 @@ export const FileExplorer = memo(function FileExplorer({
     void Promise.allSettled(ids.map((id) => deletePath(id))).then((results) => {
       const failed = results.filter((r) => r.status === 'rejected').length
       if (failed > 0) setError(`failed to delete ${failed} item(s)`)
-      reload()
+      void loadDirs(ids.map(parentDir))
     })
   }
 
@@ -452,12 +771,13 @@ export const FileExplorer = memo(function FileExplorer({
   }, [menu])
 
   const onActivate = (node: NodeApi<TreeNode>) => {
-    if (node.isLeaf) onOpenFile(node.data.id)
+    if (node.isLeaf && !node.data.more) onOpenFile(node.data.id)
   }
 
   const openMenu = (e: ReactMouseEvent, node: NodeApi<TreeNode>) => {
     e.preventDefault()
     e.stopPropagation()
+    if (node.data.more) return
     // Keep an existing multi-selection if the right-clicked row is part of it, so
     // Delete can act on every selected row; otherwise select just this one.
     if (!node.isSelected) node.select()
@@ -481,6 +801,15 @@ export const FileExplorer = memo(function FileExplorer({
 
   // Hoisted so the row branch below narrows once, closures included.
   const menuNode = menu?.node ?? null
+  // What the row menu's Delete acts on: the whole selection when the clicked
+  // row is part of it, else that row alone.
+  const menuSelection = menuNode?.tree.selectedNodes ?? []
+  const menuTargets =
+    menuNode === null
+      ? []
+      : menuSelection.length > 1 && menuSelection.some((n) => n.id === menuNode.id)
+        ? menuSelection
+        : [menuNode]
 
   return (
     <div className="panel">
@@ -490,7 +819,7 @@ export const FileExplorer = memo(function FileExplorer({
           <button
             className="btn-icon"
             aria-label="New folder"
-            onClick={() => startNewFolder(selectedDir())}
+            onClick={() => void startNewFolder(selectedDir())}
           >
             <FolderPlusIcon />
           </button>
@@ -511,7 +840,7 @@ export const FileExplorer = memo(function FileExplorer({
           multiple
           hidden
           onChange={(e) => {
-            startUpload(pickedItems(e.target.files, pickDir.current))
+            onPicked(e.target.files, false)
             e.target.value = ''
           }}
         />
@@ -520,25 +849,40 @@ export const FileExplorer = memo(function FileExplorer({
           type="file"
           hidden
           onChange={(e) => {
-            startUpload(pickedItems(e.target.files, pickDir.current))
+            onPicked(e.target.files, true)
             e.target.value = ''
           }}
         />
       </div>
-      {uploading ? (
-        <div className="panel-status" role="status">
-          Uploading {uploading.done} of {uploading.total} file(s)…
+      {notice && !uploading && (
+        <div className="panel-status panel-notice" role="status">
+          <span>{notice}</span>
+          <button className="btn-icon" aria-label="Dismiss" onClick={() => setNotice(null)}>
+            <XIcon size={12} />
+          </button>
         </div>
-      ) : (
-        dropDir !== null && (
-          <div className="panel-status" role="status">
-            Drop to upload into {dropDir ? `${dropDir}/` : 'the workspace'}
-          </div>
-        )
       )}
-      {error && <div className="panel-error">{error}</div>}
+      {error && (
+        <div className="panel-error" role="alert">
+          <div className="panel-error-head">
+            <span>{error.message}</span>
+            <button className="btn-icon" aria-label="Dismiss" onClick={() => setErrorState(null)}>
+              <XIcon size={12} />
+            </button>
+          </div>
+          {error.details && error.details.length > 0 && (
+            <ul className="panel-error-list">
+              {error.details.slice(0, 8).map((d, i) => (
+                // Two failures can read the same (one name picked twice): key by place.
+                <li key={i}>{d}</li>
+              ))}
+              {error.details.length > 8 && <li>… and {error.details.length - 8} more</li>}
+            </ul>
+          )}
+        </div>
+      )}
       <div
-        className={`panel-body${dropDir !== null ? ' drop-target' : ''}`}
+        className={`panel-body explorer-body${dropDir !== null ? ' drop-target' : ''}`}
         ref={containerRef}
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
@@ -547,19 +891,41 @@ export const FileExplorer = memo(function FileExplorer({
       >
         {/* Every other panel says what to do when it is empty; this one showed
             a blank rectangle, which reads as a failure to load. */}
-        {data.length === 0 && !error && (
+        {/* Laid over the tree's edge, never in the flow: a line appearing above
+            the tree moved every row down under the pointer mid-drag, and the drop
+            landed in the folder above the one aimed at. */}
+        {(uploading || dropDir !== null) && (
+          <div
+            className={`panel-status panel-status-float${
+              !uploading && dropLineTop ? ' at-top' : ''
+            }`}
+            role="status"
+          >
+            {uploading
+              ? uploading.unpacking
+                ? `Unpacking ${uploading.unpacking}…`
+                : `Uploading ${uploading.done} of ${uploading.total} file(s)…`
+              : `Drop to upload into ${dropDir ? `${dropDir}/` : 'the workspace'}`}
+          </div>
+        )}
+        {rootLoaded && data.length === 0 && !error && (
           <div className="viewer-message">
             This workspace is empty. Upload files, or drop files or folders here.
           </div>
         )}
+        <RowContext.Provider value={{ onMenu: openMenu, loading, dropDir }}>
         <Tree<TreeNode>
           ref={treeRef}
           data={data}
           width={size.width}
           height={size.height}
-          rowHeight={27}
+          rowHeight={28}
           indent={14}
           openByDefault={false}
+          onToggle={onToggle}
+          disableDrag={(d) => !!d.more || d.id === NEW_FOLDER_ID}
+          disableEdit={(d) => !!d.more}
+          disableSelect={(d) => !!d.more}
           onActivate={onActivate}
           onSelect={(nodes) =>
             onSelectionChange?.(nodes.filter((n) => n.isLeaf).map((n) => n.data.id))
@@ -567,15 +933,21 @@ export const FileExplorer = memo(function FileExplorer({
           onRename={({ node, name }) => {
             if (node.data.id === NEW_FOLDER_ID) {
               setData((d) => removeFromTree(d, new Set([NEW_FOLDER_ID])))
-              if (name.trim()) run(mkdir(joinPath(newFolderParent.current, name.trim())))
+              const parent = newFolderParent.current
+              if (name.trim()) run(mkdir(joinPath(parent, name.trim())), [parent])
               return
             }
-            run(renamePath(node.data.id, joinPath(parentDir(node.data.id), name)))
+            run(renamePath(node.data.id, joinPath(parentDir(node.data.id), name)), [
+              parentDir(node.data.id),
+            ])
           }}
           onMove={({ dragNodes, parentNode }) => {
             const destDir = parentNode ? parentNode.data.id : ''
             for (const node of dragNodes) {
-              run(renamePath(node.data.id, joinPath(destDir, node.data.name)))
+              run(renamePath(node.data.id, joinPath(destDir, node.data.name)), [
+                parentDir(node.data.id),
+                destDir,
+              ])
             }
           }}
           onDelete={({ nodes }) => {
@@ -586,8 +958,9 @@ export const FileExplorer = memo(function FileExplorer({
             )
           }}
         >
-          {(props) => <NodeRow {...props} onMenu={openMenu} />}
+          {Row}
         </Tree>
+        </RowContext.Provider>
         {menu &&
           createPortal(
             <div
@@ -604,7 +977,7 @@ export const FileExplorer = memo(function FileExplorer({
                 <button
                   onClick={() => {
                     setMenu(null)
-                    startNewFolder('')
+                    void startNewFolder('')
                   }}
                 >
                   New folder
@@ -625,13 +998,31 @@ export const FileExplorer = memo(function FileExplorer({
                 >
                   Upload folder…
                 </button>
-                <button onClick={menuAction(reload)}>Refresh</button>
+                <button
+                  onClick={() => {
+                    setMenu(null)
+                    reload()
+                  }}
+                >
+                  Refresh
+                </button>
               </>
             ) : (
               <>
                 {menuNode.isLeaf ? (
                   <>
                     <button onClick={menuAction(() => onOpenFile(menuNode.data.id))}>Open</button>
+                    {/* Only with a volume open to lay it over, and never that
+                        file on itself. Dragging the row onto the image does the
+                        same thing. */}
+                    {onOverlay &&
+                      isVolumePath(overlayBase) &&
+                      isVolumePath(menuNode.data.id) &&
+                      menuNode.data.id !== overlayBase && (
+                        <button onClick={menuAction(() => onOverlay(menuNode.data.id))}>
+                          Overlay on image
+                        </button>
+                      )}
                     <button onClick={menuAction(() => downloadPath(menuNode.data.id))}>
                       Download
                     </button>
@@ -641,7 +1032,7 @@ export const FileExplorer = memo(function FileExplorer({
                     <button
                       onClick={() => {
                         setMenu(null)
-                        startNewFolder(menuNode.data.id)
+                        void startNewFolder(menuNode.data.id)
                       }}
                     >
                       New folder inside
@@ -652,24 +1043,19 @@ export const FileExplorer = memo(function FileExplorer({
                   </>
                 )}
                 <button onClick={menuAction(() => void menuNode.edit())}>Rename</button>
-                {(() => {
-                  const sel = menuNode.tree.selectedNodes
-                  const targets =
-                    sel.length > 1 && sel.some((n) => n.id === menuNode.id) ? sel : [menuNode]
-                  const label = targets.length > 1 ? `${targets.length} items` : menuNode.data.name
-                  return (
-                    <button
-                      className="danger"
-                      onClick={menuAction(() => {
-                        void confirmDialog(`Delete ${label}?`).then(
-                          (ok) => ok && deleteMany(targets.map((n) => n.data.id)),
-                        )
-                      })}
-                    >
-                      {targets.length > 1 ? `Delete ${targets.length} items` : 'Delete'}
-                    </button>
-                  )
-                })()}
+                <button
+                  className="danger"
+                  onClick={() => {
+                    setMenu(null)
+                    const label =
+                      menuTargets.length > 1 ? `${menuTargets.length} items` : menuNode.data.name
+                    void confirmDialog(`Delete ${label}?`).then(
+                      (ok) => ok && deleteMany(menuTargets.map((n) => n.data.id)),
+                    )
+                  }}
+                >
+                  {menuTargets.length > 1 ? `Delete ${menuTargets.length} items` : 'Delete'}
+                </button>
               </>
             )}
             </div>,

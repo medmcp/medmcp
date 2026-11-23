@@ -5,6 +5,7 @@ import type {
   ExternalMcpState,
   GpuInfo,
   InstalledStack,
+  JobInfo,
   LocalModelsState,
   ReplayPreviewResult,
   RunSummary,
@@ -19,7 +20,20 @@ import type {
 
 /** Thin client for the workspace filesystem API. */
 
+/** A request the server answered with an error; `status` is the HTTP status. */
+export class ApiError extends Error {
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.status = status
+  }
+}
+
 async function check(res: Response): Promise<Response> {
+  // The login cookie is gone or the password changed: the reload lands on the
+  // login screen rather than leaving every panel failing on its own.
+  if (res.status === 401) window.location.reload()
   if (!res.ok) {
     let detail = res.statusText
     try {
@@ -28,7 +42,7 @@ async function check(res: Response): Promise<Response> {
     } catch {
       /* non-JSON error body */
     }
-    throw new Error(detail)
+    throw new ApiError(detail, res.status)
   }
   return res
 }
@@ -51,6 +65,16 @@ async function postJson(url: string, body: object): Promise<Response> {
   return sendJson('POST', url, body)
 }
 
+/** Trade the workspace password for this browser's login cookie. */
+export async function login(password: string): Promise<void> {
+  await postJson('/api/login', { password })
+}
+
+/** Whether this browser may use the API (no password set, or it is logged in). */
+export async function canUseApi(): Promise<boolean> {
+  return (await fetch('/api/access')).ok
+}
+
 /** The absolute on-disk workspace root, so absolute tool outputs can be shown
  *  and opened as workspace paths. */
 export async function fetchWorkspaceRoot(): Promise<string> {
@@ -58,10 +82,39 @@ export async function fetchWorkspaceRoot(): Promise<string> {
   return ((await res.json()) as { root: string }).root
 }
 
+/** The whole workspace tree in one request; the explorer loads by folder instead. */
 export async function fetchTree(): Promise<TreeNode[]> {
   const res = await check(await fetch('/api/tree'))
   const body = (await res.json()) as { tree: TreeNode[] }
   return body.tree
+}
+
+/** One entry of a folder listing as the server sends it (see /api/tree/dir). */
+interface DirEntry {
+  id: string
+  name: string
+  dir?: boolean
+  size?: number
+}
+
+/** One level of the explorer tree: folder `path`'s entries, and how many it has in all. */
+export interface DirListing {
+  path: string
+  children: TreeNode[]
+  total: number
+}
+
+/** The entries of workspace folder `path` ("" = the root); subfolders come unloaded. */
+export async function fetchDir(path: string): Promise<DirListing> {
+  const res = await check(await fetch(`/api/tree/dir?path=${encodeURIComponent(path)}`))
+  const body = (await res.json()) as { path: string; children: DirEntry[]; total: number }
+  return {
+    path: body.path,
+    total: body.total,
+    children: body.children.map((e) =>
+      e.dir ? { id: e.id, name: e.name, children: [] } : { id: e.id, name: e.name, size: e.size },
+    ),
+  }
 }
 
 export function rawUrl(path: string): string {
@@ -96,32 +149,67 @@ export interface UploadItem {
   dir: string
 }
 
+/** A file that did not upload, and the server's (or the network's) reason. */
+export interface UploadFailure {
+  path: string
+  reason: string
+}
+
 /**
  * Upload several files, a few requests at a time; `onProgress` reports files
- * done so far. Resolves to the failure count. Each item names its own target
- * folder, so a dropped or picked folder tree is recreated by the caller.
+ * done so far. Resolves to the files that failed, each with its reason. Each
+ * item names its own target folder, so a dropped or picked folder tree is
+ * recreated by the caller.
  */
 export async function uploadFiles(
   items: UploadItem[],
   onProgress: (done: number, total: number) => void,
-): Promise<number> {
+): Promise<UploadFailure[]> {
   let next = 0
   let done = 0
-  let failed = 0
+  const failures: UploadFailure[] = []
   const worker = async () => {
     while (next < items.length) {
       const item = items[next++]
       if (!item) continue
       try {
         await uploadFile(item.file, item.dir)
-      } catch {
-        failed++
+      } catch (e) {
+        failures.push({
+          path: item.dir ? `${item.dir}/${item.file.name}` : item.file.name,
+          // A dropped connection rejects fetch with a TypeError ("Failed to fetch").
+          reason:
+            e instanceof TypeError
+              ? 'the connection to the server failed'
+              : e instanceof Error
+                ? e.message
+                : String(e),
+        })
       }
       onProgress(++done, items.length)
     }
   }
   await Promise.all(Array.from({ length: Math.min(4, items.length) }, worker))
-  return failed
+  return failures
+}
+
+/** What the server unpacked from an uploaded zip. */
+export interface ZipResult {
+  path: string
+  files: number
+  dirs: number
+  bytes: number
+}
+
+/** Upload a .zip that the server checks and unpacks into `dir` ("" = root). */
+export async function uploadZip(file: File, dir: string): Promise<ZipResult> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch(`/api/files/upload-zip?dir=${encodeURIComponent(dir)}`, {
+    method: 'POST',
+    body: form,
+  })
+  return (await (await check(res)).json()) as ZipResult
 }
 
 /** Start a browser download of a file, or of a folder as a .zip. */
@@ -167,6 +255,18 @@ export async function fetchInstalledStacks(): Promise<InstalledStack[]> {
   const res = await check(await fetch('/api/stacks'))
   const body = (await res.json()) as { stacks: InstalledStack[] }
   return body.stacks
+}
+
+/** Background jobs of this workspace, newest first (empty when jobs are off). */
+export async function fetchJobs(): Promise<JobInfo[]> {
+  const res = await check(await fetch('/api/jobs'))
+  const body = (await res.json()) as { jobs: JobInfo[] }
+  return body.jobs
+}
+
+/** Stop a running background job. */
+export async function stopJob(id: string): Promise<void> {
+  await postJson(`/api/jobs/${encodeURIComponent(id)}/stop`, {})
 }
 
 /** Fetch the curated install catalog (each entry flagged whether it's installed). */
@@ -297,10 +397,20 @@ export async function fetchRuns(
   return (await res.json()) as { runs: RunSummary[]; live: string[] }
 }
 
-/** Turn a plan_batch manifest CSV into per-subject batch rows for this workflow. */
-export async function batchFromPlan(name: string, planCsv: string): Promise<BatchFromPlanResult> {
+/** Turn a manifest CSV — a batch plan or a selection of scans — into
+ *  batch rows for this workflow. `mapping` assigns a column (plan) or a series
+ *  role (selection) to inputs the server could not place by itself. */
+export async function batchFromPlan(
+  name: string,
+  planCsv: string,
+  mapping: Record<string, string> = {},
+  outputRoot = '',
+): Promise<BatchFromPlanResult> {
   const res = await postJson(`/api/workflows/${encodeURIComponent(name)}/batch-from-plan`, {
     plan_csv: planCsv,
+    column_map: mapping,
+    role_map: mapping,
+    output_root: outputRoot,
   })
   return (await res.json()) as BatchFromPlanResult
 }

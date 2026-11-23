@@ -16,6 +16,8 @@ from starlette.websockets import WebSocketDisconnect
 
 from medmcp import origincheck, server
 
+from .conftest import AUTH_HEADERS
+
 
 class TestRejectReason:
     """The header rules, independent of any server."""
@@ -75,25 +77,25 @@ class TestGuardOnTheApp:
 
     def test_same_origin_request_is_served(self) -> None:
         """The workspace's own page keeps working."""
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100", headers=AUTH_HEADERS)
         assert (
             client.get("/healthz", headers={"Origin": "http://127.0.0.1:8100"}).status_code == 200
         )
 
     def test_healthcheck_without_an_origin_is_served(self) -> None:
         """The container healthcheck sends no Origin and must not be refused."""
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100", headers=AUTH_HEADERS)
         assert client.get("/healthz").status_code == 200
 
     def test_cross_origin_http_is_refused(self) -> None:
         """A page on another site cannot reach the API at all."""
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100", headers=AUTH_HEADERS)
         resp = client.get("/api/external-mcp", headers={"Origin": "https://evil.example"})
         assert resp.status_code == 403
 
     def test_rebound_host_is_refused(self) -> None:
         """A name resolved to 127.0.0.1 is caught by the Host check."""
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100", headers=AUTH_HEADERS)
         resp = client.get("/healthz", headers={"Host": "evil.example"})
         assert resp.status_code == 403
 
@@ -104,7 +106,7 @@ class TestGuardOnTheApp:
         any origin, and `read_file` needs no approval, so the page could have
         the workspace read out to it with no dialog shown.
         """
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100", headers=AUTH_HEADERS)
         with (
             pytest.raises(WebSocketDisconnect),
             client.websocket_connect("/ws/chat", headers={"Origin": "https://evil.example"}),
@@ -113,7 +115,7 @@ class TestGuardOnTheApp:
 
     def test_cross_origin_replay_socket_is_refused(self) -> None:
         """`/ws/replay` runs workflows with no permission flow; same door, same lock."""
-        client = TestClient(server.app, base_url="http://127.0.0.1:8100")
+        client = TestClient(server.app, base_url="http://127.0.0.1:8100", headers=AUTH_HEADERS)
         with (
             pytest.raises(WebSocketDisconnect),
             client.websocket_connect("/ws/replay", headers={"Origin": "https://evil.example"}),

@@ -10,7 +10,7 @@ the failure mode differs by transport, and the streaming one is silent:
   no client can tell the turn failed. vibe records an empty assistant message and
   the chat appears frozen.
 
-This shim sits between vibe and Ollama and applies three repairs:
+This shim sits between vibe and Ollama and applies these repairs:
 
 1. **Tool renaming.** The dominant trigger is the tool literally named ``skill``,
    which collides in Glimmer's ATEM recipient namespace (hence the sibling error
@@ -36,6 +36,31 @@ This shim sits between vibe and Ollama and applies three repairs:
    ``<atem:function_calls>`` block in the content stream — and parses that block
    itself into OpenAI ``tool_calls``. Values are typed from the tool's JSON schema.
    ``MEDMCP_SHIM_TOOLS=ollama`` restores Ollama's parser (repairs 1-3 still apply).
+5. **Tool-name repair** (glimmer mode). The rendered tool section — Ollama's and
+   the publisher's template alike — shows ``example_tool_name.example_function_name``
+   as its example, and Muse copies the shape: ``bash.action``, ``todo.action``
+   (32 of 100 replayed agent requests, measured 2026-10-21). A name that is not
+   offered but whose part before the dot (``bash.action``) or after it
+   (``file_system.bash``) is exactly one offered tool is mapped to that tool; any
+   other unknown name is kept, and vibe answers it with its own error.
+6. **Parameter repair** (glimmer mode). Muse also breaks a parameter's tags: it
+   closes one with its own name (``<atem:parameter name="name">x</name>``, the
+   shape of the XML skill list beside the section), leaves one unclosed, or folds
+   the parameter into the invoke name (``<atem:invoke name="skill.name">x``).
+   Each loses the value and leaves ``{}``, which the tool's schema then rejects
+   (132 of 296 skill calls in a benchmark sweep, 2026-11). The parameter's own
+   closing tag ends it as ``</atem:parameter>`` does; an unclosed one runs to the
+   next parameter or the end of the invoke; and a ``tool.parameter`` invoke with
+   no parameters gives its text to that parameter when the tool declares it.
+
+7. **Denial reasons** (both modes). A stack tool is called from
+   ``run_typescript``, and when MedMCP's path guard denies the call (a path that
+   does not exist, say) the program -- and so the model -- gets only
+   ``tool_skipped: Tool execution was skipped by Runtime policy.`` back from vibe
+   2.26.1, never the reason. The guard leaves its reason with the core; a fresh
+   tool result holding that error gets the reason for the tool it names added as
+   ``[MedMCP] <reason>`` (:func:`note_denied_calls`), and the same note again
+   whenever the result is sent again later in the chat.
 
 **Relay mode** (``MEDMCP_SHIM_RELAY``). ``live`` (default): reasoning and
 ``content`` deltas stream straight through, so the answer appears as it is
@@ -51,25 +76,35 @@ truncation is retried invisibly, at the cost of the answer arriving all at once.
 If every attempt fails the shim emits an explicit, clearly-labelled error message
 rather than an empty turn — a visible failure beats a silent one.
 
+**Seeded sampling** (``MEDMCP_SHIM_SEED``, off when unset). Every request carries a
+sampling seed derived from this value and the conversation's first user message, so
+a conversation can be run again with the same draws; a retry moves the seed on by
+one, so it is a new draw rather than the same failure. The draws repeat exactly only
+while Ollama serves nothing else: requests batched together change the arithmetic.
+
 Inert until ``api_base`` in ``.vibe/config.toml`` points at it.
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from pathlib import Path
 from typing import Any, cast
 
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+
+from medmcp import brokerclient
 
 log: logging.Logger = logging.getLogger(__name__)
 
@@ -106,11 +141,22 @@ DEFAULT_KEEPALIVE_SEC: float = 15.0
 _KEEPALIVE_ENV = "MEDMCP_SHIM_KEEPALIVE"
 _SSE_KEEPALIVE = b": keepalive\n\n"
 
+_SEED_ENV = "MEDMCP_SHIM_SEED"
+
 # ATEM markers, as in Ollama's ``model/parsers/glimmer.go``.
 ATEM_CALLS_OPEN = "<atem:function_calls>"
 ATEM_CALLS_CLOSE = "</atem:function_calls>"
+# Ollama's model-management routes, which the passthrough refuses.
+_ADMIN_ROUTE = re.compile(r"api/(create|copy|pull|push|delete|blobs)\b")
 _ATEM_INVOKE_RE = re.compile(r'<atem:invoke name="([^"]*)">(.*?)</atem:invoke>', re.DOTALL)
-_ATEM_PARAM_RE = re.compile(r'<atem:parameter name="([^"]*)">(.*?)</atem:parameter>', re.DOTALL)
+# A parameter ends at ``</atem:parameter>`` or at its own name's closing tag (repair 6).
+_ATEM_PARAM_RE = re.compile(
+    r'<atem:parameter name="([^"]*)">((?:(?!<atem:parameter ).)*?)</(?:atem:parameter|\1)>',
+    re.DOTALL,
+)
+_ATEM_PARAM_OPEN_RE = re.compile(r'<atem:parameter name="([^"]*)">')
+# Closing tags left at the end of a value whose own were missing (repair 6).
+_TRAILING_TAGS_RE = re.compile(r"(?:\s*</[\w:.-]+>)+\s*$")
 
 # The tool section Ollama's Glimmer renderer writes into the system message
 # (``model/renderers/glimmer.go``); reproduced verbatim so the model sees what it
@@ -159,6 +205,30 @@ _GLIMMER_TOOLS_SUFFIX = (
 # ── request repair (pure) ──────────────────────────────────
 
 
+def _first_user_text(payload: JsonDict) -> str:
+    """The text of the conversation's first user message ("" when there is none)."""
+    for raw in cast("list[object]", payload.get("messages") or []):
+        if not isinstance(raw, dict) or cast("JsonDict", raw).get("role") != "user":
+            continue
+        content = cast("JsonDict", raw).get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                str(cast("JsonDict", part).get("text") or "")
+                for part in cast("list[object]", content)
+                if isinstance(part, dict)
+            )
+        return ""
+    return ""
+
+
+def conversation_seed(payload: JsonDict, base: int) -> int:
+    """The sampling seed for a conversation: ``base`` and its first user message, hashed."""
+    digest = hashlib.sha256(f"{base}\n{_first_user_text(payload)}".encode()).hexdigest()
+    return int(digest[:8], 16) % (2**31)
+
+
 def sanitize_arguments(raw: object) -> str:
     """Coerce a tool call's ``arguments`` into a JSON-object string.
 
@@ -199,6 +269,97 @@ def _rename_tool_calls(message: JsonDict, renames: Mapping[str, str]) -> None:
         if isinstance(name, str) and name in renames:
             fn["name"] = renames[name]
         fn["arguments"] = sanitize_arguments(fn.get("arguments"))
+
+
+# A stack call the path guard denied, as the program's error reaches the model: the
+# error's stack names the tool (``... [as pick]``). One match per error.
+_SKIPPED_CALL = re.compile(
+    r"tool_skipped: Tool execution was skipped by Runtime policy\."
+    r"(?:(?!tool_skipped: ).){0,2000}?\[as ([A-Za-z0-9_$]+)\]",
+    re.DOTALL,
+)
+DENIAL_PREFIX = "[MedMCP] "
+# Notes added to tool results, by tool_call_id, replayed on every later request.
+_DENIAL_MEMO_LIMIT = 500
+
+TakeDenial = Callable[[str], Awaitable[str | None]]
+
+
+def _message_text(message: JsonDict) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            str(cast("JsonDict", part).get("text") or "")
+            for part in cast("list[object]", content)
+            if isinstance(part, dict)
+        )
+    return ""
+
+
+def _append_note(message: JsonDict, note: str) -> None:
+    content = message.get("content")
+    if isinstance(content, list):
+        cast("list[object]", content).append({"type": "text", "text": note})
+    else:
+        text = content if isinstance(content, str) else ""
+        message["content"] = f"{text}\n\n{note}" if text else note
+
+
+async def note_denied_calls(payload: JsonDict, memo: dict[str, str], take: TakeDenial) -> None:
+    """Add the path guard's reasons to tool results that only say a call was skipped.
+
+    A result after the last assistant message is fresh: for each skipped call in
+    it, *take* is asked for the reason for the tool its error names (the core's
+    ``take_denial``), and the reasons found are added as ``[MedMCP] <reason>`` and
+    kept in *memo* under the result's ``tool_call_id``. vibe sends the history as
+    it recorded it, so an older result gets the note from *memo* again; one from
+    before the shim started stays as it is.
+    """
+    raw_messages = payload.get("messages")
+    if not isinstance(raw_messages, list):
+        return
+    messages = [
+        cast("JsonDict", m) for m in cast("list[object]", raw_messages) if isinstance(m, dict)
+    ]
+    last_assistant = max(
+        (i for i, m in enumerate(messages) if m.get("role") == "assistant"), default=-1
+    )
+    for i, message in enumerate(messages):
+        if message.get("role") != "tool":
+            continue
+        text = _message_text(message)
+        if "tool_skipped" not in text:
+            continue
+        call_id = str(message.get("tool_call_id") or "")
+        note = memo.get(call_id) if call_id else None
+        if note is None and i > last_assistant:
+            reasons = [r for tool in _SKIPPED_CALL.findall(text) if (r := await take(tool))]
+            if reasons:
+                note = "\n\n".join(DENIAL_PREFIX + r for r in reasons)
+                if call_id:
+                    memo[call_id] = note
+                    for stale in list(memo)[: max(0, len(memo) - _DENIAL_MEMO_LIMIT)]:
+                        del memo[stale]
+        if note:
+            _append_note(message, note)
+
+
+def _core_socket() -> Path:
+    """The broker socket as the core binds it (beside the core, not in the agent)."""
+    from medmcp import settings  # the settings module is large; only when asked
+
+    return settings.backend_socket_path()
+
+
+async def take_denial_from_core(tool: str) -> str | None:
+    """The reason of the path guard's oldest live denial of *tool*, from the core's broker."""
+    response = await brokerclient.ask(
+        "take_denial", {"tool": tool}, timeout=2.0, socket=_core_socket()
+    )
+    reason = response.get("reason") if response is not None else None
+    return reason if isinstance(reason, str) and reason else None
 
 
 def repair_request(payload: JsonDict, renames: Mapping[str, str]) -> JsonDict:
@@ -397,26 +558,64 @@ def coerce_value(raw: str, types: set[str]) -> object:
     return text
 
 
+def resolve_tool_name(name: str, functions: Mapping[str, JsonDict]) -> str:
+    """The offered tool a namespaced name means (repair 5), else *name* unchanged.
+
+    ``bash.action`` -> ``bash`` and ``file_system.bash`` -> ``bash`` when ``bash``
+    is offered. A name whose two halves are both offered tools is ambiguous and
+    kept, like any name that matches nothing.
+    """
+    if name in functions or "." not in name:
+        return name
+    first, last = name.partition(".")[0], name.rpartition(".")[2]
+    candidates = {part for part in (first, last) if part in functions}
+    if len(candidates) != 1:
+        return name
+    (resolved,) = candidates
+    log.info("tool name %r repaired to %r", name, resolved)
+    return resolved
+
+
+def _atem_parameters(body: str) -> dict[str, str]:
+    """An invoke's parameters as text: closed ones, then any opened and never closed."""
+    found = {m.group(1): m.group(2) for m in _ATEM_PARAM_RE.finditer(body)}
+    opens = list(_ATEM_PARAM_OPEN_RE.finditer(body))
+    for i, opening in enumerate(opens):
+        if opening.group(1) in found:
+            continue
+        end = opens[i + 1].start() if i + 1 < len(opens) else len(body)
+        found[opening.group(1)] = _TRAILING_TAGS_RE.sub("", body[opening.end() : end])
+    return found
+
+
 def parse_atem_block(
     block: str, functions: Mapping[str, JsonDict], *, first_index: int = 0
 ) -> list[JsonDict]:
     """Parse one ``<atem:function_calls>`` block into OpenAI tool-call objects.
 
     Lenient where Ollama's parser is not: whitespace between tags is ignored and
-    an invoke with no parameters is a call with ``{}``. Unknown tool names are
-    kept — vibe answers the model with its own error, which is better than a
-    dropped call. ``first_index`` numbers the calls after those of an earlier
-    block in the same turn: clients merge streamed deltas by index.
+    an invoke with no parameters is a call with ``{}``. A namespaced name is
+    mapped to the offered tool it means (:func:`resolve_tool_name`); other unknown
+    names are kept — vibe answers the model with its own error, which is better
+    than a dropped call. ``first_index`` numbers the calls after those of an
+    earlier block in the same turn: clients merge streamed deltas by index.
     """
     calls: list[JsonDict] = []
     for index, invoke in enumerate(_ATEM_INVOKE_RE.finditer(block), start=first_index):
-        name = invoke.group(1).strip()
+        written = invoke.group(1).strip()
+        name = resolve_tool_name(written, functions)
         fn = functions.get(name)
-        arguments: JsonDict = {}
-        for param in _ATEM_PARAM_RE.finditer(invoke.group(2)):
-            arguments[param.group(1)] = coerce_value(
-                param.group(2), _schema_types(fn, param.group(1))
-            )
+        body = invoke.group(2)
+        raw = _atem_parameters(body)
+        folded = written.rpartition(".")[2]
+        if not raw and name != written and _schema_types(fn, folded):
+            # ``<atem:invoke name="skill.name">x``: the parameter folded into the name.
+            raw[folded] = _TRAILING_TAGS_RE.sub("", body).strip()
+        if raw and not _ATEM_PARAM_RE.search(body):
+            log.info("tool call %r: parameters repaired (%s)", name, ", ".join(raw))
+        arguments: JsonDict = {
+            key: coerce_value(value, _schema_types(fn, key)) for key, value in raw.items()
+        }
         calls.append(
             {
                 "index": index,
@@ -674,8 +873,14 @@ def create_app(
     relay: str = DEFAULT_RELAY,
     tool_mode: str = DEFAULT_TOOL_MODE,
     keepalive_sec: float = DEFAULT_KEEPALIVE_SEC,
+    seed: int | None = None,
+    take_denial: TakeDenial = take_denial_from_core,
 ) -> FastAPI:
-    """Build the shim ASGI app forwarding to ``upstream``."""
+    """Build the shim ASGI app forwarding to ``upstream``; ``seed`` turns on seeded sampling.
+
+    *take_denial* answers which reason the path guard gave for denying a tool's
+    call (repair 7); by default the core's broker is asked.
+    """
     if relay not in RELAY_MODES:
         raise ValueError(f"unknown relay mode {relay!r}; expected one of {RELAY_MODES}")
     if tool_mode not in TOOL_MODES:
@@ -688,6 +893,7 @@ def create_app(
     )
     inverse = _inverse(mapping)
     base = upstream.rstrip("/")
+    denial_memo: dict[str, str] = {}
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Response:  # pyright: ignore[reportUnusedFunction]
@@ -699,6 +905,11 @@ def create_app(
             return JSONResponse({"error": {"message": "invalid payload"}}, status_code=400)
 
         payload = repair_request(cast("JsonDict", raw), mapping)
+        try:
+            await note_denied_calls(payload, denial_memo, take_denial)
+        except Exception:
+            log.exception("could not add the path guard's denial reasons")
+        sampling_seed = None if seed is None else conversation_seed(payload, seed)
         model = str(payload.get("model") or "")
         url = f"{base}/v1/chat/completions"
         functions: dict[str, JsonDict] | None = None
@@ -718,16 +929,26 @@ def create_app(
                     relay=relay,
                     functions=functions,
                     keepalive_sec=keepalive_sec,
+                    seed=sampling_seed,
                 ),
                 media_type="text/event-stream",
             )
-        return await _complete_with_retry(url, payload, inverse, attempts, functions=functions)
+        return await _complete_with_retry(
+            url, payload, inverse, attempts, functions=functions, seed=sampling_seed
+        )
 
     @app.api_route(  # pyright: ignore[reportUntypedFunctionDecorator]
         "/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD"]
     )
     async def passthrough(request: Request, path: str) -> Response:  # pyright: ignore[reportUnusedFunction]
-        """Forward every other Ollama route untouched, so the shim is a drop-in."""
+        """Forward every other Ollama route untouched, so the shim is a drop-in.
+
+        Except Ollama's model-management API: only vibe talks to the shim, and
+        nothing it does creates, copies, pulls, pushes or deletes a model. The
+        Models window reaches Ollama directly.
+        """
+        if _ADMIN_ROUTE.match(path.lstrip("/")):
+            return JSONResponse({"error": "not through the tool-call shim"}, status_code=403)
         body = await request.body()
         headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
         async with httpx.AsyncClient(timeout=httpx.Timeout(900.0)) as client:
@@ -781,12 +1002,13 @@ async def _complete_with_retry(
     *,
     client: httpx.AsyncClient | None = None,
     functions: Mapping[str, JsonDict] | None = None,
+    seed: int | None = None,
 ) -> Response:
     """Run a non-streaming completion, retrying parse failures and empty turns.
 
     A 4xx is the upstream rejecting the request itself; it is passed through at
     once, since re-sending the same request can only produce the same answer.
-    ``client`` lets tests inject a transport.
+    ``client`` lets tests inject a transport; ``seed`` is attempt 1's sampling seed.
     """
     detail = "unknown error"
     async with (
@@ -795,7 +1017,7 @@ async def _complete_with_retry(
         else contextlib.nullcontext(client)
     ) as client:
         for attempt in range(1, attempts + 1):
-            resp = await client.post(url, json=payload)
+            resp = await client.post(url, json=_seeded(payload, seed, attempt))
             if 400 <= resp.status_code < 500:
                 log.warning("shim: upstream %s — a client error, not retried", resp.status_code)
                 return Response(
@@ -836,6 +1058,13 @@ async def _complete_with_retry(
     )
 
 
+def _seeded(payload: JsonDict, seed: int | None, attempt: int) -> JsonDict:
+    """The request for ``attempt``: a retry samples with the next seed, not the same draw."""
+    if seed is None:
+        return payload
+    return {**payload, "seed": (seed + attempt - 1) % (2**31)}
+
+
 def _has_usable_choice(body: JsonDict) -> bool:
     raw_choices = body.get("choices")
     if not isinstance(raw_choices, list):
@@ -864,6 +1093,7 @@ async def _stream_with_retry(
     client: httpx.AsyncClient | None = None,
     functions: Mapping[str, JsonDict] | None = None,
     keepalive_sec: float = DEFAULT_KEEPALIVE_SEC,
+    seed: int | None = None,
 ) -> AsyncIterator[bytes]:
     """Relay a streaming completion, retrying attempts that truncate silently.
 
@@ -872,7 +1102,8 @@ async def _stream_with_retry(
     ``[DONE]``) so the caller sees an incomplete stream rather than a silent or a
     duplicated answer. ``client`` lets tests inject a transport. While upstream
     chunks arrive but nothing is forwarded for ``keepalive_sec``, an SSE comment
-    goes out so the caller's idle timer does not fire on a held block.
+    goes out so the caller's idle timer does not fire on a held block. ``seed`` is
+    attempt 1's sampling seed.
     """
     detail = "unknown error"
     async with (
@@ -883,7 +1114,8 @@ async def _stream_with_retry(
         for attempt in range(1, attempts + 1):
             outcome = StreamOutcome(relay, functions=functions)
             try:
-                async with client.stream("POST", url, json=payload) as resp:
+                body = _seeded(payload, seed, attempt)
+                async with client.stream("POST", url, json=body) as resp:
                     if resp.status_code != 200:
                         await resp.aread()
                         detail = f"HTTP {resp.status_code}"
@@ -976,13 +1208,20 @@ def main() -> None:
     except ValueError:
         log.warning("shim: unreadable %s, using %s", _KEEPALIVE_ENV, DEFAULT_KEEPALIVE_SEC)
         keepalive_sec = DEFAULT_KEEPALIVE_SEC
+    seed: int | None = None
+    if raw_seed := os.environ.get(_SEED_ENV, "").strip():
+        try:
+            seed = int(raw_seed)
+        except ValueError:
+            log.warning("shim: unreadable %s=%r, sampling unseeded", _SEED_ENV, raw_seed)
     log.info(
-        "medmcp-llm-shim -> %s (tools=%s, renames=%s, attempts=%d, relay=%s)",
+        "medmcp-llm-shim -> %s (tools=%s, renames=%s, attempts=%d, relay=%s, seed=%s)",
         upstream,
         tool_mode,
         renames or "none",
         attempts,
         relay,
+        "off" if seed is None else seed,
     )
     uvicorn.run(
         create_app(
@@ -992,6 +1231,7 @@ def main() -> None:
             relay=relay,
             tool_mode=tool_mode,
             keepalive_sec=keepalive_sec,
+            seed=seed,
         ),
         host=host,
         port=port,

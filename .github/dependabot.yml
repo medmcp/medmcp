@@ -19,3 +19,38 @@ updates:
       github-actions:
         patterns:
           - "*"
+
+  # Base images and the bundled Ollama are pinned by digest; this keeps the pins
+  # moving with upstream security fixes instead of freezing them.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    ignore:
+      # The frontend build stays on a Node LTS line; moving to the next LTS is done by hand.
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      frontend-dependencies:
+        patterns:
+          - "*"
+    ignore:
+      # @types/node follows the Node LTS the build uses (see the docker entry).
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # typescript-eslint supports TypeScript below 6.1; lift once it supports 7.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]

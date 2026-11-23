@@ -1,4 +1,5 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -6,6 +7,9 @@ import rehypeKatex from 'rehype-katex'
 import { ChatSocket } from '../chatSocket'
 import type { ChatSocketStatus } from '../chatSocket'
 import { previewRewind, rewindTo } from '../api'
+import { formatDuration } from '../format'
+import { afterScroll, isAtBottom } from '../scrollFollow'
+import type { FollowState } from '../scrollFollow'
 import type {
   ChatItem,
   PermissionRequest,
@@ -14,7 +18,15 @@ import type {
   ToolCallState,
 } from '../types'
 import { ChatsMenu } from './ChatsMenu'
-import { PlusIcon, ShieldIcon } from './icons'
+import {
+  AlertIcon,
+  CheckIcon,
+  ChevronRightIcon,
+  PlusIcon,
+  RewindIcon,
+  ShieldIcon,
+  XIcon,
+} from './icons'
 
 // vibe-acp >= 2.14 sends a tool call's rawInput as a JSON-encoded *string*
 // (read/edit/write tools) rather than an object. Parse it back so the card
@@ -45,10 +57,10 @@ const TODO_TOOL = 'todo'
 // tool, not a step of the work. Noted, not carded.
 const TOOL_SEARCH = 'search_tool_functions'
 
-const TODO_MARK: Record<string, string> = {
-  completed: '✓',
-  in_progress: '▸',
-  cancelled: '✕',
+const TODO_MARK: Record<string, ReactNode> = {
+  completed: <CheckIcon size={12} />,
+  in_progress: <ChevronRightIcon size={12} />,
+  cancelled: <XIcon size={12} />,
   pending: '·',
 }
 
@@ -96,6 +108,53 @@ const PlanCard = memo(function PlanCard({ items }: { items: TodoItem[] }) {
   )
 })
 
+/** Frames after new output in which a following transcript is pinned again. */
+const SETTLE_FRAMES = 3
+
+function settled(tc: ToolCallState): boolean {
+  return tc.status === 'completed' || tc.status === 'failed'
+}
+
+/** The call's clock start, while it is running one. */
+function clockStart(tc: ToolCallState): number | null {
+  return !settled(tc) && tc.startedAt != null ? tc.startedAt : null
+}
+
+/** `calls` with one call's clock set (a time) or stopped (`undefined`). */
+function withClock(
+  calls: Record<string, ToolCallState>,
+  id: string,
+  startedAt: number | undefined,
+): Record<string, ToolCallState> {
+  const tc = calls[id]
+  if (!tc || tc.startedAt === startedAt) return calls
+  return { ...calls, [id]: { ...tc, startedAt } }
+}
+
+/** `calls` with every clock stopped: the turn ended or the socket closed, so
+ *  nothing is running any more whatever status a call was left in. */
+function withoutClocks(calls: Record<string, ToolCallState>): Record<string, ToolCallState> {
+  let next = calls
+  for (const [id, tc] of Object.entries(calls)) {
+    if (tc.startedAt == null) continue
+    if (next === calls) next = { ...calls }
+    next[id] = { ...tc, startedAt: undefined }
+  }
+  return next
+}
+
+// How long a running call has been going ("6m 20s"), so a long segmentation
+// does not look like a hung one. The tick lives here, not in Chat: a clock in
+// the parent would re-render every row of the transcript once a second.
+function ToolElapsed({ since }: { since: number }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [])
+  return <span className="tool-elapsed">{formatDuration(now - since)}</span>
+}
+
 // Memoized so a streaming update to the newest message doesn't re-render
 // (and re-parse the markdown of) every earlier row in the transcript.
 const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
@@ -124,12 +183,14 @@ const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
   }
   const statusClass =
     tc.status === 'completed' ? 'ok' : tc.status === 'failed' ? 'fail' : 'busy'
+  const since = clockStart(tc)
   return (
     <div className="tool-card">
       <div className="tool-card-head">
         <span className={`status-dot ${statusClass}`} />
         <span className="tool-title">{tc.title}</span>
         <span className="tool-status">{tc.status}</span>
+        {since != null && <ToolElapsed key={since} since={since} />}
       </div>
       {tc.rawInput != null && (
         <details>
@@ -165,18 +226,20 @@ function callStatusClass(status: string): string {
 const ToolGroup = memo(
   function ToolGroup({ calls }: { calls: ToolCallState[] }) {
     const tool = calls[0].toolName ?? 'tool'
-    const running = calls.filter((c) => c.status !== 'completed' && c.status !== 'failed').length
+    const running = calls.filter((c) => !settled(c)).length
     const failed = calls.filter((c) => c.status === 'failed').length
     const statusClass = running > 0 ? 'busy' : failed > 0 ? 'fail' : 'ok'
     const status =
       `${calls.length} calls` +
       (running > 0 ? ', running' : failed > 0 ? `, ${failed} failed` : '')
+    const since = calls.map(clockStart).find((t) => t != null)
     return (
       <div className="tool-card tool-group">
         <div className="tool-card-head">
           <span className={`status-dot ${statusClass}`} />
           <span className="tool-title">{tool}</span>
           <span className="tool-status">{status}</span>
+          {since != null && <ToolElapsed key={since} since={since} />}
         </div>
         {calls.map((tc) => {
           // The row's title repeats the tool the head already names.
@@ -209,6 +272,8 @@ const ToolGroup = memo(
   },
   // The calls array is rebuilt on every render; compare its members instead so
   // a streaming chunk elsewhere in the transcript doesn't re-render the group.
+  // A clock starting or stopping replaces its call's object (`startedAt`), so
+  // this comparison covers it; the tick itself is ToolElapsed's own state.
   (a, b) =>
     a.calls.length === b.calls.length &&
     a.calls.every((c, i) => c === b.calls[i]),
@@ -366,6 +431,21 @@ const AssistantMessage = memo(function AssistantMessage({
   )
 })
 
+/** Sort a request's options into the two buttons and the links under them.
+ *  `allow_once` is the primary button, falling back to another allow kind so a
+ *  request without it can still be approved; the first reject kind is Deny;
+ *  everything else (a chat-long approval, a kind this build does not know) is a
+ *  quiet link. An option without a kind is read by its id. */
+function splitOptions(options: PermissionRequest['options']) {
+  const kindOf = (o: PermissionRequest['options'][number]) => o.kind ?? o.optionId
+  const allow =
+    options.find((o) => kindOf(o) === 'allow_once') ??
+    options.find((o) => kindOf(o).startsWith('allow'))
+  const reject = options.find((o) => kindOf(o).includes('reject'))
+  const more = options.filter((o) => o !== allow && o !== reject)
+  return { allow, reject, more, allowIsOnce: allow != null && kindOf(allow) === 'allow_once' }
+}
+
 function PermissionCard({
   perm,
   onDecide,
@@ -373,10 +453,15 @@ function PermissionCard({
   perm: PermissionRequest
   onDecide: (optionId: string | null) => void
 }) {
+  const { allow, reject, more, allowIsOnce } = splitOptions(perm.options)
+  const paths = perm.paths ?? []
+  // Only a path with something wrong gets a line; the rest are counted.
+  const problems = paths.filter((p) => p.severity !== 'info')
+  const fine = paths.length - problems.length
   return (
     <div className="approval-box">
       <div className="approval-header">
-        <ShieldIcon size={13} strokeWidth={2.5} />
+        <ShieldIcon size={12} />
         Action requires your approval
       </div>
       <div className="approval-title">{perm.toolCall.title ?? 'tool call'}</div>
@@ -397,15 +482,13 @@ function PermissionCard({
       {perm.toolCall.rawInput != null && (
         <pre className="approval-input">{formatToolInput(perm.toolCall.rawInput)}</pre>
       )}
-      {perm.paths && perm.paths.length > 0 && (
-        // Sits directly under the arguments it describes. Every checked path is
-        // listed, not just the problems: confirming that an input really is there
-        // is worth as much as flagging one that isn't.
+      {paths.length > 0 && (
+        // Sits directly under the arguments it describes.
         <ul className="approval-paths">
-          {perm.paths.map((p, i) => (
+          {problems.map((p, i) => (
             <li key={`${p.param}-${i}`} className={`path-${p.severity}`}>
               <span className="path-mark" aria-hidden="true">
-                {p.severity === 'error' ? '✕' : p.severity === 'warning' ? '!' : '✓'}
+                {p.severity === 'error' ? <XIcon size={12} /> : <AlertIcon size={12} />}
               </span>
               <code className="path-param">{p.param}</code>
               <span className="path-note">
@@ -424,21 +507,30 @@ function PermissionCard({
               </span>
             </li>
           ))}
+          {fine > 0 && (
+            <li className="path-summary">
+              {fine} {problems.length > 0 ? 'other ' : ''}
+              {fine === 1 ? 'path' : 'paths'} checked
+            </li>
+          )}
         </ul>
       )}
+      {/* One row of buttons, all the same height: this call, a wider approval in
+          the server's own words (it names what is being allowed), then Deny.
+          Without a reject option, Deny cancels the request. */}
       <div className="approval-btns">
-        {perm.options.map((opt) => (
-          <button
-            key={opt.optionId}
-            className={opt.kind?.includes('reject') ? 'abtn-reject' : 'abtn-approve'}
-            onClick={() => onDecide(opt.optionId)}
-          >
-            {opt.kind?.includes('reject') ? '' : '✓ '}
+        {allow && (
+          <button className="btn-primary" onClick={() => onDecide(allow.optionId)}>
+            {allowIsOnce ? (more.length > 0 ? 'Allow once' : 'Allow') : (allow.name ?? allow.optionId)}
+          </button>
+        )}
+        {more.map((opt) => (
+          <button key={opt.optionId} className="abtn-plain" onClick={() => onDecide(opt.optionId)}>
             {opt.name ?? opt.optionId}
           </button>
         ))}
-        <button className="btn-plain" onClick={() => onDecide(null)}>
-          Cancel
+        <button className="abtn-plain" onClick={() => onDecide(reject ? reject.optionId : null)}>
+          Deny
         </button>
       </div>
     </div>
@@ -452,13 +544,17 @@ function PermissionCard({
 const ChatInput = memo(function ChatInput({
   busy,
   canSend,
+  contextPath,
   onSend,
   onCancel,
+  onClearContext,
 }: {
   busy: boolean
   canSend: boolean
+  contextPath: string | null
   onSend: (text: string) => void
   onCancel: () => void
+  onClearContext: () => void
 }) {
   const [input, setInput] = useState('')
   const submit = () => {
@@ -490,6 +586,29 @@ const ChatInput = memo(function ChatInput({
           Send
         </button>
       )}
+      {/* What "this image" will resolve to. The server appends the open file to
+          the prompt as a workspace-context note and strips it from the
+          transcript, so without this the pointer is invisible — "segment this"
+          would act on whatever happened to be open. ✕ sends prompts
+          without it. The line keeps its height when empty, so the message box
+          never moves when a file is opened, dropped or sent. */}
+      <div className="chat-viewing">
+        {contextPath && (
+          <>
+            <span className="chat-viewing-label">Viewing</span>
+            <span className="chat-viewing-name">
+              <bdi>{contextPath.slice(contextPath.lastIndexOf('/') + 1)}</bdi>
+            </span>
+            <button
+              className="btn-icon chat-viewing-clear"
+              aria-label="Don't send this file with my messages"
+              onClick={onClearContext}
+            >
+              <XIcon size={12} />
+            </button>
+          </>
+        )}
+      </div>
     </div>
   )
 })
@@ -501,6 +620,7 @@ const ChatInput = memo(function ChatInput({
 export const Chat = memo(function Chat({
   onPromptedSession,
   viewedPath,
+  viewedSeq = 0,
   onToolActivity,
   resumeSessionId,
   onSessionEstablished,
@@ -511,8 +631,11 @@ export const Chat = memo(function Chat({
 }: {
   /** Called with the vibe session id whenever a prompt is sent into it. */
   onPromptedSession?: (id: string) => void
-  /** Workspace-relative file open in the viewer, sent as prompt context. */
+  /** Workspace-relative file open in the viewer, offered as prompt context
+   *  (named in a line under the message box, which the reader can clear). */
   viewedPath?: string | null
+  /** Bumped on every open in the viewer, so reopening the same file counts. */
+  viewedSeq?: number
   /** Called when a tool call completes / a turn ends (may have written files). */
   onToolActivity?: () => void
   /** Session to resume on connect; the server reloads it and replays history. */
@@ -549,9 +672,25 @@ export const Chat = memo(function Chat({
     paths: string[]
     busy: boolean
   } | null>(null)
+  // The file the next prompt resolves "this image" to: the one in the viewer,
+  // unless the reader dropped it. A drop holds until a file is opened again
+  // (the same one included); sending a message does not bring it back.
+  const [dropped, setDropped] = useState<{ path: string; seq: number } | null>(null)
+  const contextPath =
+    viewedPath && !(dropped?.path === viewedPath && dropped.seq === viewedSeq) ? viewedPath : null
   const socketRef = useRef<ChatSocket | null>(null)
   const sessionIdRef = useRef<string | null>(null)
-  const bottomRef = useRef<HTMLDivElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  // Whether the transcript follows new output: true while the reader is at the
+  // bottom. Kept from scroll events, never measured after the DOM has grown —
+  // by then "not at the bottom" is true of every reader.
+  const followRef = useRef<FollowState>({ following: true, scrollTop: 0, scrollHeight: 0 })
+  // A prompt of this socket is in flight. Only a call first seen then gets a
+  // clock; one replayed on resume started at a time the browser never saw.
+  const turnLiveRef = useRef(false)
+  // The call waiting at the approval box. It is waiting on the reader, not
+  // running, so its clock starts with the approval.
+  const heldCallRef = useRef<string | null>(null)
   // The frame handler below is a mount-once closure; route the callback
   // through a ref so it always sees the latest prop.
   const onToolActivityRef = useRef(onToolActivity)
@@ -597,6 +736,15 @@ export const Chat = memo(function Chat({
         return [...prev, { id: nextItemId(), kind: 'assistant', text }]
       })
     }
+    // A call gets its clock when it is first seen running in a live turn. One
+    // still queued (`pending`) or waiting at its approval box has not started.
+    const startsClock = (toolCallId: string, status: string) =>
+      turnLiveRef.current && status === 'in_progress' && heldCallRef.current !== toolCallId
+    const endTurn = () => {
+      turnLiveRef.current = false
+      heldCallRef.current = null
+      setToolCalls(withoutClocks)
+    }
     const onFrame = (frame: ServerFrame) => {
       // Any non-chunk frame that appends to the transcript must flush first,
       // or buffered text would land after the item it preceded.
@@ -629,29 +777,37 @@ export const Chat = memo(function Chat({
                 return [...kept, { id: nextItemId(), kind: 'tool', toolCallId: frame.toolCallId }]
               })
           }
-          setToolCalls((prev) => ({
-            ...prev,
-            [frame.toolCallId]: {
-              toolCallId: frame.toolCallId,
-              title: frame.title,
-              status: frame.status,
-              kind: frame.kind,
-              toolName: frame.toolName,
-              rawInput: frame.rawInput,
-              output: frame.output ?? prev[frame.toolCallId]?.output,
-              pathGuardRetry: frame.pathGuardRetry || prev[frame.toolCallId]?.pathGuardRetry,
-            },
-          }))
+          {
+            const startedAt = startsClock(frame.toolCallId, frame.status) ? Date.now() : undefined
+            setToolCalls((prev) => ({
+              ...prev,
+              [frame.toolCallId]: {
+                toolCallId: frame.toolCallId,
+                title: frame.title,
+                status: frame.status,
+                kind: frame.kind,
+                toolName: frame.toolName,
+                rawInput: frame.rawInput,
+                output: frame.output ?? prev[frame.toolCallId]?.output,
+                pathGuardRetry: frame.pathGuardRetry || prev[frame.toolCallId]?.pathGuardRetry,
+                startedAt: prev[frame.toolCallId]?.startedAt ?? startedAt,
+              },
+            }))
+          }
           break
-        case 'tool_call_update':
+        case 'tool_call_update': {
+          const startedAt =
+            frame.status && startsClock(frame.toolCallId, frame.status) ? Date.now() : undefined
           setToolCalls((prev) => {
             const tc = prev[frame.toolCallId]
             if (!tc) return prev
+            const status = frame.status ?? tc.status
             return {
               ...prev,
               [frame.toolCallId]: {
                 ...tc,
-                status: frame.status ?? tc.status,
+                status,
+                startedAt: settled({ ...tc, status }) ? undefined : (tc.startedAt ?? startedAt),
                 output: frame.output ?? tc.output,
                 // Sent again once the model finished streaming the arguments;
                 // the opening frame's copy can be empty or partial.
@@ -662,10 +818,16 @@ export const Chat = memo(function Chat({
           })
           if (frame.status === 'completed') onToolActivityRef.current?.()
           break
+        }
         case 'usage':
           setUsage({ used: frame.used, size: frame.size ?? null })
           break
-        case 'permission_request':
+        case 'permission_request': {
+          const held = frame.toolCall.toolCallId ?? null
+          heldCallRef.current = held
+          if (held) setToolCalls((prev) => withClock(prev, held, undefined))
+          // The turn waits on this box, so it is brought into view.
+          followRef.current = { ...followRef.current, following: true }
           setPermission({
             requestId: frame.requestId,
             toolCall: frame.toolCall,
@@ -676,6 +838,7 @@ export const Chat = memo(function Chat({
             paths: frame.paths,
           })
           break
+        }
         case 'permission_update':
           // The explanation arrives after the box is shown; ignore it if the
           // user already decided (the box for that requestId is gone).
@@ -686,12 +849,14 @@ export const Chat = memo(function Chat({
           )
           break
         case 'done':
+          endTurn()
           setBusy(false)
           setRetrying(null)
           setPermission(null)
           onToolActivityRef.current?.()
           break
         case 'error':
+          endTurn()
           setRetrying(null)
           setItems((prev) => [...prev, { id: nextItemId(), kind: 'error', text: frame.message }])
           break
@@ -732,6 +897,10 @@ export const Chat = memo(function Chat({
           // resume replays history, a reconnect reloads it — so rebuild from
           // scratch and drop any buffered/partial state from the old socket.
           seenToolIds.clear()
+          turnLiveRef.current = false
+          heldCallRef.current = null
+          // The replayed transcript is read from its end.
+          followRef.current = { ...followRef.current, following: true }
           chunkBuffer = ''
           if (flushTimer != null) {
             clearTimeout(flushTimer)
@@ -758,6 +927,7 @@ export const Chat = memo(function Chat({
         // (the server's final `done` frame is lost on close, and the next
         // session knows nothing about the old requestId) — reset, or the UI
         // is stuck on a dead Stop button after every reconnect.
+        endTurn()
         setBusy(false)
         setPermission(null)
       }
@@ -770,10 +940,52 @@ export const Chat = memo(function Chat({
     }
   }, [])
 
+  // Scroll a following transcript to its bottom, and note where it now stands.
+  const pin = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const { following } = followRef.current
+    if (following) el.scrollTop = el.scrollHeight
+    followRef.current = { following, scrollTop: el.scrollTop, scrollHeight: el.scrollHeight }
+  }, [])
+
+  const onScroll = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    followRef.current = afterScroll(followRef.current, el)
+    // A re-layout moved a following transcript off its bottom (see below).
+    if (followRef.current.following && !isAtBottom(el)) pin()
+  }, [pin])
+
+  // A flush lands every 50 ms while the agent streams; following from anywhere
+  // but the bottom would drag the transcript away as it is read. A layout
+  // effect, so a scroll event always meets the height this render produced.
+  useLayoutEffect(() => {
+    pin()
+    // Rows off screen are sized by estimate (`content-visibility: auto`) and
+    // get their real height in the frames after they come into view, so the
+    // bottom of a replayed transcript moves after the scroll to it. Where that
+    // moves the position, `onScroll` pins again; where it only adds height
+    // below, nothing fires, so pin over the next frames as well.
+    let frames = SETTLE_FRAMES
+    let raf = requestAnimationFrame(function settle() {
+      pin()
+      if (--frames > 0) raf = requestAnimationFrame(settle)
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [items, permission, busy, pin])
+
+  // Mark the tab while an approval is outstanding: the turn is stopped until
+  // someone looks at it, and nothing else says so from another tab.
+  const awaitingApproval = permission !== null
   useEffect(() => {
-    // Smooth scrolling per streamed flush is janky; only ease when idle.
-    bottomRef.current?.scrollIntoView({ behavior: busy ? 'auto' : 'smooth' })
-  }, [items, permission, busy])
+    if (!awaitingApproval) return
+    const title = document.title
+    document.title = `(!) ${title}`
+    return () => {
+      document.title = title
+    }
+  }, [awaitingApproval])
 
   // Stable so the memoized ChatInput doesn't re-render on every streaming flush;
   // the trim/empty + open-socket guards live in ChatInput.
@@ -781,11 +993,21 @@ export const Chat = memo(function Chat({
     (text: string) => {
       setItems((prev) => [...prev, { id: nextItemId(), kind: 'user', text }])
       setBusy(true)
-      socketRef.current?.sendPrompt(text, viewedPath)
+      // A new prompt supersedes whatever was running, and is read from the bottom.
+      setToolCalls(withoutClocks)
+      heldCallRef.current = null
+      turnLiveRef.current = true
+      followRef.current = { ...followRef.current, following: true }
+      socketRef.current?.sendPrompt(text, contextPath)
       if (sessionIdRef.current) onPromptedSession?.(sessionIdRef.current)
     },
-    [viewedPath, onPromptedSession],
+    [contextPath, onPromptedSession],
   )
+
+  // Stable for the same reason as `send`.
+  const clearContext = useCallback(() => {
+    if (viewedPath) setDropped({ path: viewedPath, seq: viewedSeq })
+  }, [viewedPath, viewedSeq])
 
   const cancel = useCallback(() => socketRef.current?.cancel(), [])
 
@@ -793,6 +1015,14 @@ export const Chat = memo(function Chat({
     if (permission) {
       socketRef.current?.sendPermission(permission.requestId, optionId)
       setPermission(null)
+      heldCallRef.current = null
+      const id = permission.toolCall.toolCallId
+      const option = permission.options.find((o) => o.optionId === optionId)
+      if (id && option && !option.kind?.includes('reject')) {
+        // Approved: the call starts running now.
+        const now = Date.now()
+        setToolCalls((prev) => (prev[id] && !settled(prev[id]) ? withClock(prev, id, now) : prev))
+      }
     }
   }
 
@@ -880,7 +1110,7 @@ export const Chat = memo(function Chat({
           </span>
         </span>
       </div>
-      <div className="panel-body chat-scroll">
+      <div className="panel-body chat-scroll" ref={scrollRef} onScroll={onScroll}>
         {items.length === 0 && (
           <div className="viewer-message">Ask the MedMCP agent anything about your workspace.</div>
         )}
@@ -919,7 +1149,7 @@ export const Chat = memo(function Chat({
                       aria-label="Rewind the chat to before this message"
                       onClick={() => void askRewind(mid)}
                     >
-                      ↺
+                      <RewindIcon />
                     </button>
                   )}
                   <div className="msg-avatar avatar-user">You</div>
@@ -983,10 +1213,16 @@ export const Chat = memo(function Chat({
           )
         })}
         {permission && <PermissionCard perm={permission} onDecide={decide} />}
-        {busy && !permission && <div className="thinking">●●●</div>}
-        <div ref={bottomRef} />
+        {busy && !permission && <div className="thinking">Thinking…</div>}
       </div>
-      <ChatInput busy={busy} canSend={status === 'open'} onSend={send} onCancel={cancel} />
+      <ChatInput
+        busy={busy}
+        canSend={status === 'open'}
+        contextPath={contextPath}
+        onSend={send}
+        onCancel={cancel}
+        onClearContext={clearContext}
+      />
     </div>
   )
 })

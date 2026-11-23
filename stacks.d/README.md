@@ -22,3 +22,8 @@ args = [
 # GPU stacks add:  "--device", "nvidia.com/gpu=all"  (CDI, rootless).
 # skills_path = "/app/stacks.d/medmcp-dicom/skills"   # vendored SKILL.md set
 ```
+
+The core only runs a manifest whose `command` is `docker` and whose `run` flags are the
+hardening, `--rm -i`, a CDI GPU device, `--network none|bridge` and the workspace bind
+mount at its own path; anything else (another `-v`, `--privileged`, `--pid host`, manifest
+`env`) is refused and audit-logged.

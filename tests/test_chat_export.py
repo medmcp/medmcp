@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 
 from medmcp import chat_export, provenance, server, sessions
 
+from .conftest import AUTH_HEADERS
+
 SESSION_ID = "abcd1234-1111-2222-3333-444455556666"
 
 
@@ -126,7 +128,7 @@ class TestEndpoint:
     def client(self, home: Path) -> TestClient:
         """A same-origin client against the fake vibe home."""
         del home
-        return TestClient(server.app, base_url="http://127.0.0.1:8100")
+        return TestClient(server.app, base_url="http://127.0.0.1:8100", headers=AUTH_HEADERS)
 
     def test_serves_the_page(self, client: TestClient) -> None:
         """The page comes back as HTML with its Save as PDF button."""

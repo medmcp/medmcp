@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -496,6 +496,64 @@ class TestAtemParse:
         calls = llmshim.parse_atem_block(block, _FUNCTIONS)
         assert json.loads(calls[0]["function"]["arguments"]) == {"n": "7", "o": {"k": 1}}
 
+    def test_a_namespaced_name_is_mapped_to_the_offered_tool(self) -> None:
+        """Muse copies the section's ``tool.function`` example: ``bash.action``."""
+        block = (
+            '<atem:function_calls><atem:invoke name="bash.action">'
+            '<atem:parameter name="command">ls</atem:parameter>'
+            "</atem:invoke></atem:function_calls>"
+        )
+        call = llmshim.parse_atem_block(block, _FUNCTIONS)[0]["function"]
+        assert call["name"] == "bash" and json.loads(call["arguments"]) == {"command": "ls"}
+        assert llmshim.resolve_tool_name("file_system.bash", _FUNCTIONS) == "bash"
+
+    def test_an_ambiguous_or_unmatched_name_is_kept(self) -> None:
+        """No guessing: two offered halves, or none, leave the name to vibe's error."""
+        both = {"bash": _BASH["function"], "todo": _BASH["function"]}
+        assert llmshim.resolve_tool_name("bash.todo", both) == "bash.todo"
+        assert llmshim.resolve_tool_name("shell.run", _FUNCTIONS) == "shell.run"
+        assert llmshim.resolve_tool_name("mystery", _FUNCTIONS) == "mystery"
+
+    def test_muses_broken_parameter_tags_keep_their_value(self) -> None:
+        """Repair 6: the three ways Muse loses a parameter, as written in a sweep."""
+        skill = {
+            "name": "skill",
+            "parameters": {"type": "object", "properties": {"name": {"type": "string"}}},
+        }
+        functions = {"skill": skill, "bash": _BASH["function"]}
+        for invoke in (
+            '<atem:invoke name="skill"><atem:parameter name="name">cardiac-function</name>'
+            "</atem:invoke>",
+            '<atem:invoke name="skill">\n<atem:parameter name="name">cardiac-function</name>\n'
+            "</atem:parameter>\n</atem:invoke>",
+            '<atem:invoke name="skill.name">cardiac-function</atem:parameter>\n</atem:invoke>',
+            '<atem:invoke name="skill"><atem:parameter name="name">cardiac-function</atem:invoke>',
+        ):
+            block = f"<atem:function_calls>\n{invoke}\n</atem:function_calls>"
+            call = llmshim.parse_atem_block(block, functions)[0]["function"]
+            assert call["name"] == "skill", invoke
+            assert json.loads(call["arguments"]) == {"name": "cardiac-function"}, invoke
+
+    def test_an_unclosed_parameter_ends_at_the_next(self) -> None:
+        """Repair 6 keeps the following parameter apart."""
+        block = (
+            '<atem:function_calls><atem:invoke name="bash">'
+            '<atem:parameter name="command">ls'
+            '<atem:parameter name="timeout_seconds">30</atem:parameter>'
+            "</atem:invoke></atem:function_calls>"
+        )
+        args = json.loads(llmshim.parse_atem_block(block, _FUNCTIONS)[0]["function"]["arguments"])
+        assert args == {"command": "ls", "timeout_seconds": 30}
+
+    def test_a_folded_name_that_is_no_parameter_stays_empty(self) -> None:
+        """``bash.action`` names no parameter of bash: no value is invented."""
+        block = (
+            '<atem:function_calls><atem:invoke name="bash.action">ls'
+            "</atem:invoke></atem:function_calls>"
+        )
+        call = llmshim.parse_atem_block(block, _FUNCTIONS)[0]["function"]
+        assert call["name"] == "bash" and json.loads(call["arguments"]) == {}
+
     def test_two_invokes_are_two_calls(self) -> None:
         """One block may carry several calls; indices count up."""
         block = (
@@ -704,3 +762,57 @@ async def test_keepalive_comment_while_a_block_is_held() -> None:
     assert ": keepalive\n\n" in out
     assert '"finish_reason": "tool_calls"' in out
     assert (await run(0)).count(": keepalive") == 0
+
+
+@pytest.mark.parametrize("path", ["api/create", "api/copy", "api/pull", "api/push", "api/delete"])
+def test_the_shim_refuses_ollamas_model_management(path: str) -> None:
+    """Only vibe talks to the shim, and it never needs to change the models."""
+    from starlette.testclient import TestClient
+
+    client = TestClient(llmshim.create_app("http://upstream.invalid"))
+    assert client.post(f"/{path}", json={}).status_code == 403
+
+
+def _chat(first: str) -> dict[str, object]:
+    return {
+        "model": "m",
+        "messages": [
+            {"role": "system", "content": "You are MedMCP."},
+            {"role": "user", "content": [{"type": "text", "text": first}]},
+            {"role": "assistant", "content": "Working on it."},
+            {"role": "user", "content": "And now?"},
+        ],
+    }
+
+
+def test_a_conversation_keeps_its_seed_and_another_gets_another() -> None:
+    """The seed follows the base value and the first user message, nothing later."""
+    seed = llmshim.conversation_seed(_chat("Strip the skull of /ws/run-1/t1.nii.gz"), 7)
+    later = _chat("Strip the skull of /ws/run-1/t1.nii.gz")
+    cast("list[object]", later["messages"]).append({"role": "user", "content": "Thanks"})
+    assert llmshim.conversation_seed(later, 7) == seed
+    assert llmshim.conversation_seed(_chat("Strip the skull of /ws/run-2/t1.nii.gz"), 7) != seed
+    assert llmshim.conversation_seed(_chat("Strip the skull of /ws/run-1/t1.nii.gz"), 8) != seed
+    assert 0 <= seed < 2**31
+
+
+async def test_a_retry_samples_with_the_next_seed() -> None:
+    """Attempt n sends seed + n - 1; without a seed the request is left as sent."""
+    sent: list[object] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content).get("seed"))
+        if len(sent) == 1:
+            return httpx.Response(200, json={"choices": [{"message": {"content": ""}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        resp = await llmshim._complete_with_retry(
+            "http://upstream/v1/chat/completions", {"model": "m"}, {}, 3, client=client, seed=41
+        )
+        assert resp.status_code == 200 and sent == [41, 42]
+        sent.clear()
+        await llmshim._complete_with_retry(
+            "http://upstream/v1/chat/completions", {"model": "m"}, {}, 3, client=client
+        )
+        assert sent == [None, None]

@@ -21,6 +21,7 @@ the call site — provenance must never break a chat.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import platform
@@ -30,15 +31,19 @@ import subprocess
 import sys
 import time
 import tomllib
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from medmcp.statefile import read_jsonl
+from medmcp.statefile import atomic_write_json, read_json, read_jsonl
 from medmcp.toolresult import parse_structured_blob
 
 JsonDict = dict[str, Any]
+
+# Resolves an image reference to ``{"digest": ..., "id": ...}``; injected by the
+# caller so this module stays free of the stack machinery.
+ImageIdentity = Callable[[str], JsonDict]
 
 # Resolve the repo root from this file: src/medmcp/provenance.py →
 # src/medmcp → src → <root>. VIBE_HOME is module-level so tests can monkeypatch
@@ -125,8 +130,43 @@ def docker_image_ref(server: JsonDict) -> str | None:
     return None
 
 
-def _stack_manifest_entry(server: JsonDict) -> JsonDict:
-    """Build one stack entry for the manifest (name/version/command + image)."""
+def core_identity() -> JsonDict:
+    """Which MedMCP this is: package version, image build, and commit.
+
+    A source checkout answers from git. An image has no checkout, so the commit
+    comes from what the image build baked in (``MEDMCP_REVISION``; ``MEDMCP_BUILD``
+    is the release tag, or the commit for a rolling build). A local
+    ``docker build`` without those arguments leaves both empty, and the record
+    says so rather than guessing.
+    """
+    from medmcp import __version__
+
+    return {
+        "version": __version__,
+        "build": os.environ.get("MEDMCP_BUILD") or None,
+        "git_commit": _git(["rev-parse", "HEAD"]) or os.environ.get("MEDMCP_REVISION") or None,
+        "git_branch": _git(["rev-parse", "--abbrev-ref", "HEAD"]),
+    }
+
+
+def platform_identity() -> JsonDict:
+    """The interpreter and operating system the core runs on."""
+    return {
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+        "system": platform.system(),
+    }
+
+
+def _stack_manifest_entry(
+    server: JsonDict, image_identity: ImageIdentity | None = None
+) -> JsonDict:
+    """Build one stack entry for the manifest (name/version/command + image).
+
+    With *image_identity*, the entry also carries the digest and id of the image
+    installed under that reference — a tag such as ``:main`` moves, the digest is
+    what ran.
+    """
     entry: JsonDict = {
         "name": server.get("name"),
         "version": server.get("version"),
@@ -135,32 +175,44 @@ def _stack_manifest_entry(server: JsonDict) -> JsonDict:
     image = docker_image_ref(server)
     if image:
         entry["image"] = image
+        if image_identity is not None:
+            with contextlib.suppress(Exception):
+                identity = image_identity(image)
+                entry["digest"] = identity.get("digest")
+                entry["image_id"] = identity.get("id")
     return entry
 
 
-def build_manifest(session_id: str, *, servers: list[JsonDict], model_name: str) -> JsonDict:
+def build_manifest(
+    session_id: str,
+    *,
+    servers: list[JsonDict],
+    model_name: str,
+    image_identity: ImageIdentity | None = None,
+) -> JsonDict:
     """Assemble (but do not write) the environment manifest for a session."""
     return {
         "session_id": session_id,
         "created_at": _utc_now_iso(),
-        "medmcp": {
-            "git_commit": _git(["rev-parse", "HEAD"]),
-            "git_branch": _git(["rev-parse", "--abbrev-ref", "HEAD"]),
-        },
-        "stacks": [_stack_manifest_entry(s) for s in servers],
+        "medmcp": core_identity(),
+        "stacks": [_stack_manifest_entry(s, image_identity) for s in servers],
         "model": {"name": model_name, **_read_model_config(model_name)},
-        "platform": {
-            "python": sys.version.split()[0],
-            "platform": platform.platform(),
-            "system": platform.system(),
-        },
+        "platform": platform_identity(),
     }
 
 
-def write_manifest(session_id: str, *, servers: list[JsonDict], model_name: str) -> Path:
+def write_manifest(
+    session_id: str,
+    *,
+    servers: list[JsonDict],
+    model_name: str,
+    image_identity: ImageIdentity | None = None,
+) -> Path:
     """Write ``manifest.json`` for *session_id* and return its path."""
     d = _ensure_dir(session_id)
-    manifest = build_manifest(session_id, servers=servers, model_name=model_name)
+    manifest = build_manifest(
+        session_id, servers=servers, model_name=model_name, image_identity=image_identity
+    )
     path = d / "manifest.json"
     path.write_text(json.dumps(manifest, indent=2))
     return path
@@ -318,9 +370,10 @@ def read_transcript(session_id: str, *, stop_ids: Collection[str] = ()) -> list[
     transcript records live turns only, never a replay). Empty when neither exists.
     """
     messages: list[JsonDict] = []
+    trusted = legacy_transcripts()
     for session_dir in find_vibe_session_dirs(session_id, stop_ids=stop_ids):
         path = session_dir / "messages.jsonl"
-        if path.exists():
+        if _is_trusted_legacy(path, trusted):
             messages.extend(read_jsonl(path))
     own = transcript_path(session_id)
     if own.exists():
@@ -423,27 +476,156 @@ def record_tool_event(session_id: str, tc_id: str, info: JsonDict, server_names:
         append_run_event(session_id, event)
 
 
+JOB_STARTED = "job_started"
+
+
+def record_job_started(
+    session_id: str,
+    *,
+    job_id: str,
+    server: str,
+    tool: str,
+    arguments: JsonDict,
+    image: str,
+    image_id: str,
+    image_digest: str | None,
+    command: list[str],
+    container: str,
+    gpu: bool,
+) -> None:
+    """Append a background job's start to the run log of the chat that approved it.
+
+    A job outlives its chat, so its record says what would otherwise be lost:
+    the exact image it runs (the id the daemon ran, and the registry digest
+    when the image was pulled), the command line and the arguments.
+    """
+    append_run_event(
+        session_id,
+        {
+            "event": JOB_STARTED,
+            "server": server,
+            "tool": tool,
+            "status": "started",
+            "arguments": arguments,
+            "job": {
+                "id": job_id,
+                "container": container,
+                "image": image,
+                "image_id": image_id,
+                "image_digest": image_digest,
+                "command": command,
+                "gpu": gpu,
+            },
+        },
+    )
+
+
 # ── Vibe session lookup ──────────────────────────────────────────────────────
+#
+# Everything under logs/ is written by the agent, which with agent isolation is
+# another container that shares only this volume. So nothing here is followed
+# through a symlink (a link planted there resolves in *this* container, onto its
+# secrets), meta.json is size-capped, and the one file whose content the core
+# replays — a legacy messages.jsonl — is read only if it was on disk, unchanged,
+# before this version first started (see :func:`record_legacy_transcripts`).
+
+_META_MAX_BYTES = 1 << 20
+
+
+def _legacy_manifest_path() -> Path:
+    """Where the legacy-transcript manifest lives.
+
+    It maps each legacy transcript (vibe < 2.26 wrote messages.jsonl; 2.26 never
+    does) found when this version first ran, logs-relative, to its sha256. On the
+    state volume, which the agent cannot reach.
+    """
+    return VIBE_HOME / "state" / "legacy_transcripts.json"
+
+
+def _sessions_root() -> Path | None:
+    """``logs/session``, or ``None`` when absent or not a real directory."""
+    logs = VIBE_HOME / "logs"
+    root = logs / "session"
+    if root.is_symlink() or not root.is_dir() or logs.is_symlink():
+        return None
+    return root
+
+
+def _real_dir(path: Path) -> bool:
+    return path.is_dir() and not path.is_symlink()
 
 
 def _read_session_meta(session_dir: Path) -> JsonDict | None:
     """Read a vibe session dir's ``meta.json``, or ``None`` if absent/invalid."""
     meta = session_dir / "meta.json"
-    if not meta.exists():
-        return None
     try:
-        return cast("JsonDict", json.loads(meta.read_text()))
-    except (json.JSONDecodeError, OSError):
+        if meta.is_symlink() or meta.stat().st_size > _META_MAX_BYTES:
+            return None
+        data = json.loads(meta.read_text())
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return None
+    return cast("JsonDict", data) if isinstance(data, dict) else None
 
 
 def _session_dirs(sessions_root: Path) -> list[Path]:
     """Every vibe session dir: the legacy ``session_*`` dirs and the unified ones."""
-    dirs = [d for d in sorted(sessions_root.iterdir()) if d.is_dir() and d.name != "unified"]
+    dirs = [d for d in sorted(sessions_root.iterdir()) if _real_dir(d) and d.name != "unified"]
     unified = sessions_root / "unified"
-    if unified.is_dir():
-        dirs.extend(d for d in sorted(unified.iterdir()) if d.is_dir())
+    if _real_dir(unified):
+        dirs.extend(d for d in sorted(unified.iterdir()) if _real_dir(d))
     return dirs
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def record_legacy_transcripts() -> int:
+    """Fingerprint the legacy transcripts on disk, once; return how many.
+
+    Called at startup, before the agent can run. A no-op once the manifest exists:
+    vibe 2.26 writes no messages.jsonl, so any that appears later did not come
+    from vibe.
+    """
+    if _legacy_manifest_path().exists():
+        return 0
+    manifest: dict[str, str] = {}
+    root = _sessions_root()
+    if root is not None:
+        for session_dir in _session_dirs(root):
+            path = session_dir / "messages.jsonl"
+            if path.is_file() and not path.is_symlink():
+                with contextlib.suppress(OSError):
+                    manifest[str(path.relative_to(VIBE_HOME / "logs"))] = _sha256(path)
+    atomic_write_json(_legacy_manifest_path(), cast("JsonDict", manifest))
+    return len(manifest)
+
+
+def legacy_transcripts() -> dict[str, str] | None:
+    """The legacy-transcript manifest, or ``None`` before it is recorded."""
+    data = read_json(_legacy_manifest_path())
+    return None if data is None else {str(k): str(v) for k, v in data.items()}
+
+
+def _is_trusted_legacy(path: Path, manifest: dict[str, str] | None) -> bool:
+    """Whether *path* is a legacy transcript the manifest vouches for, unchanged.
+
+    Before the manifest exists (the server records it at start, ahead of the
+    agent) a file is as trusted as it always was.
+    """
+    if not path.is_file() or path.is_symlink():
+        return False
+    if manifest is None:
+        return True
+    try:
+        rel = str(path.relative_to(VIBE_HOME / "logs"))
+        return manifest.get(rel) == _sha256(path)
+    except (ValueError, OSError):
+        return False
 
 
 def find_vibe_session_dir(session_id: str) -> Path | None:
@@ -452,15 +634,15 @@ def find_vibe_session_dir(session_id: str) -> Path | None:
     vibe names directories ``session_<timestamp>_<first8-of-uuid>``, so we glob
     on the id prefix and confirm the full id via the directory's ``meta.json``.
     """
-    sessions_root = VIBE_HOME / "logs" / "session"
-    if not sessions_root.is_dir():
+    sessions_root = _sessions_root()
+    if sessions_root is None or Path(session_id).name != session_id:
         return None
     # vibe ≥2.26 (Unified Harness) keeps a chat under its full id.
     unified = sessions_root / "unified" / session_id
-    if unified.is_dir():
+    if _real_dir(unified) and not (sessions_root / "unified").is_symlink():
         return unified
     short = session_id[:8]
-    candidates = sorted(sessions_root.glob(f"session_*_{short}"))
+    candidates = [d for d in sorted(sessions_root.glob(f"session_*_{short}")) if _real_dir(d)]
     for candidate in candidates:
         data = _read_session_meta(candidate)
         if data is None:
@@ -493,9 +675,9 @@ def find_vibe_session_dirs(session_id: str, *, stop_ids: Collection[str] = ()) -
     pure continuation never is. *session_id* itself is never a stop.
     """
     root = find_vibe_session_dir(session_id)
-    if root is None:
+    sessions_root = _sessions_root()
+    if root is None or sessions_root is None:
         return []
-    sessions_root = VIBE_HOME / "logs" / "session"
     # One scan builds the parent → children map; session counts are small.
     children: dict[str, list[tuple[Path, str]]] = {}
     for candidate in _session_dirs(sessions_root):
@@ -528,8 +710,8 @@ def vibe_session_parents() -> dict[str, str]:
     distinguish them need an additional signal (the UI session registry: a
     chat the user can see is never a hidden continuation).
     """
-    sessions_root = VIBE_HOME / "logs" / "session"
-    if not sessions_root.is_dir():
+    sessions_root = _sessions_root()
+    if sessions_root is None:
         return {}
     parents: dict[str, str] = {}
     for candidate in _session_dirs(sessions_root):
@@ -675,6 +857,23 @@ def render_report(session_id: str) -> str:
         lines.append(
             f"- **Platform:** {plat.get('platform', '?')}, Python {plat.get('python', '?')}\n"
         )
+
+    started_jobs = [e for e in events if e.get("event") == JOB_STARTED]
+    events = [e for e in events if e.get("event") != JOB_STARTED]
+    if started_jobs:
+        lines.append(f"## Background jobs ({len(started_jobs)})\n")
+        for event in started_jobs:
+            job = cast("JsonDict", event.get("job") or {})
+            lines.append(
+                f"### `{event.get('server', '?')}:{event.get('tool', '?')}` — job "
+                f"`{job.get('id', '?')}` started {event.get('ts', '')}"
+            )
+            lines.append(f"- **Image:** `{job.get('image') or '?'}` (`{job.get('image_id')}`)")
+            if job.get("image_digest"):
+                lines.append(f"- **Registry digest:** `{job['image_digest']}`")
+            lines.append(f"- **Container:** `{job.get('container')}`")
+            rendered_job_args = json.dumps(event.get("arguments"), indent=2, default=str)
+            lines.append(f"```json\n{rendered_job_args}\n```\n")
 
     lines.append(f"## Tool calls ({len(events)})\n")
     if not events:

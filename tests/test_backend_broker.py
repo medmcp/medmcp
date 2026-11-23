@@ -10,7 +10,7 @@ from typing import Any
 
 import mcp.types as mcp_types
 
-from medmcp import replay
+from medmcp import approvals, replay
 from medmcp.backend_broker import STREAM_LIMIT
 
 from ._pool import broker
@@ -115,3 +115,21 @@ async def test_multiple_requests_on_one_connection(tmp_path: Path) -> None:
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
+
+
+async def test_an_unapproved_call_never_runs(tmp_path: Path) -> None:
+    """The agent's shell reaches this socket too: only an approved call runs, once."""
+    ledger = approvals.ApprovalLedger()
+    call = {"op": "call_tool", "stack": "fake", "tool": "echo", "args": {"text": "hi"}, "id": 1}
+    async with broker(tmp_path, authorize=ledger.consume) as sock:
+        refused = await _roundtrip(sock, call)
+        ledger.grant("fake", "echo", {"text": "hi"})
+        other_args = await _roundtrip(sock, {**call, "args": {"text": "other"}})
+        approved = await _roundtrip(sock, call)
+        replayed = await _roundtrip(sock, call)
+        listed = await _roundtrip(sock, {"op": "list_tools", "stack": "fake", "id": 2})
+    assert refused["ok"] is False and "not approved" in refused["error"]
+    assert other_args["ok"] is False
+    assert approved["ok"] is True
+    assert replayed["ok"] is False
+    assert listed["ok"] is True

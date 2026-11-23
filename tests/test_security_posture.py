@@ -116,14 +116,17 @@ def test_agent_profile_keeps_edits_gated(rel: str) -> None:
 def test_bash_allowlist_survives_vibes_migration(rel: str) -> None:
     """The one-shot allowlist migration in vibe must not re-arm the emptied allowlist.
 
-    ``[tools.bash] allowlist = []`` is deliberate: an allowlisted command runs
-    without a prompt. vibe ships a one-shot migration that unions its read-only
+    ``[tools.bash] allowlist = ["find"]`` is deliberate: an allowlisted command
+    runs without a prompt, and ``find`` is the one vibe adds on every start no
+    matter what. vibe also ships a one-shot migration that unions its read-only
     defaults into any existing allowlist unless the config records it as already
-    applied — so ``applied_migrations`` is what keeps the list empty in practice.
-    Run vibe's real migration over the shipped config to prove it.
+    applied — so ``applied_migrations`` is what keeps the rest out in practice.
+    Run vibe's real migration over the shipped config to prove it, and that it
+    changes nothing: the agent's copy is mounted read-only, and a migration that
+    has to write would fail every session.
     """
     cfg = _load(rel)
-    assert cfg.get("tools", {}).get("bash", {}).get("allowlist") == []
+    assert cfg.get("tools", {}).get("bash", {}).get("allowlist") == ["find"]
     assert "bash_read_only_defaults_v1" in cfg.get("applied_migrations", [])
     try:
         from vibe.core.config._migration import (  # pyright: ignore[reportMissingTypeStubs, reportPrivateImportUsage]  # vibe ships no stubs
@@ -131,10 +134,8 @@ def test_bash_allowlist_survives_vibes_migration(rel: str) -> None:
         )
     except ImportError:  # pragma: no cover - docs-only checkout
         pytest.skip("vibe not installed")
-    migrate_config(cfg)
-    # vibe adds `find` unconditionally (that one carries no one-shot id); the
-    # read-only defaults it would otherwise union in must stay out.
-    assert set(cfg["tools"]["bash"]["allowlist"]) <= {"find"}
+    assert migrate_config(cfg) is False
+    assert cfg["tools"]["bash"]["allowlist"] == ["find"]
 
 
 @pytest.mark.parametrize("rel", CONFIGS)

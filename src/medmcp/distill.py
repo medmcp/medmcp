@@ -401,6 +401,10 @@ def distill_session(
     if summary:
         recipe.description = summary[1]
     recipe.requires = build_requirements(recipe, manifest)
+    recipe.source = {"session_id": session_id}
+    model = cast("JsonDict", (manifest or {}).get("model") or {}).get("name")
+    if isinstance(model, str) and model:
+        recipe.source["model"] = model
 
     root = workflow.resolve_root(workflows_root)
     recipe.name = workflow.unique_name(root, base)

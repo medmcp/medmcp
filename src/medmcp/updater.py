@@ -149,8 +149,10 @@ def env_file_entries(
 def write_env_file(path: Path, entries: dict[str, str]) -> None:
     """Write ``KEY=VALUE`` lines the way compose reads them (values verbatim)."""
     lines = [f"{key}={value}" for key, value in sorted(entries.items())]
-    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-    path.chmod(0o600)
+    # Created 0600 rather than chmod-ed after: it holds the env_file secrets.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + ("\n" if lines else ""))
 
 
 def compose_up(

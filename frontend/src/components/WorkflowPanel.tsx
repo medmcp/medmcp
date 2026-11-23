@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useConfirm } from '../confirm'
 import type { ReactNode } from 'react'
 import {
@@ -15,25 +15,31 @@ import {
   replayPreview,
 } from '../api'
 import { getDraggedFilePath } from '../dragState'
+import { formatDuration } from '../format'
+import { groupByItem } from '../runLog'
 import type {
   BatchPlanSkip,
   ReplayFrame,
   ReplayPreviewResult,
+  RunSummary,
   RunStatus,
+  SelectionConfirmation,
     StackRequirement,
   WorkflowDetail,
   WorkflowListEntry,
 } from '../types'
 import { DRAG_PATH_MIME } from '../types'
 import {
+  AlertIcon,
   BookmarkPlusIcon,
+  CheckIcon,
   ChevronRightIcon,
-  DownloadIcon,
   FileIcon,
   PlayIcon,
   RefreshIcon,
   StopSquareIcon,
   TableIcon,
+  UploadIcon,
   XIcon,
 } from './icons'
 
@@ -45,27 +51,81 @@ const ACTIVE_RUN_KEY = 'medmcp.activeRun'
 /** Outcome of one batch item; `steps` counts its logged step frames. */
 type ItemResult = { ok: boolean; error?: string | null; outputs: string[]; steps: number }
 
-/** One row of the run editor: one value per required input. */
-type Row = { values: Record<string, string> }
+/** One row of the run editor: one value per required input, and — when the row
+ *  came from a manifest — who it is (subject/session). */
+type Row = { values: Record<string, string>; label?: string }
 
 /** What the expanded workflow's detail area is currently showing. */
 type Mode =
   | { kind: 'view' }
   | { kind: 'rename'; value: string }
-  | { kind: 'run'; source: RunSource; rows: Row[]; resultsDir: string }
+  | {
+      kind: 'run'
+      source: RunSource
+      rows: Row[]
+      resultsDir: string
+      /** The manifest the rows were loaded from ('' for hand-picked files). */
+      manifest: string
+      /** The folder a manifest's results go under, as the server resolved it. */
+      outputRoot: string
+    }
 
 /** Where a run's inputs come from: files picked by hand (the default, prefilled
- *  from the explorer selection), or a cohort plan. The two are different jobs
- *  (a few scans vs. a reviewed roll-out), so only the chosen editor is shown. */
-type RunSource = 'files' | 'plan'
+ *  from the explorer selection), a cohort plan (one row per subject, files found
+ *  by name), or a selection (one row per series the cohort tools selected). They
+ *  are different jobs, so only the chosen editor is shown. */
+type RunSource = 'files' | 'plan' | 'selection'
+
+/** What a manifest source asks for and says, by source. */
+const MANIFEST_TEXT: Record<
+  Exclude<RunSource, 'files'>,
+  { placeholder: string; point: string; loaded: string; load: string; other: string }
+> = {
+  plan: {
+    placeholder: '…/batch_plan.csv',
+    point:
+      'Point at the batch plan (CSV) a stack wrote: click the field, then the file in the explorer, or drag it in.',
+    loaded: 'One row per cohort item, as resolved by the plan. Fix a path here if one is wrong.',
+    load: 'Load plan',
+    other: 'Load a different plan',
+  },
+  selection: {
+    placeholder: '…/selection_confirmed.csv',
+    point:
+      'Point at a confirmed selection (…_confirmed.csv; a workflow that reads one scan also takes a plain selection): click the field, then the file in the explorer, or drag it in.',
+    loaded: 'One row per selected scan, or per subject and session when the workflow reads several scans.',
+    load: 'Load selection',
+    other: 'Load a different selection',
+  },
+}
+
+/** One line about a confirmed selection: when, under which rules, what was decided by hand. */
+function confirmationLine(c: SelectionConfirmation): string {
+  const when = c.confirmed_at ? new Date(c.confirmed_at).toLocaleString() : 'at an unknown time'
+  const parts = [
+    `Confirmed selection (${when})`,
+    `review rules v${c.rule_version ?? '?'}`,
+    `${c.overrides} override${c.overrides === 1 ? '' : 's'}`,
+  ]
+  if (c.excluded > 0) {
+    parts.push(`${c.excluded} subject-session${c.excluded === 1 ? '' : 's'} left out`)
+  }
+  return `${parts.join(' · ')}. The run records it with its SHA-256.`
+}
 
 const SOURCES: { value: RunSource; icon: ReactNode; title: string; hint: string }[] = [
-  { value: 'files', icon: <FileIcon size={14} />, title: 'Files', hint: 'Pick scans by hand' },
+  { value: 'files', icon: <FileIcon />, title: 'Files', hint: 'Pick scans by hand' },
   {
     value: 'plan',
-    icon: <TableIcon size={14} />,
+    icon: <TableIcon />,
     title: 'Cohort plan',
     hint: 'One row per subject',
+  },
+  {
+    value: 'selection',
+    icon: <TableIcon />,
+    title: 'Selection',
+    hint: 'The scans you selected',
   },
 ]
 
@@ -74,6 +134,8 @@ type RunState = {
   runId: string
   workflow: string
   runs: Record<string, string>[]
+  /** Subject/session per item when the rows came from a plan or selection. */
+  labels: string[]
   total: number
   stepsPerItem: number
   startedAt: number
@@ -96,14 +158,6 @@ function runProgress(r: RunState): number {
   const currentFrac =
     r.stepsPerItem > 0 ? Math.min((r.log.length - prevSteps) / r.stepsPerItem, 1) : 0
   return (r.items.length + currentFrac) / r.total
-}
-
-/** "1m 23s" / "45s" from a millisecond duration. */
-function formatDuration(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000))
-  if (s < 60) return `${s}s`
-  if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`
-  return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`
 }
 
 function basename(p: string): string {
@@ -262,11 +316,11 @@ function PathCell({
 /** The stacks a workflow needs, pinned by image(+digest) or version. */
 const REQ_STATUS: Record<
   NonNullable<StackRequirement['status']>,
-  { icon: string; cls: string }
+  { icon: ReactNode; cls: string }
 > = {
-  ok: { icon: '✓', cls: 'ok' },
-  missing: { icon: '✗', cls: 'missing' },
-  mismatch: { icon: '⚠', cls: 'mismatch' },
+  ok: { icon: <CheckIcon size={12} />, cls: 'ok' },
+  missing: { icon: <XIcon size={12} />, cls: 'missing' },
+  mismatch: { icon: <AlertIcon size={12} />, cls: 'mismatch' },
 }
 
 function Requirements({ requires }: { requires: StackRequirement[] }) {
@@ -364,16 +418,30 @@ function StepRows({
   return <div className="wf-steprows">{rows}</div>
 }
 
+/** Shared empty bucket for items with no logged step yet, so the lookup below
+ *  allocates nothing for the queued majority of a cohort. */
+const NO_STEPS: ReplayStepFrame[] = []
+
 /** One line per batch item — finished ones with their file count, the current
  *  one with its step, the rest folded into a count. Click a line for its steps. */
 function ItemRows({ r, now, root }: { r: RunState; now: number; root: string }) {
   const [open, setOpen] = useState<number | null>(null)
-  const labels = itemLabels(r.runs, root)
+  // The panel re-renders once a second while a run is live to move the
+  // elapsed/ETA readout, and neither of these depends on that clock. The labels
+  // walk every input of every item and take their common prefix; grouping the
+  // log is one pass instead of a filter per item, which was O(items × log) and
+  // ran for queued items that are never drawn.
+  const labels = useMemo(() => {
+    const paths = itemLabels(r.runs, root)
+    return paths.map((p, i) => r.labels[i] || p)
+  }, [r.runs, r.labels, root])
+  const stepsByItem = useMemo(() => groupByItem(r.log), [r.log])
   const rows: ReactNode[] = []
   let queued = 0
   for (let i = 0; i < r.total; i++) {
     const it = r.items[i]
-    const steps = r.log.filter((s) => (s.item ?? 0) === i)
+    // Needed before the skip below, not after: `isCurrent` reads its length.
+    const steps = stepsByItem.get(i) ?? NO_STEPS
     const isCurrent = !it && (r.current?.item === i || (steps.length > 0 && r.status === 'running'))
     if (!it && !isCurrent) {
       queued += 1
@@ -426,6 +494,80 @@ function ItemRows({ r, now, root }: { r: RunState; now: number; root: string }) 
     )
   }
   return <div className="wf-itemrows">{rows}</div>
+}
+
+/** "13 Nov, 14:02" from an ISO timestamp. */
+function shortDate(iso: string): string {
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return iso
+  return new Date(t).toLocaleString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+/** The workflow's past runs, newest first: open one to see its items again, or
+ *  download its record (everything the run did, as one JSON file, or a report). */
+function RunHistory({
+  name,
+  refresh,
+  onOpen,
+}: {
+  name: string
+  /** Changes whenever a followed run starts or ends, to refetch the list. */
+  refresh: string
+  onOpen: (runId: string) => void
+}) {
+  const [runs, setRuns] = useState<RunSummary[]>([])
+  useEffect(() => {
+    let stale = false
+    fetchRuns(name, 8)
+      .then((r) => {
+        if (!stale) setRuns(r.runs)
+      })
+      .catch(() => undefined)
+    return () => {
+      stale = true
+    }
+  }, [name, refresh])
+  if (runs.length === 0) return null
+  return (
+    <div className="wf-requires">
+      <span className="wf-requires-title">Past runs</span>
+      <div className="wf-itemrows">
+        {runs.map((r) => {
+          const dot = r.status === 'done' ? 'ok' : r.status === 'running' ? 'busy' : 'fail'
+          return (
+            <div key={r.id} className="wf-itemrow-wrap">
+              <button type="button" className={`wf-itemrow ${dot}`} onClick={() => onOpen(r.id)}>
+                <span className={`status-dot ${dot}`} />
+                <span className="wf-itemrow-label">{shortDate(r.started_at)}</span>
+                <span className="wf-recent-muted wf-itemrow-note">
+                  {r.succeeded} of {r.total} done
+                  {r.failed > 0 ? ` · ${r.failed} failed` : ''}
+                  {r.status === 'cancelled' ? ' · stopped' : ''}
+                </span>
+              </button>
+              <span className="wf-actions-secondary">
+                <a className="btn-text" href={`/api/runs/${encodeURIComponent(r.id)}/export`} download>
+                  Record
+                </a>
+                <a
+                  className="btn-text"
+                  href={`/api/runs/${encodeURIComponent(r.id)}/export?format=md`}
+                  download
+                >
+                  Report
+                </a>
+              </span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
 }
 
 function ProgressBar({ frac, label, active }: { frac: number; label: string; active?: boolean }) {
@@ -517,7 +659,17 @@ export const WorkflowPanel = memo(function WorkflowPanel({
   const [now, setNow] = useState(() => Date.now())
   const [planCsv, setPlanCsv] = useState('')
   const [planSkipped, setPlanSkipped] = useState<BatchPlanSkip[] | null>(null)
-  const [showSteps, setShowSteps] = useState(false)
+  // A selection's confirmation record once loaded, or why the manifest was refused.
+  const [planConfirmation, setPlanConfirmation] = useState<SelectionConfirmation | null>(null)
+  const [planRefused, setPlanRefused] = useState<string | null>(null)
+  // Loading a manifest: where results go (blank = the server's default), and —
+  // when the server could not tell which column or series feeds an input — the
+  // question it asked and the answers so far.
+  const [outputRoot, setOutputRoot] = useState('')
+  const [mapping, setMapping] = useState<Record<string, string>>({})
+  const [ask, setAsk] = useState<{ unmapped: string[]; options: string[] } | null>(null)
+  // Bumped shortly before a preview's token expires, so the editor asks again.
+  const [previewRound, setPreviewRound] = useState(0)
   const [showResultsDir, setShowResultsDir] = useState(false)
   // Absolute workspace root: tool outputs come back absolute, the viewer wants
   // workspace-relative, and nobody wants to read the host prefix on every chip.
@@ -575,6 +727,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             runId: frame.run_id,
             workflow: frame.workflow,
             runs: frame.runs,
+            labels: frame.labels ?? [],
             total: frame.total,
             stepsPerItem: frame.steps_per_item,
             startedAt,
@@ -697,7 +850,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         const names = detail.inputs.filter((i) => !i.default).map((i) => i.name)
         setMode({ ...mode, rows: placeFiles(mode.rows, names, added, focusedCell) })
         setFocusedCell(null)
-      } else if (mode.source === 'plan' && mode.rows.length === 0) {
+      } else if (mode.rows.length === 0) {
         setPlanCsv(added[0])
       }
     }
@@ -706,26 +859,32 @@ export const WorkflowPanel = memo(function WorkflowPanel({
   // ── Pre-flight preview, debounced on every edit ──
   // The run button is only enabled once the preview for exactly these rows has
   // come back: the resolved steps and per-row checks are the confirmation the
-  // engine's no-permission-prompt design requires.
+  // engine's no-permission-prompt design requires. The server starts a run only
+  // with the token that preview returned, for exactly these rows.
   const requiredNames = detail ? detail.inputs.filter((i) => !i.default).map((i) => i.name) : []
   const derivedNames = detail ? detail.inputs.filter((i) => i.default).map((i) => i.name) : []
+  const completeRows =
+    mode.kind === 'run'
+      ? mode.rows.filter((r) => requiredNames.every((n) => (r.values[n] ?? '').trim() !== ''))
+      : []
   const runBindings: Record<string, string>[] =
     mode.kind === 'run'
-      ? mode.rows
-          .filter((r) => requiredNames.every((n) => (r.values[n] ?? '').trim() !== ''))
-          .map((r) => {
-            const values: Record<string, string> = {}
-            requiredNames.forEach((n) => {
-              values[n] = r.values[n].trim()
-            })
-            if (mode.resultsDir.trim()) {
-              derivedNames.forEach((n) => {
-                values[n] = mode.resultsDir.trim()
-              })
-            }
-            return values
+      ? completeRows.map((r) => {
+          const values: Record<string, string> = {}
+          requiredNames.forEach((n) => {
+            values[n] = r.values[n].trim()
           })
+          derivedNames.forEach((n) => {
+            // A manifest places each item's results folder itself; by hand, one
+            // folder for every row can be given, else the workflow's default.
+            const placed = (r.values[n] ?? '').trim()
+            if (mode.resultsDir.trim()) values[n] = mode.resultsDir.trim()
+            else if (placed) values[n] = placed
+          })
+          return values
+        })
       : []
+  const runLabels = completeRows.map((r) => r.label ?? '')
   const previewKey =
     mode.kind === 'run' && detail
       ? JSON.stringify([detail.name, runBindings])
@@ -741,9 +900,20 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
     }, 350)
     return () => clearTimeout(id)
-    // previewKey encodes everything the request depends on.
+    // previewKey encodes everything the request depends on; previewRound renews it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [previewKey])
+  }, [previewKey, previewRound])
+
+  // A token is short-lived: preview again half a minute before it runs out.
+  useEffect(() => {
+    const ttl = preview?.result.expires_in
+    if (!ttl) return
+    const id = window.setTimeout(
+      () => setPreviewRound((n) => n + 1),
+      Math.max(ttl - 30, 5) * 1000,
+    )
+    return () => clearTimeout(id)
+  }, [preview])
 
   // The workflow whose detail the panel currently wants. Guards against a
   // slow response for a previously clicked row overwriting the current one —
@@ -834,34 +1004,63 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       setMode({ kind: 'view' })
     })
 
-  // Fill the editor from a plan_batch manifest — the binding list built once
-  // from a single-subject prototype, so the cohort roll-out is a review-and-run.
-  // Flagged (missing/ambiguous) items are surfaced, never silently run.
+  // Fill the editor from a manifest — a batch plan or a selection of
+  // scans — so the roll-out is a review-and-run. Flagged (missing/ambiguous)
+  // items are surfaced, never silently run; when the server cannot tell which
+  // column or series feeds an input it asks, and the answer is sent back.
   const fillFromPlan = (name: string) =>
-    withBusy('Building the binding list from the cohort plan…', async () => {
-      const res = await batchFromPlan(name, planCsv.trim())
-      if (!res.ok) {
+    withBusy('Building the list of runs…', async () => {
+      const res = await batchFromPlan(name, planCsv.trim(), mapping, outputRoot.trim())
+      setPlanConfirmation(res.confirmation ?? null)
+      setPlanRefused(res.refused ? (res.error ?? 'this manifest cannot be rolled out') : null)
+      if (res.refused) {
         setPlanSkipped(null)
-        setError(res.error ?? 'could not read the cohort plan')
+        setAsk(null)
         return
       }
+      if (!res.ok) {
+        setPlanSkipped(null)
+        const options = res.kind === 'selection' ? res.roles?.map((r) => r.role) : res.columns
+        if (res.unmapped && res.unmapped.length > 0 && options && options.length > 0) {
+          setMapping({ ...(res.kind === 'selection' ? res.role_map : res.column_map), ...mapping })
+          setAsk({ unmapped: res.unmapped, options })
+          return
+        }
+        setError(res.error ?? 'could not read the manifest')
+        return
+      }
+      setAsk(null)
       setPlanSkipped(res.skipped)
       if (res.runs.length === 0) {
-        setError('No ready items in the plan. Resolve the flagged rows first.')
+        setError('No ready items. Resolve the flagged rows first.')
         return
       }
       setMode((m) =>
         m.kind === 'run'
-          ? { ...m, source: 'plan', rows: res.runs.map((values) => ({ values })) }
+          ? {
+              ...m,
+              rows: res.runs.map((values, i) => ({ values, label: res.labels?.[i] })),
+              manifest: planCsv.trim(),
+              outputRoot: res.output_root ?? '',
+            }
           : m,
       )
     })
 
+  /** Forget a manifest that was being loaded (its file, mapping and flags). */
+  const resetManifest = () => {
+    setPlanSkipped(null)
+    setPlanConfirmation(null)
+    setPlanRefused(null)
+    setPlanCsv('')
+    setOutputRoot('')
+    setMapping({})
+    setAsk(null)
+  }
+
   const beginRun = (d: WorkflowDetail) => {
     setPreview(null)
-    setPlanSkipped(null)
-    setPlanCsv('')
-    setShowSteps(false)
+    resetManifest()
     setShowResultsDir(false)
     setFocusedCell(null)
     // Files is the default, prefilled from whatever is selected in the explorer.
@@ -871,6 +1070,8 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       source: 'files',
       rows: placeFiles([emptyRow(names)], names, selectedPaths, null),
       resultsDir: '',
+      manifest: '',
+      outputRoot: '',
     })
   }
 
@@ -883,21 +1084,57 @@ export const WorkflowPanel = memo(function WorkflowPanel({
     if (source === m.source) return
     const names = d.inputs.filter((i) => !i.default).map((i) => i.name)
     setPreview(null)
-    setPlanSkipped(null)
-    setPlanCsv('')
+    resetManifest()
     setFocusedCell(null)
     setMode({
       ...m,
       source,
       rows: source === 'files' ? placeFiles([emptyRow(names)], names, selectedPaths, null) : [],
+      resultsDir: '',
+      manifest: '',
+      outputRoot: '',
     })
   }
 
-  const startRun = (name: string, runs: Record<string, string>[]) => {
+  /** Start a previewed run: `token` is what the preview of exactly these rows
+   *  returned. `labels` name the items; `manifest` and `outputRoot` say where
+   *  the rows came from and where results go, for the run's record. */
+  const startRun = (
+    name: string,
+    runs: Record<string, string>[],
+    token: string,
+    labels: string[] = [],
+    manifest = '',
+    outputRootUsed = '',
+  ) => {
     setError(null)
-    followRun({ name, runs })
+    setPreview(null) // the token is spent
+    followRun({ name, runs, labels, manifest, output_root: outputRootUsed, preview_token: token })
     setMode({ kind: 'view' })
   }
+
+  /** Put a finished run's unfinished items back in the editor, to check and run. */
+  const reviewAgain = (r: RunState) =>
+    withBusy('Loading…', async () => {
+      const rows = r.runs
+        .map((run, i) => {
+          const values: Record<string, string> = {}
+          for (const [k, v] of Object.entries(run)) values[k] = workspacePath(v, root) ?? v
+          return { values, label: r.labels[i] || undefined }
+        })
+        .filter((_, i) => !r.items[i]?.ok)
+      const d =
+        detail && detail.name === r.workflow ? detail : await fetchWorkflowDetail(r.workflow)
+      closeRun()
+      detailForRef.current = d.name
+      setExpanded(d.name)
+      setDetail(d)
+      setPreview(null)
+      resetManifest()
+      setShowResultsDir(false)
+      setFocusedCell(null)
+      setMode({ kind: 'run', source: 'files', rows, resultsDir: '', manifest: '', outputRoot: '' })
+    })
 
   const stopRun = () => {
     runWs.current?.send(JSON.stringify({ type: 'cancel' }))
@@ -987,10 +1224,10 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                   className="btn-primary"
                   aria-label={
                     r.status === 'cancelled'
-                      ? 'Continue with the items that did not finish.'
-                      : 'Run only what failed.'
+                      ? 'Check the items that did not finish, then run them.'
+                      : 'Check what failed, then run it again.'
                   }
-                  onClick={() => startRun(r.workflow, retryRuns)}
+                  onClick={() => void reviewAgain(r)}
                 >
                   {r.status === 'cancelled' ? <PlayIcon size={12} /> : <RefreshIcon size={12} />}{' '}
                   {r.status === 'cancelled' ? 'Resume' : 'Retry'}
@@ -1022,19 +1259,23 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       bindingIdx += 1
       return ready?.items[bindingIdx] ?? null
     })
-    const canRun = !!ready && ready.ok && readyItems.length > 0 && run?.status !== 'running'
+    const canRun =
+      !!ready && ready.ok && !!ready.token && readyItems.length > 0 && run?.status !== 'running'
     // The run controls appear once there is something to run: right away for
     // hand-picked files, after the plan has been loaded for a cohort.
-    const showControls = m.source === 'files' || (m.source === 'plan' && m.rows.length > 0)
-    const runnable = ready
-      ? runBindings.filter((_, i) => ready.items[i]?.ok)
-      : []
+    const showControls = m.source === 'files' || m.rows.length > 0
+    const runnable = ready ? runBindings.filter((_, i) => ready.items[i]?.ok) : []
+    const runnableLabels = ready ? runLabels.filter((_, i) => ready.items[i]?.ok) : []
+    const text = m.source === 'files' ? null : MANIFEST_TEXT[m.source]
     return (
       <form
         className="wf-form"
         onSubmit={(e) => {
           e.preventDefault()
-          if (canRun) startRun(d.name, runnable)
+          const token = ready?.token
+          if (canRun && token) {
+            startRun(d.name, runnable, token, runnableLabels, m.manifest, m.outputRoot)
+          }
         }}
       >
         {required.length > 0 && (
@@ -1060,24 +1301,76 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         <div className="wf-hint">
           {required.length === 0
             ? 'This workflow takes no inputs.'
-            : m.source === 'files'
+            : !text
               ? 'One row per run. Click a cell, then a file in the explorer, or drag a file into it.'
               : m.rows.length === 0
-                ? 'Point at the batch_plan.csv written by the cohort plan_batch step: click the field, then the file in the explorer, or drag it in.'
-                : 'One row per cohort item, as resolved by the plan. Fix a path here if one is wrong.'}
+                ? text.point
+                : `${text.loaded}${m.outputRoot ? ` Results go to ${display(m.outputRoot, root)}, one folder per subject.` : ''}`}
         </div>
-        {m.source === 'plan' && m.rows.length === 0 && (
-          <div className="wf-batch-tools">
-            <PathCell value={planCsv} placeholder="…/batch_plan.csv" onChange={setPlanCsv} />
-            <button
-              type="button"
-              className="btn-primary"
-              disabled={!planCsv.trim()}
-              onClick={() => void fillFromPlan(d.name)}
-            >
-              Load plan
-            </button>
-          </div>
+        {text && m.rows.length === 0 && (
+          <>
+            <div className="wf-batch-tools">
+              <PathCell value={planCsv} placeholder={text.placeholder} onChange={setPlanCsv} />
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={
+                  !planCsv.trim() || (ask !== null && ask.unmapped.some((n) => !mapping[n]))
+                }
+                onClick={() => void fillFromPlan(d.name)}
+              >
+                {text.load}
+              </button>
+            </div>
+            {planRefused && <div className="wf-step-error">Not rolled out: {planRefused}</div>}
+            {ask && (
+              <>
+                <div className="wf-hint">
+                  {m.source === 'selection'
+                    ? 'This workflow reads several scans. Say which selected series each one is:'
+                    : 'Say which column of the plan each input is:'}
+                </div>
+                {ask.unmapped.map((n) => {
+                  const input = d.inputs.find((i) => i.name === n)
+                  return (
+                    <label key={n} className="wf-input-row">
+                      <span className="wf-input-label">
+                        <span className="wf-input-desc">
+                          {input ? inputTitle(input) : n}
+                          {input?.example ? ` (was ${basename(input.example)})` : ''}
+                        </span>
+                      </span>
+                      <select
+                        className="wf-input"
+                        value={mapping[n] ?? ''}
+                        onChange={(e) => setMapping({ ...mapping, [n]: e.target.value })}
+                      >
+                        <option value="">choose…</option>
+                        {ask.options.map((o) => (
+                          <option key={o} value={o}>
+                            {o}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )
+                })}
+              </>
+            )}
+            <label className="wf-input-row">
+              <span className="wf-input-label">
+                <span className="wf-input-desc">
+                  Results folder (one sub-folder per subject). Leave blank for results/{d.name}.
+                </span>
+              </span>
+              <PathCell
+                className="wf-input"
+                value={outputRoot}
+                placeholder={`results/${d.name}`}
+                onChange={setOutputRoot}
+              />
+            </label>
+          </>
         )}
         {required.length > 0 && m.rows.length > 0 && (
           <div className="wf-batch-table">
@@ -1096,7 +1389,9 @@ export const WorkflowPanel = memo(function WorkflowPanel({
               const warn = verdict?.findings.find((f) => f.severity === 'warning')
               return (
                 <div key={ri} className="wf-batch-row">
-                  <span className="wf-batch-idx">{ri + 1}</span>
+                  <span className="wf-batch-idx">
+                    {ri + 1}
+                  </span>
                   {required.map((i) => (
                     <PathCell
                       key={i.name}
@@ -1107,7 +1402,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                         setMode({
                           ...m,
                           rows: m.rows.map((r, j) =>
-                            j === ri ? { values: { ...r.values, [i.name]: v } } : r,
+                            j === ri ? { ...r, values: { ...r.values, [i.name]: v } } : r,
                           ),
                         })
                       }
@@ -1116,7 +1411,16 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                   <span
                     className={`wf-batch-status ${verdict ? (verdict.ok ? (warn ? 'warn' : 'ok') : 'fail') : ''}`}
                   >
-                    {verdict ? (verdict.ok ? (warn ? '⚠' : '✓') : '✗') : ''}
+                    {verdict &&
+                      (verdict.ok ? (
+                        warn ? (
+                          <AlertIcon size={12} />
+                        ) : (
+                          <CheckIcon size={12} />
+                        )
+                      ) : (
+                        <XIcon size={12} />
+                      ))}
                   </span>
                   <button
                     type="button"
@@ -1137,7 +1441,8 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                   const f = v.findings.find((x) => x.severity === 'error')
                   return (
                     <div key={ri} className="wf-step-error">
-                      Row {ri + 1}: {v.error ?? 'cannot run'}
+                      Row {ri + 1}
+                      {m.rows[ri].label ? ` (${m.rows[ri].label})` : ''}: {v.error ?? 'cannot run'}
                       {f && f.entries.length > 0 && (
                         <span className="wf-nearest">
                           {' '}
@@ -1164,21 +1469,28 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                   type="button"
                   className="btn-text"
                   onClick={() => {
-                    setPlanSkipped(null)
+                    resetManifest()
                     setPreview(null)
-                    setMode({ ...m, rows: [] })
+                    setMode({ ...m, rows: [], manifest: '', outputRoot: '' })
                   }}
                 >
-                  Load a different plan
+                  {text?.other}
                 </button>
               )}
             </div>
           </div>
         )}
+        {planConfirmation && m.rows.length > 0 && (
+          <div
+            className="wf-hint"
+          >
+            {confirmationLine(planConfirmation)}
+          </div>
+        )}
         {planSkipped && planSkipped.length > 0 && (
           <div className="wf-hint wf-plan-skipped">
-            {planSkipped.length} item(s) flagged and left out. Resolve them in the plan, then
-            re-fill:
+            {planSkipped.length} item(s) flagged and left out. Resolve them in the{' '}
+            {m.source === 'selection' ? 'selection' : 'plan'}, then load it again:
             <ul className="wf-manual-list">
               {planSkipped.map((s, i) => (
                 <li key={i}>
@@ -1192,7 +1504,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             </ul>
           </div>
         )}
-        {derived.length > 0 && (
+        {derived.length > 0 && m.source === 'files' && (
           <>
             <button
               type="button"
@@ -1220,29 +1532,26 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         )}
         {complete > 0 && ready && ready.steps.length > 0 && (
           <div className="wf-preview">
-            <button
-              type="button"
-              className="btn-text wf-derived-toggle"
-              onClick={() => setShowSteps((v) => !v)}
-            >
-              {showSteps ? 'Hide' : 'Show'} what will run
-              {complete > 1 ? ' (first row)' : ''}
-            </button>
-            {showSteps && (
-              <ol className="wf-steps">
-                {ready.steps.map((s) => (
-                  <li key={s.index}>
-                    <code>{s.tool}</code>
-                    <span className="wf-args-inline">
-                      {Object.entries(s.arguments).map(([k, v]) => (
-                        <span key={k}>
-                          {k}: {display(v, root)}
-                        </span>
-                      ))}
-                    </span>
-                  </li>
-                ))}
-              </ol>
+            <div className="wf-hint">What will run:</div>
+            <ol className="wf-steps">
+              {ready.steps.map((s) => (
+                <li key={s.index}>
+                  <code>{s.tool}</code>
+                  <div className="wf-args">
+                    {Object.entries(s.arguments).map(([k, v]) => (
+                      <div key={k}>
+                        {k}: {display(v, root)}
+                      </div>
+                    ))}
+                  </div>
+                </li>
+              ))}
+            </ol>
+            {readyItems.length > 1 && (
+              <div className="wf-hint">
+                … and {readyItems.length - 1} more row{readyItems.length === 2 ? '' : 's'} like
+                this
+              </div>
             )}
           </div>
         )}
@@ -1339,6 +1648,11 @@ export const WorkflowPanel = memo(function WorkflowPanel({
               </button>
             </span>
           </div>
+          <RunHistory
+            name={d.name}
+            refresh={`${run?.runId ?? ''}:${run?.status ?? ''}`}
+            onOpen={(id) => followRun({ attach: id })}
+          />
         </>
       )}
 
@@ -1394,7 +1708,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             disabled={busy !== null}
             onClick={() => fileInputRef.current?.click()}
           >
-            <DownloadIcon />
+            <UploadIcon />
           </button>
           <button className="btn-icon" aria-label="Refresh" onClick={() => void reload()}>
             <RefreshIcon />

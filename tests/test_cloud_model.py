@@ -282,7 +282,10 @@ def test_a_missing_key_falls_back_to_the_local_model(
     cfg = synced_config(tmp_path)
     assert cfg["active_model"] == "cloud"
     assert cfg["providers"][-1]["api_key_env_var"] == "SITE_LLM_KEY"
-    # A variable the deployment owns is inherited, not injected by this process.
+    # The agent's environment is scrubbed of credentials, so a variable the
+    # deployment owns is handed over by name — only while the model is in force.
+    assert settings.agent_secret_env() == {"SITE_LLM_KEY": "from-the-deployment"}
+    settings.set_cloud_model_enabled(False)
     assert settings.agent_secret_env() == {}
 
 

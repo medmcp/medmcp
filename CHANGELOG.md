@@ -49,6 +49,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Chat: a stack call with arguments the tool does not accept is turned back to the assistant with what is wrong; before, the whole turn ended with `Core rejected durable input`.
 - Explorer: the rows no longer jump when a file is dragged in, so a drop lands on the folder under the pointer.
 - Explorer: uploading a file named like an existing folder says so instead of failing with a server error.
+- Viewer: a volume or overlay that cannot be loaded (empty, truncated, not a volume, deleted) says so and names the file; the panel stayed blank and a failed overlay vanished silently.
 - Stacks: reinstalling a stack that is already running (a new image under the same name) now stops the running copy, so the next call uses the new image. Before, the old copy kept serving its old tools until it went idle.
 - Stacks: after a stack is updated or reinstalled under the same image name, the assistant sees its new tools. Before, it kept the previous tool list for up to a day, so a newly added tool such as `check_dataset` could not be found.
 - Stacks: installing a stack from the catalog or by image works again with `docker compose`; since 0.7.2 the docker guard refused the image lookup.

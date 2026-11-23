@@ -162,7 +162,13 @@ async function inflateGzip(bytes: ArrayBuffer): Promise<ArrayBuffer | null> {
   }
 }
 
+/** A failure as the viewer words it: the reason, without the `Error:` prefix. */
+function failureReason(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
+
 /** The volume at *url*, from the cache when the server says it is still current.
+ *  Throws an Error whose message is the reason, worded for the viewer.
  *
  *  One conditional GET does the revalidation and the download together: the
  *  server answers 304 while the ETag holds, where this used to cost a HEAD and
@@ -182,11 +188,16 @@ async function fetchVolume(url: string, gzipped: boolean): Promise<CachedVolume>
     volumeCache.set(url, hit)
     return hit
   }
-  if (!r.ok) throw new Error(`could not load volume (HTTP ${r.status})`)
+  if (!r.ok) {
+    volumeCache.delete(url)
+    throw new Error(
+      r.status === 404 ? 'the file no longer exists' : `the server answered HTTP ${r.status}`,
+    )
+  }
   const raw = await r.arrayBuffer()
   // Niivue reads the bytes from the buffer only while it has some; an empty one
   // would send it back to the network for a name that is not a URL.
-  if (raw.byteLength === 0) throw new Error('could not load volume (the file is empty)')
+  if (raw.byteLength === 0) throw new Error('the file is empty')
   const plain = gzipped ? await inflateGzip(raw) : null
   const entry: CachedVolume = {
     buffer: plain ?? raw,
@@ -209,7 +220,8 @@ async function fetchVolume(url: string, gzipped: boolean): Promise<CachedVolume>
 /** Load *path* into `nv` as the base volume (replace = true) or as an added
  *  overlay, from the volume cache. Niivue takes the file type from `name`.
  *  Returns the file's ETag ('' when unknown), which changes when a tool
- *  rewrites the file.
+ *  rewrites the file. Throws an Error whose message is the reason, worded for
+ *  the viewer.
  *
  *  Analyze pairs (`.hdr` + `.img`) bypass the cache: Niivue finds the sibling
  *  by rewriting the URL's extension, which a buffer has none of. */
@@ -219,10 +231,36 @@ async function loadVolume(
   opts: { opacity?: number; replace: boolean },
 ): Promise<string> {
   const name = path.split('/').pop() ?? path
+  const before = opts.replace ? 0 : nv.volumes.length
+  const etag = await addVolume(nv, path, name, opts)
+  // Niivue reports some unreadable files by adding nothing rather than throwing.
+  if (nv.volumes.length !== before + 1) throw new Error('not a readable volume')
+  return etag
+}
+
+/** `addVolumeFromUrl`, with Niivue's parser errors (a trace of its own
+ *  internals, for a truncated or mislabelled file) replaced by one reason. */
+async function addParsedVolume(
+  nv: Niivue,
+  options: Parameters<Niivue['addVolumeFromUrl']>[0],
+): Promise<void> {
+  try {
+    await nv.addVolumeFromUrl(options)
+  } catch {
+    throw new Error('not a readable volume')
+  }
+}
+
+async function addVolume(
+  nv: Niivue,
+  path: string,
+  name: string,
+  opts: { opacity?: number; replace: boolean },
+): Promise<string> {
   if (/\.(hdr|img)$/i.test(name)) {
     const url = rawUrl(path)
-    if (opts.replace) await nv.loadVolumes([{ url, name }])
-    else await nv.addVolumeFromUrl({ url, name, opacity: opts.opacity ?? 1 })
+    if (opts.replace) nv.volumes = []
+    await addParsedVolume(nv, { url, name, opacity: opts.opacity ?? 1 })
     return ''
   }
   const entry = await fetchVolume(rawUrl(path), /\.nii\.gz$/i.test(name))
@@ -234,7 +272,7 @@ async function loadVolume(
   // volumes, but the contract should not depend on that.
   const as = entry.inflated ? name.replace(/\.gz$/i, '') : name
   if (opts.replace) nv.volumes = []
-  await nv.addVolumeFromUrl({ url: as, name: as, buffer: entry.buffer, opacity: opts.opacity ?? 1 })
+  await addParsedVolume(nv, { url: as, name: as, buffer: entry.buffer, opacity: opts.opacity ?? 1 })
   return entry.etag
 }
 
@@ -627,6 +665,9 @@ function VolumeView({
   const dropRef = useRef<HTMLDivElement>(null)
   const nvRef = useRef<Niivue | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  // Kept apart from the base image's error: a failed overlay puts the overlay
+  // state back to "none", and the pass that follows must not wipe either message.
+  const [overlayError, setOverlayError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [dragOver, setDragOver] = useState(false)
   const [readout, setReadout] = useState<Readout | null>(null)
@@ -844,7 +885,9 @@ function VolumeView({
    *  otherwise just restyle. Idempotent, so it can run after every change. */
   const applyOverlay = useCallback(async () => {
     const nv = nvRef.current
-    if (!nv) return
+    // Without a base image (still loading, or it failed) there is nothing to
+    // overlay; the base load restores a persisted overlay itself.
+    if (!nv || nv.volumes.length === 0) return
     const state = overlayRef.current
     const current = overlayVolRef.current
     try {
@@ -859,6 +902,9 @@ function VolumeView({
       overlayVolRef.current = null
       setOverlayVol(null)
       if (state.path) {
+        // A new attempt replaces the message of the last one. Not cleared when
+        // there is no path: that is also the pass a failure itself triggers.
+        setOverlayError(null)
         await loadVolume(nv, state.path, { opacity: state.opacity, replace: false })
         const vol = nv.volumes[nv.volumes.length - 1]
         const info = await describeOverlay(vol, state.path, state.kind)
@@ -883,12 +929,24 @@ function VolumeView({
         settingsRef.current.interpolation === 'nearest' ||
           overlayVolRef.current?.info.kind === 'label',
       )
-      setLoadError(null)
     } catch (e) {
       // A torn-down instance must not clear the overlay a newer mount is restoring.
       if (nvRef.current !== nv) return
+      // Leave the base image alone on screen: drop whatever the failed attempt
+      // added before it broke, so no layer is drawn that no control addresses.
+      try {
+        while (nv.volumes.length > 1) nv.removeVolume(nv.volumes[nv.volumes.length - 1])
+      } catch {
+        // best-effort; the base volume is index 0 and was not touched
+      }
+      overlayVolRef.current = null
+      setOverlayVol(null)
+      nv.setInterpolation(settingsRef.current.interpolation === 'nearest')
+      // Superseded by a newer choice: that one's own pass reports its outcome.
+      if (overlayRef.current.path !== state.path) return
+      const name = state.path.split('/').pop() ?? state.path
+      setOverlayError(`Could not load overlay ${name}: ${failureReason(e)}`)
       onOverlayChangeRef.current({ ...EMPTY_OVERLAY, base: path })
-      setLoadError(`Could not load overlay: ${String(e)}`)
     }
   }, [path, applyFrame])
 
@@ -1034,7 +1092,9 @@ function VolumeView({
           await applyOverlay()
         }
       } catch (e) {
-        if (!cancelled) setLoadError(String(e))
+        if (!cancelled) {
+          setLoadError(`Could not load ${path.split('/').pop() ?? path}: ${failureReason(e)}`)
+        }
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -1119,8 +1179,9 @@ function VolumeView({
   // Every overlay change goes through the serialized chain; applyOverlay works
   // out whether that means a load, a re-read or only a restyle.
   useEffect(() => {
-    // A rejected link must not end the chain: every later change would be ignored.
-    overlayOpRef.current = overlayOpRef.current.then(applyOverlay, () => undefined)
+    // A rejected link must not end the chain, nor swallow this change with it:
+    // every later change would be ignored.
+    overlayOpRef.current = overlayOpRef.current.catch(() => undefined).then(applyOverlay)
   }, [overlay, applyOverlay])
 
   const patchOverlay = (patch: Partial<OverlayState>) =>
@@ -1373,6 +1434,7 @@ function VolumeView({
         </div>
       )}
       {loadError && <div className="panel-error">{loadError}</div>}
+      {overlayError && <div className="panel-error">{overlayError}</div>}
       <div className="niivue-sizer" ref={sizerRef}>
         <div
           ref={dropRef}

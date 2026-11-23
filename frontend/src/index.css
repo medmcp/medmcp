@@ -4916,3 +4916,24 @@ textarea.wf-input {
   border: 1px solid var(--border2);
   border-radius: 4px;
 }
+
+/* ── Reduced motion ──────────────────────────────────────────────────────── */
+
+/* Nothing loops or slides in for someone who asked for less motion. What each
+   animation was saying is still said by something that holds still: a busy dot
+   keeps its colour, the volume spinner its ring and its "Loading volume…", the
+   thinking dots stay on screen, a running workflow bar keeps its highlight. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+  }
+
+  /* The install bar is a sweep, not a measure: stopped mid-sweep it would read
+     as "40% done". Full and dimmed reads as "working". */
+  .install-bar-fill {
+    width: 100%;
+    opacity: 0.45;
+  }
+}

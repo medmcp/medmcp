@@ -61,11 +61,9 @@ const OTHER: Group[] = [
 /* What a person should know before relying on a result. Each line is a claim
  * about the product; keep it true. */
 const LIMITS = [
-  'Research software: not a medical device, and not for clinical decisions.',
-  'The model can misread a request or pick the wrong file or tool. Read each approval before you allow it.',
-  'Check every result before you use it. Segmentations and measurements can be wrong.',
-  'A saved workflow runs without asking at each step. Review its steps before you start it.',
-  'A cloud model or an external server, once switched on, receives what you send it.',
+  'Research software: not for clinical decisions.',
+  'Read each approval before you allow it.',
+  'Check every result before you use it.',
 ]
 
 function GroupList({ group }: { group: Group }) {
@@ -130,11 +128,7 @@ export function ShortcutsWindow({ open, onClose }: ShortcutsWindowProps) {
         <div ref={winRef} className="extwin-body sc-body" tabIndex={-1}>
           <div className="sc-about">
             <div className="settings-section">About MedMCP</div>
-            <p>
-              MedMCP runs medical imaging tools from a chat. A model on this machine plans the
-              steps, and tested tools do the computing. Your data stays on this machine unless you
-              connect an outside service.
-            </p>
+            <p>MedMCP runs tested imaging tools from a chat, on this machine.</p>
             <div className="settings-section">Know the limits</div>
             <ul>
               {LIMITS.map((line) => (

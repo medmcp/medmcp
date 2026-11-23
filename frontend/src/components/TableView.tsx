@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { numericColumns, type Sheet } from '../tabular'
+import { ChevronDownIcon, ChevronUpIcon } from './icons'
 
 /** Rows shown of a large table; the count line says when it was cut. */
 const MAX_ROWS = 5000
@@ -44,7 +45,11 @@ export function TableView({ sheets }: { sheets: Sheet[] }) {
                   onClick={() => toggleSort(i)}
                 >
                   {h || <span className="data-empty">column {i + 1}</span>}
-                  {sort?.col === i && <span className="data-sort">{sort.dir === 1 ? '▲' : '▼'}</span>}
+                  {sort?.col === i && (
+                    <span className="data-sort">
+                      {sort.dir === 1 ? <ChevronUpIcon size={12} /> : <ChevronDownIcon size={12} />}
+                    </span>
+                  )}
                 </th>
               ))}
             </tr>

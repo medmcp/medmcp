@@ -30,7 +30,9 @@ import type {
 } from '../types'
 import { DRAG_PATH_MIME } from '../types'
 import {
+  AlertIcon,
   BookmarkPlusIcon,
+  CheckIcon,
   ChevronRightIcon,
   FileIcon,
   PlayIcon,
@@ -314,11 +316,11 @@ function PathCell({
 /** The stacks a workflow needs, pinned by image(+digest) or version. */
 const REQ_STATUS: Record<
   NonNullable<StackRequirement['status']>,
-  { icon: string; cls: string }
+  { icon: ReactNode; cls: string }
 > = {
-  ok: { icon: '✓', cls: 'ok' },
-  missing: { icon: '✗', cls: 'missing' },
-  mismatch: { icon: '⚠', cls: 'mismatch' },
+  ok: { icon: <CheckIcon size={12} />, cls: 'ok' },
+  missing: { icon: <XIcon size={12} />, cls: 'missing' },
+  mismatch: { icon: <AlertIcon size={12} />, cls: 'mismatch' },
 }
 
 function Requirements({ requires }: { requires: StackRequirement[] }) {
@@ -1409,7 +1411,16 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                   <span
                     className={`wf-batch-status ${verdict ? (verdict.ok ? (warn ? 'warn' : 'ok') : 'fail') : ''}`}
                   >
-                    {verdict ? (verdict.ok ? (warn ? '⚠' : '✓') : '✗') : ''}
+                    {verdict &&
+                      (verdict.ok ? (
+                        warn ? (
+                          <AlertIcon size={12} />
+                        ) : (
+                          <CheckIcon size={12} />
+                        )
+                      ) : (
+                        <XIcon size={12} />
+                      ))}
                   </span>
                   <button
                     type="button"

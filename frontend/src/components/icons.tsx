@@ -210,6 +210,52 @@ export function ChevronRightIcon(props: IconProps) {
   )
 }
 
+export function ChevronDownIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M6 9l6 6 6-6" />
+    </Icon>
+  )
+}
+
+export function ChevronUpIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M6 15l6-6 6 6" />
+    </Icon>
+  )
+}
+
+/** A tick — done, present, allowed. */
+export function CheckIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M20 6L9 17l-5-5" />
+    </Icon>
+  )
+}
+
+/** A warning triangle — something to look at before going on. */
+export function AlertIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <path d="M12 17h.01" />
+    </Icon>
+  )
+}
+
+/** An arrow turning back on itself — rewind to an earlier point. */
+export function RewindIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <polyline points="1 4 1 10 7 10" />
+      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+    </Icon>
+  )
+}
+
 export function PencilIcon(props: IconProps) {
   return (
     <Icon {...props}>

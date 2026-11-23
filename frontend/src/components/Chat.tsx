@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -17,7 +18,15 @@ import type {
   ToolCallState,
 } from '../types'
 import { ChatsMenu } from './ChatsMenu'
-import { PlusIcon, ShieldIcon, XIcon } from './icons'
+import {
+  AlertIcon,
+  CheckIcon,
+  ChevronRightIcon,
+  PlusIcon,
+  RewindIcon,
+  ShieldIcon,
+  XIcon,
+} from './icons'
 
 // vibe-acp >= 2.14 sends a tool call's rawInput as a JSON-encoded *string*
 // (read/edit/write tools) rather than an object. Parse it back so the card
@@ -48,10 +57,10 @@ const TODO_TOOL = 'todo'
 // tool, not a step of the work. Noted, not carded.
 const TOOL_SEARCH = 'search_tool_functions'
 
-const TODO_MARK: Record<string, string> = {
-  completed: '✓',
-  in_progress: '▸',
-  cancelled: '✕',
+const TODO_MARK: Record<string, ReactNode> = {
+  completed: <CheckIcon size={12} />,
+  in_progress: <ChevronRightIcon size={12} />,
+  cancelled: <XIcon size={12} />,
   pending: '·',
 }
 
@@ -479,7 +488,7 @@ function PermissionCard({
           {problems.map((p, i) => (
             <li key={`${p.param}-${i}`} className={`path-${p.severity}`}>
               <span className="path-mark" aria-hidden="true">
-                {p.severity === 'error' ? '✕' : '!'}
+                {p.severity === 'error' ? <XIcon size={12} /> : <AlertIcon size={12} />}
               </span>
               <code className="path-param">{p.param}</code>
               <span className="path-note">
@@ -1140,7 +1149,7 @@ export const Chat = memo(function Chat({
                       aria-label="Rewind the chat to before this message"
                       onClick={() => void askRewind(mid)}
                     >
-                      ↺
+                      <RewindIcon />
                     </button>
                   )}
                   <div className="msg-avatar avatar-user">You</div>

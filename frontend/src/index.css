@@ -22,6 +22,13 @@
   --warn: #fbbf24;
   --mono: 'JetBrains Mono', ui-monospace, monospace;
   --sans: 'Inter', system-ui, sans-serif;
+  /* The icon family's chevron and tick for places CSS draws them (a disclosure
+     marker, a checkbox, a select): the shapes of components/icons.tsx at the
+     12px size. The first two are masks, coloured by the element; a select's
+     arrow is a background image, so its colour (--muted) is in the image. */
+  --icon-chevron-right: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 18l6-6-6-6'/%3E%3C/svg%3E");
+  --icon-check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6L9 17l-5-5'/%3E%3C/svg%3E");
+  --icon-chevron-down-muted: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2399a1b4' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   font-family: var(--sans);
   font-size: 14px;
   color-scheme: dark;
@@ -54,6 +61,64 @@ body,
 
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* A checkbox in the family: the toggle's fills and the icon set's tick, in place
+   of the browser's. Still an <input type="checkbox">. */
+input[type='checkbox'] {
+  appearance: none;
+  flex: none;
+  display: inline-grid;
+  place-content: center;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border: 1px solid var(--border2);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  vertical-align: -3px;
+  cursor: pointer;
+}
+
+input[type='checkbox']::before {
+  content: '';
+  width: 12px;
+  height: 12px;
+  background: #fff;
+  mask: var(--icon-check) center / 12px 12px no-repeat;
+  -webkit-mask: var(--icon-check) center / 12px 12px no-repeat;
+  opacity: 0;
+}
+
+input[type='checkbox']:checked {
+  background: var(--blue);
+  border-color: rgba(127, 168, 245, 0.35);
+}
+
+input[type='checkbox']:checked::before {
+  opacity: 1;
+}
+
+input[type='checkbox']:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+input[type='checkbox']:focus-visible {
+  outline: 2px solid var(--blue-xl);
+  outline-offset: 2px;
+}
+
+/* A select keeps the browser's list and loses its arrow for the family's
+   chevron. :not([multiple]) also lifts this above the one-class rules that
+   set a select's background and padding. */
+select:not([multiple]) {
+  appearance: none;
+  background-image: var(--icon-chevron-down-muted);
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 12px 12px;
+  padding-right: 26px;
 }
 
 button {
@@ -881,12 +946,6 @@ button:disabled {
   cursor: pointer;
 }
 
-.vs-check input {
-  accent-color: var(--blue-l);
-  width: 15px;
-  height: 15px;
-}
-
 .vs-select {
   background: var(--dark2);
   color: var(--text);
@@ -1195,8 +1254,9 @@ button:disabled {
   color: var(--muted2);
 }
 .data-sort {
-  margin-left: 6px;
-  font-size: 9px;
+  display: inline-flex;
+  margin-left: 4px;
+  vertical-align: -2px;
   color: var(--blue-xl);
 }
 .data-empty {
@@ -1249,9 +1309,14 @@ button:disabled {
   color: var(--text);
 }
 .json-caret {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
   width: 14px;
   color: var(--muted);
+}
+
+.json-caret.open svg {
+  transform: rotate(90deg);
 }
 .json-row {
   padding-left: 14px;
@@ -1570,8 +1635,11 @@ button:disabled {
   margin: 2px 0;
 }
 
+/* A task list's boxes are read-only (the renderer disables them); they show
+   their state at full strength all the same. */
 .bubble-ai li > input[type='checkbox'] {
   margin-right: 6px;
+  opacity: 1;
 }
 
 .bubble-ai blockquote {
@@ -1918,6 +1986,34 @@ button.model-name:hover {
   color: var(--text);
 }
 
+/* The family's chevron in place of the browser's triangle; it turns when the
+   row is open. */
+.tool-card summary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  list-style: none;
+}
+
+.tool-card summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-card summary::before {
+  content: '';
+  flex: none;
+  width: 12px;
+  height: 12px;
+  background: currentColor;
+  mask: var(--icon-chevron-right) center / 12px 12px no-repeat;
+  -webkit-mask: var(--icon-chevron-right) center / 12px 12px no-repeat;
+  transition: transform 0.12s ease;
+}
+
+.tool-card details[open] > summary::before {
+  transform: rotate(90deg);
+}
+
 .tool-group-call > details > summary {
   display: flex;
   align-items: center;
@@ -1927,8 +2023,9 @@ button.model-name:hover {
   font-size: 12.5px;
 }
 
-.tool-group-call > details > summary::-webkit-details-marker {
-  display: none;
+/* A call's row leads with its status dot, as before, not a chevron. */
+.tool-group-call > details > summary::before {
+  content: none;
 }
 
 .tool-group-call > details > summary .status-dot {
@@ -2094,6 +2191,7 @@ button.model-name:hover {
   flex-direction: column;
   gap: 3px;
   font-size: 11.5px;
+  line-height: 16px;
 }
 
 .approval-paths li {
@@ -2103,11 +2201,16 @@ button.model-name:hover {
   min-width: 0;
 }
 
+/* An icon now, not a character: a box as tall as the line beside it, with the
+   icon centred in it, so it does not hang off the text baseline. */
 .path-mark {
   flex: none;
-  width: 11px;
-  text-align: center;
-  font-weight: 700;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 16px;
 }
 
 .path-param {
@@ -2913,11 +3016,9 @@ textarea.wf-input {
 }
 
 .wf-req-status {
-  display: inline-block;
-  width: 1em;
+  display: inline-flex;
   margin-right: 5px;
-  font-weight: 700;
-  text-align: center;
+  vertical-align: -2px;
 }
 
 .wf-req-pin {
@@ -3409,11 +3510,12 @@ textarea.wf-input {
 
 /* Per-row pre-flight verdict in the run editor (✓ ready, ⚠ overwrite, ✗ missing). */
 .wf-batch-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 16px;
+  height: 16px;
   flex: none;
-  text-align: center;
-  font-size: 12px;
-  line-height: 16px;
 }
 
 .wf-batch-status.ok {
@@ -3860,8 +3962,12 @@ textarea.wf-input {
 
 .plan-mark {
   flex: none;
-  width: 11px;
-  text-align: center;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 18px;
   font-weight: 700;
   color: var(--muted);
 }
@@ -4117,6 +4223,10 @@ textarea.wf-input {
 
 .ext-mcp-consent li {
   margin-bottom: 8px;
+}
+
+.ext-mcp-understood input {
+  margin-top: 1px;
 }
 
 .ext-mcp-understood {

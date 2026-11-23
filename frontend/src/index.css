@@ -77,6 +77,14 @@ button:hover {
   border-color: rgba(255, 255, 255, 0.22);
 }
 
+/* A button that cannot be used says so, whatever its class: dimmed, and out of
+   the pointer's reach so none of the hover rules below can light it up. */
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+  pointer-events: none;
+}
+
 .btn-primary {
   background: var(--blue);
   border-color: rgba(43, 79, 163, 0.45);
@@ -2243,6 +2251,11 @@ button.model-name:hover {
 
 .settings-row.disabled {
   opacity: 0.45;
+}
+
+/* The row is already dimmed as a whole; its switch does not dim twice. */
+.settings-row.disabled .toggle:disabled {
+  opacity: 1;
 }
 
 /* Whole-pixel line boxes. With `normal` (≈1.2 → 15.6px) and 11.5px × 1.5

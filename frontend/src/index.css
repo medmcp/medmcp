@@ -15,6 +15,11 @@
   --card2: #1e2333;
   --border: rgba(255, 255, 255, 0.07);
   --border2: rgba(255, 255, 255, 0.12);
+  /* The edge of a field, a select, a checkbox or a filter chip: often the only
+     thing that says it is one, so it is 3:1 against the surface it sits on
+     (3.5:1 on each of the four), where --border2 is 1.4:1. Hairlines between
+     panels and rows stay on --border / --border2. */
+  --control-border: rgba(255, 255, 255, 0.38);
   --muted: #99a1b4;
   --muted2: #c6ccdb;
   --text: #e4e8f0;
@@ -73,7 +78,7 @@ input[type='checkbox'] {
   width: 16px;
   height: 16px;
   margin: 0;
-  border: 1px solid var(--border2);
+  border: 1px solid var(--control-border);
   border-radius: 4px;
   background: rgba(255, 255, 255, 0.04);
   vertical-align: -3px;
@@ -949,7 +954,7 @@ button:disabled {
 .vs-select {
   background: var(--dark2);
   color: var(--text);
-  border: 1px solid var(--border2);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   padding: 3px 8px;
   font-size: 12px;
@@ -1873,7 +1878,7 @@ button.model-name:hover {
   resize: none;
   background: var(--card);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 10px;
   padding: 9px 14px;
   font: inherit;
@@ -1888,7 +1893,7 @@ button.model-name:hover {
 
 .chat-input-row textarea:focus {
   outline: none;
-  border-color: rgba(127, 168, 245, 0.4);
+  border-color: var(--blue-xl);
 }
 
 .chat-input-row button {
@@ -2323,7 +2328,7 @@ button.model-name:hover {
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--blue-l);
+  color: var(--blue-xl);
   margin: 20px 0 4px;
 }
 
@@ -2353,7 +2358,7 @@ button.model-name:hover {
 }
 
 .settings-advanced-toggle.open {
-  color: var(--blue-l);
+  color: var(--blue-xl);
 }
 
 .settings-advanced-toggle:hover {
@@ -2937,7 +2942,7 @@ button.model-name:hover {
   font-family: var(--mono);
   background: var(--dark2);
   color: var(--text);
-  border: 1px solid var(--border2);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   padding: 6px 9px;
   width: 100%;
@@ -3033,7 +3038,7 @@ textarea.wf-input {
 }
 
 .wf-req-status.missing {
-  color: var(--red);
+  color: var(--red-tint);
 }
 
 .wf-req-status.mismatch {
@@ -3219,7 +3224,7 @@ textarea.wf-input {
   font-family: var(--mono);
   background: var(--dark2);
   color: var(--text);
-  border: 1px solid var(--border2);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   padding: 5px 8px;
 }
@@ -3757,7 +3762,7 @@ textarea.wf-input {
   flex: 1 1 220px;
   min-width: 0;
   background: var(--card);
-  border: 1px solid var(--border2);
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   color: var(--text);
   font-family: inherit;
@@ -3780,7 +3785,7 @@ textarea.wf-input {
   align-items: center;
   gap: 6px;
   background: transparent;
-  border: 1px solid var(--border2);
+  border: 1px solid var(--control-border);
   border-radius: 999px;
   color: var(--muted);
   cursor: pointer;
@@ -4744,7 +4749,7 @@ textarea.wf-input {
   width: 100%;
   box-sizing: border-box;
   background: var(--dark);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   padding: 3px 6px;
   color: var(--text);
@@ -4807,7 +4812,7 @@ textarea.wf-input {
 .label-legend-search {
   margin: 6px 8px 2px;
   background: var(--dark);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   padding: 4px 8px;
   color: var(--text);
@@ -4932,7 +4937,7 @@ textarea.wf-input {
   margin-top: 14px;
   padding: 8px 10px;
   background: var(--dark2);
-  border: 1px solid var(--border2);
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   color: var(--text);
   font: 13px/16px var(--mono);

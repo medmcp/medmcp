@@ -32,3 +32,11 @@ jobs:
           # Rootful daemon on the runner.
           XDG_RUNTIME_DIR: /var/run
         run: uv run python tests/e2e/isolation.py --image medmcp-core:dev
+      - name: Schema-invalid stack call is turned back
+        env:
+          XDG_RUNTIME_DIR: /var/run
+        run: uv run python tests/e2e/invalid_args.py --image medmcp-core:dev
+      - name: Denial reason reaches the model
+        env:
+          XDG_RUNTIME_DIR: /var/run
+        run: uv run python tests/e2e/denial_reason.py --image medmcp-core:dev

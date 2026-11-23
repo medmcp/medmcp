@@ -553,7 +553,7 @@ const ChatInput = memo(function ChatInput({
       {/* What "this image" will resolve to. The server appends the open file to
           the prompt as a workspace-context note and strips it from the
           transcript, so without this the pointer is invisible — "segment this"
-          would act on whatever happened to be open. ✕ sends the next prompt
+          would act on whatever happened to be open. ✕ sends prompts
           without it. The line keeps its height when empty, so the message box
           never moves when a file is opened, dropped or sent. */}
       <div className="chat-viewing">
@@ -565,7 +565,7 @@ const ChatInput = memo(function ChatInput({
             </span>
             <button
               className="btn-icon chat-viewing-clear"
-              aria-label="Don't send this file with the next message"
+              aria-label="Don't send this file with my messages"
               onClick={onClearContext}
             >
               <XIcon size={12} />
@@ -637,9 +637,8 @@ export const Chat = memo(function Chat({
     busy: boolean
   } | null>(null)
   // The file the next prompt resolves "this image" to: the one in the viewer,
-  // unless the reader dropped it. A drop holds for one prompt and for that
-  // opening of the file; sending, or opening a file (the same one included),
-  // arms it again.
+  // unless the reader dropped it. A drop holds until a file is opened again
+  // (the same one included); sending a message does not bring it back.
   const [dropped, setDropped] = useState<{ path: string; seq: number } | null>(null)
   const contextPath =
     viewedPath && !(dropped?.path === viewedPath && dropped.seq === viewedSeq) ? viewedPath : null
@@ -964,7 +963,6 @@ export const Chat = memo(function Chat({
       turnLiveRef.current = true
       followRef.current = { ...followRef.current, following: true }
       socketRef.current?.sendPrompt(text, contextPath)
-      setDropped(null)
       if (sessionIdRef.current) onPromptedSession?.(sessionIdRef.current)
     },
     [contextPath, onPromptedSession],

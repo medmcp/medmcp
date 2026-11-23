@@ -28,6 +28,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Explorer: an uploaded `.zip` can be unpacked on the server; an archive that would replace an existing file is refused.
 - Chat: the file "this image" refers to is named above the message box; ✕ leaves it out of the next message.
 - Chat: the message box says which open file "this image" means (Viewing t1.nii.gz), and ✕ leaves it out of the next message.
+- Chat: the message box says which open file "this image" means (Viewing t1.nii.gz); ✕ leaves it out until you open a file again.
 - Chat: a running tool call shows how long it has been running.
 - Chat: the browser tab is marked "(!)" while an approval is waiting.
 

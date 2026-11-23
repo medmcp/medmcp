@@ -229,9 +229,9 @@ button:disabled {
   align-items: center;
   justify-content: center;
   flex: none;
-  /* A fixed, even square: 24 around a 16px icon, 20 around a 12px one, so the
-     icon is centred on whole pixels at either size (3px clear of the 1px
-     border). Sized by padding, the box followed the icon and came out odd. */
+  /* A fixed, even square: 24 around a 14px icon, 20 around a 12px one, so the
+     icon is centred on whole pixels at either size. Sized by padding, the box
+     followed the icon and came out odd. */
   width: 24px;
   height: 24px;
   padding: 0;

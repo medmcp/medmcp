@@ -2,11 +2,11 @@ import type { SVGProps } from 'react'
 
 /** Small monochrome stroke icons (feather-style), sized for inline UI use.
  *
- *  Two sizes only: 16 in a button, 12 beside small text. The stroke is derived
- *  from the size, so a line is the same 1.1px at both; a fixed stroke on the
- *  24-unit grid drew the small icons a quarter lighter than the large ones. */
+ *  Two sizes only: 14 in a button, 12 beside small text. The stroke is derived
+ *  from the size, so a line is the same 1.4px at both: heavy enough to read on a
+ *  standard-resolution screen, where a 1px-ish line antialiases to grey. */
 
-type IconSize = 12 | 16
+type IconSize = 12 | 14
 
 type IconProps = Omit<SVGProps<SVGSVGElement>, 'strokeWidth'> & {
   size?: IconSize
@@ -15,9 +15,9 @@ type IconProps = Omit<SVGProps<SVGSVGElement>, 'strokeWidth'> & {
 }
 
 /** The rendered line weight, in pixels, at either size. */
-const STROKE_PX = 1.1
+const STROKE_PX = 1.4
 
-function Icon({ size = 16, grid = 24, children, ...props }: IconProps) {
+function Icon({ size = 14, grid = 24, children, ...props }: IconProps) {
   return (
     <svg
       width={size}
@@ -377,7 +377,7 @@ export function ListIcon(props: IconProps) {
 
 /** A question mark — the list of shortcuts and controls. Drawn rather than
  *  typed, so it is centred in its box whatever the font's metrics are. The
- *  view box is cropped around the glyph: at size 16 one unit is one pixel. */
+ *  view box is cropped around the glyph, and `grid` keeps its line the family weight. */
 export function HelpIcon(props: IconProps) {
   return (
     <Icon grid={16} viewBox="4 4 16 16" {...props}>

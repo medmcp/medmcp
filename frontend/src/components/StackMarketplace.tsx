@@ -11,6 +11,7 @@ import {
 import type { CatalogEntry, JobInfo, SettingsState } from '../types'
 import { XIcon } from './icons'
 import { Toggle } from './SettingsControls'
+import { modalLayer } from '../modalLayer'
 
 interface StackMarketplaceProps {
   open: boolean
@@ -304,7 +305,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
   return (
     <>
       <div className="modal-backdrop" onClick={onClose} />
-      <div className="market" role="dialog">
+      <div ref={modalLayer} className="market" role="dialog" aria-modal="true" aria-label="Tool stacks">
         <div className="panel-header">
           <span>Tool stacks</span>
           <span className="panel-actions">
@@ -453,6 +454,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
         {consent && (
           <div className="modal-backdrop" onClick={() => setConsent(null)}>
             <div
+              ref={modalLayer}
               className="modal ext-mcp-consent"
               role="dialog"
               aria-modal="true"

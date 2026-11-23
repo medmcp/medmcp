@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { modalLayer } from '../modalLayer'
 import { XIcon } from './icons'
 
 interface ShortcutsWindowProps {
@@ -100,22 +101,23 @@ export function ShortcutsWindow({ open, onClose }: ShortcutsWindowProps) {
   }, [open, onClose])
 
   // Focus moves into the window while it is open, so the keyboard scrolls the
-  // list rather than driving what is behind the backdrop, and goes back to
-  // where it came from (the ? button, or the viewer) on close.
+  // list rather than driving what is behind the backdrop. The layer hands it
+  // back to where it came from (the ? button, or the viewer) on close.
   useEffect(() => {
-    if (!open) return
-    const before = document.activeElement
-    winRef.current?.focus()
-    return () => {
-      if (before instanceof HTMLElement) before.focus()
-    }
+    if (open) winRef.current?.focus()
   }, [open])
 
   if (!open) return null
   return (
     <>
       <div className="modal-backdrop" onClick={onClose} />
-      <div className="extwin scwin" role="dialog" aria-label="Help">
+      <div
+        ref={modalLayer}
+        className="extwin scwin"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Help"
+      >
         <div className="panel-header">
           <span>Help</span>
           <span className="panel-actions">

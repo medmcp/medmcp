@@ -11,6 +11,7 @@ import {
 } from '../api'
 import type { ExternalMcpState, ExternalServer } from '../types'
 import { Row, Toggle } from './SettingsControls'
+import { modalLayer } from '../modalLayer'
 
 /**
  * The body of the external-MCP window: wiring third-party MCP services into the
@@ -248,6 +249,7 @@ export function ExternalMcpSection({ onChanged }: ExternalMcpSectionProps) {
             onClick={() => setConsenting(false)}
           >
             <div
+              ref={modalLayer}
               className="modal ext-mcp-consent"
               role="dialog"
               aria-modal="true"

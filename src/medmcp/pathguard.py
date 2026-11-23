@@ -34,9 +34,10 @@ check before the hook lets an invalid call through when the schema nests a
 model as the ``$defs``/``$ref`` pydantic writes.) A denial is the one answer
 that skips that check, so the guard validates each stack call against the
 schema the stack pool last listed (the broker's ``tool_schema`` op) and denies
-with what is wrong and what the argument takes. That denial is not capped:
-letting an invalid call through ends the turn. No schema known, no core to ask,
-or anything going wrong while checking allows as before.
+with what is wrong and what the argument takes. That denial is capped like a
+path denial: the same mistake repeated ``_MAX_DENIALS`` times goes through, and
+the turn ends where a person sees it. No schema known, no core to ask, or
+anything going wrong while checking allows as before.
 
 The hook contract is "exit 0 and print a JSON object on stdout", so every failure
 path here still prints ``{"decision": "allow"}``: a broken guard must never be
@@ -58,14 +59,14 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
-
-from jsonschema import Draft202012Validator, exceptions, validators
-from jsonschema.exceptions import ValidationError
+from typing import TYPE_CHECKING, Any, cast
 
 from medmcp import brokerclient, harness
 from medmcp.pathcheck import PathFinding, check_tool_call_paths
 from medmcp.statefile import atomic_write_json, read_json
+
+if TYPE_CHECKING:
+    from jsonschema.exceptions import ValidationError
 
 # Refusals of the same call before the hook gives up and lets a human look at it.
 _MAX_DENIALS = 2
@@ -252,7 +253,7 @@ def _where(path: list[object]) -> str:
     return out or "(arguments)"
 
 
-def _holds(error: ValidationError, target: ValidationError) -> bool:
+def _holds(error: "ValidationError", target: "ValidationError") -> bool:
     """True if *target* is *error* or one of the errors under it (``anyOf`` branches)."""
     return error is target or any(_holds(sub, target) for sub in error.context)
 
@@ -264,6 +265,9 @@ def schema_problem(tool: str, tool_input: object, schema: dict[str, Any]) -> str
     argument it sits under takes -- the top-level error's schema, so a value that
     fits none of an ``anyOf`` is shown all the shapes it may take.
     """
+    # Imported here: a hook that cannot import it must still answer "allow".
+    from jsonschema import Draft202012Validator, exceptions, validators
+
     validator = validators.validator_for(schema, default=Draft202012Validator)(schema)
     errors = list(validator.iter_errors(cast("Any", tool_input)))
     if not errors:
@@ -278,8 +282,12 @@ def schema_problem(tool: str, tool_input: object, schema: dict[str, Any]) -> str
         expected = f"{_where(list(top.absolute_path))} takes " + schema_hint(top.schema, schema)
     if len(expected) > _HINT_CHARS:
         expected = expected[: _HINT_CHARS - 1] + "…"
+    # The message quotes the offending value, which the model wrote and may be long.
+    message = deep.message
+    if len(message) > _HINT_CHARS:
+        message = message[: _HINT_CHARS - 1] + "…"
     return (
-        f"{tool} arguments are invalid: {_where(list(deep.absolute_path))}: {deep.message}. "
+        f"{tool} arguments are invalid: {_where(list(deep.absolute_path))}: {message}. "
         f"Expected: {expected}.\n\n"
         "Nobody refused this call and the tool did not run. Fix only this argument, "
         f"keep every other argument exactly as it was, and call {tool} again now."
@@ -301,18 +309,41 @@ def _known_schema(route: str) -> dict[str, Any] | None:
     return cast("dict[str, Any]", schema) if isinstance(schema, dict) else None
 
 
-def check_schema(route: str, tool_input: object) -> dict[str, Any] | None:
-    """A denial for a call its tool's schema rejects; ``None`` to go on (also on any error)."""
+def check_schema(route: str, tool_input: object, session_id: str = "") -> dict[str, Any] | None:
+    """The answer for a call its tool's schema rejects; ``None`` to go on (also on any error).
+
+    A denial with what is wrong, until the same mistake has been turned back
+    ``_MAX_DENIALS`` times in this chat: then the guard stands aside, as it does
+    for a path, so a model that is not converging surfaces instead of looping.
+    """
     try:
         schema = _known_schema(route)
         if schema is None:
             return None
         tool = route.partition(".")[2] or route
         problem = schema_problem(tool, tool_input, schema)
+        if not problem:
+            return None
+        ledger_file = _ledger_path()
+        ledger = _load_ledger(ledger_file)
+        # Keyed on the complaint, so a different mistake gets its own budget.
+        complaint = problem.partition("\n")[0].encode("utf-8", "replace")
+        key = f"{session_id}:{route}:schema:{hashlib.sha256(complaint).hexdigest()[:16]}"
+        seen = ledger.get(key, 0)
+        if seen >= _MAX_DENIALS:
+            return {
+                "decision": "allow",
+                "system_message": (
+                    f"path guard: allowing {tool} after {seen} refusals — "
+                    "the agent did not correct its arguments"
+                ),
+            }
+        ledger[key] = seen + 1
+        _save_ledger(ledger_file, ledger)
     except Exception as exc:
         print(f"medmcp-pathguard: schema check skipped: {exc}", file=sys.stderr)
         return None
-    return {"decision": "deny", "reason": problem} if problem else None
+    return {"decision": "deny", "reason": problem}
 
 
 def decide(invocation: dict[str, Any]) -> dict[str, Any]:
@@ -326,9 +357,9 @@ def decide(invocation: dict[str, Any]) -> dict[str, Any]:
     tool_input = invocation.get("tool_input")
 
     # First: an invalid call let through here would end the turn, not fail the call.
-    denial = check_schema(str(invocation.get("tool_name") or ""), tool_input)
-    if denial is not None:
-        return denial
+    answer = check_schema(str(invocation.get("tool_name") or ""), tool_input, session_id)
+    if answer is not None:
+        return answer
 
     # The agent's cwd is the workspace (session/new is started there); the env var
     # is preferred so the two cannot disagree if that ever changes.

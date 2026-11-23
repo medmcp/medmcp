@@ -393,11 +393,15 @@ class BackendPool:
         if self._known.get(name) == listed:
             return
         self._known[name] = listed
-        if self._schema_cache is not None:
-            try:
-                atomic_write_json(self._schema_cache, cast("JsonDict", self._known))
-            except OSError as exc:
-                log.debug("could not write the tool schema cache: %s", exc)
+        self._save_schemas()
+
+    def _save_schemas(self) -> None:
+        if self._schema_cache is None:
+            return
+        try:
+            atomic_write_json(self._schema_cache, cast("JsonDict", self._known))
+        except OSError as exc:
+            log.debug("could not write the tool schema cache: %s", exc)
 
     def _load_schemas(self) -> dict[str, dict[str, JsonDict]]:
         data = read_json(self._schema_cache) if self._schema_cache is not None else None
@@ -430,8 +434,14 @@ class BackendPool:
         return results
 
     async def evict(self, name: str) -> None:
-        """Tear down a backend now (deactivation), freeing its RAM/VRAM."""
+        """Tear down a backend now (deactivation), freeing its RAM/VRAM.
+
+        Its remembered tool list goes too: a stack that comes back, possibly as a
+        new image, is listed again before its schemas are trusted.
+        """
         await self._drop(name)
+        if self._known.pop(name, None) is not None:
+            self._save_schemas()
 
     def warm_names(self) -> list[str]:
         """Names of currently-live backends."""

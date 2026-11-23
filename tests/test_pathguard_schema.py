@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -168,12 +169,37 @@ class TestDecide:
         _known(monkeypatch, {"type": "object", "properties": {"x": {"pattern": "("}}})
         assert pathguard.decide(_invocation({"x": "a"})) == {"decision": "allow"}
 
-    def test_the_denial_is_not_capped(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Unlike a path denial, giving up here would end the turn; the ledger stays out of it."""
+    def test_the_same_mistake_is_turned_back_only_so_often(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After ``_MAX_DENIALS`` the guard stands aside, as it does for a path."""
         _known(monkeypatch, PICK)
-        for _ in range(pathguard._MAX_DENIALS + 2):
+        for _ in range(pathguard._MAX_DENIALS):
             assert pathguard.decide(_invocation(NESTED))["decision"] == "deny"
-        assert not pathguard._ledger_path().exists()
+        answer = pathguard.decide(_invocation(NESTED))
+        assert answer["decision"] == "allow"
+        assert "did not correct its arguments" in answer["system_message"]
+
+    def test_another_chat_has_its_own_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The cap counts per chat."""
+        _known(monkeypatch, PICK)
+        for _ in range(pathguard._MAX_DENIALS):
+            pathguard.decide(_invocation(NESTED))
+        other = {**_invocation(NESTED), "session_id": "another-chat"}
+        assert pathguard.decide(other)["decision"] == "deny"
+
+    def test_a_long_offending_value_is_clipped(self) -> None:
+        """The reason quotes the model's value; a huge one does not come back whole."""
+        schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
+        problem = pathguard.schema_problem("pick", {"n": "x" * 5000}, schema)
+        assert problem is not None
+        assert len(problem) < 1200
+
+    def test_a_missing_validator_library_allows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The guard answers "allow" when jsonschema cannot be imported."""
+        _known(monkeypatch, PICK)
+        monkeypatch.setitem(sys.modules, "jsonschema", None)
+        assert pathguard.decide(_invocation(NESTED)) == {"decision": "allow"}
 
     def test_harness_tools_are_never_looked_up(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The harness checks its own tools; the core is not asked about them."""
@@ -268,14 +294,14 @@ async def test_the_guard_asks_the_core_over_the_broker(
 class TestKnownTools:
     """The pool keeps each stack's input schemas once listed, without warming it again."""
 
-    async def test_listed_tools_are_kept_after_eviction_and_restart(self, tmp_path: Path) -> None:
+    async def test_listed_tools_are_kept_after_a_reap_and_restart(self, tmp_path: Path) -> None:
         """Listing records them (warmup left out); a new pool reads them back from the file."""
         cache = tmp_path / "tool_schemas.json"
         pool = BackendPool(resolve_spec=resolver({"fake": fake_spec("fake")}), schema_cache=cache)
         try:
             assert pool.known_tools("fake") is None
             await pool.list_tools("fake")
-            await pool.evict("fake")
+            await pool._drop("fake")  # reaped while idle; the stack stays active
             known = pool.known_tools("fake")
             assert known is not None
             assert "echo" in known

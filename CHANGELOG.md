@@ -39,7 +39,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Chats: a branched chat no longer shows every message twice.
 - Chats: opening a chat in a second tab starts a new chat instead of attaching to the same one (approvals asked twice, then "App server client closed").
 - Chats: reloading the page, pressing Stop or sending a new message while an approval is open no longer breaks the chat ("A turn is already running", the chat missing from the list).
-- Chat: a stack call whose arguments the tool's schema rejects (a list inside a list where the tool takes a string or a list of strings) is turned back to the assistant by the path guard, with what is wrong and what the argument takes. Before, vibe 2.26 rejected the call after the guard had let it through and the whole turn ended with `Core rejected durable input`. Reproduce with `just e2e-invalid-args IMAGE`.
+- Chat: a stack call with arguments the tool does not accept is turned back to the assistant with what is wrong; before, the whole turn ended with `Core rejected durable input`.
 - Stacks: reinstalling a stack that is already running (a new image under the same name) now stops the running copy, so the next call uses the new image. Before, the old copy kept serving its old tools until it went idle.
 - Stacks: after a stack is updated or reinstalled under the same image name, the assistant sees its new tools. Before, it kept the previous tool list for up to a day, so a newly added tool such as `check_dataset` could not be found.
 - Stacks: installing a stack from the catalog or by image works again with `docker compose`; since 0.7.2 the docker guard refused the image lookup.
@@ -48,7 +48,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Workflows: a plan no longer fails to load for a workflow whose output folder has a default.
 - Workflows: a run lists the files it wrote when the output path was chosen by the caller; it showed none before.
 - Provenance: the record of a chat run from an image names the commit the image was built from; it was empty. Images must be built with `MEDMCP_REVISION`, as the release and `:main` builds are.
-- Chat: when the path guard turns back a stack call (an input file that does not exist), a local model now reads why. Under vibe 2.26.1 the call, made from `run_typescript`, only reported "Tool execution was skipped by Runtime policy"; the LLM shim now adds the guard's reason to that result. The reason is matched to the call by tool name and recency (the oldest unclaimed denial of that tool from the last two minutes). Cloud models do not go through the shim and still see only the skip. Reproduce with `just e2e-denial-reason IMAGE`.
+- Chat: a local model is told why the path guard turned a stack call back (a file that does not exist); before, it only read that the call was skipped.
 
 ### Security
 

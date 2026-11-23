@@ -30,6 +30,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Chat: the message box says which open file "this image" means (Viewing t1.nii.gz), and ✕ leaves it out of the next message.
 - Chat: the message box says which open file "this image" means (Viewing t1.nii.gz); ✕ leaves it out until you open a file again.
 - Chat: a running tool call shows how long it has been running.
+- Chat: "Thinking…" shows while the assistant works before its first word.
 - Chat: the browser tab is marked "(!)" while an approval is waiting.
 
 ### Changed

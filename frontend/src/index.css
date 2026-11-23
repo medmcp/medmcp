@@ -1568,10 +1568,12 @@ button:hover {
   font-size: 12.5px;
 }
 
+/* Shown while the model works before anything is visible (a local model can
+   reason for many seconds before its first word or a plan card). */
 .thinking {
   color: var(--muted);
-  letter-spacing: 4px;
-  font-size: 10px;
+  font-size: 13px;
+  line-height: 16px;
   margin-left: 38px;
   animation: blink 1.6s ease-in-out infinite;
 }

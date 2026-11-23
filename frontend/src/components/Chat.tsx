@@ -1204,7 +1204,7 @@ export const Chat = memo(function Chat({
           )
         })}
         {permission && <PermissionCard perm={permission} onDecide={decide} />}
-        {busy && !permission && <div className="thinking">●●●</div>}
+        {busy && !permission && <div className="thinking">Thinking…</div>}
       </div>
       <ChatInput
         busy={busy}

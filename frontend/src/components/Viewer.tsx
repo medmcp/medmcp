@@ -211,16 +211,22 @@ async function fetchVolume(url: string, gzipped: boolean): Promise<CachedVolume>
 
 /** Load *path* into `nv` as the base volume (replace = true) or as an added
  *  overlay, from the volume cache. Niivue takes the file type from `name`.
+ *  Returns the file's ETag ('' when unknown), which changes when a tool
+ *  rewrites the file.
  *
  *  Analyze pairs (`.hdr` + `.img`) bypass the cache: Niivue finds the sibling
  *  by rewriting the URL's extension, which a buffer has none of. */
-async function loadVolume(nv: Niivue, path: string, opts: { opacity?: number; replace: boolean }) {
+async function loadVolume(
+  nv: Niivue,
+  path: string,
+  opts: { opacity?: number; replace: boolean },
+): Promise<string> {
   const name = path.split('/').pop() ?? path
   if (/\.(hdr|img)$/i.test(name)) {
     const url = rawUrl(path)
     if (opts.replace) await nv.loadVolumes([{ url, name }])
     else await nv.addVolumeFromUrl({ url, name, opacity: opts.opacity ?? 1 })
-    return
+    return ''
   }
   const entry = await fetchVolume(rawUrl(path), /\.nii\.gz$/i.test(name))
   // Niivue reads `buffer` straight through and takes the format from `name`,
@@ -232,6 +238,7 @@ async function loadVolume(nv: Niivue, path: string, opts: { opacity?: number; re
   const as = entry.inflated ? name.replace(/\.gz$/i, '') : name
   if (opts.replace) nv.volumes = []
   await nv.addVolumeFromUrl({ url: as, name: as, buffer: entry.buffer, opacity: opts.opacity ?? 1 })
+  return entry.etag
 }
 
 /** What the loaded overlay turned out to be — derived from its data once. */
@@ -344,39 +351,61 @@ function applyViewerSettings(nv: Niivue, s: ViewerSettings, labelOverlay: boolea
 const INITIAL_AZIMUTH = 110
 const INITIAL_ELEVATION = 10
 
-/** Zoom step and limits. Niivue's own wheel zoom — unreachable here, its
- *  branch needs DRAG_MODE.pan — moves 10% a notch and rounds to one decimal;
- *  the same step keeps the two in step if that path is ever enabled. */
-const ZOOM_STEP = 0.1
+/** Zoom limits, and the factor one key press applies. */
 const ZOOM_MIN = 0.5
 const ZOOM_MAX = 8
+const ZOOM_KEY_FACTOR = 1.1
 
-/** Back to 1x with the pan centred. Leaves the crosshair and the 3D angle alone;
- *  the caller redraws. */
-function clearZoom(nv: Niivue): void {
-  nv.scene.pan2Dxyzmm = [0, 0, 0, 1]
-  nv.scene.volScaleMultiplier = 1
+/** Wheel zoom follows `deltaY`: a trackpad pinch arrives as dozens of events of
+ *  a few px each, a mouse notch as one of about 100, so a fixed step per event
+ *  would throw a pinch straight to the limit. It is 1% per px, capped per
+ *  event so that a notch is about one key press. */
+const ZOOM_PER_WHEEL_PX = 0.01
+const WHEEL_PX_PER_EVENT_MAX = 10
+/** Pixels per unit of `deltaY` for WheelEvent.deltaMode 0 (pixel), 1 (line), 2 (page). */
+const WHEEL_DELTA_PX = [1, 33, 800]
+
+/** The zoom factor for one wheel event; 1 (no change) when it carries no
+ *  vertical movement, as a ctrl + horizontal scroll does. */
+function wheelZoomFactor(e: WheelEvent): number {
+  const px = e.deltaY * (WHEEL_DELTA_PX[e.deltaMode] ?? 1)
+  const bounded = Math.max(-WHEEL_PX_PER_EVENT_MAX, Math.min(WHEEL_PX_PER_EVENT_MAX, px))
+  return Math.exp(-bounded * ZOOM_PER_WHEEL_PX)
 }
 
-/** Zoom the slices, and the 3D render with them, about the crosshair.
+/** Slices back to 1x with the pan centred. Leaves the crosshair and the 3D
+ *  render alone; the caller redraws. */
+function clearZoom(nv: Niivue): void {
+  nv.scene.pan2Dxyzmm = [0, 0, 0, 1]
+}
+
+/** Zoom the slices about the crosshair. The 3D render keeps its own scale
+ *  (`volScaleMultiplier`, which a plain wheel over that tile changes).
  *
- * `pan2Dxyzmm[3]` is the 2D zoom factor and `volScaleMultiplier` the 3D one.
- * The pan is shifted by the change in zoom times the crosshair's millimetre
- * position, so the structure under the crosshair stays put instead of the
- * volume growing out of a corner — the same correction Niivue applies on its
- * own zoom path. Returns the zoom in force afterwards.
+ * `pan2Dxyzmm[3]` is the 2D zoom factor. The pan is shifted by the change in
+ * zoom times the crosshair's millimetre position, so the structure under the
+ * crosshair stays put instead of the volume growing out of a corner — the same
+ * correction Niivue applies on its own zoom path. Returns the zoom in force
+ * afterwards.
  */
 function applyZoom(nv: Niivue, factor: number): number {
   const current = nv.scene.pan2Dxyzmm[3]
-  const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(current * factor * 10) / 10))
+  let next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, current * factor))
+  // Land on 1x exactly when a step comes within rounding of it, so zooming in
+  // and back out clears the readout.
+  if (Math.abs(next - 1) < 1e-6) next = 1
   if (next === current) return current
   const change = current - next
   const mm = nv.frac2mm(nv.scene.crosshairPos)
   nv.scene.pan2Dxyzmm[3] = next
-  nv.scene.volScaleMultiplier = next
   for (let i = 0; i < 3; i++) nv.scene.pan2Dxyzmm[i] += change * mm[i]
   nv.drawScene()
   return next
+}
+
+/** The zoom as the status bar shows it. */
+function zoomPercent(zoom: number): number {
+  return Math.round(zoom * 100)
 }
 
 /** Return pan, zoom, rotation, and slice position to their just-loaded state.
@@ -389,6 +418,7 @@ function applyZoom(nv: Niivue, factor: number): number {
  */
 function resetView(nv: Niivue): void {
   clearZoom(nv)
+  nv.scene.volScaleMultiplier = 1
   nv.scene.renderAzimuth = INITIAL_AZIMUTH
   nv.scene.renderElevation = INITIAL_ELEVATION
   nv.scene.crosshairPos = [0.5, 0.5, 0.5]
@@ -556,10 +586,11 @@ const lastWindowByPath = new Map<string, { min: number; max: number }>()
 /** The zoom and pan last left per file, for the same reason again: a reader who
  *  has zoomed into a vertebra and then nudges the panel separator should not
  *  have to find it twice. Saved when the view goes away, which is exactly when
- *  the remount happens. */
+ *  the remount happens, with the file's ETag: a pan is in the image's own
+ *  millimetres, so it is dropped once a tool has rewritten the file. */
 const lastViewByPath = new Map<
   string,
-  { pan: [number, number, number, number]; scale: number }
+  { pan: [number, number, number, number]; etag: string }
 >()
 
 type OverlayVol = {
@@ -707,9 +738,12 @@ function VolumeView({
     }
   }, [])
 
-  // Ctrl/Cmd + wheel zooms about the crosshair; a trackpad pinch reaches the
-  // page as exactly that, so pinch-to-zoom comes with it. A plain wheel is left
-  // for Niivue, which scrolls slices with it — what a reader expects.
+  // Ctrl/Cmd + wheel zooms the slices about the crosshair; a trackpad pinch
+  // reaches the page as exactly that, so pinch-to-zoom comes with it. A plain
+  // wheel is left for Niivue, which scrolls slices with it — what a reader
+  // expects — except during a pan drag, where Niivue would zoom on its own
+  // path, past the limits and behind the readout: there every wheel is
+  // swallowed.
   //
   // Bound natively rather than as onWheelCapture because React attaches `wheel`
   // as a passive listener, where preventDefault() is ignored — and without it
@@ -720,12 +754,18 @@ function VolumeView({
     const drop = dropRef.current
     if (!drop) return
     const onWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey && !e.metaKey) return
       const nv = nvRef.current
       if (!nv || nv.volumes.length === 0) return
+      const zooming = e.ctrlKey || e.metaKey
+      const panning = nv.uiData.activeDragMode === DRAG_MODE.pan
+      if (!zooming && !panning) return
       e.preventDefault()
       e.stopPropagation()
-      setZoom(applyZoom(nv, e.deltaY < 0 ? 1 + ZOOM_STEP : 1 - ZOOM_STEP))
+      // Not mid-drag either: the drag re-derives the pan from where it began,
+      // which would undo the shift that keeps the crosshair in place.
+      if (panning) return
+      const factor = wheelZoomFactor(e)
+      if (factor !== 1) setZoom(applyZoom(nv, factor))
     }
     drop.addEventListener('wheel', onWheel, { capture: true, passive: false })
     return () => drop.removeEventListener('wheel', onWheel, { capture: true })
@@ -931,6 +971,8 @@ function VolumeView({
       }
     }
     let cancelled = false
+    // The base file's validator, for the zoom/pan memory (see lastViewByPath).
+    let baseEtag = ''
     const load = async () => {
       setLoading(true)
       setLoadError(null)
@@ -947,12 +989,13 @@ function VolumeView({
         // the dropzone, whose handler owns the keys; wheel scrolling does not
         // need focus.
         canvas.removeAttribute('tabindex')
-        // Zoomed in, the reader has to be able to pan, and Niivue's defaults
-        // leave panning on no button at all (left draws the crosshair, right
-        // and middle change the window). Put it on the middle button and on
-        // shift/ctrl + left, keeping right-drag windowing, which the status
-        // bar's Window hint promises. Shift as well as ctrl because macOS
-        // turns a ctrl-click into a right-click.
+        // Zoomed in, the reader has to be able to pan. Niivue already pans on
+        // a middle-button drag whatever the drag mode, which a trackpad or a
+        // two-button mouse cannot do, so panning is also put on shift/ctrl +
+        // left. The middle and right buttons are spelled out as what they
+        // already did: right-drag windowing is what the status bar's Window
+        // hint promises. Shift as well as ctrl because macOS turns a
+        // ctrl-click into a right-click.
         nv.setMouseEventConfig({
           leftButton: {
             primary: DRAG_MODE.crosshair,
@@ -969,7 +1012,7 @@ function VolumeView({
         // instead of the viewer just appearing hung.
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
         if (cancelled) return
-        await loadVolume(nv, path, { replace: true })
+        baseEtag = await loadVolume(nv, path, { replace: true })
         if (cancelled) return
         applyViewerSettings(nv, settingsRef.current, overlayVolRef.current?.info.kind === 'label')
         const base = nv.volumes[0]
@@ -995,14 +1038,16 @@ function VolumeView({
           nv.updateGLVolume()
         }
         setWin({ min: base.cal_min ?? gmin, max: base.cal_max ?? gmax })
-        // Likewise the zoom and pan from before a rebuild.
+        // Likewise the zoom and pan from before a rebuild, unless the file
+        // has been rewritten since: they described the old image.
         const keptView = lastViewByPath.get(path)
-        if (keptView) {
+        if (keptView && keptView.etag === baseEtag) {
           const [px, py, pz, pzoom] = keptView.pan
           nv.scene.pan2Dxyzmm = [px, py, pz, pzoom]
-          nv.scene.volScaleMultiplier = keptView.scale
           setZoom(pzoom)
           nv.drawScene()
+        } else {
+          lastViewByPath.delete(path)
         }
         nv.createOnLocationChange()
         // Resume a 4D file on the frame it was last shown at.
@@ -1029,10 +1074,7 @@ function VolumeView({
       if (nv.volumes.length > 0) {
         const [px, py, pz, pzoom] = nv.scene.pan2Dxyzmm
         if (pzoom !== 1 || px !== 0 || py !== 0 || pz !== 0) {
-          lastViewByPath.set(path, {
-            pan: [px, py, pz, pzoom],
-            scale: nv.scene.volScaleMultiplier,
-          })
+          lastViewByPath.set(path, { pan: [px, py, pz, pzoom], etag: baseEtag })
         } else {
           lastViewByPath.delete(path)
         }
@@ -1155,7 +1197,7 @@ function VolumeView({
     // +/- zoom, 0 back to 1x. Bare keys: the modifier check above already
     // handed ctrl/cmd combinations back to the browser.
     if (e.key === '+' || e.key === '=' || e.key === '-') {
-      setZoom(applyZoom(nv, e.key === '-' ? 1 - ZOOM_STEP : 1 + ZOOM_STEP))
+      setZoom(applyZoom(nv, e.key === '-' ? 1 / ZOOM_KEY_FACTOR : ZOOM_KEY_FACTOR))
       e.preventDefault()
       return
     }
@@ -1416,10 +1458,10 @@ function VolumeView({
               </span>
             </span>
           )}
-          {zoom !== 1 && (
+          {zoomPercent(zoom) !== 100 && (
             <span className="st-item">
               <span className="st-key">Zoom</span>
-              <span className="st-val st-strong">{zoom.toFixed(1)}&times;</span>
+              <span className="st-val st-strong">{zoomPercent(zoom)}%</span>
             </span>
           )}
           <span className="status-spacer" />

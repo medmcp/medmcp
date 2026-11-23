@@ -59,6 +59,21 @@ class TestRawFiles:
         (workspace_root / "seg.nii.gz").write_bytes(b"v2-longer")
         assert client.head("/api/raw/seg.nii.gz").headers["etag"] != got.headers["etag"]
 
+    def test_optional_raw_answers_a_missing_file_with_204(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """An optional sidecar that is absent is not an error; the traversal guard still holds."""
+        assert client.get("/api/raw/seg_labels.csv").status_code == 404
+        missing = client.get("/api/raw/seg_labels.csv?optional=1")
+        assert missing.status_code == 204
+        assert missing.content == b""
+        (workspace_root / "seg_labels.csv").write_text("label,structure\n1,liver\n")
+        there = client.get("/api/raw/seg_labels.csv?optional=1")
+        assert there.status_code == 200
+        assert there.text == "label,structure\n1,liver\n"
+        outside = client.get("/api/raw/%2e%2e/%2e%2e/etc/passwd?optional=1")
+        assert outside.status_code not in (200, 204)
+
     def test_raw_answers_a_revalidation_with_304(
         self, workspace_root: Path, client: TestClient
     ) -> None:

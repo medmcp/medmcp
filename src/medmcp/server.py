@@ -734,7 +734,7 @@ def _if_none_match(header: str | None, etag: str) -> bool:
 
 
 @app.api_route("/api/raw/{rel_path:path}", methods=["GET", "HEAD"])
-async def get_raw(rel_path: str, request: Request) -> Response:
+async def get_raw(rel_path: str, request: Request, optional: bool = False) -> Response:
     """Serve a file's raw bytes (viewer content, downloads).
 
     ``no-cache`` because a tool rewrites files in place: without it a browser
@@ -747,9 +747,16 @@ async def get_raw(rel_path: str, request: Request) -> Response:
     revalidation re-sent the entire file, which for a 225 MB CT is the
     difference between a reload that is instant and one that is not. HEAD is
     answered too, as it was before conditional requests worked here.
+
+    ``?optional=1`` answers a missing file with 204 instead of 404, for a file
+    the caller only uses if it is there (a label map's name table): a browser
+    logs every 404 to its console as an error, whatever the page does with it.
+    The path is checked against the workspace either way.
     """
     path = _safe_path(rel_path)
     if not path.is_file():
+        if optional:
+            return Response(status_code=204, headers={"Cache-Control": "no-cache"})
         raise HTTPException(status_code=404, detail="file not found")
     headers = {"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"}
     if path.suffix.lower() in _SCRIPTABLE_SUFFIXES:

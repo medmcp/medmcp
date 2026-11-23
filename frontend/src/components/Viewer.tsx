@@ -566,12 +566,16 @@ async function describeOverlay(vol: NVImage, path: string, forcedKind: OverlayKi
   }
 }
 
-/** The first label-name sidecar that exists next to the segmentation. */
+/** The first label-name sidecar that exists next to the segmentation.
+ *
+ *  The file is optional, and asked for as such: the server then answers a
+ *  missing one with 204 rather than 404, which the browser would log to the
+ *  console as a failed request on every label overlay. */
 async function fetchLabelNames(volumePath: string): Promise<Map<number, string>> {
   for (const candidate of labelFileCandidates(volumePath)) {
     try {
-      const r = await fetch(rawUrl(candidate))
-      if (!r.ok) continue
+      const r = await fetch(`${rawUrl(candidate)}?optional=1`, { cache: 'no-cache' })
+      if (r.status !== 200) continue
       const names = parseLabelNames(await r.text())
       if (names.size > 0) return names
     } catch {

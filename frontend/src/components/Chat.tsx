@@ -788,6 +788,8 @@ export const Chat = memo(function Chat({
           const held = frame.toolCall.toolCallId ?? null
           heldCallRef.current = held
           if (held) setToolCalls((prev) => withClock(prev, held, undefined))
+          // The turn waits on this box, so it is brought into view.
+          followRef.current = { ...followRef.current, following: true }
           setPermission({
             requestId: frame.requestId,
             toolCall: frame.toolCall,

@@ -14,8 +14,10 @@ export default function LoginScreen() {
     try {
       await login(value)
       window.location.reload()
-    } catch {
-      setError('Wrong password.')
+    } catch (err) {
+      // A refusal by the origin or host guard is a 403 too; say which it was.
+      const detail = err instanceof Error ? err.message : ''
+      setError(detail && detail !== 'wrong password' ? `Refused: ${detail}` : 'Wrong password.')
       setBusy(false)
     }
   }

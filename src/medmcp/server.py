@@ -271,9 +271,11 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         if outcome is None and await asyncio.to_thread(update.updater_pending)
         else None
     )
+    # Stack manifests mount ``${MEDMCP_WORKSPACE}``, expanded from the environment
+    # when they are loaded, and proxy children read it for their fallback cwd.
+    # Assigned, not setdefault, so a relative value becomes the resolved path.
+    os.environ["MEDMCP_WORKSPACE"] = str(WORKSPACE_ROOT)
     if settings.stack_pool_enabled():
-        # Proxy children read MEDMCP_WORKSPACE for their fallback cwd; export it.
-        os.environ.setdefault("MEDMCP_WORKSPACE", str(WORKSPACE_ROOT))
         _pool = BackendPool(resolve_spec=_resolve_backend_spec, cwd=str(WORKSPACE_ROOT))
         if settings.stack_jobs_enabled():
             _jobs = jobs.JobManager(

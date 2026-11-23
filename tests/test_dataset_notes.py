@@ -91,6 +91,20 @@ class TestWhichFoldersAPromptMeans:
         _scans(workspace / "test")
         assert find_dataset_dirs(prompt, None, workspace, INDEXES) == []
 
+    def test_a_path_in_the_prompt_does_not_name_its_top_level_folder(self, workspace: Path) -> None:
+        """An output path does not bring in the top-level folder it lies in.
+
+        "Put the selection into <workspace>/stack-tests/run-5/" (not created yet)
+        used to match the top-level folder ``stack-tests`` by name, so the agent
+        was told to index the output tree, which held earlier results, as data.
+        """
+        data = _scans(workspace / "atss_testdata")
+        _scans(workspace / "stack-tests" / "run-4")
+        out = workspace / "stack-tests" / "run-5"
+        prompt = f"select the T2 scans from {data} into {out}/"
+        assert find_dataset_dirs(prompt, None, workspace, INDEXES) == [data]
+        assert "stack-tests" not in build_dataset_notes(prompt, None, workspace, INDEXES)
+
     def test_the_viewed_file_brings_its_indexed_folder(self, workspace: Path) -> None:
         """The viewed file brings its indexed folder."""
         data = _scans(workspace / "study")

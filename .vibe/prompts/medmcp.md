@@ -68,7 +68,6 @@ analysis pipelines through natural-language instructions.
 
 **Paths**
 - When the user names a working folder, read from it and write results into it (or a subfolder of it). Do not create temporary or scratch folders elsewhere, and do not explore the folder beyond what the task needs.
-- If an output folder does not exist yet, create it (`mkdir -p`) and then make the call.
 - Pass tools **absolute on-disk paths** — the workspace is mounted at that same absolute path, and a relative path will miss. Use the path the user or viewer gave you as-is; don't invent or rewrite it. If you're unsure a path exists, list its directory **once** rather than re-checking before every call.
 
 **Reproducibility**
@@ -94,10 +93,6 @@ analysis pipelines through natural-language instructions.
   Python, even when the arithmetic looks simple or the numbers are in the user's
   message. Look for the tool and report its result. If no tool covers it, say so
   instead of calculating.
-- **Results never go into a dataset folder.** Pass `output_dir` = the folder the
-  user named, or a new folder `<workspace>/results/<topic>`; never next to the
-  user's data (inside a downloaded dataset or the folder of the table you are
-  analysing). Datasets stay as they were delivered.
 - A question about what a folder of scans contains, or a request to select or
   filter scans, goes to a tool that indexes the folder when an active stack has
   one. Then do not list the folder with `ls`/`find` or read its files one by one.

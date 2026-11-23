@@ -26,12 +26,16 @@ Notable, user-visible changes to MedMCP. Format follows
 ### Changed
 
 - Dependencies: frontend packages (react-resizable-panels 4.24, Vite 8.3.8, KaTeX 0.19.1), httpx2 2.16, and CI actions updated.
-- Prompt: the per-tool routing for the cohort and stats stacks is gone from the system prompt; the stacks' own skills carry it. The general rules stay (use the tool, never compute a statistic by hand, results never into a dataset folder, ask before writing code).
+- Prompt: the assistant no longer creates a `results/` folder before a call; results go where the tool puts them (beside the input) unless you name a folder.
+- Prompt: the per-tool routing for the cohort and stats stacks is gone from the system prompt; the stacks' own skills carry it. The general rules stay (use the tool, never compute a statistic by hand, ask before writing code).
 - Workflows: the record of a confirmed selection is a core format (`medmcp_selection_confirmation: 1`, `role_labels`) that any stack can write; messages no longer name a stack's tools. See [docs/rollout.md](docs/rollout.md).
 - Explorer: the second upload button and the folder menu's upload entries are removed again; Upload acts on the selected folder.
 
 ### Fixed
 
+- Chat: an output path in a message is no longer taken for a dataset to index.
+- Stacks: container stacks start when MedMCP runs from source without `MEDMCP_WORKSPACE` set; before, their workspace mount was invalid and they had no tools.
+- Login: a request refused for its origin or host shows the server's reason instead of "Wrong password."
 - Stacks: reinstalling a stack that is already running (a new image under the same name) now stops the running copy, so the next call uses the new image. Before, the old copy kept serving its old tools until it went idle.
 - Stacks: after a stack is updated or reinstalled under the same image name, the assistant sees its new tools. Before, it kept the previous tool list for up to a day, so a newly added tool such as `check_dataset` could not be found.
 - Stacks: installing a stack from the catalog or by image works again with `docker compose`; since 0.7.2 the docker guard refused the image lookup.

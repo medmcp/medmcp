@@ -110,6 +110,8 @@ from medmcp.workspace_note import (
     display_content_text,
     strip_workspace_note,
 )
+from medmcp.zipupload import MAX_BYTES as ZIP_MAX_BYTES
+from medmcp.zipupload import ZipRejectedError, unpack_into
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
 log: logging.Logger = logging.getLogger(__name__)
@@ -629,6 +631,80 @@ async def get_tree() -> JsonDict:
     return {"tree": root.get("children", [])}
 
 
+# One explorer folder level; the explorer asks for a folder's level when it is
+# opened, so a large one is still listed whole (it renders virtualized).
+_DIR_MAX_ENTRIES: int = 5000
+
+
+def _dir_entry_node(entry: os.DirEntry[str], rel_dir: str) -> JsonDict:
+    """One entry of a folder listing: a folder is marked ``dir``, a file carries its size."""
+    path = Path(entry.path)
+    rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
+    node: JsonDict = {"id": rel, "name": entry.name}
+    leaves = entry.is_symlink() and _link_leaves_tree(path)
+    try:
+        is_dir = entry.is_dir()
+    except OSError:
+        is_dir = False
+    if is_dir:
+        node["dir"] = True
+    elif not leaves:
+        with contextlib.suppress(OSError):
+            node["size"] = entry.stat().st_size
+    return node
+
+
+def _list_dir(rel: str) -> JsonDict:
+    """One level of the explorer tree under workspace folder *rel* ("" = the root)."""
+    parts = [p for p in Path(rel).parts if p not in {"", "."}]
+    if ".." in parts:
+        raise HTTPException(status_code=400, detail="'..' is not allowed")
+    _safe_path(rel)  # confinement: the folder must resolve inside the workspace
+    rel_dir = "/".join(parts)
+    # Listed under the name it was asked by, so ids match the parent's listing
+    # when the path passes through a link inside the workspace.
+    path = WORKSPACE_ROOT.joinpath(*parts)
+    # A link leaving the workspace, or pointing back at its own ancestor, is not
+    # looked through at any depth (the tree shows such a folder as empty).
+    through_link = any(
+        _link_leaves_tree(WORKSPACE_ROOT.joinpath(*parts[: i + 1])) for i in range(len(parts))
+    )
+    if any(p in _SKIP_DIRS for p in parts) or through_link:
+        return {"path": rel_dir, "children": [], "total": 0}
+    if not path.is_dir():
+        raise HTTPException(status_code=404, detail="folder not found")
+    try:
+        with os.scandir(path) as it:
+            entries = [e for e in it if e.name not in _SKIP_DIRS]
+    except PermissionError:
+        entries = []
+
+    def is_dir(e: os.DirEntry[str]) -> bool:
+        try:
+            return e.is_dir()
+        except OSError:
+            return False
+
+    entries.sort(key=lambda e: (not is_dir(e), e.name.lower()))
+    shown = entries[:_DIR_MAX_ENTRIES]
+    return {
+        "path": rel_dir,
+        "children": [_dir_entry_node(e, rel_dir) for e in shown],
+        "total": len(entries),
+    }
+
+
+@app.get("/api/tree/dir")
+async def get_tree_dir(path: str = "") -> JsonDict:
+    """Return one level of the explorer tree: the entries of folder ``path``.
+
+    Folders carry ``dir`` (their own entries are fetched when they are opened),
+    files their ``size``. ``total`` counts every entry, so a
+    listing cut at the cap can say how many were left out.
+    """
+    return await asyncio.to_thread(_list_dir, path)
+
+
 @app.api_route("/api/raw/{rel_path:path}", methods=["GET", "HEAD"])
 async def get_raw(rel_path: str) -> FileResponse:
     """Serve a file's raw bytes (viewer content, downloads).
@@ -851,11 +927,57 @@ async def post_upload(file: UploadFile, dir: str = "") -> JsonDict:
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise HTTPException(status_code=400, detail="a link with that name exists") from exc
+        if exc.errno == errno.EISDIR:
+            raise HTTPException(status_code=409, detail="a folder with that name exists") from exc
         raise
     with os.fdopen(fd, "wb") as fh:
         while chunk := await file.read(1024 * 1024):
             await asyncio.to_thread(fh.write, chunk)
     return {"ok": True, "path": str(target.relative_to(WORKSPACE_ROOT))}
+
+
+def _one_line(text: str) -> str:
+    """*text* with anything unprintable replaced, so it cannot break a log line."""
+    return "".join(c if c.isprintable() else "?" for c in text)
+
+
+@app.post("/api/files/upload-zip")
+async def post_upload_zip(file: UploadFile, dir: str = "") -> JsonDict:
+    """Unpack an uploaded ``.zip`` into ``dir`` (workspace-relative).
+
+    For when the browser cannot hand over a folder. Every member is checked
+    before anything is written (no absolute paths, ``..``, links or device files;
+    file-count and size caps), nothing that exists is replaced — an archive
+    naming an existing file is refused whole — and a failed unpack leaves the
+    folder as it was. Every outcome, refusals included, is audit-logged.
+    """
+    try:
+        target_dir = _safe_path(dir)
+        # The multipart parser has already spooled the upload to a seekable
+        # temporary file, which is all zipfile needs: read it from there.
+        if file.size is not None and file.size > ZIP_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="the archive is too large")
+        try:
+            done = await asyncio.to_thread(unpack_into, file.file, target_dir)
+        except ZipRejectedError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    except HTTPException as exc:
+        _audit.info(
+            "zip upload refused (%d): %s into %s: %s",
+            exc.status_code,
+            _one_line(file.filename or "?"),
+            _one_line(dir or "."),
+            _one_line(str(exc.detail)),
+        )
+        raise
+    rel = "" if target_dir == WORKSPACE_ROOT else str(target_dir.relative_to(WORKSPACE_ROOT))
+    _audit.info(
+        "zip upload: %s, %d file(s) into %s",
+        _one_line(file.filename or "?"),
+        done.files,
+        _one_line(rel or "."),
+    )
+    return {"ok": True, "path": rel, "files": done.files, "dirs": done.dirs, "bytes": done.bytes}
 
 
 # ── Settings API ───────────────────────────────────────────

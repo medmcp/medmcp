@@ -22,6 +22,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Provenance: a chat's record names each stack's image digest and the MedMCP version.
 - Stacks: background jobs. A stack can declare a job runner in its image label; an approved call of one of its job tools (an nnU-Net training) then runs in its own container, which keeps running when the chat is idle or closed, when another GPU stack is used and when MedMCP restarts. One job at a time by default (`MEDMCP_MAX_JOBS`); `MEDMCP_STACK_JOBS=0` turns jobs off.
 - Jobs: `/api/jobs` lists, shows and stops them; the Tool stacks window shows running jobs with a Stop button; a job's start, image and arguments are recorded in the provenance of the chat that approved it.
+- Explorer: an uploaded `.zip` can be unpacked on the server; an archive that would replace an existing file is refused.
 
 ### Changed
 
@@ -30,6 +31,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Prompt: the per-tool routing for the cohort and stats stacks is gone from the system prompt; the stacks' own skills carry it. The general rules stay (use the tool, never compute a statistic by hand, ask before writing code).
 - Workflows: the record of a confirmed selection is a core format (`medmcp_selection_confirmation: 1`, `role_labels`) that any stack can write; messages no longer name a stack's tools. See [docs/rollout.md](docs/rollout.md).
 - Explorer: the second upload button and the folder menu's upload entries are removed again; Upload acts on the selected folder.
+- Explorer: the file list loads one folder at a time, so a large workspace opens at once; a folder lists up to 5,000 entries (was 500).
 
 ### Fixed
 
@@ -40,6 +42,8 @@ Notable, user-visible changes to MedMCP. Format follows
 - Chats: opening a chat in a second tab starts a new chat instead of attaching to the same one (approvals asked twice, then "App server client closed").
 - Chats: reloading the page, pressing Stop or sending a new message while an approval is open no longer breaks the chat ("A turn is already running", the chat missing from the list).
 - Chat: a stack call with arguments the tool does not accept is turned back to the assistant with what is wrong; before, the whole turn ended with `Core rejected durable input`.
+- Explorer: the rows no longer jump when a file is dragged in, so a drop lands on the folder under the pointer.
+- Explorer: uploading a file named like an existing folder says so instead of failing with a server error.
 - Stacks: reinstalling a stack that is already running (a new image under the same name) now stops the running copy, so the next call uses the new image. Before, the old copy kept serving its old tools until it went idle.
 - Stacks: after a stack is updated or reinstalled under the same image name, the assistant sees its new tools. Before, it kept the previous tool list for up to a day, so a newly added tool such as `check_dataset` could not be found.
 - Stacks: installing a stack from the catalog or by image works again with `docker compose`; since 0.7.2 the docker guard refused the image lookup.
@@ -49,6 +53,9 @@ Notable, user-visible changes to MedMCP. Format follows
 - Workflows: a run lists the files it wrote when the output path was chosen by the caller; it showed none before.
 - Provenance: the record of a chat run from an image names the commit the image was built from; it was empty. Images must be built with `MEDMCP_REVISION`, as the release and `:main` builds are.
 - Chat: a local model is told why the path guard turned a stack call back (a file that does not exist); before, it only read that the call was skipped.
+- Explorer: the first click on a folder opens it.
+- Explorer: New folder works when the selected folder is scrolled out of view.
+- Explorer: a failed upload names each file with its reason and stays until dismissed.
 
 ### Security
 

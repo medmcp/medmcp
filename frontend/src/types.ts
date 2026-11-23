@@ -3,12 +3,17 @@
 /** dataTransfer MIME carrying a workspace-relative path when dragging a file. */
 export const DRAG_PATH_MIME = 'application/medmcp-path'
 
-/** One node of the explorer tree (mirrors /api/tree). Directories have `children`. */
+/** One node of the explorer tree (see /api/tree/dir). Directories have `children`,
+ *  empty until the folder is first opened and its level fetched (`loaded`). */
 export interface TreeNode {
   id: string
   name: string
   children?: TreeNode[]
   size?: number
+  /** A folder whose own entries have been fetched at least once. */
+  loaded?: boolean
+  /** Not an entry: the row saying how many entries a capped listing left out. */
+  more?: boolean
 }
 
 /** Tool-call state accumulated from tool_call / tool_call_update frames. */

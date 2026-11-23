@@ -2401,6 +2401,7 @@ button.model-name:hover {
 }
 
 .session-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 9px;
@@ -2411,6 +2412,43 @@ button.model-name:hover {
 
 .session-row:hover {
   background: rgba(255, 255, 255, 0.04);
+}
+
+/* Opens the chat. Looks like the title it wraps; its ::after covers the row, so
+   the whole row is its hit area and carries its focus ring. */
+.session-open,
+.session-open:hover {
+  display: flex;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+
+/* As wide as the row allows, as it was before it sat in a button: sized to its
+   text, its clip edge falls on a fraction of a pixel and shaves the last glyph. */
+.session-open .session-title {
+  flex: 1;
+}
+
+.session-open::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+}
+
+.session-open:focus-visible {
+  outline: none;
+}
+
+.session-open:focus-visible::after {
+  outline: 2px solid var(--blue-xl);
+  outline-offset: -2px;
 }
 
 /* The open chat. A background wash alone was too close to :hover to pick out
@@ -2488,7 +2526,10 @@ button.model-name:hover {
   width: 100%;
 }
 
+/* Above the open button's stretched hit area. */
 .session-actions {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 1px;
@@ -2496,7 +2537,11 @@ button.model-name:hover {
   opacity: 0;
 }
 
-.session-row:hover .session-actions {
+/* Shown for the keyboard as for the pointer. :focus-visible rather than
+   :focus-within, because opening the menu puts focus on a row, and after a
+   click that must not light up one row's actions. */
+.session-row:hover .session-actions,
+.session-row:has(:focus-visible) .session-actions {
   opacity: 1;
 }
 

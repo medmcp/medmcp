@@ -106,6 +106,7 @@ export function ChatsMenu({
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const triggerRef = useRef<HTMLButtonElement>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
   const [placement, setPlacement] = useState<Placement | null>(null)
 
   const toggle = () => {
@@ -132,10 +133,26 @@ export function ChatsMenu({
     if (open) load()
   }, [open])
 
+  // The list is rendered at the end of the document, a long way from its
+  // trigger in tab order. Focus goes into it when it opens (the open chat's
+  // row, else the first) and back to the trigger on Escape. After a click this
+  // shows nothing: the ring and the row actions follow :focus-visible.
+  const loaded = list != null
+  useEffect(() => {
+    if (!open || !loaded) return
+    const pop = popoverRef.current
+    const row =
+      pop?.querySelector<HTMLElement>('.session-row.current .session-open') ??
+      pop?.querySelector<HTMLElement>('.session-open')
+    row?.focus()
+  }, [open, loaded])
+
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
+      if (e.key !== 'Escape') return
+      setOpen(false)
+      triggerRef.current?.focus()
     }
     // Re-place on resize: the window may shrink or grow while the list is open.
     const onResize = () => {
@@ -210,7 +227,6 @@ export function ChatsMenu({
         // otherwise distinguished only by a background wash, which hover nearly
         // matches and which conveys nothing without colour.
         aria-current={isCurrent ? 'true' : undefined}
-        onClick={() => !editing && select(s.id)}
       >
         <span
           className={`prov-dot${s.hasProvenance ? ' on' : ''}`}
@@ -226,13 +242,27 @@ export function ChatsMenu({
               onClick={(e) => e.stopPropagation()}
               onChange={(e) => setEditValue(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') commitRename(s.id)
+                if (e.key === 'Enter') {
+                  // The editor is about to unmount with focus in it; hand it
+                  // to the row, which the keyboard would otherwise lose.
+                  const row = e.currentTarget.closest('.session-row')
+                  commitRename(s.id)
+                  requestAnimationFrame(() =>
+                    row?.querySelector<HTMLElement>('.session-open')?.focus(),
+                  )
+                }
                 if (e.key === 'Escape') setEditingId(null)
               }}
               onBlur={() => commitRename(s.id)}
             />
           ) : (
-            <span className="session-title">{s.title || 'Untitled chat'}</span>
+            // The row's own control: a real button, so a chat opens from the
+            // keyboard, stretched over the whole row (its ::after) so a click
+            // anywhere on it still opens. The row is not the button, because
+            // it also holds the action buttons.
+            <button className="session-open" onClick={() => select(s.id)}>
+              <span className="session-title">{s.title || 'Untitled chat'}</span>
+            </button>
           )}
           <span className="session-time">
             {timeLabel(s.updatedAt)}
@@ -241,7 +271,7 @@ export function ChatsMenu({
             {isCurrent && <span className="session-current-tag">open</span>}
           </span>
         </span>
-        <span className="session-actions" onClick={(e) => e.stopPropagation()}>
+        <span className="session-actions">
           {!isArchived && isCurrent && (
             <button
               className="btn-icon"
@@ -312,6 +342,7 @@ export function ChatsMenu({
           <>
             <div className="chats-menu-backdrop" onClick={() => setOpen(false)} />
             <div
+              ref={popoverRef}
               className="chats-menu-popover"
               style={{
                 top: placement.top,

@@ -984,13 +984,13 @@ class TestReadOnlySessionApproval:
             self._bash_options(("command_pattern", "ls *"))
         )
         assert [o["optionId"] for o in visible] == ["allow_once", "allow_always", "reject_once"]
-        assert visible[1]["name"] == "Allow looking at files for the rest of this chat (ls)"
+        assert visible[1]["name"] == "Allow reading files in this chat"
 
     def test_names_every_command_of_a_compound(self) -> None:
         """``ls; wc -l x`` needs two rules; both are read-only, so both are named."""
         options = self._bash_options(("command_pattern", "ls *"), ("command_pattern", "wc *"))
         visible = server._visible_permission_options(options)
-        assert visible[1]["name"] == "Allow looking at files for the rest of this chat (ls, wc)"
+        assert visible[1]["name"] == "Allow reading files in this chat"
 
     @pytest.mark.parametrize(
         "rules",
@@ -2814,9 +2814,7 @@ class TestStackToolGrantForTheChat:
         req = self._request(1, "medmcp-cohort_index_dataset", dataset_dir=str(tmp_path / "study"))
         await self._answer(conn, req, "allow_once")
         offered = {o["optionId"]: o["name"] for o in self._dialogs(conn)[0]["options"]}
-        assert offered[server._STACK_TOOL_CHAT_OPTION] == (
-            "Allow index_dataset for the rest of this chat"
-        )
+        assert offered[server._STACK_TOOL_CHAT_OPTION] == ("Allow index_dataset in this chat")
         assert "allow_always" not in offered
 
     async def test_later_calls_of_that_tool_are_allowed_without_a_dialog(
@@ -2991,6 +2989,21 @@ class TestAssistantCode:
     @staticmethod
     def _dialogs(conn: server._ChatConnection) -> list[dict[str, Any]]:
         return [m for m in cast("_StubWs", conn.ws).sent if m.get("type") == "permission_request"]
+
+    async def test_a_label_only_the_model_gave_is_not_shown(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """The dialog carries the fixed rules' labels, not the model's own reading."""
+        conn, _ = _connection()
+        req = TestReadOnlyGrantForTheChat._request(1, "python3 - <<'PY'\nprint(1)\nPY")
+        cast("dict[str, Any]", req["params"])["toolCall"]["risks"] = ["privacy"]
+        task = asyncio.create_task(conn._handle_permission(req))
+        await asyncio.sleep(0.05)
+        keys = {r["key"] for r in self._dialogs(conn)[-1]["risks"]}
+        assert "assistant_code" in keys
+        assert "privacy" not in keys
+        conn._pending_perms[1].set_result("reject_once")
+        await task
 
     async def test_script_is_labelled_in_the_dialog(
         self, responses: list[tuple[int, object]]

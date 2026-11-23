@@ -3265,8 +3265,9 @@ def _read_only_session_label(option: JsonDict, command: str | None = None) -> st
         if pattern not in _READ_ONLY_SESSION_PATTERNS:
             return None
         patterns.append(str(pattern))
-    commands = ", ".join(p.removesuffix(" *") for p in patterns)
-    return f"Allow looking at files for the rest of this chat ({commands})"
+    # The grant covers every read-only command in the chat (see _handle_permission),
+    # so the label names that, not the one command in hand.
+    return "Allow reading files in this chat"
 
 
 def _visible_permission_options(
@@ -4087,7 +4088,6 @@ class _ChatConnection:
         # wait on the Ollama round-trip, which can take seconds while the
         # model is still busy with the agent's own generation.
         explanation = cast("str | None", tool_call.get("humanReadable"))
-        risk_keys: list[str] = cast("list[str]", tool_call.get("risks") or [])
         explaining = explanation is None and settings.load_explain_enabled()
 
         # Existence check on the call's path arguments. Deterministic and local, so
@@ -4172,7 +4172,7 @@ class _ChatConnection:
                     *options,
                     {
                         "optionId": _STACK_TOOL_CHAT_OPTION,
-                        "name": f"Allow {tool} for the rest of this chat",
+                        "name": f"Allow {tool} in this chat",
                         "kind": "allow_always",
                     },
                 ]
@@ -4189,7 +4189,9 @@ class _ChatConnection:
                 "options": options,
                 "explanation": explanation,
                 "explaining": explaining,
-                "risks": explain.resolve_risks(_merge_keys(rule_keys, risk_keys)),
+                # Only the labels the fixed rules give: one that rests on the model's
+                # reading of the call alone is not shown.
+                "risks": explain.resolve_risks(rule_keys),
                 "paths": path_findings,
             }
         )
@@ -4276,7 +4278,7 @@ class _ChatConnection:
                     "type": "permission_update",
                     "requestId": req_id,
                     "explanation": explanation,
-                    "risks": explain.resolve_risks(_merge_keys(rule_keys, risk_keys)),
+                    "risks": explain.resolve_risks(rule_keys),
                 }
             )
 

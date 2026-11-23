@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useConfirm } from '../confirm'
 import type { ReactNode } from 'react'
 import {
@@ -15,6 +15,8 @@ import {
   replayPreview,
 } from '../api'
 import { getDraggedFilePath } from '../dragState'
+import { formatDuration } from '../format'
+import { groupByItem } from '../runLog'
 import type {
   BatchPlanSkip,
   ReplayFrame,
@@ -154,14 +156,6 @@ function runProgress(r: RunState): number {
   const currentFrac =
     r.stepsPerItem > 0 ? Math.min((r.log.length - prevSteps) / r.stepsPerItem, 1) : 0
   return (r.items.length + currentFrac) / r.total
-}
-
-/** "1m 23s" / "45s" from a millisecond duration. */
-function formatDuration(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000))
-  if (s < 60) return `${s}s`
-  if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`
-  return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`
 }
 
 function basename(p: string): string {
@@ -422,17 +416,30 @@ function StepRows({
   return <div className="wf-steprows">{rows}</div>
 }
 
+/** Shared empty bucket for items with no logged step yet, so the lookup below
+ *  allocates nothing for the queued majority of a cohort. */
+const NO_STEPS: ReplayStepFrame[] = []
+
 /** One line per batch item — finished ones with their file count, the current
  *  one with its step, the rest folded into a count. Click a line for its steps. */
 function ItemRows({ r, now, root }: { r: RunState; now: number; root: string }) {
   const [open, setOpen] = useState<number | null>(null)
-  const paths = itemLabels(r.runs, root)
-  const labels = paths.map((p, i) => r.labels[i] || p)
+  // The panel re-renders once a second while a run is live to move the
+  // elapsed/ETA readout, and neither of these depends on that clock. The labels
+  // walk every input of every item and take their common prefix; grouping the
+  // log is one pass instead of a filter per item, which was O(items × log) and
+  // ran for queued items that are never drawn.
+  const labels = useMemo(() => {
+    const paths = itemLabels(r.runs, root)
+    return paths.map((p, i) => r.labels[i] || p)
+  }, [r.runs, r.labels, root])
+  const stepsByItem = useMemo(() => groupByItem(r.log), [r.log])
   const rows: ReactNode[] = []
   let queued = 0
   for (let i = 0; i < r.total; i++) {
     const it = r.items[i]
-    const steps = r.log.filter((s) => (s.item ?? 0) === i)
+    // Needed before the skip below, not after: `isCurrent` reads its length.
+    const steps = stepsByItem.get(i) ?? NO_STEPS
     const isCurrent = !it && (r.current?.item === i || (steps.length > 0 && r.status === 'running'))
     if (!it && !isCurrent) {
       queued += 1

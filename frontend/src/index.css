@@ -1293,7 +1293,7 @@ button:hover {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  padding: 18px;
+  padding: 18px 18px 34px;
   max-width: 860px;
   width: 100%;
   margin: 0 auto;
@@ -1568,10 +1568,12 @@ button:hover {
   font-size: 12.5px;
 }
 
+/* Shown while the model works before anything is visible (a local model can
+   reason for many seconds before its first word or a plan card). */
 .thinking {
   color: var(--muted);
-  letter-spacing: 4px;
-  font-size: 10px;
+  font-size: 13px;
+  line-height: 16px;
   margin-left: 38px;
   animation: blink 1.6s ease-in-out infinite;
 }
@@ -1670,8 +1672,11 @@ button.model-name:hover {
 
 .chat-input-row {
   display: flex;
-  gap: 10px;
-  padding: 12px 18px 16px;
+  /* Lets the "Viewing …" line take a row of its own under the message box
+   * without a second hairline border. */
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 12px 18px 8px;
   /* The page's ? button (.help-fab) sits in the bottom-right corner, 46px wide
      with its inset. While this row reaches that corner its right padding grows
      to keep Send clear of it; once the panel is wide enough for the centred
@@ -1682,6 +1687,52 @@ button.model-name:hover {
   max-width: 860px;
   width: 100%;
   margin: 0 auto;
+}
+
+/* The file the next message is about. The row is always there, empty or not,
+ * so opening a file, dropping it or sending never moves the message box.
+ * Indented to the box's text edge (1px border + 14px padding). */
+.chat-viewing {
+  flex: 0 0 100%;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  height: 20px;
+  padding-left: 15px;
+  font-size: 11.5px;
+  line-height: 20px;
+  color: var(--muted);
+}
+
+.chat-viewing-label {
+  flex: none;
+}
+
+/* A long name loses its head, not its extension: the box is laid out right to
+ * left so the ellipsis lands on the left, and <bdi> keeps the name itself in
+ * reading order. */
+.chat-viewing-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.chat-input-row .chat-viewing-clear {
+  flex: none;
+  align-self: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+}
+
+.chat-input-row .chat-viewing-clear:focus-visible {
+  outline: 2px solid var(--blue-xl);
+  outline-offset: -1px;
+  color: var(--text);
 }
 
 .chat-input-row textarea {
@@ -1768,6 +1819,13 @@ button.model-name:hover {
   color: var(--muted);
   font-size: 11.5px;
   margin-left: auto;
+}
+
+/* A running call's age, after its status. */
+.tool-elapsed {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .tool-card details {
@@ -1887,30 +1945,32 @@ button.model-name:hover {
 
 .approval-btns {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
 }
 
-.abtn-approve {
-  background: rgba(43, 79, 163, 0.3);
-  color: var(--blue-xl);
-  border: 1px solid rgba(127, 168, 245, 0.25);
+.approval-btns button {
+  min-height: 28px;
+  padding-top: 0;
+  padding-bottom: 0;
+  text-align: left;
+  overflow-wrap: anywhere;
 }
 
-.abtn-approve:hover {
-  background: rgba(43, 79, 163, 0.45);
-  border-color: rgba(127, 168, 245, 0.4);
-}
-
-.abtn-reject {
+.abtn-plain {
   background: rgba(255, 255, 255, 0.05);
-  color: var(--muted);
-  border: 1px solid var(--border);
+  color: var(--muted2);
 }
 
-.abtn-reject:hover {
+.abtn-plain:hover {
   color: var(--text);
   background: rgba(255, 255, 255, 0.08);
+}
+
+.approval-btns button:focus-visible {
+  outline: 2px solid var(--blue-xl);
+  outline-offset: 2px;
 }
 
 /* ── Risk chips (website badge pattern) ── */
@@ -1998,8 +2058,8 @@ button.model-name:hover {
   color: var(--muted2);
 }
 
-.path-info .path-mark {
-  color: var(--ok);
+.approval-paths .path-summary {
+  color: var(--muted);
 }
 
 .path-warning .path-mark,
@@ -4661,7 +4721,8 @@ textarea.wf-input {
 .help-fab {
   position: fixed;
   right: 10px;
-  bottom: 16px;
+  /* Level with Send: the composer's padding plus the "Viewing …" row below it. */
+  bottom: 32px;
   z-index: 10;
   display: flex;
   align-items: center;

@@ -30,6 +30,9 @@ export interface ToolCallState {
   /** The path guard turned this call back before it ran: the agent corrects the
    *  path and retries, so it renders as a quiet note rather than a failure. */
   pathGuardRetry?: boolean
+  /** Browser time (ms) the call was seen to start running in a live turn; unset
+   *  for a replayed call, one waiting for approval, and once the turn ended. */
+  startedAt?: number
 }
 
 /** A risk tag resolved by the server from the fixed taxonomy. */

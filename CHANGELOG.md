@@ -13,7 +13,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Help: the `?` button in the bottom-right corner, or the `?` key, says what MedMCP is, where its limits are, and lists the main keyboard and mouse controls.
 - Jobs: a pill in the header shows running background jobs with their progress (e.g. "nnunet · start_training · epoch 41/100 · pseudo-Dice 0.88 · ~30 min left"), and a finished or failed job until it has been looked at; click for the list with Stop. A job may report progress by writing `{"fraction", "text"}` to the file named in `MEDMCP_JOB_PROGRESS`; the core keeps only a clamped fraction and one short line.
 - Approvals: code the assistant wrote itself (a Python heredoc or `-c`, `Rscript`, `node`, an awk program, a shell on a string, a `.py`/`.R`/`.sh` file it writes) is labelled as such in the approval dialog and is never covered by a chat-long approval. `MEDMCP_ASSISTANT_CODE=deny` refuses it outright, so only tools run.
-- Approvals: a stack tool can be allowed for the rest of the chat ("Allow index_dataset for the rest of this chat"). Later calls of that tool run without a dialog; a call that would overwrite a file or touch a path outside the workspace is still shown, and the shell keeps its own rules. `MEDMCP_STACK_TOOL_APPROVAL=0` restores a dialog for every call.
+- Approvals: a stack tool can be allowed for the rest of the chat ("Allow index_dataset in this chat"). Later calls of that tool run without a dialog; a call that would overwrite a file or touch a path outside the workspace is still shown, and the shell keeps its own rules. `MEDMCP_STACK_TOOL_APPROVAL=0` restores a dialog for every call.
 - Chat: when a message names a workspace folder and an active stack declares a dataset index (`dataset_index` in its image label), the assistant is told what that index says about the folder, or which tool builds it first. Without such a stack nothing is added. See [docs/stack-dataset-index.md](docs/stack-dataset-index.md).
 - Catalog: medmcp-stats (statistical tests and publication figures) and medmcp-cohort.
 - Workflows: a cohort roll-out writes each subject's results to its own folder under an output folder (`results/<workflow>/<subject>` unless you choose another) and creates missing folders itself.
@@ -26,6 +26,10 @@ Notable, user-visible changes to MedMCP. Format follows
 - Stacks: background jobs. A stack can declare a job runner in its image label; an approved call of one of its job tools (an nnU-Net training) then runs in its own container, which keeps running when the chat is idle or closed, when another GPU stack is used and when MedMCP restarts. One job at a time by default (`MEDMCP_MAX_JOBS`); `MEDMCP_STACK_JOBS=0` turns jobs off.
 - Jobs: `/api/jobs` lists, shows and stops them; the Tool stacks window shows running jobs with a Stop button; a job's start, image and arguments are recorded in the provenance of the chat that approved it.
 - Explorer: an uploaded `.zip` can be unpacked on the server; an archive that would replace an existing file is refused.
+- Chat: the message box says which open file "this image" means (Viewing t1.nii.gz); ✕ leaves it out until you open a file again.
+- Chat: a running tool call shows how long it has been running.
+- Chat: "Thinking…" shows while the assistant works before its first word.
+- Chat: the browser tab is marked "(!)" while an approval is waiting.
 
 ### Changed
 
@@ -33,6 +37,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Prompt: the assistant no longer creates a `results/` folder before a call; results go where the tool puts them (beside the input) unless you name a folder.
 - Prompt: the per-tool routing for the cohort and stats stacks is gone from the system prompt; the stacks' own skills carry it. The general rules stay (use the tool, never compute a statistic by hand, ask before writing code).
 - Viewer: volumes load faster. An unchanged file is not downloaded again, and a `.nii.gz` is unpacked once instead of on every panel resize.
+- Approvals: one row of buttons (Allow once, the chat-long option, Deny); path checks only when something is wrong; risk labels only from fixed rules.
 - Workflows: the record of a confirmed selection is a core format (`medmcp_selection_confirmation: 1`, `role_labels`) that any stack can write; messages no longer name a stack's tools. See [docs/rollout.md](docs/rollout.md).
 - Explorer: the second upload button and the folder menu's upload entries are removed again; Upload acts on the selected folder.
 - Explorer: the file list loads one folder at a time, so a large workspace opens at once; a folder lists up to 5,000 entries (was 500).
@@ -63,6 +68,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Explorer: the first click on a folder opens it.
 - Explorer: New folder works when the selected folder is scrolled out of view.
 - Explorer: a failed upload names each file with its reason and stays until dismissed.
+- Chat: scrolling up while a reply streams stays where you are; the transcript follows new text only from the bottom.
 
 ### Security
 

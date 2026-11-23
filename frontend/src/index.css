@@ -4721,7 +4721,8 @@ textarea.wf-input {
 .help-fab {
   position: fixed;
   right: 10px;
-  bottom: 16px;
+  /* Level with Send: the composer's padding plus the "Viewing …" row below it. */
+  bottom: 32px;
   z-index: 10;
   display: flex;
   align-items: center;

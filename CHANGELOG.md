@@ -26,8 +26,6 @@ Notable, user-visible changes to MedMCP. Format follows
 - Stacks: background jobs. A stack can declare a job runner in its image label; an approved call of one of its job tools (an nnU-Net training) then runs in its own container, which keeps running when the chat is idle or closed, when another GPU stack is used and when MedMCP restarts. One job at a time by default (`MEDMCP_MAX_JOBS`); `MEDMCP_STACK_JOBS=0` turns jobs off.
 - Jobs: `/api/jobs` lists, shows and stops them; the Tool stacks window shows running jobs with a Stop button; a job's start, image and arguments are recorded in the provenance of the chat that approved it.
 - Explorer: an uploaded `.zip` can be unpacked on the server; an archive that would replace an existing file is refused.
-- Chat: the file "this image" refers to is named above the message box; ✕ leaves it out of the next message.
-- Chat: the message box says which open file "this image" means (Viewing t1.nii.gz), and ✕ leaves it out of the next message.
 - Chat: the message box says which open file "this image" means (Viewing t1.nii.gz); ✕ leaves it out until you open a file again.
 - Chat: a running tool call shows how long it has been running.
 - Chat: "Thinking…" shows while the assistant works before its first word.
@@ -39,10 +37,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Prompt: the assistant no longer creates a `results/` folder before a call; results go where the tool puts them (beside the input) unless you name a folder.
 - Prompt: the per-tool routing for the cohort and stats stacks is gone from the system prompt; the stacks' own skills carry it. The general rules stay (use the tool, never compute a statistic by hand, ask before writing code).
 - Viewer: volumes load faster. An unchanged file is not downloaded again, and a `.nii.gz` is unpacked once instead of on every panel resize.
-- Approvals: the dialog shows Allow and Deny, the chat-long option as a link underneath, and path checks only when something is wrong.
-- Approvals: the dialog's choices are plain buttons in one row (Allow once, the chat-long option, Deny); path checks show only when something is wrong, and risk labels only when a fixed rule sets them.
 - Approvals: one row of buttons (Allow once, the chat-long option, Deny); path checks only when something is wrong; risk labels only from fixed rules.
-- Prompt: the per-tool routing for the cohort and stats stacks is gone from the system prompt; the stacks' own skills carry it. The general rules stay (use the tool, never compute a statistic by hand, results never into a dataset folder, ask before writing code).
 - Workflows: the record of a confirmed selection is a core format (`medmcp_selection_confirmation: 1`, `role_labels`) that any stack can write; messages no longer name a stack's tools. See [docs/rollout.md](docs/rollout.md).
 - Explorer: the second upload button and the folder menu's upload entries are removed again; Upload acts on the selected folder.
 - Explorer: the file list loads one folder at a time, so a large workspace opens at once; a folder lists up to 5,000 entries (was 500).

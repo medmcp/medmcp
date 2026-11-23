@@ -38,6 +38,8 @@ Notable, user-visible changes to MedMCP. Format follows
 - Prompt: the assistant no longer creates a `results/` folder before a call; results go where the tool puts them (beside the input) unless you name a folder.
 - Prompt: the per-tool routing for the cohort and stats stacks is gone from the system prompt; the stacks' own skills carry it. The general rules stay (use the tool, never compute a statistic by hand, ask before writing code).
 - Viewer: volumes load faster. An unchanged file is not downloaded again, and a `.nii.gz` is unpacked once instead of on every panel resize.
+- Approvals: the dialog shows Allow and Deny, the chat-long option as a link underneath, and path checks only when something is wrong.
+- Prompt: the per-tool routing for the cohort and stats stacks is gone from the system prompt; the stacks' own skills carry it. The general rules stay (use the tool, never compute a statistic by hand, results never into a dataset folder, ask before writing code).
 - Workflows: the record of a confirmed selection is a core format (`medmcp_selection_confirmation: 1`, `role_labels`) that any stack can write; messages no longer name a stack's tools. See [docs/rollout.md](docs/rollout.md).
 - Explorer: the second upload button and the folder menu's upload entries are removed again; Upload acts on the selected folder.
 - Explorer: the file list loads one folder at a time, so a large workspace opens at once; a folder lists up to 5,000 entries (was 500).

@@ -422,6 +422,21 @@ const AssistantMessage = memo(function AssistantMessage({
   )
 })
 
+/** Sort a request's options into the two buttons and the links under them.
+ *  `allow_once` is the primary button, falling back to another allow kind so a
+ *  request without it can still be approved; the first reject kind is Deny;
+ *  everything else (a chat-long approval, a kind this build does not know) is a
+ *  quiet link. An option without a kind is read by its id. */
+function splitOptions(options: PermissionRequest['options']) {
+  const kindOf = (o: PermissionRequest['options'][number]) => o.kind ?? o.optionId
+  const allow =
+    options.find((o) => kindOf(o) === 'allow_once') ??
+    options.find((o) => kindOf(o).startsWith('allow'))
+  const reject = options.find((o) => kindOf(o).includes('reject'))
+  const more = options.filter((o) => o !== allow && o !== reject)
+  return { allow, reject, more, allowIsOnce: allow != null && kindOf(allow) === 'allow_once' }
+}
+
 function PermissionCard({
   perm,
   onDecide,
@@ -429,6 +444,11 @@ function PermissionCard({
   perm: PermissionRequest
   onDecide: (optionId: string | null) => void
 }) {
+  const { allow, reject, more, allowIsOnce } = splitOptions(perm.options)
+  const paths = perm.paths ?? []
+  // Only a path with something wrong gets a line; the rest are counted.
+  const problems = paths.filter((p) => p.severity !== 'info')
+  const fine = paths.length - problems.length
   return (
     <div className="approval-box">
       <div className="approval-header">
@@ -453,15 +473,13 @@ function PermissionCard({
       {perm.toolCall.rawInput != null && (
         <pre className="approval-input">{formatToolInput(perm.toolCall.rawInput)}</pre>
       )}
-      {perm.paths && perm.paths.length > 0 && (
-        // Sits directly under the arguments it describes. Every checked path is
-        // listed, not just the problems: confirming that an input really is there
-        // is worth as much as flagging one that isn't.
+      {paths.length > 0 && (
+        // Sits directly under the arguments it describes.
         <ul className="approval-paths">
-          {perm.paths.map((p, i) => (
+          {problems.map((p, i) => (
             <li key={`${p.param}-${i}`} className={`path-${p.severity}`}>
               <span className="path-mark" aria-hidden="true">
-                {p.severity === 'error' ? '✕' : p.severity === 'warning' ? '!' : '✓'}
+                {p.severity === 'error' ? '✕' : '!'}
               </span>
               <code className="path-param">{p.param}</code>
               <span className="path-note">
@@ -480,23 +498,35 @@ function PermissionCard({
               </span>
             </li>
           ))}
+          {fine > 0 && (
+            <li className="path-summary">
+              {fine} {problems.length > 0 ? 'other ' : ''}
+              {fine === 1 ? 'path' : 'paths'} checked
+            </li>
+          )}
         </ul>
       )}
       <div className="approval-btns">
-        {perm.options.map((opt) => (
-          <button
-            key={opt.optionId}
-            className={opt.kind?.includes('reject') ? 'abtn-reject' : 'abtn-approve'}
-            onClick={() => onDecide(opt.optionId)}
-          >
-            {opt.kind?.includes('reject') ? '' : '✓ '}
-            {opt.name ?? opt.optionId}
+        {allow && (
+          <button className="btn-primary" onClick={() => onDecide(allow.optionId)}>
+            {allowIsOnce ? 'Allow' : (allow.name ?? allow.optionId)}
           </button>
-        ))}
-        <button className="btn-plain" onClick={() => onDecide(null)}>
-          Cancel
+        )}
+        {/* Without a reject option, Deny cancels the request. */}
+        <button className="abtn-deny" onClick={() => onDecide(reject ? reject.optionId : null)}>
+          Deny
         </button>
       </div>
+      {more.length > 0 && (
+        // Wider approvals stay out of the button row: named in full, never primary.
+        <div className="approval-more">
+          {more.map((opt) => (
+            <button key={opt.optionId} onClick={() => onDecide(opt.optionId)}>
+              {opt.name ?? opt.optionId}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

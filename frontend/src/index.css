@@ -1947,26 +1947,57 @@ button.model-name:hover {
   margin-top: 10px;
 }
 
-.abtn-approve {
-  background: rgba(43, 79, 163, 0.3);
-  color: var(--blue-xl);
-  border: 1px solid rgba(127, 168, 245, 0.25);
+.approval-btns button {
+  height: 28px;
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
-.abtn-approve:hover {
-  background: rgba(43, 79, 163, 0.45);
-  border-color: rgba(127, 168, 245, 0.4);
-}
-
-.abtn-reject {
+.abtn-deny {
   background: rgba(255, 255, 255, 0.05);
-  color: var(--muted);
-  border: 1px solid var(--border);
+  color: var(--muted2);
 }
 
-.abtn-reject:hover {
+.abtn-deny:hover {
   color: var(--text);
   background: rgba(255, 255, 255, 0.08);
+}
+
+.approval-btns button:focus-visible,
+.approval-more button:focus-visible {
+  outline: 2px solid var(--blue-xl);
+  outline-offset: 2px;
+}
+
+/* A wider approval than this one call: a link under the buttons, in the
+   server's own words. */
+.approval-more {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.approval-more button {
+  background: none;
+  border: none;
+  border-radius: 3px;
+  padding: 0;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--muted);
+  text-align: left;
+  overflow-wrap: anywhere;
+  transition: color 0.2s;
+}
+
+.approval-more button:hover,
+.approval-more button:focus-visible {
+  background: none;
+  color: var(--text);
+  text-decoration: underline;
 }
 
 /* ── Risk chips (website badge pattern) ── */
@@ -2054,8 +2085,8 @@ button.model-name:hover {
   color: var(--muted2);
 }
 
-.path-info .path-mark {
-  color: var(--ok);
+.approval-paths .path-summary {
+  color: var(--muted);
 }
 
 .path-warning .path-mark,

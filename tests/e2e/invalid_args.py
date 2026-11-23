@@ -9,7 +9,8 @@ allows (``labels: [["a", "b"]]`` where it takes a string or a list of strings).
 Under vibe 2.26.1 the path guard's ``pre_tool`` hook let that call continue;
 vibe then validated the arguments once more, rejected them as an invalid
 command, and the turn died with ``Core rejected durable input``. With the fix
-the guard denies the call with what is wrong, and the turn goes on.
+the guard denies the call, the turn goes on, and the model reads what is wrong
+(the LLM shim adds the guard's reason to the skipped call's result).
 
 Prints the chat's errors and what the model was told, then ``FIXED`` (exit 0)
 or ``BROKEN`` (exit 1). Needs docker with compose >= 2.24.
@@ -78,7 +79,8 @@ services:
       docker-guard:
         condition: service_started
     environment:
-      MEDMCP_LLM_SHIM: "0"
+      MEDMCP_LLM_SHIM: "1"
+      MEDMCP_SHIM_TOOLS: "ollama"
       MEDMCP_UPDATE_CHECK: "0"
       MEDMCP_AUTO_TITLES: "0"
       MEDMCP_PASSWORD: "{password}"
@@ -165,7 +167,8 @@ def _scenario(env: dict[str, str], compose: list[str]) -> bool:
     print("chat errors:", json.dumps(errors, indent=2))
     print("the model was told:", json.dumps(told, indent=2))
     rejected = any("Core rejected durable input" in e for e in errors)
-    return ended and not rejected and bool(told)
+    reasoned = any("[MedMCP] pick arguments are invalid" in t for t in told)
+    return ended and not rejected and reasoned
 
 
 def main() -> int:

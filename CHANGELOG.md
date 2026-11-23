@@ -33,6 +33,8 @@ Notable, user-visible changes to MedMCP. Format follows
 ### Fixed
 
 - Chat: a folder path in a message no longer brings in the top-level folder it sits in. Before, "put the selection into /ws/stack-tests/run-5/" told the assistant to index `stack-tests`, earlier results included, as a dataset.
+- Stacks: container stacks start when MedMCP runs from source without `MEDMCP_WORKSPACE` set; before, their workspace mount was invalid and they had no tools.
+- Login: a request refused for its origin or host shows the server's reason instead of "Wrong password."
 - Stacks: reinstalling a stack that is already running (a new image under the same name) now stops the running copy, so the next call uses the new image. Before, the old copy kept serving its old tools until it went idle.
 - Stacks: after a stack is updated or reinstalled under the same image name, the assistant sees its new tools. Before, it kept the previous tool list for up to a day, so a newly added tool such as `check_dataset` could not be found.
 - Stacks: installing a stack from the catalog or by image works again with `docker compose`; since 0.7.2 the docker guard refused the image lookup.

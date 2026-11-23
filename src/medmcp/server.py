@@ -111,7 +111,7 @@ from medmcp.workspace_note import (
     strip_workspace_note,
 )
 from medmcp.zipupload import MAX_BYTES as ZIP_MAX_BYTES
-from medmcp.zipupload import ZipRejectedError, extract_archive
+from medmcp.zipupload import ZipRejectedError, unpack_into
 
 _audit: logging.Logger = logging.getLogger("medmcp.audit")
 log: logging.Logger = logging.getLogger(__name__)
@@ -934,37 +934,48 @@ async def post_upload(file: UploadFile, dir: str = "") -> JsonDict:
     return {"ok": True, "path": str(target.relative_to(WORKSPACE_ROOT))}
 
 
+def _one_line(text: str) -> str:
+    """*text* with anything unprintable replaced, so it cannot break a log line."""
+    return "".join(c if c.isprintable() else "?" for c in text)
+
+
 @app.post("/api/files/upload-zip")
 async def post_upload_zip(file: UploadFile, dir: str = "") -> JsonDict:
     """Unpack an uploaded ``.zip`` into ``dir`` (workspace-relative).
 
-    For when the browser cannot hand over a folder: every member is checked
+    For when the browser cannot hand over a folder. Every member is checked
     before anything is written (no absolute paths, ``..``, links or device files;
-    file-count and size caps), and files are written without following links.
+    file-count and size caps), nothing that exists is replaced — an archive
+    naming an existing file is refused whole — and a failed unpack leaves the
+    folder as it was. Every outcome, refusals included, is audit-logged.
     """
-    target_dir = _safe_path(dir)
-    # The multipart parser has already spooled the upload to a seekable
-    # temporary file, which is all zipfile needs: read it from there.
-    if file.size is not None and file.size > ZIP_MAX_BYTES:
-        raise HTTPException(status_code=413, detail="the archive is too large")
-    created = not target_dir.exists()
-    target_dir.mkdir(parents=True, exist_ok=True)
     try:
-        done = await asyncio.to_thread(extract_archive, file.file, target_dir)
-    except ZipRejectedError as exc:
-        if created:  # a refused archive leaves no empty folder behind
-            with contextlib.suppress(OSError):
-                target_dir.rmdir()
-        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
-    result: JsonDict = {
-        "ok": True,
-        "path": "" if target_dir == WORKSPACE_ROOT else str(target_dir.relative_to(WORKSPACE_ROOT)),
-        "files": done.files,
-        "dirs": done.dirs,
-        "bytes": done.bytes,
-    }
-    _audit.info("zip upload: %d file(s) into %s", result["files"], result["path"] or ".")
-    return result
+        target_dir = _safe_path(dir)
+        # The multipart parser has already spooled the upload to a seekable
+        # temporary file, which is all zipfile needs: read it from there.
+        if file.size is not None and file.size > ZIP_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="the archive is too large")
+        try:
+            done = await asyncio.to_thread(unpack_into, file.file, target_dir)
+        except ZipRejectedError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    except HTTPException as exc:
+        _audit.info(
+            "zip upload refused (%d): %s into %s: %s",
+            exc.status_code,
+            _one_line(file.filename or "?"),
+            _one_line(dir or "."),
+            _one_line(str(exc.detail)),
+        )
+        raise
+    rel = "" if target_dir == WORKSPACE_ROOT else str(target_dir.relative_to(WORKSPACE_ROOT))
+    _audit.info(
+        "zip upload: %s, %d file(s) into %s",
+        _one_line(file.filename or "?"),
+        done.files,
+        _one_line(rel or "."),
+    )
+    return {"ok": True, "path": rel, "files": done.files, "dirs": done.dirs, "bytes": done.bytes}
 
 
 # ── Settings API ───────────────────────────────────────────

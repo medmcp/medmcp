@@ -112,12 +112,9 @@ interface CachedVolume {
 }
 
 const volumeCache = new Map<string, CachedVolume>()
-/** Byte budget for the cache beyond what the viewer is showing. The entries are
- *  inflated volumes, not compressed files — the 235 MB test CT is 515 MB of
- *  int16 — so this bounds the history, not the open file: the two most recently
- *  used entries are never evicted, which is exactly the base volume and its
- *  overlay. Without that, a pair of large volumes would evict each other and an
- *  overlay change would re-fetch and re-inflate the image under it. */
+/** Hard byte bound on the cache. Entries are inflated volumes, so 1 GiB holds a
+ *  large CT (~500 MB of int16) plus its label map; a volume that does not fit
+ *  on its own is not cached. */
 const VOLUME_CACHE_BYTES = 1024 * 1024 * 1024
 
 function cachedBytes(): number {
@@ -172,15 +169,17 @@ async function inflateGzip(bytes: ArrayBuffer): Promise<ArrayBuffer | null> {
  *
  *  One conditional GET does the revalidation and the download together: the
  *  server answers 304 while the ETag holds, where this used to cost a HEAD and
- *  then a second, full round trip. `no-store` because the bytes are kept here —
- *  a browser cache holding a second copy of a 450 MB volume is the wrong use of
- *  the disk. */
+ *  then a second, full round trip. Without an entry of our own (a page reload)
+ *  the request is `no-cache`, as every other fetch of a workspace file is: the
+ *  browser revalidates whatever copy it kept, so that can be a 304 as well. */
 async function fetchVolume(url: string, gzipped: boolean): Promise<CachedVolume> {
   const hit = volumeCache.get(url)
-  const r = await fetch(url, {
-    cache: 'no-store',
-    headers: hit ? { 'If-None-Match': hit.etag } : undefined,
-  })
+  const r = await fetch(
+    url,
+    hit?.etag
+      ? { cache: 'no-store', headers: { 'If-None-Match': hit.etag } }
+      : { cache: 'no-cache' },
+  )
   if (hit && r.status === 304) {
     volumeCache.delete(url)
     volumeCache.set(url, hit)
@@ -197,10 +196,12 @@ async function fetchVolume(url: string, gzipped: boolean): Promise<CachedVolume>
     etag: r.headers.get('etag') ?? '',
     inflated: plain !== null,
   }
+  // A stale entry for this URL goes either way; the new one is kept only if it
+  // fits the budget on its own, evicting least recently used to make room.
+  volumeCache.delete(url)
+  if (entry.buffer.byteLength > VOLUME_CACHE_BYTES) return entry
   volumeCache.set(url, entry)
-  // Evict least recently used until under budget, keeping the two the viewer is
-  // showing (see VOLUME_CACHE_BYTES).
-  while (volumeCache.size > 2 && cachedBytes() > VOLUME_CACHE_BYTES) {
+  while (volumeCache.size > 1 && cachedBytes() > VOLUME_CACHE_BYTES) {
     const oldest = volumeCache.keys().next().value
     if (oldest === undefined) break
     volumeCache.delete(oldest)

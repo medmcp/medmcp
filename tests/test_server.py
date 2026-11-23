@@ -114,6 +114,33 @@ class TestRawFiles:
         assert got.content == blob
         assert got.headers["content-length"] == str(len(blob))
 
+    def test_raw_still_serves_ranges_and_head(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """The response subclass keeps what ``FileResponse`` gave: ranges, HEAD, ``no-cache``."""
+        blob = bytes(range(256)) * 8_200  # ~2 MB, so a range can straddle a chunk seam
+        (workspace_root / "big.nii.gz").write_bytes(blob)
+        seam = 1024 * 1024
+        part = client.get("/api/raw/big.nii.gz", headers={"Range": f"bytes={seam - 10}-{seam + 9}"})
+        assert part.status_code == 206
+        assert part.content == blob[seam - 10 : seam + 10]
+        assert part.headers["content-range"] == f"bytes {seam - 10}-{seam + 9}/{len(blob)}"
+        assert part.headers["cache-control"] == "no-cache"
+        tail = client.get("/api/raw/big.nii.gz", headers={"Range": "bytes=-5"})
+        assert tail.status_code == 206
+        assert tail.content == blob[-5:]
+        head = client.head("/api/raw/big.nii.gz")
+        assert head.status_code == 200
+        assert head.content == b""
+        assert head.headers["content-length"] == str(len(blob))
+        assert head.headers["cache-control"] == "no-cache"
+        assert head.headers["accept-ranges"] == "bytes"
+        full = client.get("/api/raw/big.nii.gz")
+        assert full.headers["cache-control"] == "no-cache"
+        stale = client.head("/api/raw/big.nii.gz", headers={"If-None-Match": full.headers["etag"]})
+        assert stale.status_code == 304
+        assert stale.headers["cache-control"] == "no-cache"
+
     def test_raw_html_and_svg_are_sandboxed(self, workspace_root: Path, client: TestClient) -> None:
         """Opened directly, a workspace page must not run with the app's origin."""
         (workspace_root / "qc.html").write_text("<script>1</script>")

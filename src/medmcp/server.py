@@ -37,7 +37,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
-import hashlib
 import importlib
 import io
 import json
@@ -86,6 +85,7 @@ from medmcp import (
     origincheck,
     pathcheck,
     pathguard,
+    previewgrant,
     provenance,
     replay,
     riskcheck,
@@ -1979,24 +1979,9 @@ def _confined_input_paths(inputs: dict[str, str]) -> dict[str, str]:
     return {key: _confined_input_path(value) for key, value in inputs.items()}
 
 
-# Bindings the run screen has previewed, keyed by a hash of the workflow and the
-# exact rows, with when. A run records whether what it was asked to start is what
-# a preview showed; bounded, in memory, and never a gate (the engine's own checks
-# are) — it is the record's answer to "was this confirmed?".
-_previewed: dict[str, str] = {}
-_PREVIEWED_MAX = 256
-
-
-def _binding_key(name: str, bindings: list[dict[str, str]]) -> str:
-    """A stable fingerprint of one workflow run over these exact bindings."""
-    blob = json.dumps([name, bindings], sort_keys=True).encode("utf-8")
-    return hashlib.sha256(blob).hexdigest()
-
-
-def _remember_preview(name: str, bindings: list[dict[str, str]]) -> None:
-    _previewed[_binding_key(name, bindings)] = datetime.now(UTC).isoformat(timespec="seconds")
-    while len(_previewed) > _PREVIEWED_MAX:
-        _previewed.pop(next(iter(_previewed)))
+# What each preview showed, so that a run starts only from one (see
+# medmcp.previewgrant): replay-preview issues a token, /ws/replay redeems it.
+_preview_grants = previewgrant.PreviewGrants()
 
 
 class ReplayPreviewPayload(BaseModel):
@@ -2054,10 +2039,15 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
     is caught here rather than by the tool, after the stacks were spawned. An
     item whose output would land on one of its inputs, or on another item's
     output, is refused with the reason — never offered with a warning.
+
+    When something can run, the answer carries a ``token``: the only way to
+    start this run on ``/ws/replay``, valid for ``expires_in`` seconds, once,
+    for this recipe and exactly the rows that passed (see
+    :mod:`medmcp.previewgrant`).
     """
 
     def _preview() -> JsonDict:
-        recipe = workflow.load_workflow(name)
+        recipe, recipe_sha256 = workflow.load_workflow_with_digest(name)
         bindings_list = [_confined_input_paths(dict(r)) for r in payload.runs]
         servers = settings.active_servers()
         arg_names = workflow.input_argument_names(recipe)
@@ -2072,8 +2062,15 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
             if items[index]["error"] is None:
                 items[index].update(ok=False, error=reason)
         first_ok = next((i for i, item in enumerate(items) if item["error"] is None), None)
+        no_token: JsonDict = {"token": None, "expires_in": None}
         if first_ok is None and items:
-            return {"ok": False, "error": items[0]["error"], "steps": [], "items": items}
+            return {
+                "ok": False,
+                "error": items[0]["error"],
+                "steps": [],
+                "items": items,
+                **no_token,
+            }
         # Same defaults the run will use, so the preview shows what will actually
         # be sent rather than an unresolved placeholder the user never filled in.
         first = bindings_list[first_ok] if first_ok is not None else {}
@@ -2095,19 +2092,18 @@ async def post_replay_preview(name: str, payload: ReplayPreviewPayload) -> JsonD
                 error = f"step {step['index']} names a path outside the workspace: " + ", ".join(
                     outside
                 )
-                return {"ok": False, "error": error, "steps": steps, "items": items}
-        ready = sum(1 for item in items if item["ok"])
-        # What the Run button sends is the rows that passed, so that is what a
-        # start is compared against (see _binding_key).
-        _remember_preview(
-            name, [b for b, item in zip(bindings_list, items, strict=True) if item["ok"]]
-        )
-        _remember_preview(name, bindings_list)
+                return {"ok": False, "error": error, "steps": steps, "items": items, **no_token}
+        runnable = [b for b, item in zip(bindings_list, items, strict=True) if item["ok"]]
+        # What the Run button sends is the rows that passed, so that is what the
+        # token admits.
+        token = _preview_grants.issue(name, recipe_sha256, runnable) if runnable else None
         return {
-            "ok": ready > 0,
-            "error": None if ready > 0 else "no item can run",
+            "ok": bool(runnable),
+            "error": None if runnable else "no item can run",
             "steps": steps,
             "items": items,
+            "token": token,
+            "expires_in": _preview_grants.ttl_s if token else None,
         }
 
     try:
@@ -2325,6 +2321,8 @@ class ReplayStartRequest(BaseModel):
     manifest: str = ""
     """The workspace path of the plan or selection the rows came from, if any."""
     output_root: str = ""
+    preview_token: str = ""
+    """The ``token`` the preview of exactly these rows returned; required to start."""
 
 
 @app.websocket("/ws/replay")
@@ -2333,7 +2331,8 @@ async def ws_replay(ws: WebSocket) -> None:
 
     First client message, one of:
 
-    - ``{"name": str, "runs": [{in_N: value}, ...]}`` starts a new run;
+    - ``{"name": str, "runs": [{in_N: value}, ...], "preview_token": str}``
+      starts a new run;
 
       each entry is one full input binding and the recipe runs once per
       entry, sequentially. A failed item does not stop the remaining items.
@@ -2348,7 +2347,10 @@ async def ws_replay(ws: WebSocket) -> None:
 
     SECURITY: the replay engine calls MCP tools directly, bypassing the
     vibe-acp permission flow — the client must show the resolved-steps preview
-    (``/replay-preview``) and get an explicit confirmation before starting.
+    (``/replay-preview``) and get an explicit confirmation before starting. A
+    start must carry that preview's token, for this workflow, this version of
+    its recipe and exactly these rows; anything else is refused and audit-logged
+    before a step runs (see :mod:`medmcp.previewgrant`).
     Inputs are confined to the workspace here regardless (see
     :func:`_confined_input_path`), since a binding arriving on this socket has
     had no permission prompt between it and the tool call.
@@ -2383,8 +2385,20 @@ async def ws_replay(ws: WebSocket) -> None:
                 await ws.send_json({"type": "result", "ok": False, "error": "no inputs to run"})
                 return
             try:
-                recipe = await asyncio.to_thread(workflow.load_workflow, first.name)
+                recipe, recipe_sha256 = await asyncio.to_thread(
+                    workflow.load_workflow_with_digest, first.name
+                )
             except FileNotFoundError as exc:
+                await ws.send_json({"type": "result", "ok": False, "error": str(exc)})
+                return
+            # The recipe just read, these rows: exactly what a preview showed, or
+            # nothing runs.
+            try:
+                grant = _preview_grants.redeem(
+                    first.preview_token, first.name, recipe_sha256, bindings
+                )
+            except previewgrant.GrantRefusedError as exc:
+                _audit.warning("replay refused: %s: %s", first.name, exc)
                 await ws.send_json({"type": "result", "ok": False, "error": str(exc)})
                 return
             servers = await asyncio.to_thread(settings.active_servers)
@@ -2405,7 +2419,6 @@ async def ws_replay(ws: WebSocket) -> None:
                     _audit.warning("replay refused: %s", exc)
                     await ws.send_json({"type": "result", "ok": False, "error": str(exc)})
                     return
-            previewed_at = _previewed.get(_binding_key(first.name, bindings))
             record = _runs.start(
                 recipe=recipe,
                 runs=bindings,
@@ -2420,12 +2433,13 @@ async def ws_replay(ws: WebSocket) -> None:
                 confirmation={
                     # One person owns a workspace; there is no account to name.
                     # What can be said is how the start reached the server and
-                    # whether these exact rows had been shown in the preview.
+                    # that these exact rows were shown in the preview (a start
+                    # without its token never gets here).
                     "by": "workspace user",
                     "authenticated": access.required(),
                     "client": ws.client.host if ws.client is not None else None,
-                    "previewed": previewed_at is not None,
-                    "previewed_at": previewed_at,
+                    "previewed": True,
+                    "previewed_at": grant.issued_at,
                     "confirmed_at": datetime.now(UTC).isoformat(timespec="seconds"),
                 },
                 on_finished=lambda r: _audit.info(

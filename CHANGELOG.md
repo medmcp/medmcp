@@ -57,6 +57,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Jobs: a progress file is read only if it is a regular file; a pipe left in its place blocked the server.
 - Docker guard: a container named or labelled as a job is created only with no network, the workspace as its only mount and the job command its image declares; images carrying a job label are refused.
 - Images: uv 0.13.7 and Docker Compose 5.7.0, for critical advisories in their bundled zip and gRPC libraries.
+- Workflows: the run editor shows the resolved steps, and a run starts only from the preview that showed them.
 
 ## 0.7.4 — 2026-11-04
 

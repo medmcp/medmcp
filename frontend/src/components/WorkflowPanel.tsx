@@ -659,7 +659,8 @@ export const WorkflowPanel = memo(function WorkflowPanel({
   const [outputRoot, setOutputRoot] = useState('')
   const [mapping, setMapping] = useState<Record<string, string>>({})
   const [ask, setAsk] = useState<{ unmapped: string[]; options: string[] } | null>(null)
-  const [showSteps, setShowSteps] = useState(false)
+  // Bumped shortly before a preview's token expires, so the editor asks again.
+  const [previewRound, setPreviewRound] = useState(0)
   const [showResultsDir, setShowResultsDir] = useState(false)
   // Absolute workspace root: tool outputs come back absolute, the viewer wants
   // workspace-relative, and nobody wants to read the host prefix on every chip.
@@ -849,7 +850,8 @@ export const WorkflowPanel = memo(function WorkflowPanel({
   // ── Pre-flight preview, debounced on every edit ──
   // The run button is only enabled once the preview for exactly these rows has
   // come back: the resolved steps and per-row checks are the confirmation the
-  // engine's no-permission-prompt design requires.
+  // engine's no-permission-prompt design requires. The server starts a run only
+  // with the token that preview returned, for exactly these rows.
   const requiredNames = detail ? detail.inputs.filter((i) => !i.default).map((i) => i.name) : []
   const derivedNames = detail ? detail.inputs.filter((i) => i.default).map((i) => i.name) : []
   const completeRows =
@@ -889,9 +891,20 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
     }, 350)
     return () => clearTimeout(id)
-    // previewKey encodes everything the request depends on.
+    // previewKey encodes everything the request depends on; previewRound renews it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [previewKey])
+  }, [previewKey, previewRound])
+
+  // A token is short-lived: preview again half a minute before it runs out.
+  useEffect(() => {
+    const ttl = preview?.result.expires_in
+    if (!ttl) return
+    const id = window.setTimeout(
+      () => setPreviewRound((n) => n + 1),
+      Math.max(ttl - 30, 5) * 1000,
+    )
+    return () => clearTimeout(id)
+  }, [preview])
 
   // The workflow whose detail the panel currently wants. Guards against a
   // slow response for a previously clicked row overwriting the current one —
@@ -1039,7 +1052,6 @@ export const WorkflowPanel = memo(function WorkflowPanel({
   const beginRun = (d: WorkflowDetail) => {
     setPreview(null)
     resetManifest()
-    setShowSteps(false)
     setShowResultsDir(false)
     setFocusedCell(null)
     // Files is the default, prefilled from whatever is selected in the explorer.
@@ -1075,19 +1087,45 @@ export const WorkflowPanel = memo(function WorkflowPanel({
     })
   }
 
-  /** Start a run. `labels` name the items; `manifest` and `outputRoot` say where
+  /** Start a previewed run: `token` is what the preview of exactly these rows
+   *  returned. `labels` name the items; `manifest` and `outputRoot` say where
    *  the rows came from and where results go, for the run's record. */
   const startRun = (
     name: string,
     runs: Record<string, string>[],
+    token: string,
     labels: string[] = [],
     manifest = '',
     outputRootUsed = '',
   ) => {
     setError(null)
-    followRun({ name, runs, labels, manifest, output_root: outputRootUsed })
+    setPreview(null) // the token is spent
+    followRun({ name, runs, labels, manifest, output_root: outputRootUsed, preview_token: token })
     setMode({ kind: 'view' })
   }
+
+  /** Put a finished run's unfinished items back in the editor, to check and run. */
+  const reviewAgain = (r: RunState) =>
+    withBusy('Loading…', async () => {
+      const rows = r.runs
+        .map((run, i) => {
+          const values: Record<string, string> = {}
+          for (const [k, v] of Object.entries(run)) values[k] = workspacePath(v, root) ?? v
+          return { values, label: r.labels[i] || undefined }
+        })
+        .filter((_, i) => !r.items[i]?.ok)
+      const d =
+        detail && detail.name === r.workflow ? detail : await fetchWorkflowDetail(r.workflow)
+      closeRun()
+      detailForRef.current = d.name
+      setExpanded(d.name)
+      setDetail(d)
+      setPreview(null)
+      resetManifest()
+      setShowResultsDir(false)
+      setFocusedCell(null)
+      setMode({ kind: 'run', source: 'files', rows, resultsDir: '', manifest: '', outputRoot: '' })
+    })
 
   const stopRun = () => {
     runWs.current?.send(JSON.stringify({ type: 'cancel' }))
@@ -1106,7 +1144,6 @@ export const WorkflowPanel = memo(function WorkflowPanel({
     const failedRan = r.items.filter((it) => !it.ok).length
     const notRun = r.total - r.items.length
     const retryRuns = r.runs.filter((_, i) => !r.items[i]?.ok)
-    const retryLabels = r.labels.filter((_, i) => !r.items[i]?.ok)
     const duration = (r.finishedAt ?? now) - r.startedAt
     const single = r.total === 1
     const failedStep = single ? r.log.find((s) => !s.ok) : undefined
@@ -1178,10 +1215,10 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                   className="btn-primary"
                   aria-label={
                     r.status === 'cancelled'
-                      ? 'Continue with the items that did not finish.'
-                      : 'Run only what failed.'
+                      ? 'Check the items that did not finish, then run them.'
+                      : 'Check what failed, then run it again.'
                   }
-                  onClick={() => startRun(r.workflow, retryRuns, retryLabels)}
+                  onClick={() => void reviewAgain(r)}
                 >
                   {r.status === 'cancelled' ? <PlayIcon size={12} /> : <RefreshIcon size={12} />}{' '}
                   {r.status === 'cancelled' ? 'Resume' : 'Retry'}
@@ -1213,7 +1250,8 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       bindingIdx += 1
       return ready?.items[bindingIdx] ?? null
     })
-    const canRun = !!ready && ready.ok && readyItems.length > 0 && run?.status !== 'running'
+    const canRun =
+      !!ready && ready.ok && !!ready.token && readyItems.length > 0 && run?.status !== 'running'
     // The run controls appear once there is something to run: right away for
     // hand-picked files, after the plan has been loaded for a cohort.
     const showControls = m.source === 'files' || m.rows.length > 0
@@ -1225,7 +1263,10 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         className="wf-form"
         onSubmit={(e) => {
           e.preventDefault()
-          if (canRun) startRun(d.name, runnable, runnableLabels, m.manifest, m.outputRoot)
+          const token = ready?.token
+          if (canRun && token) {
+            startRun(d.name, runnable, token, runnableLabels, m.manifest, m.outputRoot)
+          }
         }}
       >
         {required.length > 0 && (
@@ -1473,29 +1514,26 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         )}
         {complete > 0 && ready && ready.steps.length > 0 && (
           <div className="wf-preview">
-            <button
-              type="button"
-              className="btn-text wf-derived-toggle"
-              onClick={() => setShowSteps((v) => !v)}
-            >
-              {showSteps ? 'Hide' : 'Show'} what will run
-              {complete > 1 ? ' (first row)' : ''}
-            </button>
-            {showSteps && (
-              <ol className="wf-steps">
-                {ready.steps.map((s) => (
-                  <li key={s.index}>
-                    <code>{s.tool}</code>
-                    <span className="wf-args-inline">
-                      {Object.entries(s.arguments).map(([k, v]) => (
-                        <span key={k}>
-                          {k}: {display(v, root)}
-                        </span>
-                      ))}
-                    </span>
-                  </li>
-                ))}
-              </ol>
+            <div className="wf-hint">What will run:</div>
+            <ol className="wf-steps">
+              {ready.steps.map((s) => (
+                <li key={s.index}>
+                  <code>{s.tool}</code>
+                  <div className="wf-args">
+                    {Object.entries(s.arguments).map(([k, v]) => (
+                      <div key={k}>
+                        {k}: {display(v, root)}
+                      </div>
+                    ))}
+                  </div>
+                </li>
+              ))}
+            </ol>
+            {readyItems.length > 1 && (
+              <div className="wf-hint">
+                … and {readyItems.length - 1} more row{readyItems.length === 2 ? '' : 's'} like
+                this
+              </div>
             )}
           </div>
         )}

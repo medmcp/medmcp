@@ -253,6 +253,10 @@ export interface ReplayPreviewResult {
   /** The resolved steps of the first item that can run. */
   steps: ReplayPreviewStep[]
   items: ReplayPreviewItem[]
+  /** Starts exactly the rows that passed, once; null when nothing can run. */
+  token: string | null
+  /** Seconds the token stays valid. */
+  expires_in: number | null
 }
 
 export type RunStatus = 'running' | 'done' | 'failed' | 'cancelled'

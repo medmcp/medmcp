@@ -3071,6 +3071,23 @@ def _workspace_note(viewed_path: str) -> str:
 # goes out anyway, and for it to confirm a session/close.
 TURN_CANCEL_TIMEOUT: float = 15.0
 SESSION_CLOSE_TIMEOUT: float = 10.0
+# How long to wait for vibe-acp to take in a ``cancelled`` approval before the
+# turn is interrupted (see ``_settle_cancelled_permissions``).
+PERMISSION_SETTLE_TIMEOUT: float = 5.0
+# How long a resume waits for the socket that last held the chat to finish
+# closing it: the cancelled turn's end, then the session/close.
+SESSION_HANDOVER_TIMEOUT: float = TURN_CANCEL_TIMEOUT + SESSION_CLOSE_TIMEOUT + 5.0
+
+# Sessions a closing socket is still releasing in vibe-acp, by vibe session id.
+# A resume of one waits for the event: vibe 2.26 attaches a session that is
+# still open a second time instead of refusing, and the close under way would
+# then take the new socket's session and queue with it.
+_closing_sessions: dict[str, asyncio.Event] = {}
+
+
+def _is_permission_request(msg: JsonDict) -> bool:
+    """Whether a vibe-acp frame asks for an approval (and so awaits an answer)."""
+    return msg.get("method") == "session/request_permission"
 
 
 class _ChatConnection:
@@ -3119,6 +3136,9 @@ class _ChatConnection:
         # Relays unsolicited frames before the first prompt (see start_idle_pump).
         self._idle_pump: asyncio.Task[None] | None = None
         self._pending_perms: dict[int, asyncio.Future[str | None]] = {}
+        # Set when a cancelled turn's open approval was answered ``cancelled``:
+        # the interrupt must wait until vibe-acp has taken that answer in.
+        self._permission_cancelled = False
         # Set once the user allows a read-only command for the rest of the chat:
         # from then on every read-only command (any of _READ_ONLY_SESSION_PATTERNS,
         # with the same redirect rules) is allowed without asking again.
@@ -3187,19 +3207,29 @@ class _ChatConnection:
         resumed session is never purged on close — it already has history the
         user came back to view.
         """
-        await self._stop_idle_pump()
-        await self._cancel_prompt()
-        for task in [*self._explain_tasks, *self._title_tasks]:
-            task.cancel()
-        # Release vibe-acp's lease on the session. Without session/close it stays
-        # "open" in vibe-acp until a restart, so coming back to this chat fails
-        # session/load and silently lands in a new, empty chat instead.
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(
-                _client.request("session/close", {"sessionId": self.session_id}),
-                timeout=SESSION_CLOSE_TIMEOUT,
-            )
-        _client.unregister_session(self.session_id)
+        # Registered before the first await, so a socket resuming this chat (a
+        # page reload) finds it and waits instead of loading a session that is
+        # still being closed.
+        released = asyncio.Event()
+        _closing_sessions[self.session_id] = released
+        try:
+            await self._stop_idle_pump()
+            await self._cancel_prompt()
+            for task in [*self._explain_tasks, *self._title_tasks]:
+                task.cancel()
+            # Release vibe-acp's lease on the session. Without session/close it
+            # stays "open" in vibe-acp until a restart, and vibe 2.26 attaches an
+            # open session a second time on session/load — every frame twice.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    _client.request("session/close", {"sessionId": self.session_id}),
+                    timeout=SESSION_CLOSE_TIMEOUT,
+                )
+            _client.unregister_session(self.session_id)
+        finally:
+            if _closing_sessions.get(self.session_id) is released:
+                del _closing_sessions[self.session_id]
+            released.set()
         if not self._prompted and not self._resumed:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(
@@ -3216,10 +3246,65 @@ class _ChatConnection:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+            await self._settle_cancelled_permissions()
             with contextlib.suppress(Exception):
                 await _client.notify("session/cancel", {"session_id": self.session_id})
             await self._await_turn_end()
             await self._drain_stale_frames()
+
+    async def _settle_cancelled_permissions(self) -> None:
+        """Let vibe-acp take in a ``cancelled`` approval before the turn is interrupted.
+
+        vibe 2.26 journals the answer to an approval and the interrupt of its
+        turn independently. Sent back to back, the interrupt can drop the pending
+        approval first and the answer is then recorded against nothing: the
+        session store is invalid from there on — "A turn is already running" for
+        every later prompt, and the chat can no longer be loaded or listed. So
+        an approval open at cancel time (answered in ``_handle_permission``) or
+        still queued is answered here, and the interrupt goes out only once
+        vibe-acp has moved on: the next frame of the turn, or its end. Frames
+        read while waiting belong to the cancelled turn and are discarded.
+        """
+        answered = self._permission_cancelled
+        self._permission_cancelled = False
+        rpc = self._prompt_rpc
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + PERMISSION_SETTLE_TIMEOUT
+        while True:
+            while not self.queue.empty():
+                try:
+                    msg = self.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                answered = await self._cancel_stale_permission(msg)
+            if not answered or rpc is None or rpc.done():
+                return
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                log.warning(
+                    "vibe-acp did not take a cancelled approval within %ss",
+                    PERMISSION_SETTLE_TIMEOUT,
+                )
+                return
+            get_task = asyncio.create_task(self.queue.get())
+            await asyncio.wait(
+                {get_task, rpc}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+            )
+            if get_task.done():
+                answered = await self._cancel_stale_permission(get_task.result())
+            else:
+                # Cancelling a parked Queue.get leaves the queue untouched.
+                get_task.cancel()
+
+    async def _cancel_stale_permission(self, msg: JsonDict) -> bool:
+        """Answer *msg* ``cancelled`` if it asks for an approval; say whether it did."""
+        if not _is_permission_request(msg):
+            return False
+        req_id = msg.get("id")
+        if isinstance(req_id, int):
+            with contextlib.suppress(Exception):
+                await _client.respond(req_id, {"outcome": {"outcome": "cancelled"}})
+        return True
 
     async def _await_turn_end(self) -> None:
         """Wait (bounded) for vibe-acp to answer the cancelled turn's session/prompt.
@@ -3252,11 +3337,7 @@ class _ChatConnection:
                 msg = self.queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            if msg.get("method") == "session/request_permission":
-                req_id = msg.get("id")
-                if isinstance(req_id, int):
-                    with contextlib.suppress(Exception):
-                        await _client.respond(req_id, {"outcome": {"outcome": "cancelled"}})
+            await self._cancel_stale_permission(msg)
 
     async def _send(self, msg: JsonDict) -> None:
         """Send one frame to the browser, ignoring a just-closed socket."""
@@ -3875,6 +3956,9 @@ class _ChatConnection:
             # this JSON-RPC response; answer "cancelled" before propagating or
             # its agent loop hangs and rejects every later prompt. The shield
             # keeps a second cancel from abandoning the write mid-flight.
+            # The interrupt that follows waits for vibe-acp to take this answer
+            # in (_settle_cancelled_permissions).
+            self._permission_cancelled = True
             with contextlib.suppress(Exception):
                 await asyncio.shield(self._resolve_permission(req_id_raw, title, cached, None))
             raise
@@ -4147,8 +4231,10 @@ async def fork_session(session_id: str) -> JsonDict:
     """Branch the live chat: fork its whole history into a new session.
 
     Uses vibe's ``session/fork`` (vibe ≥2.23), which copies the transcript into
-    a fresh session without attaching it; the browser then opens the fork via
-    the normal resume flow. The fork is registered in the UI session registry
+    a fresh session; the browser then opens the fork via the normal resume
+    flow. vibe 2.26 leaves the fork attached, and the ``session/load`` of that
+    resume would attach it a second time — every live frame relayed twice — so
+    the fork is closed here first. The fork is registered in the UI session registry
     immediately — the entry names it *and* keeps the chain-collapse folding
     from hiding it (forks carry the same ``parent_session_id`` backlink as
     compaction continuations). Requires the chat to be open (vibe only forks
@@ -4169,6 +4255,11 @@ async def fork_session(session_id: str) -> JsonDict:
     if not new_id:
         raise HTTPException(status_code=502, detail="fork returned no session id")
     _audit.info("chat branched: %s -> %s", session_id, new_id)
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(
+            _client.request("session/close", {"sessionId": new_id}),
+            timeout=SESSION_CLOSE_TIMEOUT,
+        )
 
     def _register() -> None:
         entry = sessions.get_entry(session_id)
@@ -4382,9 +4473,21 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
             tip = await asyncio.to_thread(
                 lambda: provenance.vibe_chain_tip(resume, stop_ids=_chain_stop_ids(resume))
             )
-            queue = _client.register_session(tip)
+            # A socket that held this chat a moment ago (a page reload) may still
+            # be ending its turn and closing the session: let it finish first.
+            closing = _closing_sessions.get(tip)
+            if closing is not None:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(closing.wait(), timeout=SESSION_HANDOVER_TIMEOUT)
             load_params: JsonDict = {"cwd": str(WORKSPACE_ROOT), "mcpServers": [], "sessionId": tip}
-            load = await _session_request("session/load", load_params)
+            if any(c.session_id == tip for c in _connections):
+                # Another socket is using this chat (a second tab): it is not
+                # stolen. vibe 2.26 would load it a second time rather than
+                # refuse, and this socket would take the other one's frames.
+                load: JsonDict = {"error": {"message": "session is open in another socket"}}
+            else:
+                queue = _client.register_session(tip)
+                load = await _session_request("session/load", load_params)
             if "error" in load and not any(c.session_id == tip for c in _connections):
                 # vibe-acp still holds the session though no socket uses it (a
                 # disconnect that predates session/close on close, or one cut
@@ -4396,7 +4499,8 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
                     )
                 load = await _session_request("session/load", load_params)
             if "error" in load:
-                _client.unregister_session(tip)
+                if queue is not None:
+                    _client.unregister_session(tip)
                 queue = None
             else:
                 session_id = tip

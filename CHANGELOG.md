@@ -33,7 +33,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Fixed
 
-- Chat: a folder path in a message no longer brings in the top-level folder it sits in. Before, "put the selection into /ws/stack-tests/run-5/" told the assistant to index `stack-tests`, earlier results included, as a dataset.
+- Chat: an output path in a message is no longer taken for a dataset to index.
 - Stacks: container stacks start when MedMCP runs from source without `MEDMCP_WORKSPACE` set; before, their workspace mount was invalid and they had no tools.
 - Login: a request refused for its origin or host shows the server's reason instead of "Wrong password."
 - Stacks: reinstalling a stack that is already running (a new image under the same name) now stops the running copy, so the next call uses the new image. Before, the old copy kept serving its old tools until it went idle.

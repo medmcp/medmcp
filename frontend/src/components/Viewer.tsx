@@ -1911,6 +1911,21 @@ function WindowPopover({
   )
 }
 
+/** A ref for the element that holds a volume, or the empty viewer: Ctrl/Cmd +
+ *  wheel over it never zooms the browser page. The volume view's own handler
+ *  only covers the canvas once an image is on it — not the loading cover, a
+ *  failed load or the empty panel, where the same gesture zoomed the whole app.
+ *  Native and non-passive for the reason given there; it does not stop
+ *  propagation, so that handler still does the zooming. */
+function keepPageZoomOut(el: HTMLElement | null): (() => void) | undefined {
+  if (!el) return
+  const onWheel = (e: WheelEvent) => {
+    if (e.ctrlKey || e.metaKey) e.preventDefault()
+  }
+  el.addEventListener('wheel', onWheel, { capture: true, passive: false })
+  return () => el.removeEventListener('wheel', onWheel, { capture: true })
+}
+
 /** Routes the selected file to the right renderer (volume / PDF / image / text). */
 // Memoized so a separator drag doesn't re-render the viewer (and its WebGL/React
 // subtree) every frame; props from App are stable except when the open file
@@ -1985,7 +2000,7 @@ export const Viewer = memo(function Viewer({
         {/* Black is the right ground for an image and the wrong one for an
             empty panel, where it reads as a hole in the app. The layout stays,
             only the colour changes. */}
-        <div className="panel-body viewer-body is-empty">
+        <div className="panel-body viewer-body is-empty" ref={keepPageZoomOut}>
           <div className="viewer-message">Select a file in the explorer to view it here.</div>
         </div>
       </div>
@@ -2040,7 +2055,7 @@ export const Viewer = memo(function Viewer({
       </div>
       <div className="panel-body viewer-body">
         {kind === 'volume' && (
-          <div className={`volume-slot${rebuilding ? ' rebuilding' : ''}`}>
+          <div className={`volume-slot${rebuilding ? ' rebuilding' : ''}`} ref={keepPageZoomOut}>
             <VolumeView
               key={`${path}#${resizeGen}#${settings.antialias ? 'aa' : 'noaa'}#${settings.renderScale}`}
               path={path}

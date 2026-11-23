@@ -50,6 +50,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Explorer: the rows no longer jump when a file is dragged in, so a drop lands on the folder under the pointer.
 - Explorer: uploading a file named like an existing folder says so instead of failing with a server error.
 - Viewer: a `.hdr`/`.img` pair opens whatever the case of its file names, from either file; only an upper-case `.HDR` did. A missing half is named.
+- Viewer: Ctrl/⌘ + wheel over the empty viewer, or over a volume that is loading or failed to load, no longer zooms the browser page.
 - Viewer: a volume or overlay that cannot be loaded (empty, truncated, not a volume, deleted) says so and names the file; the panel stayed blank and a failed overlay vanished silently.
 - Stacks: reinstalling a stack that is already running (a new image under the same name) now stops the running copy, so the next call uses the new image. Before, the old copy kept serving its old tools until it went idle.
 - Stacks: after a stack is updated or reinstalled under the same image name, the assistant sees its new tools. Before, it kept the previous tool list for up to a day, so a newly added tool such as `check_dataset` could not be found.

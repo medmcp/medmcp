@@ -21,6 +21,7 @@ touched, so every accessor here calls it.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -338,8 +339,22 @@ def rename_workflow(name: str, new_name: str, *, workflows_root: Path | None = N
 
 def read_recipe(directory: Path) -> Recipe:
     """Load the recipe stored in workflow *directory*."""
-    data = yaml.safe_load((directory / RECIPE_FILE).read_text(encoding="utf-8"))
+    return _parse_recipe((directory / RECIPE_FILE).read_bytes())
+
+
+def _parse_recipe(raw: bytes) -> Recipe:
+    data = yaml.safe_load(raw.decode("utf-8"))
     return Recipe.from_dict(cast("JsonDict", data) if isinstance(data, dict) else {})
+
+
+def load_workflow_with_digest(name: str, root: Path | None = None) -> tuple[Recipe, str]:
+    """Workflow *name*'s recipe and the SHA-256 of the ``recipe.yaml`` it was parsed from.
+
+    One read serves both, so the digest is of exactly the recipe returned — what
+    a replay preview pins and a run start compares against.
+    """
+    raw = (require_dir(name, root) / RECIPE_FILE).read_bytes()
+    return _parse_recipe(raw), hashlib.sha256(raw).hexdigest()
 
 
 def write_recipe(directory: Path, recipe: Recipe) -> None:

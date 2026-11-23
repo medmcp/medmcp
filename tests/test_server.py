@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import importlib
 import io
+import logging
 import os
 import zipfile
 from collections.abc import Callable, Iterable
@@ -1513,7 +1514,18 @@ class TestReplayRuns:
 
         monkeypatch.setattr(runs, "_to_thread", inline)
         monkeypatch.setattr(settings, "image_identity", no_image)
+        # A fresh grant store per test: no token outlives the test that got it.
+        from medmcp import previewgrant
+
+        monkeypatch.setattr(server, "_preview_grants", previewgrant.PreviewGrants())
         return workspace
+
+    @staticmethod
+    def _token(client: TestClient, name: str, bindings: list[dict[str, str]]) -> str:
+        """Preview *bindings* and return the token that may run them."""
+        body = client.post(f"/api/workflows/{name}/replay-preview", json={"runs": bindings}).json()
+        assert body["ok"] is True and isinstance(body["token"], str)
+        return body["token"]
 
     def test_preview_flags_a_missing_input_per_item(self, env: Path, client: TestClient) -> None:
         """A row pointing at a file that is not there is reported before anything runs."""
@@ -1534,8 +1546,9 @@ class TestReplayRuns:
         self, env: Path, client: TestClient
     ) -> None:
         """Closing the socket detaches; the run finishes and a later attach replays it."""
+        token = self._token(client, "strip", [{"in_1": "t1.nii.gz"}])
         with client.websocket_connect("/ws/replay", headers=WS_HEADERS) as ws:
-            ws.send_json({"name": "strip", "runs": [{"in_1": "t1.nii.gz"}]})
+            ws.send_json({"name": "strip", "runs": [{"in_1": "t1.nii.gz"}], "preview_token": token})
             started = ws.receive_json()
             assert started["type"] == "started"
             run_id = started["run_id"]
@@ -1683,13 +1696,16 @@ class TestReplayRuns:
         (env / "sel.csv").write_text("subject_id,path\nP1,t1.nii.gz\n")
         (env / "brain.nii.gz").write_bytes(b"brain")
         bindings = [{"in_1": "t1.nii.gz"}]
-        assert (
-            client.post("/api/workflows/strip/replay-preview", json={"runs": bindings}).status_code
-            == 200
-        )
+        token = self._token(client, "strip", bindings)
         with client.websocket_connect("/ws/replay", headers=WS_HEADERS) as ws:
             ws.send_json(
-                {"name": "strip", "runs": bindings, "labels": ["P1/ses-1"], "manifest": "sel.csv"}
+                {
+                    "name": "strip",
+                    "runs": bindings,
+                    "labels": ["P1/ses-1"],
+                    "manifest": "sel.csv",
+                    "preview_token": token,
+                }
             )
             frames: list[dict[str, Any]] = []
             while not frames or frames[-1]["type"] != "result":
@@ -1703,6 +1719,7 @@ class TestReplayRuns:
         assert step["result"] == {"brain_path": str(env / "brain.nii.gz")}
         assert record["recipe"]["steps"][0]["tool"] == "skull_strip"
         assert record["confirmation"]["previewed"] is True
+        assert record["confirmation"]["previewed_at"]
         assert record["manifest"]["copy"] == "manifest.csv"
         assert record["environment"]["medmcp"]["version"]
 
@@ -1713,15 +1730,154 @@ class TestReplayRuns:
         assert "# MedMCP run report" in report.text and "P1/ses-1" in report.text
         assert client.get("/api/runs/nope/export").status_code == 404
 
-    def test_a_start_that_was_never_previewed_says_so(self, env: Path, client: TestClient) -> None:
-        """The record does not claim a confirmation that did not happen."""
-        with client.websocket_connect("/ws/replay", headers=WS_HEADERS) as ws:
-            ws.send_json({"name": "strip", "runs": [{"in_1": "t1.nii.gz"}]})
-            frames: list[dict[str, Any]] = []
-            while not frames or frames[-1]["type"] != "result":
-                frames.append(ws.receive_json())
+    def _count_calls(self, env: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        """Re-patch the engine's tool caller to record every call it is asked to make."""
+        import contextlib
+        from collections.abc import AsyncGenerator
+
+        from medmcp import replay
+
+        calls: list[str] = []
+
+        @contextlib.asynccontextmanager
+        async def counting(*_a: object, **_k: object) -> AsyncGenerator[replay.ToolCaller]:
+            async def _call(
+                srv: str, tool: str, args: dict[str, Any]
+            ) -> tuple[bool, dict[str, Any], str | None]:
+                calls.append(tool)
+                return True, {"brain_path": str(env / "brain.nii.gz")}, None
+
+            yield _call
+
+        monkeypatch.setattr(replay, "mcp_caller", counting)
+        return calls
+
+    def _refused(
+        self, client: TestClient, message: dict[str, Any], calls: list[str], reason: str
+    ) -> None:
+        """One refusal naming *reason* answers the start; nothing ran, nothing was recorded."""
+        frames = self._run(client, message)
+        assert frames == [{"type": "result", "ok": False, "error": frames[0]["error"]}]
+        assert reason in frames[0]["error"]
+        assert calls == []
+        assert client.get("/api/runs").json()["runs"] == []
+
+    def test_a_start_without_a_preview_is_refused(
+        self, env: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No token: no run, no record, and the refusal is in the audit trail."""
+        calls = self._count_calls(env, monkeypatch)
+        audit: list[logging.LogRecord] = []
+
+        class Collect(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                audit.append(record)
+
+        handler = Collect(logging.WARNING)
+        server._audit.addHandler(handler)
+        try:
+            message: dict[str, Any] = {"name": "strip", "runs": [{"in_1": "t1.nii.gz"}]}
+            self._refused(client, message, calls, "not previewed")
+            self._refused(client, {**message, "preview_token": "made-up"}, calls, "unknown")
+        finally:
+            server._audit.removeHandler(handler)
+        lines = [r.getMessage() for r in audit if "replay refused" in r.getMessage()]
+        assert len(lines) == 2
+        assert "strip" in lines[0] and "not previewed" in lines[0] and "unknown" in lines[1]
+
+    def test_a_token_runs_only_what_its_preview_showed(
+        self, env: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Other rows, another workflow, or a recipe changed on disk: refused."""
+        calls = self._count_calls(env, monkeypatch)
+        self._import_reorient(client)
+        (env / "b.nii.gz").write_bytes(b"x")
+        shown = [{"in_1": "t1.nii.gz"}]
+
+        other_rows = [{"in_1": "b.nii.gz"}]
+        token = self._token(client, "strip", shown)
+        message = {"name": "strip", "runs": other_rows, "preview_token": token}
+        self._refused(client, message, calls, "differ from the ones the preview showed")
+        # One more row than was shown is other rows too.
+        token = self._token(client, "strip", shown)
+        message = {"name": "strip", "runs": shown + other_rows, "preview_token": token}
+        self._refused(client, message, calls, "differ from the ones the preview showed")
+
+        token = self._token(client, "strip", shown)
+        rows = [{"in_1": "t1.nii.gz", "in_2": "out/t1_RAS.nii.gz"}]
+        message = {"name": "reorient", "runs": rows, "preview_token": token}
+        self._refused(client, message, calls, "was for workflow 'strip'")
+
+        token = self._token(client, "strip", shown)
+        recipe_file = provenance.VIBE_HOME / "workflows" / "strip" / "recipe.yaml"
+        assert recipe_file.is_file()
+        recipe_file.write_text(recipe_file.read_text().replace("skull_strip", "bet"))
+        message = {"name": "strip", "runs": shown, "preview_token": token}
+        self._refused(client, message, calls, "changed after the preview")
+
+    def test_a_token_works_once(
+        self, env: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The previewed run starts, with a record saying so; the same token again does not."""
+        calls = self._count_calls(env, monkeypatch)
+        shown = [{"in_1": "t1.nii.gz"}]
+        token = self._token(client, "strip", shown)
+        message = {"name": "strip", "runs": shown, "preview_token": token}
+        frames = self._run(client, message)
+        assert frames[0]["type"] == "started" and frames[-1]["ok"] is True
+        assert calls == ["skull_strip"]
         record = client.get(f"/api/runs/{frames[0]['run_id']}").json()
-        assert record["confirmation"]["previewed"] is False
+        assert record["confirmation"]["previewed"] is True
+
+        again = self._run(client, message)
+        assert again == [{"type": "result", "ok": False, "error": again[0]["error"]}]
+        assert "already used" in again[0]["error"]
+        assert calls == ["skull_strip"]
+
+    def test_an_expired_token_is_refused(
+        self, env: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A preview older than its lifetime no longer starts anything."""
+        from medmcp import previewgrant
+
+        calls = self._count_calls(env, monkeypatch)
+        clock = [1000.0]
+        grants = previewgrant.PreviewGrants(ttl_s=60, clock=lambda: clock[0])
+        monkeypatch.setattr(server, "_preview_grants", grants)
+        shown = [{"in_1": "t1.nii.gz"}]
+        body = client.post("/api/workflows/strip/replay-preview", json={"runs": shown}).json()
+        assert body["expires_in"] == 60
+        clock[0] += 61
+        message = {"name": "strip", "runs": shown, "preview_token": body["token"]}
+        self._refused(client, message, calls, "expired")
+
+    def test_a_batch_runs_the_rows_that_passed_its_preview(
+        self, env: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The token admits the rows the preview found runnable: those run, all of them."""
+        calls = self._count_calls(env, monkeypatch)
+        (env / "b.nii.gz").write_bytes(b"x")
+        rows = [{"in_1": "t1.nii.gz"}, {"in_1": "typo.nii.gz"}, {"in_1": "b.nii.gz"}]
+        body = client.post("/api/workflows/strip/replay-preview", json={"runs": rows}).json()
+        assert [i["ok"] for i in body["items"]] == [True, False, True]
+        message = {"name": "strip", "runs": rows, "preview_token": body["token"]}
+        self._refused(client, message, calls, "differ from the ones the preview showed")
+
+        body = client.post("/api/workflows/strip/replay-preview", json={"runs": rows}).json()
+        message = {"name": "strip", "runs": [rows[0], rows[2]], "preview_token": body["token"]}
+        frames = self._run(client, message)
+        assert frames[-1]["ok"] is True
+        assert [f["ok"] for f in frames if f["type"] == "item_result"] == [True, True]
+        assert calls == ["skull_strip", "skull_strip"]
+
+    def test_a_preview_with_nothing_runnable_gives_no_token(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """Every row failed its checks: there is nothing a token could start."""
+        body = client.post(
+            "/api/workflows/strip/replay-preview", json={"runs": [{"in_1": "typo.nii.gz"}]}
+        ).json()
+        assert body["ok"] is False and body["token"] is None
 
     def test_a_selection_manifest_feeds_the_roll_out(self, env: Path, client: TestClient) -> None:
         """One row per selected series: the single input takes ``path``, no status needed."""
@@ -1870,8 +2026,6 @@ class TestReplayRuns:
             "/api/workflows/lesions/batch-from-plan",
             json={"plan_csv": manifest, "role_map": self.ROLES},
         ).json()
-        preview = client.post("/api/workflows/lesions/replay-preview", json={"runs": bound["runs"]})
-        assert preview.json()["ok"] is True
         frames = self._run(
             client,
             {
@@ -1879,6 +2033,7 @@ class TestReplayRuns:
                 "runs": bound["runs"],
                 "labels": bound["labels"],
                 "manifest": manifest,
+                "preview_token": self._token(client, "lesions", bound["runs"]),
             },
         )
         assert frames[-1]["ok"] is True
@@ -1921,7 +2076,9 @@ class TestReplayRuns:
         csv_path = folder / "lesions_confirmed.csv"
         csv_path.write_bytes(csv_path.read_bytes() + b"\n")
         message = {"name": "lesions", "runs": bound["runs"], "manifest": manifest}
-        frames = self._run(client, message)
+        frames = self._run(
+            client, {**message, "preview_token": self._token(client, "lesions", bound["runs"])}
+        )
         assert frames == [
             {"type": "result", "ok": False, "error": frames[0]["error"]},
         ]
@@ -1930,11 +2087,25 @@ class TestReplayRuns:
         csv_path.write_bytes(csv_path.read_bytes()[:-1])  # as confirmed again
         edited = [dict(r) for r in bound["runs"]]
         edited[1]["in_1"] = str(env / "study" / "P02" / "ses-01" / "s05.nii.gz")
-        frames = self._run(client, {**message, "runs": edited})
+        frames = self._run(
+            client,
+            {
+                **message,
+                "runs": edited,
+                "preview_token": self._token(client, "lesions", edited),
+            },
+        )
         assert frames[0]["ok"] is False
         assert "item 2 reads" in frames[0]["error"] and "not a series of" in frames[0]["error"]
 
-        plain = self._run(client, {**message, "manifest": "study/.medmcp/lesions_series.csv"})
+        plain = self._run(
+            client,
+            {
+                **message,
+                "manifest": "study/.medmcp/lesions_series.csv",
+                "preview_token": self._token(client, "lesions", bound["runs"]),
+            },
+        )
         assert plain[0]["ok"] is False and "reviewed and confirmed first" in plain[0]["error"]
         assert client.get("/api/runs", params={"workflow": "lesions"}).json()["runs"] == []
 

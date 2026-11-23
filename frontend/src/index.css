@@ -4670,10 +4670,19 @@ textarea.wf-input {
   outline-offset: 2px;
 }
 
-/* A dense reference list, so the rows are tighter than `.settings-row`: at ~40
-   bindings that spacing would double the window's height for no gain. The
-   section headings are shared with the settings drawer. */
-.sc-body .settings-section:first-child {
+/* Two columns, so the whole list shows without scrolling: the viewer on the
+   left, everything else on the right. One column when the window is narrow. */
+.sc-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 32px;
+}
+
+.sc-group .settings-section {
+  margin-top: 14px;
+}
+
+.sc-col > .sc-group:first-child .settings-section {
   margin-top: 2px;
 }
 
@@ -4681,33 +4690,32 @@ textarea.wf-input {
   font-size: 11.5px;
   color: var(--muted2);
   line-height: 16px;
-  margin: 0 0 2px;
+  margin: 8px 0 0;
 }
 
 .sc-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 5px 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.sc-row:last-child {
-  border-bottom: none;
+  min-height: 28px;
 }
 
 .sc-action {
   font-size: 13px;
-  line-height: 17px;
+  line-height: 16px;
 }
 
 .sc-keys {
   display: flex;
   flex-shrink: 0;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 5px;
+  gap: 4px;
+}
+
+@media (max-width: 560px) {
+  .sc-body {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* The window takes focus when it opens (see ShortcutsWindow); it is not a

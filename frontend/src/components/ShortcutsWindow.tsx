@@ -6,94 +6,78 @@ interface ShortcutsWindowProps {
   onClose: () => void
 }
 
-/** One line of the list. `keys` are alternatives, each drawn as its own key cap;
- *  a combination is one cap ("Shift + ↑"), so the two never read the same. */
+/** One line of the list; `keys` are alternatives, each drawn as its own key cap. */
 type Shortcut = { keys: string[]; action: string }
 
 type Group = { title: string; hint?: string; rows: Shortcut[] }
 
-/* Everything the app actually binds, grouped by the thing that has to have
- * focus for it to work — the detail that makes a shortcut list useless when it
- * is left out. Several of these are not ours: the file tree's keymap comes with
- * react-arborist, the separator keys with react-resizable-panels, and the
- * viewer's mouse controls with Niivue. They are listed because a reader cannot
- * tell the difference, and they work.
- *
- * Niivue's own *keyboard* bindings (V, M, H/J/K/L and the rest) are deliberately
- * absent: Viewer.tsx strips the canvas's tabindex so they can never fire.
+/* The controls worth knowing, not every binding the libraries bring along
+ * (type-ahead in the file tree, separator keys, …): a short list gets read.
+ * Niivue's own keyboard bindings are absent on purpose: Viewer.tsx strips the
+ * canvas's tabindex so they can never fire.
  *
  * Every row is a claim about the code; change the two together. */
-const GROUPS: Group[] = [
+const VIEWER: Group = {
+  title: 'Viewer',
+  hint: 'Keys work after a click on the image.',
+  rows: [
+    { keys: ['Scroll', '↑', '↓'], action: 'Slices' },
+    { keys: ['←', '→'], action: '4D frames' },
+    { keys: ['Space'], action: 'Play 4D' },
+    { keys: ['Ctrl + scroll', '+', '-'], action: 'Zoom' },
+    { keys: ['0'], action: 'Reset zoom' },
+    { keys: ['Shift + drag'], action: 'Pan' },
+    { keys: ['Right drag'], action: 'Brightness and contrast' },
+    { keys: ['o'], action: 'Hide overlay' },
+  ],
+}
+
+const OTHER: Group[] = [
   {
     title: 'Chat',
     rows: [
-      { keys: ['Enter'], action: 'Send the message' },
-      { keys: ['Shift + Enter'], action: 'Start a new line' },
+      { keys: ['Enter'], action: 'Send' },
+      { keys: ['Shift + Enter'], action: 'New line' },
     ],
   },
   {
     title: 'Files',
-    hint: 'While the file tree has focus.',
     rows: [
-      { keys: ['↑', '↓'], action: 'Move between rows' },
-      { keys: ['Shift + ↑', 'Shift + ↓'], action: 'Extend the selection' },
-      { keys: ['→', '←'], action: 'Open or close a folder' },
-      { keys: ['Space'], action: 'Open the file, or fold the folder' },
+      { keys: ['Ctrl + click'], action: 'Select several' },
       { keys: ['Enter'], action: 'Rename' },
-      { keys: ['Backspace'], action: 'Delete the selection, after asking' },
-      { keys: ['Ctrl / ⌘ + A'], action: 'Select everything' },
-      { keys: ['Home', 'End'], action: 'Jump to the first or last row' },
-      { keys: ['PageUp', 'PageDown'], action: 'Move a page at a time' },
-      { keys: ['*'], action: 'Open every folder beside this one' },
-      { keys: ['a…z'], action: 'Jump to a visible name starting with what you type' },
-      { keys: ['Ctrl / ⌘ + click', 'Shift + click'], action: 'Add a row or a range to the selection' },
-      { keys: ['Right-click'], action: 'Row menu; on a volume, Overlay on image' },
+      { keys: ['Backspace'], action: 'Delete' },
+      { keys: ['Drag onto image'], action: 'Overlay' },
     ],
   },
   {
-    title: 'Viewer — keys',
-    hint: 'Click the image once first: these need the viewer to hold the keyboard.',
+    title: 'General',
     rows: [
-      { keys: ['↑', '↓', 'PageUp', 'PageDown'], action: 'Step one slice, 10 with Shift' },
-      { keys: ['←', '→'], action: 'Step one frame of a 4D volume, 10 with Shift' },
-      { keys: ['Space'], action: 'Play or pause a 4D volume' },
-      { keys: ['o'], action: 'Hide or show the overlay' },
-      { keys: ['+', '=', '-'], action: 'Zoom the slices in or out about the crosshair' },
-      { keys: ['0'], action: 'Slices back to 100%, centred' },
-    ],
-  },
-  {
-    title: 'Viewer — mouse',
-    hint: 'These need no focus.',
-    rows: [
-      { keys: ['Left drag'], action: 'Move the crosshair; turn the 3D view' },
-      { keys: ['Shift / Ctrl + left drag', 'Middle drag'], action: 'Pan the slices' },
-      { keys: ['Right drag'], action: 'Set the intensity window' },
-      { keys: ['Double-click'], action: 'Reset the intensity window' },
-      { keys: ['Wheel'], action: 'Step slices; zoom the 3D view' },
-      { keys: ['Ctrl / ⌘ + wheel', 'Trackpad pinch'], action: 'Zoom the slices about the crosshair' },
-      { keys: ['Drag a volume from Files'], action: 'Overlay it on the image' },
-    ],
-  },
-  {
-    title: 'Panels and windows',
-    rows: [
-      { keys: ['←', '→', '↑', '↓'], action: 'Move the focused panel separator' },
-      { keys: ['Home', 'End'], action: 'Push that separator all the way over' },
-      { keys: ['F6'], action: 'Go to the next separator' },
-      { keys: ['Escape'], action: 'Close a menu, a popover or this window' },
-      { keys: ['?'], action: 'Show this list' },
+      { keys: ['?'], action: 'This list' },
+      { keys: ['Esc'], action: 'Close' },
     ],
   },
 ]
 
-/**
- * Every keyboard and mouse control the app has, in one list.
- *
- * It exists because almost none of them were discoverable: four strings in the
- * whole frontend hinted at a binding, and three of those were aria-labels, which
- * a sighted reader never sees.
- */
+function GroupList({ group }: { group: Group }) {
+  return (
+    <div className="sc-group">
+      <div className="settings-section">{group.title}</div>
+      {group.rows.map((r) => (
+        <div key={r.action} className="sc-row">
+          <span className="sc-action">{r.action}</span>
+          <span className="sc-keys">
+            {r.keys.map((k) => (
+              <kbd key={k}>{k}</kbd>
+            ))}
+          </span>
+        </div>
+      ))}
+      {group.hint && <div className="sc-group-hint">{group.hint}</div>}
+    </div>
+  )
+}
+
+/** The keyboard and mouse controls worth knowing, in one short list. */
 export function ShortcutsWindow({ open, onClose }: ShortcutsWindowProps) {
   const winRef = useRef<HTMLDivElement>(null)
 
@@ -134,22 +118,14 @@ export function ShortcutsWindow({ open, onClose }: ShortcutsWindowProps) {
         </div>
         {/* Focus goes to the scrolling list, so the arrow and page keys scroll it. */}
         <div ref={winRef} className="extwin-body sc-body" tabIndex={-1}>
-          {GROUPS.map((g) => (
-            <div key={g.title}>
-              <div className="settings-section">{g.title}</div>
-              {g.hint && <div className="sc-group-hint">{g.hint}</div>}
-              {g.rows.map((r) => (
-                <div key={r.action} className="sc-row">
-                  <span className="sc-action">{r.action}</span>
-                  <span className="sc-keys">
-                    {r.keys.map((k) => (
-                      <kbd key={k}>{k}</kbd>
-                    ))}
-                  </span>
-                </div>
-              ))}
-            </div>
-          ))}
+          <div className="sc-col">
+            <GroupList group={VIEWER} />
+          </div>
+          <div className="sc-col">
+            {OTHER.map((g) => (
+              <GroupList key={g.title} group={g} />
+            ))}
+          </div>
         </div>
       </div>
     </>

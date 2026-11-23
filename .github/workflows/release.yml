@@ -257,7 +257,7 @@ jobs:
               docker compose -f docker-compose.ghcr.yml publish \
               "ghcr.io/medmcp/compose:$tag" -y
           done
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
       - name: Sign the images and the compose artifact
         run: |
           # Keyless: the signature is bound to this repository, this workflow

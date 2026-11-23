@@ -120,7 +120,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | @babel/runtime | 7.29.10 | MIT |
 | @fontsource/inter | 5.3.0 | OFL-1.1 |
 | @fontsource/jetbrains-mono | 5.3.0 | OFL-1.1 |
-| @lobehub/icons-static-svg | 1.95.1 | MIT |
+| @lobehub/icons-static-svg | 1.102.0 | MIT |
 | @lukeed/csprng | 1.1.0 | MIT |
 | @lukeed/uuid | 2.0.1 | MIT |
 | @niivue/niivue | 0.69.0 | BSD-2-Clause |
@@ -181,7 +181,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | is-decimal | 2.0.1 | MIT |
 | is-hexadecimal | 2.0.1 | MIT |
 | is-plain-obj | 4.1.0 | MIT |
-| katex | 0.19.0 | MIT |
+| katex | 0.19.1 | MIT |
 | longest-streak | 3.1.0 | MIT |
 | markdown-table | 3.0.4 | MIT |
 | mdast-util-find-and-replace | 3.0.2 | MIT |
@@ -243,7 +243,7 @@ package dependencies and are attributed in [`NOTICE`](NOTICE) instead.
 | react-dom | 19.3.1 | MIT |
 | react-is | 16.13.1 | MIT |
 | react-markdown | 10.1.0 | MIT |
-| react-resizable-panels | 4.14.8 | MIT |
+| react-resizable-panels | 4.24.0 | MIT |
 | react-window | 1.8.11 | MIT |
 | redux | 4.2.1 | MIT |
 | reference-spec-reader | 0.2.0 | MIT |

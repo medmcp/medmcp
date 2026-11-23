@@ -25,6 +25,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Changed
 
+- Dependencies: frontend packages (react-resizable-panels 4.24, Vite 8.3.8, KaTeX 0.19.1), httpx2 2.16, and CI actions updated.
 - Prompt: the per-tool routing for the cohort and stats stacks is gone from the system prompt; the stacks' own skills carry it. The general rules stay (use the tool, never compute a statistic by hand, results never into a dataset folder, ask before writing code).
 - Workflows: the record of a confirmed selection is a core format (`medmcp_selection_confirmation: 1`, `role_labels`) that any stack can write; messages no longer name a stack's tools. See [docs/rollout.md](docs/rollout.md).
 - Explorer: the second upload button and the folder menu's upload entries are removed again; Upload acts on the selected folder.

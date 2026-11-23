@@ -20,7 +20,7 @@ from typing import Any, ClassVar, cast
 
 import pytest
 import yaml
-from fastapi import HTTPException
+from fastapi import HTTPException, WebSocketDisconnect
 from fastapi.testclient import TestClient
 
 from medmcp import provenance, server, sessions, settings
@@ -2054,6 +2054,10 @@ class _FakeAcpClient:
         self.cancel_delay = cancel_delay
         self.hang = hang
         self._turn: asyncio.Future[dict[str, object]] | None = None
+        # Set to a connection's queue to act like vibe-acp taking an approval's
+        # answer in: ``answer_delay`` later the turn's next frame arrives there.
+        self.frames: asyncio.Queue[dict[str, object]] | None = None
+        self.answer_delay = 0.05
 
     async def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
         del params
@@ -2081,7 +2085,21 @@ class _FakeAcpClient:
             )
 
     async def respond(self, req_id: int, result: dict[str, object]) -> None:
-        del req_id, result
+        del req_id
+        outcome = cast("dict[str, object]", result.get("outcome") or {})
+        self.calls.append(("respond", str(outcome.get("outcome"))))
+        frames = self.frames
+        if frames is not None:
+            asyncio.get_running_loop().call_later(self.answer_delay, self._take_answer, frames)
+
+    def _take_answer(self, frames: asyncio.Queue[dict[str, object]]) -> None:
+        self.calls.append(("answer-taken", ""))
+        frames.put_nowait(
+            {
+                "method": "session/update",
+                "params": {"update": {"sessionUpdate": "tool_call_update", "status": "failed"}},
+            }
+        )
 
     def unregister_session(self, session_id: str) -> None:
         del session_id
@@ -2150,6 +2168,260 @@ class TestChatSessionLifecycle:
             ("turn-ended", "session/prompt"),
             ("request", "session/close"),
         ]
+
+
+def _approval_request(req_id: int) -> dict[str, object]:
+    """A ``session/request_permission`` frame for a shell command."""
+    return {
+        "id": req_id,
+        "method": "session/request_permission",
+        "params": {
+            "toolCall": {
+                "toolCallId": f"c{req_id}",
+                "title": "bash: echo hi",
+                "toolName": "bash",
+                "rawInput": {"command": "echo hi"},
+            },
+            "options": [
+                {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+                {"optionId": "reject_once", "name": "Deny", "kind": "reject_once"},
+            ],
+        },
+    }
+
+
+class TestCancelWithAnApprovalOpen:
+    """An approval is answered and taken in before its turn is interrupted.
+
+    vibe 2.26 corrupts the session store when the answer and the interrupt
+    arrive together: the chat then refuses every prompt and cannot be reopened.
+    """
+
+    @pytest.fixture
+    def fake(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _FakeAcpClient:
+        """Swap vibe-acp for the recorder; provenance and explanations off."""
+        client = _FakeAcpClient()
+        monkeypatch.setattr(server, "_client", client)
+        monkeypatch.setattr(server, "WORKSPACE_ROOT", tmp_path)
+        monkeypatch.setattr(server.settings, "load_provenance_enabled", lambda: False)
+        monkeypatch.setattr(server.settings, "load_explain_enabled", lambda: False)
+        return client
+
+    @staticmethod
+    async def _dialog_shown(conn: server._ChatConnection) -> None:
+        ws = cast("_StubWs", conn.ws)
+        for _ in range(200):
+            if any(m.get("type") == "permission_request" for m in ws.sent):
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("the approval dialog was never shown")
+
+    @staticmethod
+    def _assert_answered_then_interrupted(fake: _FakeAcpClient) -> None:
+        answered = fake.calls.index(("respond", "cancelled"))
+        taken = fake.calls.index(("answer-taken", ""))
+        interrupted = fake.calls.index(("notify", "session/cancel"))
+        assert answered < taken < interrupted
+
+    async def test_open_dialog_is_answered_and_taken_before_the_interrupt(
+        self, fake: _FakeAcpClient
+    ) -> None:
+        """Stop, a new prompt or a reload with the dialog open: answer, wait, interrupt."""
+        conn, queue = _connection()
+        fake.frames = queue
+        conn._prompt_task = asyncio.create_task(conn._run_prompt("first"))
+        await asyncio.sleep(0.01)
+        await queue.put(_approval_request(7))
+        await self._dialog_shown(conn)
+        await conn._cancel_prompt()
+        self._assert_answered_then_interrupted(fake)
+        assert fake.calls[-1] == ("turn-ended", "session/prompt")
+        assert queue.empty()
+
+    async def test_queued_request_is_answered_and_taken_before_the_interrupt(
+        self, fake: _FakeAcpClient
+    ) -> None:
+        """A request the relay had not reached yet is not left for after the interrupt."""
+        conn, queue = _connection()
+        fake.frames = queue
+        conn._prompt_rpc = asyncio.create_task(fake.request("session/prompt", {}))
+        conn._prompt_task = asyncio.create_task(asyncio.sleep(60))
+        await asyncio.sleep(0.01)
+        await queue.put(_approval_request(8))
+        await conn._cancel_prompt()
+        self._assert_answered_then_interrupted(fake)
+
+    async def test_interrupt_still_goes_out_when_vibe_never_takes_the_answer(
+        self, fake: _FakeAcpClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A silent vibe-acp delays the interrupt by the timeout, not forever."""
+        monkeypatch.setattr(server, "PERMISSION_SETTLE_TIMEOUT", 0.05)
+        conn, queue = _connection()
+        conn._prompt_task = asyncio.create_task(conn._run_prompt("first"))
+        await asyncio.sleep(0.01)
+        await queue.put(_approval_request(9))
+        await self._dialog_shown(conn)
+        await asyncio.wait_for(conn._cancel_prompt(), timeout=1.0)
+        assert ("notify", "session/cancel") in fake.calls
+
+    async def test_close_marks_the_session_until_vibe_released_it(
+        self, fake: _FakeAcpClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A resume can tell that the chat's last socket is still closing it."""
+        monkeypatch.setattr(server, "_closing_sessions", dict[str, asyncio.Event]())
+        conn, _ = _connection()
+        marked: list[bool] = []
+        plain_request = fake.request
+
+        async def _request(method: str, params: dict[str, object]) -> dict[str, object]:
+            if method == "session/close":
+                event = server._closing_sessions.get("sid")
+                marked.append(event is not None and not event.is_set())
+            return await plain_request(method, params)
+
+        monkeypatch.setattr(fake, "request", _request)
+        await conn.close()
+        assert marked == [True]
+        assert server._closing_sessions == {}
+
+
+class _StubChatWs(_StubWs):
+    """A browser socket that connects and leaves again at once."""
+
+    async def accept(self) -> None:
+        """Nothing to negotiate."""
+
+    async def receive_json(self) -> dict[str, object]:
+        raise WebSocketDisconnect
+
+    async def close(self) -> None:
+        """Nothing to release."""
+
+
+class _FakeSessionClient(_FakeAcpClient):
+    """vibe-acp as ``ws_chat`` and the fork endpoint see it: sessions open and close."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.requests: list[tuple[str, dict[str, object]]] = []
+
+    async def ensure_started(self) -> None:
+        """Already running."""
+
+    async def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+        self.requests.append((method, params))
+        self.calls.append(("request", method))
+        if method in ("session/new", "session/fork"):
+            return {"result": {"sessionId": "fresh"}}
+        return {"result": {}}
+
+    def register_session(self, session_id: str) -> asyncio.Queue[dict[str, object]]:
+        self.calls.append(("register", session_id))
+        return asyncio.Queue()
+
+    def unregister_session(self, session_id: str) -> None:
+        self.calls.append(("unregister", session_id))
+
+
+class TestOneAttachmentPerSession:
+    """vibe 2.26 attaches an open session again instead of refusing; we never ask it to."""
+
+    @pytest.fixture
+    def fake(self, monkeypatch: pytest.MonkeyPatch) -> _FakeSessionClient:
+        """Swap vibe-acp for the recorder and keep every disk access out of the way."""
+
+        async def _no_window() -> None:
+            return None
+
+        def _no_servers() -> list[dict[str, object]]:
+            return []
+
+        def _no_sync(servers: list[dict[str, object]]) -> None:
+            del servers
+
+        def _no_model() -> None:
+            return None
+
+        def _no_stop_ids(session_id: str) -> set[str]:
+            del session_id
+            return set()
+
+        def _own_tip(sid: str, stop_ids: set[str] | None = None) -> str:
+            del stop_ids
+            return sid
+
+        def _no_title(sid: str) -> None:
+            del sid
+
+        def _no_purge(sid: str, stop_ids: set[str] | None = None) -> None:
+            del sid, stop_ids
+
+        def _no_copy(src: str, dst: str) -> None:
+            del src, dst
+
+        def _no_entry(sid: str) -> dict[str, object]:
+            del sid
+            return {}
+
+        def _titled(sid: str, title: str) -> bool:
+            del sid, title
+            return True
+
+        client = _FakeSessionClient()
+        monkeypatch.setattr(server, "_client", client)
+        monkeypatch.setattr(server, "_connections", set[server._ChatConnection]())
+        monkeypatch.setattr(server, "_closing_sessions", dict[str, asyncio.Event]())
+        monkeypatch.setattr(server, "_chain_stop_ids", _no_stop_ids)
+        monkeypatch.setattr(server.settings, "active_servers", _no_servers)
+        monkeypatch.setattr(server.settings, "sync_servers_to_vibe_config", _no_sync)
+        monkeypatch.setattr(server.settings, "active_cloud_model", _no_model)
+        monkeypatch.setattr(server.settings, "load_local_model", _no_model)
+        monkeypatch.setattr(server.settings, "fetch_context_window", _no_window)
+        monkeypatch.setattr(provenance, "vibe_chain_tip", _own_tip)
+        monkeypatch.setattr(provenance, "vibe_session_title", _no_title)
+        monkeypatch.setattr(provenance, "purge_session", _no_purge)
+        monkeypatch.setattr(provenance, "copy_transcript", _no_copy)
+        monkeypatch.setattr(sessions, "get_entry", _no_entry)
+        monkeypatch.setattr(sessions, "set_auto_title", _titled)
+        return client
+
+    async def test_branch_is_released_before_the_browser_opens_it(
+        self, fake: _FakeSessionClient
+    ) -> None:
+        """session/fork leaves the fork attached; loading it on top doubled every frame."""
+        assert await server.fork_session("src") == {"id": "fresh"}
+        methods = [method for method, _ in fake.requests]
+        assert methods == ["session/fork", "session/close"]
+        assert fake.requests[-1][1] == {"sessionId": "fresh"}
+
+    async def test_resume_waits_for_the_socket_still_closing_the_chat(
+        self, fake: _FakeSessionClient
+    ) -> None:
+        """A reload's new socket loads the chat only once the old one released it."""
+        released = asyncio.Event()
+        server._closing_sessions["sid"] = released
+        ws = _StubChatWs()
+        task = asyncio.create_task(server.ws_chat(cast("Any", ws), resume="sid"))
+        await asyncio.sleep(0.05)
+        assert ("request", "session/load") not in fake.calls
+        released.set()
+        await asyncio.wait_for(task, timeout=1.0)
+        assert ("request", "session/load") in fake.calls
+        assert ws.sent[0]["sessionId"] == "sid"
+
+    async def test_chat_open_in_another_socket_is_not_loaded_again(
+        self, fake: _FakeSessionClient
+    ) -> None:
+        """A second tab gets a fresh chat; the first keeps its session and its frames."""
+        first, _ = _connection()
+        server._connections.add(first)
+        ws = _StubChatWs()
+        await server.ws_chat(cast("Any", ws), resume="sid")
+        assert ("request", "session/load") not in fake.calls
+        assert ("register", "sid") not in fake.calls
+        assert ("unregister", "sid") not in fake.calls
+        assert ("request", "session/new") in fake.calls
+        assert ws.sent[0]["sessionId"] == "fresh"
 
 
 class TestPathGuardDenial:

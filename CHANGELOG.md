@@ -36,6 +36,9 @@ Notable, user-visible changes to MedMCP. Format follows
 - Chat: an output path in a message is no longer taken for a dataset to index.
 - Stacks: container stacks start when MedMCP runs from source without `MEDMCP_WORKSPACE` set; before, their workspace mount was invalid and they had no tools.
 - Login: a request refused for its origin or host shows the server's reason instead of "Wrong password."
+- Chats: a branched chat no longer shows every message twice.
+- Chats: opening a chat in a second tab starts a new chat instead of attaching to the same one (approvals asked twice, then "App server client closed").
+- Chats: reloading the page, pressing Stop or sending a new message while an approval is open no longer breaks the chat ("A turn is already running", the chat missing from the list).
 - Stacks: reinstalling a stack that is already running (a new image under the same name) now stops the running copy, so the next call uses the new image. Before, the old copy kept serving its old tools until it went idle.
 - Stacks: after a stack is updated or reinstalled under the same image name, the assistant sees its new tools. Before, it kept the previous tool list for up to a day, so a newly added tool such as `check_dataset` could not be found.
 - Stacks: installing a stack from the catalog or by image works again with `docker compose`; since 0.7.2 the docker guard refused the image lookup.

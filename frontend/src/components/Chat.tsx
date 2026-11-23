@@ -529,26 +529,6 @@ const ChatInput = memo(function ChatInput({
   }
   return (
     <div className="chat-input-row">
-      {/* What "this image" will resolve to. The server appends the open file to
-          the prompt as a workspace-context note and strips it from the
-          transcript, so without this the pointer is invisible — "segment this"
-          would act on whatever happened to be open. ✕ sends the next prompt
-          without it. */}
-      {contextPath && (
-        <div className="chat-context">
-          <span>context</span>
-          <span className="chat-context-path">
-            <bdi>{contextPath}</bdi>
-          </span>
-          <button
-            className="btn-icon chat-context-clear"
-            aria-label="Ask without the open file as context"
-            onClick={onClearContext}
-          >
-            <XIcon size={12} />
-          </button>
-        </div>
-      )}
       <textarea
         value={input}
         placeholder="Message the agent… (Enter to send, Shift+Enter for newline)"
@@ -570,6 +550,29 @@ const ChatInput = memo(function ChatInput({
           Send
         </button>
       )}
+      {/* What "this image" will resolve to. The server appends the open file to
+          the prompt as a workspace-context note and strips it from the
+          transcript, so without this the pointer is invisible — "segment this"
+          would act on whatever happened to be open. ✕ sends the next prompt
+          without it. The line keeps its height when empty, so the message box
+          never moves when a file is opened, dropped or sent. */}
+      <div className="chat-viewing">
+        {contextPath && (
+          <>
+            <span className="chat-viewing-label">Viewing</span>
+            <span className="chat-viewing-name">
+              <bdi>{contextPath.slice(contextPath.lastIndexOf('/') + 1)}</bdi>
+            </span>
+            <button
+              className="btn-icon chat-viewing-clear"
+              aria-label="Don't send this file with the next message"
+              onClick={onClearContext}
+            >
+              <XIcon size={12} />
+            </button>
+          </>
+        )}
+      </div>
     </div>
   )
 })
@@ -593,7 +596,7 @@ export const Chat = memo(function Chat({
   /** Called with the vibe session id whenever a prompt is sent into it. */
   onPromptedSession?: (id: string) => void
   /** Workspace-relative file open in the viewer, offered as prompt context
-   *  (shown as a chip above the composer, which the reader can clear). */
+   *  (named in a line under the message box, which the reader can clear). */
   viewedPath?: string | null
   /** Bumped on every open in the viewer, so reopening the same file counts. */
   viewedSeq?: number

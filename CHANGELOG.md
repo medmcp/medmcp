@@ -27,6 +27,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Jobs: `/api/jobs` lists, shows and stops them; the Tool stacks window shows running jobs with a Stop button; a job's start, image and arguments are recorded in the provenance of the chat that approved it.
 - Explorer: an uploaded `.zip` can be unpacked on the server; an archive that would replace an existing file is refused.
 - Chat: the file "this image" refers to is named above the message box; ✕ leaves it out of the next message.
+- Chat: the message box says which open file "this image" means (Viewing t1.nii.gz), and ✕ leaves it out of the next message.
 - Chat: a running tool call shows how long it has been running.
 - Chat: the browser tab is marked "(!)" while an approval is waiting.
 

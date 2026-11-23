@@ -1670,11 +1670,11 @@ button.model-name:hover {
 
 .chat-input-row {
   display: flex;
-  /* Lets the workspace-context chip take a line of its own above the composer
-   * without a second hairline border between them. */
+  /* Lets the "Viewing …" line take a row of its own under the message box
+   * without a second hairline border. */
   flex-wrap: wrap;
-  gap: 10px;
-  padding: 12px 18px 16px;
+  gap: 4px 10px;
+  padding: 12px 18px 8px;
   /* The page's ? button (.help-fab) sits in the bottom-right corner, 46px wide
      with its inset. While this row reaches that corner its right padding grows
      to keep Send clear of it; once the panel is wide enough for the centred
@@ -1687,24 +1687,31 @@ button.model-name:hover {
   margin: 0 auto;
 }
 
-.chat-context {
+/* The file the next message is about. The row is always there, empty or not,
+ * so opening a file, dropping it or sending never moves the message box.
+ * Indented to the box's text edge (1px border + 14px padding). */
+.chat-viewing {
   flex: 0 0 100%;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
+  height: 20px;
+  padding-left: 15px;
   font-size: 11.5px;
   line-height: 20px;
   color: var(--muted);
 }
 
-/* A long path loses its head, not its file name: the box is laid out right to
- * left so the ellipsis lands on the left, and <bdi> keeps the path itself in
+.chat-viewing-label {
+  flex: none;
+}
+
+/* A long name loses its head, not its extension: the box is laid out right to
+ * left so the ellipsis lands on the left, and <bdi> keeps the name itself in
  * reading order. */
-.chat-context-path {
+.chat-viewing-name {
   min-width: 0;
-  font-family: var(--mono);
-  color: var(--muted2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1712,12 +1719,18 @@ button.model-name:hover {
   text-align: left;
 }
 
-.chat-input-row .chat-context-clear {
+.chat-input-row .chat-viewing-clear {
   flex: none;
   align-self: center;
   width: 20px;
   height: 20px;
   padding: 0;
+}
+
+.chat-input-row .chat-viewing-clear:focus-visible {
+  outline: 2px solid var(--blue-xl);
+  outline-offset: -1px;
+  color: var(--text);
 }
 
 .chat-input-row textarea {

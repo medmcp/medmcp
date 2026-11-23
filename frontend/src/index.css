@@ -2319,7 +2319,9 @@ button.model-name:hover {
      general muted grey. */
   color: var(--muted2);
   line-height: 17px;
-  margin-top: 2px;
+  /* 3, not 2: label 16 + 3 + hint 17 + the row's 20 of padding is 56, an even
+     height for the 20px switch to centre in on whole pixels. */
+  margin-top: 3px;
 }
 
 /* Install-a-stack field + per-stack uninstall action. */

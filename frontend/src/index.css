@@ -4678,6 +4678,42 @@ textarea.wf-input {
   gap: 0 32px;
 }
 
+/* The about text spans both columns, above the shortcuts. */
+.sc-about {
+  grid-column: 1 / -1;
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sc-about .settings-section:first-child {
+  margin-top: 2px;
+}
+
+.sc-about .settings-section {
+  margin-top: 14px;
+}
+
+.sc-about p,
+.sc-about li {
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--muted2);
+}
+
+.sc-about p {
+  margin: 0;
+}
+
+.sc-about ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.sc-about li + li {
+  margin-top: 4px;
+}
+
 .sc-group .settings-section {
   margin-top: 14px;
 }

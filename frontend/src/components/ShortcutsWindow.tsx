@@ -58,6 +58,16 @@ const OTHER: Group[] = [
   },
 ]
 
+/* What a person should know before relying on a result. Each line is a claim
+ * about the product; keep it true. */
+const LIMITS = [
+  'Research software: not a medical device, and not for clinical decisions.',
+  'The model can misread a request or pick the wrong file or tool. Read each approval before you allow it.',
+  'Check every result before you use it. Segmentations and measurements can be wrong.',
+  'A saved workflow runs without asking at each step. Review its steps before you start it.',
+  'A cloud model or an external server, once switched on, receives what you send it.',
+]
+
 function GroupList({ group }: { group: Group }) {
   return (
     <div className="sc-group">
@@ -77,7 +87,7 @@ function GroupList({ group }: { group: Group }) {
   )
 }
 
-/** The keyboard and mouse controls worth knowing, in one short list. */
+/** Help: what MedMCP is and where its limits are, then the controls worth knowing. */
 export function ShortcutsWindow({ open, onClose }: ShortcutsWindowProps) {
   const winRef = useRef<HTMLDivElement>(null)
 
@@ -107,9 +117,9 @@ export function ShortcutsWindow({ open, onClose }: ShortcutsWindowProps) {
   return (
     <>
       <div className="modal-backdrop" onClick={onClose} />
-      <div className="extwin scwin" role="dialog" aria-label="Keyboard shortcuts">
+      <div className="extwin scwin" role="dialog" aria-label="Help">
         <div className="panel-header">
-          <span>Keyboard shortcuts</span>
+          <span>Help</span>
           <span className="panel-actions">
             <button className="btn-icon" aria-label="Close" onClick={onClose}>
               <XIcon />
@@ -118,6 +128,20 @@ export function ShortcutsWindow({ open, onClose }: ShortcutsWindowProps) {
         </div>
         {/* Focus goes to the scrolling list, so the arrow and page keys scroll it. */}
         <div ref={winRef} className="extwin-body sc-body" tabIndex={-1}>
+          <div className="sc-about">
+            <div className="settings-section">About MedMCP</div>
+            <p>
+              MedMCP runs medical imaging tools from a chat. A model on this machine plans the
+              steps, and tested tools do the computing. Your data stays on this machine unless you
+              connect an outside service.
+            </p>
+            <div className="settings-section">Know the limits</div>
+            <ul>
+              {LIMITS.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          </div>
           <div className="sc-col">
             <GroupList group={VIEWER} />
           </div>

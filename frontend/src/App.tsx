@@ -300,7 +300,7 @@ export default function App() {
           held it. */}
       <button
         className="help-fab"
-        aria-label="Keyboard shortcuts"
+        aria-label="Help"
         onClick={(e) => {
           e.currentTarget.focus()
           setShortcutsOpen(true)

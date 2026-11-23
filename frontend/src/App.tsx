@@ -71,17 +71,18 @@ export default function App() {
   const [marketOpen, setMarketOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const closeShortcuts = useCallback(() => setShortcutsOpen(false), [])
-  // `?` and F1 open the shortcut list. The app's only standing hotkey — every
-  // other window listener here is mounted with the thing it closes — so the
-  // guard is the whole of it: a `?` belongs to whatever field is being typed
-  // in, and a modified key belongs to the browser. F1's preventDefault is
-  // best-effort; some browsers keep their own help, and the button remains.
+  // `?` opens the shortcut list. The app's only standing hotkey — every other
+  // window listener here is mounted with the thing it closes — so the guard is
+  // the whole of it: a `?` belongs to whatever field is being typed in, a
+  // modified key to the browser, and nothing opens over another window, the
+  // settings drawer or a dialog (each has a backdrop while it is up).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey) return
+      if (e.key !== '?' || e.ctrlKey || e.metaKey || e.altKey) return
       const t = e.target as HTMLElement | null
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
-      if (e.key !== '?' && e.key !== 'F1') return
+      const typing = t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)
+      if (typing) return
+      if (document.querySelector('.modal-backdrop, .drawer-backdrop')) return
       e.preventDefault()
       // Capture-phase and stopped, so the key cannot also land in the file
       // tree's 600 ms type-ahead buffer and corrupt the next search.

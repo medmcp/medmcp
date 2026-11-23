@@ -4729,15 +4729,6 @@ textarea.wf-input {
   line-height: 17px;
 }
 
-/* Caveats belong on their own line under the action: several of these bindings
-   are conditional, and a reader who misses that reads the row as wrong. */
-.sc-note {
-  display: block;
-  font-size: 11px;
-  color: var(--muted);
-  line-height: 15px;
-}
-
 .sc-keys {
   display: flex;
   flex-shrink: 0;
@@ -4746,7 +4737,13 @@ textarea.wf-input {
   gap: 5px;
 }
 
-kbd {
+/* The window takes focus when it opens (see ShortcutsWindow); it is not a
+   control, so it shows no ring for it. */
+.scwin:focus {
+  outline: none;
+}
+
+.scwin kbd {
   font-family: var(--mono);
   font-size: 11px;
   line-height: 15px;

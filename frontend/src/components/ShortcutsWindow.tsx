@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { XIcon } from './icons'
 
 interface ShortcutsWindowProps {
@@ -8,7 +8,7 @@ interface ShortcutsWindowProps {
 
 /** One line of the list. `keys` are alternatives, each drawn as its own key cap;
  *  a combination is one cap ("Shift + ↑"), so the two never read the same. */
-type Shortcut = { keys: string[]; action: string; note?: string }
+type Shortcut = { keys: string[]; action: string }
 
 type Group = { title: string; hint?: string; rows: Shortcut[] }
 
@@ -20,96 +20,67 @@ type Group = { title: string; hint?: string; rows: Shortcut[] }
  * tell the difference, and they work.
  *
  * Niivue's own *keyboard* bindings (V, M, H/J/K/L and the rest) are deliberately
- * absent: Viewer.tsx strips the canvas's tabindex so they can never fire. */
+ * absent: Viewer.tsx strips the canvas's tabindex so they can never fire.
+ *
+ * Every row is a claim about the code; change the two together. */
 const GROUPS: Group[] = [
   {
     title: 'Chat',
     rows: [
       { keys: ['Enter'], action: 'Send the message' },
-      { keys: ['Shift + Enter'], action: 'Start a new line instead' },
+      { keys: ['Shift + Enter'], action: 'Start a new line' },
     ],
   },
   {
     title: 'Files',
     hint: 'While the file tree has focus.',
     rows: [
-      { keys: ['↑', '↓'], action: 'Move between files' },
+      { keys: ['↑', '↓'], action: 'Move between rows' },
       { keys: ['Shift + ↑', 'Shift + ↓'], action: 'Extend the selection' },
       { keys: ['→', '←'], action: 'Open or close a folder' },
       { keys: ['Space'], action: 'Open the file, or fold the folder' },
       { keys: ['Enter'], action: 'Rename' },
-      {
-        keys: ['Backspace'],
-        action: 'Delete the selection',
-        note: 'Asks first. Delete does nothing — only Backspace is bound.',
-      },
+      { keys: ['Backspace'], action: 'Delete the selection, after asking' },
       { keys: ['Ctrl / ⌘ + A'], action: 'Select everything' },
-      { keys: ['Home', 'End'], action: 'Jump to the first or last file' },
+      { keys: ['Home', 'End'], action: 'Jump to the first or last row' },
       { keys: ['PageUp', 'PageDown'], action: 'Move a page at a time' },
       { keys: ['*'], action: 'Open every folder beside this one' },
-      {
-        keys: ['a…z'],
-        action: 'Jump to the next name starting with what you type',
-        note: 'Only reaches files already on screen, not ones inside a folded folder.',
-      },
-      {
-        keys: ['Ctrl / ⌘ + click', 'Shift + click'],
-        action: 'Add one file to the selection, or take a range',
-      },
+      { keys: ['a…z'], action: 'Jump to a visible name starting with what you type' },
+      { keys: ['Ctrl / ⌘ + click', 'Shift + click'], action: 'Add a row or a range to the selection' },
     ],
   },
   {
     title: 'Viewer — keys',
-    hint: 'The viewer has to hold the keyboard: click the image once first.',
+    hint: 'Click the image once first: these need the viewer to hold the keyboard.',
     rows: [
-      { keys: ['↑', '↓', 'PageUp', 'PageDown'], action: 'Step one slice', note: 'Hold Shift for 10.' },
-      { keys: ['←', '→'], action: 'Step one frame of a 4D volume', note: 'Hold Shift for 10.' },
+      { keys: ['↑', '↓', 'PageUp', 'PageDown'], action: 'Step one slice, 10 with Shift' },
+      { keys: ['←', '→'], action: 'Step one frame of a 4D volume, 10 with Shift' },
       { keys: ['Space'], action: 'Play or pause a 4D volume' },
-      { keys: ['o'], action: 'Hide or show the overlay, for a before and after' },
-      {
-        keys: ['+', '-'],
-        action: 'Zoom about the crosshair',
-        note: '= zooms in as well, so it needs no Shift.',
-      },
-      { keys: ['0'], action: 'Back to 1×' },
+      { keys: ['o'], action: 'Hide or show the overlay' },
+      { keys: ['+', '=', '-'], action: 'Zoom the slices in or out about the crosshair' },
+      { keys: ['0'], action: 'Slices back to 100%, centred' },
     ],
   },
   {
     title: 'Viewer — mouse',
-    hint: 'These need no focus, so they work wherever you last clicked.',
+    hint: 'These need no focus.',
     rows: [
-      {
-        keys: ['Left drag'],
-        action: 'Move the crosshair',
-        note: 'Inside the 3D tile it turns the view instead.',
-      },
-      { keys: ['Middle drag', 'Shift / Ctrl + left drag'], action: 'Pan' },
-      { keys: ['Right drag'], action: 'Set the window and level' },
-      { keys: ['Double-click'], action: 'Put the window and level back' },
-      {
-        keys: ['Wheel'],
-        action: 'Step slices',
-        note: 'Over the 3D tile it zooms; over a 4D graph it steps frames.',
-      },
-      { keys: ['Ctrl / ⌘ + wheel', 'Pinch'], action: 'Zoom about the crosshair' },
+      { keys: ['Left drag'], action: 'Move the crosshair; turn the 3D view' },
+      { keys: ['Shift / Ctrl + left drag', 'Middle drag'], action: 'Pan the slices' },
+      { keys: ['Right drag'], action: 'Set the intensity window' },
+      { keys: ['Double-click'], action: 'Reset the intensity window' },
+      { keys: ['Wheel'], action: 'Step slices; zoom the 3D view' },
+      { keys: ['Ctrl / ⌘ + wheel', 'Trackpad pinch'], action: 'Zoom the slices about the crosshair' },
     ],
   },
   {
     title: 'Panels and windows',
     rows: [
-      {
-        keys: ['←', '→', '↑', '↓'],
-        action: 'Move a panel separator by 5%',
-        note: 'Tab to a separator first.',
-      },
+      { keys: ['←', '→', '↑', '↓'], action: 'Move the focused panel separator' },
       { keys: ['Home', 'End'], action: 'Push that separator all the way over' },
       { keys: ['F6'], action: 'Go to the next separator' },
-      {
-        keys: ['Escape'],
-        action: 'Close the open popover or menu',
-        note: 'The settings drawer and the larger windows close on their ✕ or the backdrop.',
-      },
-      { keys: ['?', 'F1'], action: 'Show this list' },
+      { keys: ['Escape'], action: 'Close a menu, a popover or this window' },
+      { keys: ['?'], action: 'Show this list' },
     ],
   },
 ]
@@ -119,12 +90,12 @@ const GROUPS: Group[] = [
  *
  * It exists because almost none of them were discoverable: four strings in the
  * whole frontend hinted at a binding, and three of those were aria-labels, which
- * a sighted reader never sees. Most of the list is therefore new information
- * even to someone who has used the app for months.
+ * a sighted reader never sees.
  */
 export function ShortcutsWindow({ open, onClose }: ShortcutsWindowProps) {
-  // Same as the other windows that bother: Escape closes it. Worth having here
-  // more than anywhere, since a reference panel is opened and dismissed often.
+  const winRef = useRef<HTMLDivElement>(null)
+
+  // Escape closes it, as it does the Tool stacks window.
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
@@ -134,11 +105,29 @@ export function ShortcutsWindow({ open, onClose }: ShortcutsWindowProps) {
     return () => window.removeEventListener('keydown', onKey)
   }, [open, onClose])
 
+  // Focus moves into the window while it is open, so the keyboard scrolls the
+  // list rather than driving what is behind the backdrop, and goes back to
+  // where it came from (the header button, or the viewer) on close.
+  useEffect(() => {
+    if (!open) return
+    const before = document.activeElement
+    winRef.current?.focus()
+    return () => {
+      if (before instanceof HTMLElement) before.focus()
+    }
+  }, [open])
+
   if (!open) return null
   return (
     <>
       <div className="modal-backdrop" onClick={onClose} />
-      <div className="extwin" role="dialog" aria-label="Shortcuts and controls">
+      <div
+        ref={winRef}
+        className="extwin scwin"
+        role="dialog"
+        aria-label="Shortcuts and controls"
+        tabIndex={-1}
+      >
         <div className="panel-header">
           <span>Shortcuts and controls</span>
           <span className="panel-actions">
@@ -154,10 +143,7 @@ export function ShortcutsWindow({ open, onClose }: ShortcutsWindowProps) {
               {g.hint && <div className="sc-group-hint">{g.hint}</div>}
               {g.rows.map((r) => (
                 <div key={r.action} className="sc-row">
-                  <span className="sc-action">
-                    {r.action}
-                    {r.note && <span className="sc-note">{r.note}</span>}
-                  </span>
+                  <span className="sc-action">{r.action}</span>
                   <span className="sc-keys">
                     {r.keys.map((k) => (
                       <kbd key={k}>{k}</kbd>

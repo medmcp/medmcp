@@ -162,6 +162,10 @@ async function inflateGzip(bytes: ArrayBuffer): Promise<ArrayBuffer | null> {
   }
 }
 
+/** A file the server does not have (HTTP 404): deleted by a tool since the
+ *  explorer listed it, or the absent half of a header/image pair. */
+class MissingFileError extends Error {}
+
 /** A failure as the viewer words it: the reason, without the `Error:` prefix. */
 function failureReason(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
@@ -190,9 +194,8 @@ async function fetchVolume(url: string, gzipped: boolean): Promise<CachedVolume>
   }
   if (!r.ok) {
     volumeCache.delete(url)
-    throw new Error(
-      r.status === 404 ? 'the file no longer exists' : `the server answered HTTP ${r.status}`,
-    )
+    if (r.status === 404) throw new MissingFileError('the file no longer exists')
+    throw new Error(`the server answered HTTP ${r.status}`)
   }
   const raw = await r.arrayBuffer()
   // Niivue reads the bytes from the buffer only while it has some; an empty one
@@ -217,14 +220,53 @@ async function fetchVolume(url: string, gzipped: boolean): Promise<CachedVolume>
   return entry
 }
 
+/** A header/image pair (`.hdr` + `.img`), in any letter case. */
+const PAIR_EXT = /\.(hdr|img)$/i
+
+/** Names the other half of the pair *name* may go by, likeliest first: the
+ *  extension in the case this half is written in (`x.hdr` → `x.img`, `X.HDR` →
+ *  `X.IMG`, `X.Hdr` → `X.Img`), then lower case, then upper case. */
+function pairSiblingNames(name: string): string[] {
+  const stem = name.slice(0, -3)
+  const ext = name.slice(-3)
+  const other = ext.toLowerCase() === 'hdr' ? 'img' : 'hdr'
+  const sameCase = [...other]
+    .map((c, i) => (ext[i] !== ext[i].toLowerCase() ? c.toUpperCase() : c))
+    .join('')
+  return [...new Set([sameCase, other, other.toUpperCase()])].map((e) => stem + e)
+}
+
+/** Both halves of the header/image pair that *path* is one half of.
+ *
+ *  Niivue would look for the image itself, by replacing a literal upper-case
+ *  `HDR` in the URL with `IMG` — so only an upper-case pair ever loaded, and
+ *  only when opened by its header. Both files are fetched here instead, through
+ *  the volume cache, and the sibling is looked for under each case it may have. */
+async function fetchPair(
+  path: string,
+): Promise<{ hdrName: string; hdr: CachedVolume; img: CachedVolume }> {
+  const name = path.split('/').pop() ?? path
+  const dir = path.slice(0, path.length - name.length)
+  const own = await fetchVolume(rawUrl(path), false)
+  const candidates = pairSiblingNames(name)
+  for (const candidate of candidates) {
+    try {
+      const sibling = await fetchVolume(rawUrl(dir + candidate), false)
+      return /\.hdr$/i.test(name)
+        ? { hdrName: name, hdr: own, img: sibling }
+        : { hdrName: candidate, hdr: sibling, img: own }
+    } catch (e) {
+      if (!(e instanceof MissingFileError)) throw e
+    }
+  }
+  throw new Error(`${candidates[0]} is missing`)
+}
+
 /** Load *path* into `nv` as the base volume (replace = true) or as an added
  *  overlay, from the volume cache. Niivue takes the file type from `name`.
  *  Returns the file's ETag ('' when unknown), which changes when a tool
  *  rewrites the file. Throws an Error whose message is the reason, worded for
- *  the viewer.
- *
- *  Analyze pairs (`.hdr` + `.img`) bypass the cache: Niivue finds the sibling
- *  by rewriting the URL's extension, which a buffer has none of. */
+ *  the viewer. */
 async function loadVolume(
   nv: Niivue,
   path: string,
@@ -257,10 +299,23 @@ async function addVolume(
   name: string,
   opts: { opacity?: number; replace: boolean },
 ): Promise<string> {
-  if (/\.(hdr|img)$/i.test(name)) {
-    const url = rawUrl(path)
-    if (opts.replace) nv.volumes = []
-    await addParsedVolume(nv, { url, name, opacity: opts.opacity ?? 1 })
+  if (PAIR_EXT.test(name)) {
+    const { hdrName, hdr, img } = await fetchPair(path)
+    // Niivue takes the paired image as a URL only, so the bytes held here are
+    // lent to it as an object URL for the length of the load.
+    const imgUrl = URL.createObjectURL(new Blob([img.buffer]))
+    try {
+      if (opts.replace) nv.volumes = []
+      await addParsedVolume(nv, {
+        url: hdrName,
+        name: hdrName,
+        buffer: hdr.buffer,
+        urlImgData: imgUrl,
+        opacity: opts.opacity ?? 1,
+      })
+    } finally {
+      URL.revokeObjectURL(imgUrl)
+    }
     return ''
   }
   const entry = await fetchVolume(rawUrl(path), /\.nii\.gz$/i.test(name))

@@ -661,10 +661,13 @@ const lastWindowByPath = new Map<string, { min: number; max: number }>()
  *  has zoomed into a vertebra and then nudges the panel separator should not
  *  have to find it twice. Saved when the view goes away, which is exactly when
  *  the remount happens, with the file's ETag: a pan is in the image's own
- *  millimetres, so it is dropped once a tool has rewritten the file. */
+ *  millimetres, so it is dropped once a tool has rewritten the file. The
+ *  crosshair (the slice shown in each pane) goes with it: the pan was shifted
+ *  to keep that point still, so restoring one without the other shows another
+ *  place at the same zoom. */
 const lastViewByPath = new Map<
   string,
-  { pan: [number, number, number, number]; etag: string }
+  { pan: [number, number, number, number]; crosshair: [number, number, number]; etag: string }
 >()
 
 type OverlayVol = {
@@ -1138,6 +1141,7 @@ function VolumeView({
         if (keptView && keptView.etag === baseEtag) {
           const [px, py, pz, pzoom] = keptView.pan
           nv.scene.pan2Dxyzmm = [px, py, pz, pzoom]
+          nv.scene.crosshairPos = [...keptView.crosshair]
           setZoom(pzoom)
           nv.drawScene()
         } else {
@@ -1165,12 +1169,18 @@ function VolumeView({
     overlayOpRef.current = load()
     return () => {
       cancelled = true
-      // Remember the zoom and pan for the remount a resize or a reopen brings.
-      // Read before cleanup() below, while the scene is still intact.
+      // Remember the zoom, pan and crosshair for the remount a resize or a
+      // reopen brings. Read before cleanup() below, while the scene is intact.
       if (nv.volumes.length > 0) {
         const [px, py, pz, pzoom] = nv.scene.pan2Dxyzmm
-        if (pzoom !== 1 || px !== 0 || py !== 0 || pz !== 0) {
-          lastViewByPath.set(path, { pan: [px, py, pz, pzoom], etag: baseEtag })
+        const [cx, cy, cz] = nv.scene.crosshairPos
+        const moved = pzoom !== 1 || px !== 0 || py !== 0 || pz !== 0
+        if (moved || cx !== 0.5 || cy !== 0.5 || cz !== 0.5) {
+          lastViewByPath.set(path, {
+            pan: [px, py, pz, pzoom],
+            crosshair: [cx, cy, cz],
+            etag: baseEtag,
+          })
         } else {
           lastViewByPath.delete(path)
         }

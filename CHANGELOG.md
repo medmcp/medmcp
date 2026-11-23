@@ -22,7 +22,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Provenance: a chat's record names each stack's image digest and the MedMCP version.
 - Stacks: background jobs. A stack can declare a job runner in its image label; an approved call of one of its job tools (an nnU-Net training) then runs in its own container, which keeps running when the chat is idle or closed, when another GPU stack is used and when MedMCP restarts. One job at a time by default (`MEDMCP_MAX_JOBS`); `MEDMCP_STACK_JOBS=0` turns jobs off.
 - Jobs: `/api/jobs` lists, shows and stops them; the Tool stacks window shows running jobs with a Stop button; a job's start, image and arguments are recorded in the provenance of the chat that approved it.
-- Explorer: a `.zip` picked with Upload or dropped on the file list can be unpacked on the server (Unpack / Keep as .zip / Cancel). Existing files are never replaced: an archive that would overwrite one is refused whole.
+- Explorer: an uploaded `.zip` can be unpacked on the server; an archive that would replace an existing file is refused.
 
 ### Changed
 
@@ -53,10 +53,6 @@ Notable, user-visible changes to MedMCP. Format follows
 - Workflows: a run lists the files it wrote when the output path was chosen by the caller; it showed none before.
 - Provenance: the record of a chat run from an image names the commit the image was built from; it was empty. Images must be built with `MEDMCP_REVISION`, as the release and `:main` builds are.
 - Chat: a local model is told why the path guard turned a stack call back (a file that does not exist); before, it only read that the call was skipped.
-- Explorer: the file list opens at once on a large workspace. It loads one folder at a time (`GET /api/tree/dir`) instead of walking the whole workspace first, and after a change refreshes only the folders it touched. A folder lists up to 5,000 entries (it was 500) and ends with a line saying how many more there are.
-- Explorer: the first click on a folder opens it; it was lost because every row was rebuilt between mouse down and mouse up.
-- Explorer: New folder works when the selected folder has been scrolled out of view: the name field is scrolled into view at the top of that folder. Before, nothing appeared and no folder was made.
-- Explorer: a failed upload names each file with the server's reason (e.g. "a link with that name exists") instead of only a count, and the message stays until dismissed; it was cleared by the refresh that followed. A folder pick or drop that arrives without any files says so and suggests a .zip.
 - Explorer: the first click on a folder opens it.
 - Explorer: New folder works when the selected folder is scrolled out of view.
 - Explorer: a failed upload names each file with its reason and stays until dismissed.

@@ -501,6 +501,37 @@ button:hover {
   font-variant-numeric: tabular-nums;
 }
 
+/* The explorer's drop-target and upload-progress line: over the tree's bottom
+   edge, so showing or hiding it never moves a row, and transparent to the
+   pointer, so a drop on it reaches the row beneath. */
+.explorer-body {
+  position: relative;
+}
+
+.panel-status-float {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  pointer-events: none;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text);
+  background: var(--card2);
+  border-top: 1px solid var(--border2);
+  border-bottom: none;
+}
+
+/* While the pointer is near the bottom edge the line moves out of its way. */
+.panel-status-float.at-top {
+  top: 0;
+  bottom: auto;
+  border-top: none;
+  border-bottom: 1px solid var(--border2);
+}
+
 /* An explorer message with its dismiss button; a failed upload lists each file. */
 .panel-notice,
 .panel-error-head {
@@ -555,6 +586,14 @@ button:hover {
 .tree-row.selected {
   background: rgba(43, 79, 163, 0.18);
   color: var(--text);
+}
+
+/* The folder a desktop file drag would upload into (the line at the panel's
+   bottom edge names it; this shows it where the pointer is). */
+.tree-row.drop-into {
+  background: rgba(58, 99, 204, 0.28);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--blue-l);
 }
 
 .tree-icon {

@@ -42,6 +42,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Chats: opening a chat in a second tab starts a new chat instead of attaching to the same one (approvals asked twice, then "App server client closed").
 - Chats: reloading the page, pressing Stop or sending a new message while an approval is open no longer breaks the chat ("A turn is already running", the chat missing from the list).
 - Chat: a stack call with arguments the tool does not accept is turned back to the assistant with what is wrong; before, the whole turn ended with `Core rejected durable input`.
+- Explorer: the rows no longer jump when a file is dragged in, so a drop lands on the folder under the pointer.
 - Explorer: uploading a file named like an existing folder says so instead of failing with a server error.
 - Stacks: reinstalling a stack that is already running (a new image under the same name) now stops the running copy, so the next call uses the new image. Before, the old copy kept serving its old tools until it went idle.
 - Stacks: after a stack is updated or reinstalled under the same image name, the assistant sees its new tools. Before, it kept the previous tool list for up to a day, so a newly added tool such as `check_dataset` could not be found.

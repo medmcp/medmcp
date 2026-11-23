@@ -82,6 +82,9 @@ function carriesFiles(dt: DataTransfer): boolean {
   return Array.from(dt.types).includes('Files')
 }
 
+/** Pointer distance from the tree's bottom edge within which the drop line moves to the top. */
+const DROP_LINE_ZONE = 56
+
 /**
  * The workspace folder a drop at this point lands in: the folder row under the
  * pointer, a file row's parent folder, or the root when over empty space.
@@ -156,11 +159,8 @@ function NodeRow({
   dragHandle,
   onMenu,
   loading,
-}: NodeRendererProps<TreeNode> & {
-  onMenu: (e: ReactMouseEvent, node: NodeApi<TreeNode>) => void
-  /** Folders whose entries are being fetched. */
-  loading: ReadonlySet<string>
-}) {
+  dropDir,
+}: NodeRendererProps<TreeNode> & RowExtras) {
   if (node.data.more) {
     return (
       <div style={style} className="tree-row tree-more" aria-disabled="true">
@@ -179,7 +179,9 @@ function NodeRow({
     <div
       ref={editing ? undefined : dragHandle}
       style={style}
-      className={`tree-row${node.isSelected ? ' selected' : ''}`}
+      className={`tree-row${node.isSelected ? ' selected' : ''}${
+        isDir && node.data.id === dropDir ? ' drop-into' : ''
+      }`}
       data-path={node.data.id}
       data-dir={isDir ? '' : undefined}
       onClick={() => {
@@ -249,10 +251,17 @@ function NodeRow({
 /** What every row needs from the explorer, passed by context rather than props. */
 interface RowExtras {
   onMenu: (e: ReactMouseEvent, node: NodeApi<TreeNode>) => void
+  /** Folders whose entries are being fetched. */
   loading: ReadonlySet<string>
+  /** Folder a desktop drag would upload into; its row is marked. */
+  dropDir: string | null
 }
 
-const RowContext = createContext<RowExtras>({ onMenu: () => undefined, loading: new Set() })
+const RowContext = createContext<RowExtras>({
+  onMenu: () => undefined,
+  loading: new Set(),
+  dropDir: null,
+})
 
 /**
  * The row renderer handed to react-arborist. One stable component: an inline
@@ -395,6 +404,9 @@ export const FileExplorer = memo(function FileExplorer({
   } | null>(null)
   // Folder a desktop drag currently hovering the tree would upload into; null when none.
   const [dropDir, setDropDir] = useState<string | null>(null)
+  // The line naming that folder sits at the bottom edge, and at the top while
+  // the pointer is near the bottom, so it never covers the row aimed at.
+  const [dropLineTop, setDropLineTop] = useState(false)
   // Read inside the mount-once observer effect without re-subscribing.
   const isResizingRef = useRef(isResizing)
   useEffect(() => {
@@ -640,6 +652,8 @@ export const FileExplorer = memo(function FileExplorer({
     e.dataTransfer.dropEffect = 'copy'
     const dir = dropTargetDir(e.target)
     if (dir !== dropDir) setDropDir(dir)
+    const nearBottom = e.clientY > e.currentTarget.getBoundingClientRect().bottom - DROP_LINE_ZONE
+    if (nearBottom !== dropLineTop) setDropLineTop(nearBottom)
   }
   const onDragLeave = (e: ReactDragEvent<HTMLDivElement>) => {
     if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
@@ -834,19 +848,6 @@ export const FileExplorer = memo(function FileExplorer({
           }}
         />
       </div>
-      {uploading ? (
-        <div className="panel-status" role="status">
-          {uploading.unpacking
-            ? `Unpacking ${uploading.unpacking}…`
-            : `Uploading ${uploading.done} of ${uploading.total} file(s)…`}
-        </div>
-      ) : (
-        dropDir !== null && (
-          <div className="panel-status" role="status">
-            Drop to upload into {dropDir ? `${dropDir}/` : 'the workspace'}
-          </div>
-        )
-      )}
       {notice && !uploading && (
         <div className="panel-status panel-notice" role="status">
           <span>{notice}</span>
@@ -875,7 +876,7 @@ export const FileExplorer = memo(function FileExplorer({
         </div>
       )}
       <div
-        className={`panel-body${dropDir !== null ? ' drop-target' : ''}`}
+        className={`panel-body explorer-body${dropDir !== null ? ' drop-target' : ''}`}
         ref={containerRef}
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
@@ -884,12 +885,29 @@ export const FileExplorer = memo(function FileExplorer({
       >
         {/* Every other panel says what to do when it is empty; this one showed
             a blank rectangle, which reads as a failure to load. */}
+        {/* Laid over the tree's edge, never in the flow: a line appearing above
+            the tree moved every row down under the pointer mid-drag, and the drop
+            landed in the folder above the one aimed at. */}
+        {(uploading || dropDir !== null) && (
+          <div
+            className={`panel-status panel-status-float${
+              !uploading && dropLineTop ? ' at-top' : ''
+            }`}
+            role="status"
+          >
+            {uploading
+              ? uploading.unpacking
+                ? `Unpacking ${uploading.unpacking}…`
+                : `Uploading ${uploading.done} of ${uploading.total} file(s)…`
+              : `Drop to upload into ${dropDir ? `${dropDir}/` : 'the workspace'}`}
+          </div>
+        )}
         {rootLoaded && data.length === 0 && !error && (
           <div className="viewer-message">
             This workspace is empty. Upload files, or drop files or folders here.
           </div>
         )}
-        <RowContext.Provider value={{ onMenu: openMenu, loading }}>
+        <RowContext.Provider value={{ onMenu: openMenu, loading, dropDir }}>
         <Tree<TreeNode>
           ref={treeRef}
           data={data}

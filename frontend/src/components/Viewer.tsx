@@ -1477,7 +1477,7 @@ function VolumeView({
               aria-label="Labels: names, volumes, isolate"
               onClick={() => setLegendOpen((v) => !v)}
             >
-              <ListIcon size={13} />
+              <ListIcon />
             </button>
           )}
           <span className="overlay-opacity-label">Opacity</span>
@@ -1496,10 +1496,10 @@ function VolumeView({
             aria-label={overlay.hidden ? 'Show overlay (o)' : 'Hide overlay (o)'}
             onClick={() => patchOverlay({ hidden: !overlay.hidden })}
           >
-            {overlay.hidden ? <EyeOffIcon size={13} /> : <EyeIcon size={13} />}
+            {overlay.hidden ? <EyeOffIcon /> : <EyeIcon />}
           </button>
           <button className="btn-icon" aria-label="Remove overlay" onClick={() => setOverlayPath('')}>
-            <XIcon size={13} />
+            <XIcon />
           </button>
         </div>
       )}
@@ -1598,7 +1598,7 @@ function VolumeView({
                 aria-label={playing ? 'Pause (space)' : 'Play (space)'}
                 onClick={() => setPlaying((p) => !p)}
               >
-                {playing ? <PauseIcon size={14} /> : <PlayIcon size={14} />}
+                {playing ? <PauseIcon size={12} /> : <PlayIcon size={12} />}
               </button>
               <input
                 className="frame-slider"

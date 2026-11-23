@@ -1,5 +1,6 @@
 import { ExternalMcpSection } from './ExternalMcpSection'
 import { XIcon } from './icons'
+import { modalLayer } from '../modalLayer'
 
 interface ExternalMcpWindowProps {
   open: boolean
@@ -24,7 +25,7 @@ export function ExternalMcpWindow({ open, onClose, onChanged }: ExternalMcpWindo
   return (
     <>
       <div className="modal-backdrop" onClick={onClose} />
-      <div className="extwin" role="dialog">
+      <div ref={modalLayer} className="extwin" role="dialog" aria-modal="true" aria-label="External MCP servers">
         <div className="panel-header">
           <span>External MCP servers</span>
           <span className="panel-actions">

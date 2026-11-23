@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { ChevronRightIcon } from './icons'
 
 /** Children shown of one large array or object; the rest is one line. */
 const MAX_CHILDREN = 500
@@ -67,7 +68,9 @@ function Node({ value, depth, name }: { value: unknown; depth: number; name?: st
   return (
     <div className="json-node">
       <button className="json-toggle" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
-        <span className="json-caret">{open ? '▾' : '▸'}</span>
+        <span className={open ? 'json-caret open' : 'json-caret'}>
+          <ChevronRightIcon size={12} />
+        </span>
         {label}
         <span className="json-punct">{summary}</span>
       </button>

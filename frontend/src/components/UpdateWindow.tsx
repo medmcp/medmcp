@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { UpdateState } from '../types'
 import { XIcon } from './icons'
+import { modalLayer } from '../modalLayer'
 
 interface UpdateWindowProps {
   open: boolean
@@ -145,7 +146,7 @@ export function UpdateWindow({ open, onClose, state, onDismiss }: UpdateWindowPr
   return (
     <>
       <div className="modal-backdrop" onClick={close} />
-      <div className="upwin" role="dialog">
+      <div ref={modalLayer} className="upwin" role="dialog" aria-modal="true" aria-label="Software update">
         <div className="panel-header">
           <span>Software update</span>
           <span className="panel-actions">

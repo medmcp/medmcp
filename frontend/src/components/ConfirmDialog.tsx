@@ -8,6 +8,7 @@ import {
   type ConfirmFn,
   type ConfirmOptions,
 } from '../confirm'
+import { modalLayer } from '../modalLayer'
 
 interface Pending extends ConfirmOptions {
   question: string
@@ -61,6 +62,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
           createPortal(
             <div className="modal-backdrop over-window" onClick={() => settle(null)}>
               <div
+                ref={modalLayer}
                 className="modal confirm-dialog"
                 role="alertdialog"
                 aria-modal="true"

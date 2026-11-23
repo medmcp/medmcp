@@ -312,7 +312,7 @@ export default function App() {
           setShortcutsOpen(true)
         }}
       >
-        <HelpIcon size={14} />
+        <HelpIcon />
       </button>
       <Group
         orientation="vertical"

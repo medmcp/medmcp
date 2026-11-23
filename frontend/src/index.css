@@ -4712,7 +4712,7 @@ textarea.wf-input {
 
 /* The window takes focus when it opens (see ShortcutsWindow); it is not a
    control, so it shows no ring for it. */
-.scwin:focus {
+.sc-body:focus {
   outline: none;
 }
 

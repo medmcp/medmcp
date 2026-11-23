@@ -123,13 +123,7 @@ export function ShortcutsWindow({ open, onClose }: ShortcutsWindowProps) {
   return (
     <>
       <div className="modal-backdrop" onClick={onClose} />
-      <div
-        ref={winRef}
-        className="extwin scwin"
-        role="dialog"
-        aria-label="Keyboard shortcuts"
-        tabIndex={-1}
-      >
+      <div className="extwin scwin" role="dialog" aria-label="Keyboard shortcuts">
         <div className="panel-header">
           <span>Keyboard shortcuts</span>
           <span className="panel-actions">
@@ -138,7 +132,8 @@ export function ShortcutsWindow({ open, onClose }: ShortcutsWindowProps) {
             </button>
           </span>
         </div>
-        <div className="extwin-body sc-body">
+        {/* Focus goes to the scrolling list, so the arrow and page keys scroll it. */}
+        <div ref={winRef} className="extwin-body sc-body" tabIndex={-1}>
           {GROUPS.map((g) => (
             <div key={g.title}>
               <div className="settings-section">{g.title}</div>

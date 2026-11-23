@@ -700,6 +700,12 @@ button:disabled {
   color: var(--text);
 }
 
+/* A destructive entry says so before it is pointed at, as Delete does in the
+   workflow panel. */
+.ctx-menu button.danger {
+  color: var(--red-tint);
+}
+
 .ctx-menu button.danger:hover {
   background: rgba(210, 34, 41, 0.15);
   color: var(--red-tint);

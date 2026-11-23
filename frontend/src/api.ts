@@ -20,6 +20,16 @@ import type {
 
 /** Thin client for the workspace filesystem API. */
 
+/** A request the server answered with an error; `status` is the HTTP status. */
+export class ApiError extends Error {
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.status = status
+  }
+}
+
 async function check(res: Response): Promise<Response> {
   // The login cookie is gone or the password changed: the reload lands on the
   // login screen rather than leaving every panel failing on its own.
@@ -32,7 +42,7 @@ async function check(res: Response): Promise<Response> {
     } catch {
       /* non-JSON error body */
     }
-    throw new Error(detail)
+    throw new ApiError(detail, res.status)
   }
   return res
 }
@@ -72,12 +82,18 @@ export async function fetchWorkspaceRoot(): Promise<string> {
   return ((await res.json()) as { root: string }).root
 }
 
+/** The whole workspace tree in one request; the explorer loads by folder instead. */
+export async function fetchTree(): Promise<TreeNode[]> {
+  const res = await check(await fetch('/api/tree'))
+  const body = (await res.json()) as { tree: TreeNode[] }
+  return body.tree
+}
+
 /** One entry of a folder listing as the server sends it (see /api/tree/dir). */
 interface DirEntry {
   id: string
   name: string
   dir?: boolean
-  has_children?: boolean
   size?: number
 }
 
@@ -96,9 +112,7 @@ export async function fetchDir(path: string): Promise<DirListing> {
     path: body.path,
     total: body.total,
     children: body.children.map((e) =>
-      e.dir
-        ? { id: e.id, name: e.name, children: [], hasChildren: e.has_children ?? false }
-        : { id: e.id, name: e.name, size: e.size },
+      e.dir ? { id: e.id, name: e.name, children: [] } : { id: e.id, name: e.name, size: e.size },
     ),
   }
 }

@@ -1,11 +1,12 @@
 import { createContext, memo, useContext, useEffect, useRef, useState } from 'react'
 import type { DragEvent as ReactDragEvent } from 'react'
-import { useConfirm } from '../confirm'
+import { useChoice, useConfirm } from '../confirm'
 import { createPortal } from 'react-dom'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { Tree } from 'react-arborist'
 import type { NodeApi, NodeRendererProps, TreeApi } from 'react-arborist'
 import {
+  ApiError,
   deletePath,
   downloadPath,
   fetchDir,
@@ -66,10 +67,7 @@ function isZip(name: string): boolean {
 }
 
 /** Said when a folder pick or drop arrives without a single file. */
-const NO_FILES_HINT =
-  'The browser handed over no files from that folder (a sandboxed browser, such as ' +
-  'snap or flatpak Firefox, may do this). Pack the folder as a .zip and upload that: ' +
-  'it is unpacked here.'
+const NO_FILES_HINT = 'No files arrived from that folder; upload it as a .zip instead.'
 
 /** A failure to show, with per-file reasons when there are several. */
 interface ExplorerError {
@@ -325,7 +323,7 @@ function withListing(nodes: TreeNode[], listing: DirListing): TreeNode[] {
   if (!listing.path) return mergeChildren(nodes, kids)
   return nodes.map((n) =>
     n.id === listing.path
-      ? { ...n, children: mergeChildren(n.children, kids), loaded: true, hasChildren: kids.length > 0 }
+      ? { ...n, children: mergeChildren(n.children, kids), loaded: true }
       : n.children?.length && listing.path.startsWith(`${n.id}/`)
         ? { ...n, children: withListing(n.children, listing) }
         : n,
@@ -333,18 +331,17 @@ function withListing(nodes: TreeNode[], listing: DirListing): TreeNode[] {
 }
 
 /**
- * Collect the loaded folders shown open (reachable through open folders) into
- * `open`, and return the tree with every other loaded folder marked unloaded,
- * so opening it again fetches it afresh rather than showing what it held
- * minutes ago.
+ * The folders among `nodes` and below that are shown open, i.e. reachable
+ * through open folders only. A folder that is open under a closed one is not
+ * shown, so it is left out: it is fetched afresh when the closed one is opened.
  */
-function splitOpen(nodes: TreeNode[], isOpen: (id: string) => boolean, open: string[]): TreeNode[] {
-  return nodes.map((n) => {
-    if (!n.children || !n.loaded) return n
-    if (!isOpen(n.id)) return { ...n, loaded: false }
-    open.push(n.id)
-    return { ...n, children: splitOpen(n.children, isOpen, open) }
-  })
+function shownOpen(nodes: TreeNode[], isOpen: (id: string) => boolean): string[] {
+  const open: string[] = []
+  for (const n of nodes) {
+    if (!n.children || n.more || !isOpen(n.id)) continue
+    open.push(n.id, ...shownOpen(n.children, isOpen))
+  }
+  return open
 }
 
 function depth(path: string): number {
@@ -363,6 +360,7 @@ export const FileExplorer = memo(function FileExplorer({
   isResizing,
 }: FileExplorerProps) {
   const confirmDialog = useConfirm()
+  const chooseDialog = useChoice()
   const [data, setData] = useState<TreeNode[]>([])
   // Read by async loaders that would otherwise see the data of their closure.
   const dataRef = useRef<TreeNode[]>([])
@@ -403,47 +401,62 @@ export const FileExplorer = memo(function FileExplorer({
     isResizingRef.current = isResizing
   }, [isResizing])
 
+  // The newest request per folder, so an older answer arriving late is dropped.
+  const loadSeq = useRef(0)
+  const latestLoad = useRef(new Map<string, number>())
+
   /**
    * Fetch the given folders' levels and merge them in, parents first, so a
    * subfolder's listing lands in the node its parent's listing kept. A folder
-   * that has vanished meanwhile is skipped quietly.
+   * that has vanished meanwhile leaves the tree quietly.
    */
   const loadDirs = async (paths: string[]): Promise<void> => {
     const unique = [...new Set(paths)].sort((a, b) => depth(a) - depth(b))
     if (unique.length === 0) return
+    const seq = ++loadSeq.current
+    for (const p of unique) latestLoad.current.set(p, seq)
     setLoading((prev) => new Set([...prev, ...unique]))
     const results = await Promise.allSettled(unique.map((p) => fetchDir(p)))
-    setLoading((prev) => new Set([...prev].filter((p) => !unique.includes(p))))
+    // A folder asked for again since belongs to that newer request: this answer
+    // must not replace the newer one, whichever of the two arrives first.
+    const mine = new Set(unique.filter((p) => latestLoad.current.get(p) === seq))
+    for (const p of mine) latestLoad.current.delete(p)
+    setLoading((prev) => new Set([...prev].filter((p) => !mine.has(p))))
     const listings: DirListing[] = []
-    let failure: string | null = null
-    results.forEach((r) => {
+    const gone = new Set<string>()
+    const failures: string[] = []
+    for (const [i, path] of unique.entries()) {
+      const r = results[i]
+      if (!r || !mine.has(path)) continue
       if (r.status === 'fulfilled') listings.push(r.value)
-      else if (!String(r.reason).includes('folder not found')) failure = String(r.reason)
-    })
-    setData((d) => listings.reduce(withListing, d))
-    if (unique.includes('')) {
-      setRootLoaded(true)
-      if (failure === null) setErrorState((e) => (e?.fromLoad ? null : e))
+      else if (r.reason instanceof ApiError && r.reason.status === 404) gone.add(path)
+      else failures.push(String(r.reason))
     }
-    if (failure !== null) setErrorState({ message: failure, fromLoad: true })
+    setData((d) => removeFromTree(listings.reduce(withListing, d), gone))
+    const failure = failures.at(-1)
+    if (mine.has('')) {
+      setRootLoaded(true)
+      if (failure === undefined) setErrorState((e) => (e?.fromLoad ? null : e))
+    }
+    if (failure !== undefined) setErrorState({ message: failure, fromLoad: true })
   }
 
-  /** Refresh the root and every folder shown open; closed folders refetch when next opened. */
+  const isOpen = (id: string) => treeRef.current?.isOpen(id) ?? false
+
+  /** Refresh the root and every folder shown open. */
   const reload = () => {
-    const tree = treeRef.current
-    const open: string[] = []
-    const next = splitOpen(dataRef.current, (id) => tree?.isOpen(id) ?? false, open)
-    dataRef.current = next
-    setData(next)
-    void loadDirs(['', ...open])
+    void loadDirs(['', ...shownOpen(dataRef.current, isOpen)])
   }
 
-  /** A folder was opened: fetch its level the first time (or again once stale). */
+  /**
+   * A folder was opened: fetch its level, and that of every folder shown open
+   * below it. Always, also when it was loaded before: while it was closed
+   * nothing refreshed it, and what it held then may be minutes old.
+   */
   const onToggle = (id: string) => {
-    const tree = treeRef.current
-    const node = tree?.get(id)
-    if (!tree?.isOpen(id) || !node || node.isLeaf || node.data.loaded) return
-    void loadDirs([id])
+    const node = findNode(dataRef.current, id)
+    if (!isOpen(id) || !node?.children || id === NEW_FOLDER_ID) return
+    void loadDirs([id, ...shownOpen(node.children, isOpen)])
   }
 
   // The root level, once mounted (deferred a tick, so the loader's state
@@ -551,22 +564,23 @@ export const FileExplorer = memo(function FileExplorer({
   /**
    * Upload `items` into `dir`. With `offerUnpack`, a .zip picked or dropped
    * there itself (not one inside a picked folder) can instead be unpacked on
-   * the server; the person is asked, and declining uploads the .zip as it is.
+   * the server; the person is asked, and may unpack, upload the .zip as it
+   * is, or cancel the upload altogether.
    */
   const startUpload = async (items: UploadItem[], dir: string, offerUnpack: boolean) => {
     if (items.length === 0) return
     let zips = offerUnpack ? items.filter((i) => i.dir === dir && isZip(i.file.name)) : []
     if (zips.length > 0) {
       const what = zips.length === 1 ? (zips[0]?.file.name ?? '') : `${zips.length} zip archives`
-      const unpack = await confirmDialog(`Unpack ${what} here?`, {
-        body:
-          `The server checks every entry and unpacks into ${dir ? `${dir}/` : 'the workspace'}. ` +
-          '"Keep as .zip" uploads the archive file itself.',
+      const where = dir ? `${dir}/` : 'the workspace'
+      const choice = await chooseDialog(`Unpack ${what} into ${where}?`, {
+        body: 'Existing files are never replaced.',
         action: 'Unpack',
-        cancel: 'Keep as .zip',
+        alt: 'Keep as .zip',
         tone: 'primary',
       })
-      if (!unpack) zips = []
+      if (choice === null) return
+      if (choice === 'alt') zips = []
     }
     const files = items.filter((i) => !zips.includes(i))
     const total = items.length
@@ -767,6 +781,15 @@ export const FileExplorer = memo(function FileExplorer({
 
   // Hoisted so the row branch below narrows once, closures included.
   const menuNode = menu?.node ?? null
+  // What the row menu's Delete acts on: the whole selection when the clicked
+  // row is part of it, else that row alone.
+  const menuSelection = menuNode?.tree.selectedNodes ?? []
+  const menuTargets =
+    menuNode === null
+      ? []
+      : menuSelection.length > 1 && menuSelection.some((n) => n.id === menuNode.id)
+        ? menuSelection
+        : [menuNode]
 
   return (
     <div className="panel">
@@ -814,7 +837,7 @@ export const FileExplorer = memo(function FileExplorer({
       {uploading ? (
         <div className="panel-status" role="status">
           {uploading.unpacking
-            ? `Uploading ${uploading.unpacking} and unpacking it on the server…`
+            ? `Unpacking ${uploading.unpacking}…`
             : `Uploading ${uploading.done} of ${uploading.total} file(s)…`}
         </div>
       ) : (
@@ -842,8 +865,9 @@ export const FileExplorer = memo(function FileExplorer({
           </div>
           {error.details && error.details.length > 0 && (
             <ul className="panel-error-list">
-              {error.details.slice(0, 8).map((d) => (
-                <li key={d}>{d}</li>
+              {error.details.slice(0, 8).map((d, i) => (
+                // Two failures can read the same (one name picked twice): key by place.
+                <li key={i}>{d}</li>
               ))}
               {error.details.length > 8 && <li>… and {error.details.length - 8} more</li>}
             </ul>
@@ -984,24 +1008,19 @@ export const FileExplorer = memo(function FileExplorer({
                   </>
                 )}
                 <button onClick={menuAction(() => void menuNode.edit())}>Rename</button>
-                {(() => {
-                  const sel = menuNode.tree.selectedNodes
-                  const targets =
-                    sel.length > 1 && sel.some((n) => n.id === menuNode.id) ? sel : [menuNode]
-                  const label = targets.length > 1 ? `${targets.length} items` : menuNode.data.name
-                  return (
-                    <button
-                      className="danger"
-                      onClick={menuAction(() => {
-                        void confirmDialog(`Delete ${label}?`).then(
-                          (ok) => ok && deleteMany(targets.map((n) => n.data.id)),
-                        )
-                      })}
-                    >
-                      {targets.length > 1 ? `Delete ${targets.length} items` : 'Delete'}
-                    </button>
-                  )
-                })()}
+                <button
+                  className="danger"
+                  onClick={() => {
+                    setMenu(null)
+                    const label =
+                      menuTargets.length > 1 ? `${menuTargets.length} items` : menuNode.data.name
+                    void confirmDialog(`Delete ${label}?`).then(
+                      (ok) => ok && deleteMany(menuTargets.map((n) => n.data.id)),
+                    )
+                  }}
+                >
+                  {menuTargets.length > 1 ? `Delete ${menuTargets.length} items` : 'Delete'}
+                </button>
               </>
             )}
             </div>,

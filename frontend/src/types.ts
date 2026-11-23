@@ -10,9 +10,7 @@ export interface TreeNode {
   name: string
   children?: TreeNode[]
   size?: number
-  /** A folder holding anything the explorer shows (known before it is loaded). */
-  hasChildren?: boolean
-  /** A folder whose own entries have been fetched. */
+  /** A folder whose own entries have been fetched at least once. */
   loaded?: boolean
   /** Not an entry: the row saying how many entries a capped listing left out. */
   more?: boolean

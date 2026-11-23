@@ -17,7 +17,7 @@ import {
 } from '../api'
 import type { DirListing, UploadFailure, UploadItem } from '../api'
 import { setDraggedFilePath } from '../dragState'
-import { classify, isVolumePath } from '../fileKinds'
+import { classify } from '../fileKinds'
 import { DRAG_PATH_MIME, type TreeNode } from '../types'
 import {
   FileIcon,
@@ -41,11 +41,6 @@ interface FileExplorerProps {
   onSelectionChange?: (paths: string[]) => void
   /** True while a separator is being dragged; defer tree resize until it ends. */
   isResizing?: boolean
-  /** The volume open in the viewer, or null when none is — what an overlay
-   *  would go on top of. */
-  overlayBase?: string | null
-  /** Overlay a file on `overlayBase`. */
-  onOverlay?: (path: string) => void
 }
 
 function parentDir(path: string): string {
@@ -372,8 +367,6 @@ export const FileExplorer = memo(function FileExplorer({
   refreshSignal,
   onSelectionChange,
   isResizing,
-  overlayBase,
-  onOverlay,
 }: FileExplorerProps) {
   const confirmDialog = useConfirm()
   const chooseDialog = useChoice()
@@ -1013,17 +1006,6 @@ export const FileExplorer = memo(function FileExplorer({
                 {menuNode.isLeaf ? (
                   <>
                     <button onClick={menuAction(() => onOpenFile(menuNode.data.id))}>Open</button>
-                    {/* Only with a volume open to lay it over, and never that
-                        file on itself. Dragging the row onto the image does the
-                        same thing, for anyone who has discovered that it does. */}
-                    {onOverlay &&
-                      isVolumePath(overlayBase) &&
-                      isVolumePath(menuNode.data.id) &&
-                      menuNode.data.id !== overlayBase && (
-                        <button onClick={menuAction(() => onOverlay(menuNode.data.id))}>
-                          Overlay on image
-                        </button>
-                      )}
                     <button onClick={menuAction(() => downloadPath(menuNode.data.id))}>
                       Download
                     </button>

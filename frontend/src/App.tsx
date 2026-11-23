@@ -13,7 +13,7 @@ import { SettingsDrawer } from './components/SettingsDrawer'
 import { ShortcutsWindow } from './components/ShortcutsWindow'
 import { UpdateWindow } from './components/UpdateWindow'
 import { Viewer } from './components/Viewer'
-import { EMPTY_OVERLAY, overlayFor, type OverlayState } from './components/viewerData'
+import { EMPTY_OVERLAY, type OverlayState } from './components/viewerData'
 import { WorkflowPanel } from './components/WorkflowPanel'
 import { GearIcon, KeyboardIcon, StoreIcon, XIcon } from './components/icons'
 import {
@@ -48,8 +48,7 @@ function describeUpdateResult(r: NonNullable<UpdateState['last_result']>): strin
 export default function App() {
   const [openPath, setOpenPath] = useState<string | null>(null)
   // What is overlaid on the open volume. Lives here rather than in the viewer so
-  // the chat can set it (a tool result's "Overlay" chip) and so it survives the
-  // viewer's resize rebuild.
+  // it survives the viewer's resize rebuild.
   const [overlay, setOverlay] = useState<OverlayState>(EMPTY_OVERLAY)
   // Files multi-selected in the explorer — feeds the workflow batch editor.
   const [selectedPaths, setSelectedPaths] = useState<string[]>([])
@@ -311,10 +310,6 @@ export default function App() {
                 refreshSignal={fsVersion}
                 onSelectionChange={setSelectedPaths}
                 isResizing={resizing}
-                overlayBase={openPath}
-                onOverlay={(p) => {
-                  if (openPath) setOverlay(overlayFor(openPath, p))
-                }}
               />
             </Panel>
             <Separator className="sep sep-v" />

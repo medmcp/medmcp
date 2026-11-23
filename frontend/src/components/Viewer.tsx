@@ -21,7 +21,6 @@ import {
   CONTINUOUS_COLORMAPS,
   CT_WINDOW_PRESETS,
   EMPTY_OVERLAY,
-  LABEL_WARN_COUNT,
   VOLUME_EXT_I,
   buildLabelColormap,
   classifyOverlayData,
@@ -36,7 +35,6 @@ import {
   looksLikeCT,
   parseLabelNames,
   overlayFor,
-  segmentationRefusal,
   voxelsToMl,
   volumeUnit,
   type LabelStat,
@@ -244,8 +242,6 @@ async function loadVolume(
 /** What the loaded overlay turned out to be — derived from its data once. */
 interface OverlayInfo {
   kind: OverlayKind
-  /** What to say out loud about this overlay, or null when there is nothing. */
-  warning: string | null
   maxLabel: number
   stats: LabelStat[]
   names: Map<number, string>
@@ -438,31 +434,18 @@ async function describeOverlay(vol: NVImage, path: string, forcedKind: OverlayKi
     hdr?.pixDims[2] ?? 1,
     hdr?.pixDims[3] ?? 1,
   ]
-  const facts = {
-    datatypeCode: hdr?.datatypeCode ?? 0,
-    sclSlope: hdr?.scl_slope ?? 1,
-    sclInter: hdr?.scl_inter ?? 0,
-  }
+  const dt = hdr?.datatypeCode ?? 0
+  const isColor = dt === DT_RGB24 || dt === DT_RGBA32
   const kind =
     forcedKind ??
-    classifyOverlayData(
-      img,
-      facts.datatypeCode,
-      facts.sclSlope,
-      facts.sclInter,
-      hdr?.intent_code ?? 0,
-    )
+    (isColor
+      ? 'continuous'
+      : classifyOverlayData(img, hdr?.scl_slope ?? 1, hdr?.scl_inter ?? 0, hdr?.intent_code ?? 0))
   let stats: LabelStat[] = []
   let names = new Map<number, string>()
   let maxLabel = 0
   let exactColors = true
-  let warning: string | null = null
   if (kind === 'label') {
-    // Why this file is not a segmentation, if it is not one. Only ever non-null
-    // for a kind forced by hand — the datatype gate in classifyOverlayData keeps
-    // anything else out — and read here, before routeThroughAtlasShader below
-    // rewrites both the voxels and the datatype in place.
-    const refusal = segmentationRefusal(facts, img)
     stats = labelStats(img, dims)
     maxLabel = stats.length ? stats[stats.length - 1].id : Math.ceil(vol.global_max ?? 1)
     // A 4D label map (a cine segmentation) is counted one frame at a time, but
@@ -474,15 +457,9 @@ async function describeOverlay(vol: NVImage, path: string, forcedKind: OverlayKi
     }
     exactColors = routeThroughAtlasShader(vol, maxLabel)
     names = await fetchLabelNames(path)
-    warning = refusal
-      ? `Drawn as labels although ${refusal}.`
-      : stats.length > LABEL_WARN_COUNT
-        ? `${stats.length} label ids, more than a segmentation usually has — check this is a label map and not an image.`
-        : null
   }
   return {
     kind,
-    warning,
     maxLabel,
     stats,
     names,
@@ -1325,9 +1302,9 @@ function VolumeView({
 
   return (
     <div className="volume-view">
-      {/* Only rendered once something is actually overlaid: with drag-and-drop
-          as the only way in, an always-present bar would be a permanent strip of
-          controls for a state the viewer is usually not in. */}
+      {/* Only rendered once something is actually overlaid: an always-present
+          bar would be a permanent strip of controls for a state the viewer is
+          usually not in. The header's overlay button is the way in. */}
       {overlay.path && (
         <div className="overlay-bar">
           <span className="overlay-label">
@@ -1396,7 +1373,6 @@ function VolumeView({
           </button>
         </div>
       )}
-      {overlay.path && info?.warning && <div className="overlay-note">{info.warning}</div>}
       {loadError && <div className="panel-error">{loadError}</div>}
       <div className="niivue-sizer" ref={sizerRef}>
         <div
@@ -1800,10 +1776,6 @@ function WindowPopover({
   )
 }
 
-/** Routes the selected file to the right renderer (volume / PDF / image / text). */
-// Memoized so a separator drag doesn't re-render the viewer (and its WebGL/React
-// subtree) every frame; props from App are stable except when the open file
-// actually changes.
 /** Every volume in the workspace, deepest-first, as the tree gives them. */
 function volumePaths(nodes: TreeNode[], out: string[] = []): string[] {
   for (const n of nodes) {
@@ -1812,6 +1784,10 @@ function volumePaths(nodes: TreeNode[], out: string[] = []): string[] {
   }
   return out
 }
+
+/** Rows the overlay picker renders at once; the rest are reached by filtering,
+ *  so a workspace of thousands of volumes cannot stall the popover. */
+const PICKER_MAX_ROWS = 100
 
 /** Pick a file to overlay on the open volume.
  *
@@ -1851,10 +1827,11 @@ function OverlayPicker({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
-  const shown = useMemo(() => {
+  const matches = useMemo(() => {
     const q = query.trim().toLowerCase()
     return (paths ?? []).filter((p) => !q || p.toLowerCase().includes(q))
   }, [paths, query])
+  const shown = matches.slice(0, PICKER_MAX_ROWS)
   return (
     <>
       <div className="vs-backdrop" onClick={onClose} />
@@ -1863,7 +1840,8 @@ function OverlayPicker({
           className="overlay-picker-search"
           type="search"
           placeholder="Filter by name"
-          aria-label="Filter the workspace's volumes by name"
+          aria-label="Filter volumes"
+          autoFocus
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
@@ -1879,21 +1857,28 @@ function OverlayPicker({
             <button
               key={p}
               className="overlay-picker-item"
-              title={p}
               onClick={() => {
                 onPick(p)
                 onClose()
               }}
             >
-              {p}
+              <span className="overlay-picker-name">{p.split('/').pop()}</span>
+              <span className="overlay-picker-dir">{p.split('/').slice(0, -1).join('/')}</span>
             </button>
           ))}
         </div>
+        {matches.length > shown.length && (
+          <span className="vs-label">{matches.length - shown.length} more — type to filter</span>
+        )}
       </div>
     </>
   )
 }
 
+/** Routes the selected file to the right renderer (volume / PDF / image / text). */
+// Memoized so a separator drag doesn't re-render the viewer (and its WebGL/React
+// subtree) every frame; props from App are stable except when the open file
+// actually changes.
 export const Viewer = memo(function Viewer({
   path,
   isResizing,

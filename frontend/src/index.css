@@ -158,10 +158,21 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 4px;
+  flex: none;
+  /* A fixed, even square: 24 around a 16px icon, 20 around a 12px one, so the
+     icon is centred on whole pixels at either size (3px clear of the 1px
+     border). Sized by padding, the box followed the icon and came out odd. */
+  width: 24px;
+  height: 24px;
+  padding: 0;
   border-color: transparent;
   color: var(--muted);
   border-radius: 6px;
+}
+
+.btn-icon:has(> svg[width='12']) {
+  width: 20px;
+  height: 20px;
 }
 
 .btn-icon:hover {
@@ -464,8 +475,10 @@ button:disabled {
   justify-content: space-between;
   gap: 8px;
   /* Fixed height so all four panel headers line up regardless of whether they
-     hold buttons/menus (taller) or just a title; content centers vertically. */
-  min-height: 44px;
+     hold buttons/menus (taller) or just a title; content centers vertically.
+     45, not 44: less the padding and the 1px rule that leaves 32 inside, an
+     even height for the 24px icon buttons to centre in on whole pixels. */
+  min-height: 45px;
   padding: 6px 14px;
   background: var(--dark2);
   border-bottom: 1px solid var(--border);
@@ -509,7 +522,9 @@ button:disabled {
 .panel-actions a {
   display: inline-flex;
   align-items: center;
-  padding: 4px;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
   color: var(--muted);
   border-radius: 6px;
 }
@@ -3091,7 +3106,7 @@ textarea.wf-input {
 }
 
 .wf-batch-rm {
-  width: 22px;
+  width: 20px;
   flex: none;
 }
 
@@ -4528,15 +4543,9 @@ textarea.wf-input {
   flex: 1;
 }
 
-/* 4D: play/pause, a frame slider and the count, centred on the row. The button
-   is 14px icon + 2px padding = 18px, the row's line height, so it sits on
-   whole pixels. */
+/* 4D: play/pause, a frame slider and the count, centred on the row. */
 .status-frame {
   align-items: center;
-}
-
-.status-frame .btn-icon {
-  padding: 2px;
 }
 
 .frame-slider {

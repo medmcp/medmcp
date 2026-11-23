@@ -112,16 +112,16 @@ function confirmationLine(c: SelectionConfirmation): string {
 }
 
 const SOURCES: { value: RunSource; icon: ReactNode; title: string; hint: string }[] = [
-  { value: 'files', icon: <FileIcon size={14} />, title: 'Files', hint: 'Pick scans by hand' },
+  { value: 'files', icon: <FileIcon />, title: 'Files', hint: 'Pick scans by hand' },
   {
     value: 'plan',
-    icon: <TableIcon size={14} />,
+    icon: <TableIcon />,
     title: 'Cohort plan',
     hint: 'One row per subject',
   },
   {
     value: 'selection',
-    icon: <TableIcon size={14} />,
+    icon: <TableIcon />,
     title: 'Selection',
     hint: 'The scans you selected',
   },

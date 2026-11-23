@@ -1,10 +1,23 @@
 import type { SVGProps } from 'react'
 
-/** Small monochrome stroke icons (feather-style), sized for inline UI use. */
+/** Small monochrome stroke icons (feather-style), sized for inline UI use.
+ *
+ *  Two sizes only: 16 in a button, 12 beside small text. The stroke is derived
+ *  from the size, so a line is the same 1.1px at both; a fixed stroke on the
+ *  24-unit grid drew the small icons a quarter lighter than the large ones. */
 
-type IconProps = SVGProps<SVGSVGElement> & { size?: number }
+type IconSize = 12 | 16
 
-function Icon({ size = 15, children, ...props }: IconProps) {
+type IconProps = Omit<SVGProps<SVGSVGElement>, 'strokeWidth'> & {
+  size?: IconSize
+  /** Units across the view box, when it is not the family's 24. */
+  grid?: number
+}
+
+/** The rendered line weight, in pixels, at either size. */
+const STROKE_PX = 1.1
+
+function Icon({ size = 16, grid = 24, children, ...props }: IconProps) {
   return (
     <svg
       width={size}
@@ -12,7 +25,7 @@ function Icon({ size = 15, children, ...props }: IconProps) {
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth={1.7}
+      strokeWidth={(grid / size) * STROKE_PX}
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden
@@ -318,10 +331,10 @@ export function ListIcon(props: IconProps) {
 
 /** A question mark — the list of shortcuts and controls. Drawn rather than
  *  typed, so it is centred in its box whatever the font's metrics are. The
- *  view box is cropped to the glyph: at size 14 one unit is one pixel. */
+ *  view box is cropped around the glyph: at size 16 one unit is one pixel. */
 export function HelpIcon(props: IconProps) {
   return (
-    <Icon viewBox="5 5 14 14" {...props}>
+    <Icon grid={16} viewBox="4 4 16 16" {...props}>
       <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
       <path d="M12 17h.01" />
     </Icon>

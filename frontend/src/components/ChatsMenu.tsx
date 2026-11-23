@@ -278,7 +278,7 @@ export function ChatsMenu({
               aria-label="Branch this chat (duplicate to try a different path)"
               onClick={() => branch(s.id)}
             >
-              <BranchIcon size={14} />
+              <BranchIcon />
             </button>
           )}
           {!isArchived && (
@@ -290,7 +290,7 @@ export function ChatsMenu({
                 setEditingId(s.id)
               }}
             >
-              <PencilIcon size={14} />
+              <PencilIcon />
             </button>
           )}
           <button
@@ -300,17 +300,17 @@ export function ChatsMenu({
               window.open(`/api/sessions/${encodeURIComponent(s.id)}/export`, '_blank', 'noopener')
             }
           >
-            <DownloadIcon size={14} />
+            <DownloadIcon />
           </button>
           <button
             className="btn-icon"
             aria-label={isArchived ? 'Restore' : 'Archive'}
             onClick={() => act(archiveSession(s.id, !isArchived))}
           >
-            <ArchiveIcon size={14} />
+            <ArchiveIcon />
           </button>
           <button className="btn-icon danger" aria-label="Delete" onClick={() => confirmDelete(s.id)}>
-            <TrashIcon size={14} />
+            <TrashIcon />
           </button>
         </span>
       </div>
@@ -334,7 +334,7 @@ export function ChatsMenu({
         onClick={toggle}
       >
         Chats
-        <ChevronRightIcon size={11} className="chats-caret" />
+        <ChevronRightIcon size={12} className="chats-caret" />
       </button>
       {open &&
         placement &&

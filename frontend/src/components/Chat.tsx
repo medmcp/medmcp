@@ -452,7 +452,7 @@ function PermissionCard({
   return (
     <div className="approval-box">
       <div className="approval-header">
-        <ShieldIcon size={13} strokeWidth={2.5} />
+        <ShieldIcon size={12} />
         Action requires your approval
       </div>
       <div className="approval-title">{perm.toolCall.title ?? 'tool call'}</div>

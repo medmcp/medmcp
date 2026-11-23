@@ -923,6 +923,23 @@ button:hover {
   display: flex;
 }
 
+/* Load failures, laid over the top of the canvas so they never resize it. */
+.volume-errors {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  background: var(--dark2);
+}
+
+.volume-errors .panel-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 /* The viewer's keys (slice stepping, `o`, space, zoom) only fire while this
    dropzone holds focus, and clicking the chat or the tree silently takes it
    away. Nothing said so before, which made the shortcut list look broken.

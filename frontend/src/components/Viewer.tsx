@@ -1488,9 +1488,27 @@ function VolumeView({
           </button>
         </div>
       )}
-      {loadError && <div className="panel-error">{loadError}</div>}
-      {overlayError && <div className="panel-error">{overlayError}</div>}
       <div className="niivue-sizer" ref={sizerRef}>
+        {/* Laid over the canvas rather than above it: a strip that took its own
+            row would resize the WebGL canvas and reflow the panes of the image
+            the failed overlay was meant to leave alone. */}
+        {(loadError || overlayError) && (
+          <div className="volume-errors">
+            {loadError && <div className="panel-error">{loadError}</div>}
+            {overlayError && (
+              <div className="panel-error">
+                <span>{overlayError}</span>
+                <button
+                  className="btn-icon"
+                  aria-label="Dismiss"
+                  onClick={() => setOverlayError(null)}
+                >
+                  <XIcon size={12} />
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         <div
           ref={dropRef}
           className={`niivue-dropzone${dragOver ? ' drag-over' : ''}`}

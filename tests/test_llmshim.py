@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -514,6 +514,46 @@ class TestAtemParse:
         assert llmshim.resolve_tool_name("shell.run", _FUNCTIONS) == "shell.run"
         assert llmshim.resolve_tool_name("mystery", _FUNCTIONS) == "mystery"
 
+    def test_muses_broken_parameter_tags_keep_their_value(self) -> None:
+        """Repair 6: the three ways Muse loses a parameter, as written in a sweep."""
+        skill = {
+            "name": "skill",
+            "parameters": {"type": "object", "properties": {"name": {"type": "string"}}},
+        }
+        functions = {"skill": skill, "bash": _BASH["function"]}
+        for invoke in (
+            '<atem:invoke name="skill"><atem:parameter name="name">cardiac-function</name>'
+            "</atem:invoke>",
+            '<atem:invoke name="skill">\n<atem:parameter name="name">cardiac-function</name>\n'
+            "</atem:parameter>\n</atem:invoke>",
+            '<atem:invoke name="skill.name">cardiac-function</atem:parameter>\n</atem:invoke>',
+            '<atem:invoke name="skill"><atem:parameter name="name">cardiac-function</atem:invoke>',
+        ):
+            block = f"<atem:function_calls>\n{invoke}\n</atem:function_calls>"
+            call = llmshim.parse_atem_block(block, functions)[0]["function"]
+            assert call["name"] == "skill", invoke
+            assert json.loads(call["arguments"]) == {"name": "cardiac-function"}, invoke
+
+    def test_an_unclosed_parameter_ends_at_the_next(self) -> None:
+        """Repair 6 keeps the following parameter apart."""
+        block = (
+            '<atem:function_calls><atem:invoke name="bash">'
+            '<atem:parameter name="command">ls'
+            '<atem:parameter name="timeout_seconds">30</atem:parameter>'
+            "</atem:invoke></atem:function_calls>"
+        )
+        args = json.loads(llmshim.parse_atem_block(block, _FUNCTIONS)[0]["function"]["arguments"])
+        assert args == {"command": "ls", "timeout_seconds": 30}
+
+    def test_a_folded_name_that_is_no_parameter_stays_empty(self) -> None:
+        """``bash.action`` names no parameter of bash: no value is invented."""
+        block = (
+            '<atem:function_calls><atem:invoke name="bash.action">ls'
+            "</atem:invoke></atem:function_calls>"
+        )
+        call = llmshim.parse_atem_block(block, _FUNCTIONS)[0]["function"]
+        assert call["name"] == "bash" and json.loads(call["arguments"]) == {}
+
     def test_two_invokes_are_two_calls(self) -> None:
         """One block may carry several calls; indices count up."""
         block = (
@@ -731,3 +771,48 @@ def test_the_shim_refuses_ollamas_model_management(path: str) -> None:
 
     client = TestClient(llmshim.create_app("http://upstream.invalid"))
     assert client.post(f"/{path}", json={}).status_code == 403
+
+
+def _chat(first: str) -> dict[str, object]:
+    return {
+        "model": "m",
+        "messages": [
+            {"role": "system", "content": "You are MedMCP."},
+            {"role": "user", "content": [{"type": "text", "text": first}]},
+            {"role": "assistant", "content": "Working on it."},
+            {"role": "user", "content": "And now?"},
+        ],
+    }
+
+
+def test_a_conversation_keeps_its_seed_and_another_gets_another() -> None:
+    """The seed follows the base value and the first user message, nothing later."""
+    seed = llmshim.conversation_seed(_chat("Strip the skull of /ws/run-1/t1.nii.gz"), 7)
+    later = _chat("Strip the skull of /ws/run-1/t1.nii.gz")
+    cast("list[object]", later["messages"]).append({"role": "user", "content": "Thanks"})
+    assert llmshim.conversation_seed(later, 7) == seed
+    assert llmshim.conversation_seed(_chat("Strip the skull of /ws/run-2/t1.nii.gz"), 7) != seed
+    assert llmshim.conversation_seed(_chat("Strip the skull of /ws/run-1/t1.nii.gz"), 8) != seed
+    assert 0 <= seed < 2**31
+
+
+async def test_a_retry_samples_with_the_next_seed() -> None:
+    """Attempt n sends seed + n - 1; without a seed the request is left as sent."""
+    sent: list[object] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content).get("seed"))
+        if len(sent) == 1:
+            return httpx.Response(200, json={"choices": [{"message": {"content": ""}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        resp = await llmshim._complete_with_retry(
+            "http://upstream/v1/chat/completions", {"model": "m"}, {}, 3, client=client, seed=41
+        )
+        assert resp.status_code == 200 and sent == [41, 42]
+        sent.clear()
+        await llmshim._complete_with_retry(
+            "http://upstream/v1/chat/completions", {"model": "m"}, {}, 3, client=client
+        )
+        assert sent == [None, None]

@@ -9,6 +9,7 @@ import type {
 } from '../types'
 import { Row } from './SettingsControls'
 import { ChevronRightIcon, XIcon } from './icons'
+import { modalLayer } from '../modalLayer'
 
 interface SettingsDrawerProps {
   open: boolean
@@ -177,7 +178,7 @@ export function SettingsDrawer({
   return (
     <>
       <div className="drawer-backdrop" onClick={onClose} />
-      <aside className="drawer">
+      <aside ref={modalLayer} className="drawer" role="dialog" aria-modal="true" aria-label="Settings">
         <div className="panel-header">
           <span>Settings</span>
           <span className="panel-actions">

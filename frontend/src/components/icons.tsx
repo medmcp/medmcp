@@ -1,10 +1,23 @@
 import type { SVGProps } from 'react'
 
-/** Small monochrome stroke icons (feather-style), sized for inline UI use. */
+/** Small monochrome stroke icons (feather-style), sized for inline UI use.
+ *
+ *  Two sizes only: 14 in a button, 12 beside small text. The stroke is derived
+ *  from the size, so a line is the same 1.4px at both: heavy enough to read on a
+ *  standard-resolution screen, where a 1px-ish line antialiases to grey. */
 
-type IconProps = SVGProps<SVGSVGElement> & { size?: number }
+type IconSize = 12 | 14
 
-function Icon({ size = 15, children, ...props }: IconProps) {
+type IconProps = Omit<SVGProps<SVGSVGElement>, 'strokeWidth'> & {
+  size?: IconSize
+  /** Units across the view box, when it is not the family's 24. */
+  grid?: number
+}
+
+/** The rendered line weight, in pixels, at either size. */
+const STROKE_PX = 1.4
+
+function Icon({ size = 14, grid = 24, children, ...props }: IconProps) {
   return (
     <svg
       width={size}
@@ -12,7 +25,7 @@ function Icon({ size = 15, children, ...props }: IconProps) {
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth={1.7}
+      strokeWidth={(grid / size) * STROKE_PX}
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden
@@ -197,6 +210,52 @@ export function ChevronRightIcon(props: IconProps) {
   )
 }
 
+export function ChevronDownIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M6 9l6 6 6-6" />
+    </Icon>
+  )
+}
+
+export function ChevronUpIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M6 15l6-6 6 6" />
+    </Icon>
+  )
+}
+
+/** A tick — done, present, allowed. */
+export function CheckIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M20 6L9 17l-5-5" />
+    </Icon>
+  )
+}
+
+/** A warning triangle — something to look at before going on. */
+export function AlertIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <path d="M12 17h.01" />
+    </Icon>
+  )
+}
+
+/** An arrow turning back on itself — rewind to an earlier point. */
+export function RewindIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <polyline points="1 4 1 10 7 10" />
+      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+    </Icon>
+  )
+}
+
 export function PencilIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -312,6 +371,18 @@ export function ListIcon(props: IconProps) {
       <circle cx="5" cy="6" r="1" />
       <circle cx="5" cy="12" r="1" />
       <circle cx="5" cy="18" r="1" />
+    </Icon>
+  )
+}
+
+/** A question mark — the list of shortcuts and controls. Drawn rather than
+ *  typed, so it is centred in its box whatever the font's metrics are. The
+ *  view box is cropped around the glyph, and `grid` keeps its line the family weight. */
+export function HelpIcon(props: IconProps) {
+  return (
+    <Icon grid={16} viewBox="4 4 16 16" {...props}>
+      <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+      <path d="M12 17h.01" />
     </Icon>
   )
 }

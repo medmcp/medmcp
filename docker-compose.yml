@@ -153,6 +153,11 @@ services:
       # warm across calls and hides pool-machinery tools (warmup) from the model.
       # 1/true to enable; empty = off (legacy per-call spawn).
       MEDMCP_STACK_POOL: "${MEDMCP_STACK_POOL:-}"
+      # Background jobs: a stack tool that declares one (an nnU-Net training)
+      # runs in its own container, which outlives the chat and the pool. 0 turns
+      # them off; MEDMCP_MAX_JOBS is how many may run at once (default 1).
+      MEDMCP_STACK_JOBS: "${MEDMCP_STACK_JOBS:-}"
+      MEDMCP_MAX_JOBS: "${MEDMCP_MAX_JOBS:-}"
       # Tool-call repair shim between vibe and Ollama. On by default: without it
       # Ollama's Glimmer parser silently drops roughly half of all tool-using
       # turns, and the failure is invisible — no error, just a chat that never
@@ -163,12 +168,20 @@ services:
       # every truncation can be retried invisibly).
       MEDMCP_SHIM_RELAY: "${MEDMCP_SHIM_RELAY:-live}"
       MEDMCP_SHIM_TOOLS: "${MEDMCP_SHIM_TOOLS:-glimmer}"
+      # Seed for the model's sampling, so a chat can be rerun with the same draws.
+      MEDMCP_SHIM_SEED: "${MEDMCP_SHIM_SEED:-}"
+      # Largest file (MB) a workflow run checksums for its record; 0 turns
+      # checksums off. Empty: 2048.
+      MEDMCP_RUN_HASH_MAX_MB: "${MEDMCP_RUN_HASH_MAX_MB:-}"
       # Release check (one anonymous request to GitHub a day; off with 0) and
       # where to read the newest release from (a mirror serving the same JSON).
       MEDMCP_UPDATE_CHECK: "${MEDMCP_UPDATE_CHECK:-}"
       MEDMCP_UPDATE_URL: "${MEDMCP_UPDATE_URL:-}"
       # Chat-long approval of read-only shell commands (ls, cat, …); off with 0.
       MEDMCP_READ_ONLY_APPROVAL: "${MEDMCP_READ_ONLY_APPROVAL:-}"
+      # Code the assistant wrote itself (a Python heredoc, Rscript, a .py file):
+      # "ask" (default) shows every such call on its own; "deny" refuses it.
+      MEDMCP_ASSISTANT_CODE: "${MEDMCP_ASSISTANT_CODE:-}"
       # The agent runs in its own container: no docker socket, no state volume,
       # its config read-only, stack tools through the core (forces the stack
       # pool on). Empty runs it inside this container, as before.

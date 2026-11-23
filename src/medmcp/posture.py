@@ -23,6 +23,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, cast
 
+from medmcp.jobspec import NAME_PREFIX as _JOB_NAME_PREFIX
 from medmcp.statefile import atomic_write_toml
 
 JsonDict = dict[str, Any]
@@ -288,7 +289,27 @@ def unsafe_stack_args(args: list[str], workspace: str | None = None) -> str | No
         elif flag in _FLAG_VALUES:
             if not _FLAG_VALUES[flag].fullmatch(value):
                 return f"{flag} {value!r} is not allowed"
+            if flag == "--name" and value.startswith(_JOB_NAME_PREFIX):
+                # Job containers are found by name; a stack may not pose as one.
+                return f"--name {value!r} is reserved for jobs"
         else:
             return f"{flag} is not allowed"
         index += 2
     return "manifest names no image"
+
+
+def split_run_args(args: list[str]) -> tuple[list[str], str, list[str]] | None:
+    """A manifest's ``docker run`` *args* as (flags, image, command), or ``None``.
+
+    For args that passed :func:`split_flag_values` and :func:`unsafe_stack_args`:
+    *flags* is everything between ``run`` and the image, values included.
+    """
+    if not args or args[0] != "run":
+        return None
+    index = 1
+    while index < len(args):
+        flag = args[index]
+        if not flag.startswith("-"):
+            return args[1:index], flag, args[index + 1 :]
+        index += 1 if flag in _FLAGS_NO_VALUE else 2
+    return None

@@ -25,9 +25,30 @@ this hook invisibly, burning tokens with nothing on screen. After
 through to the dialog, where a human can see what it is stuck on. Silent infinite
 retry would make this feature worse than not having it.
 
+It also turns back a call whose arguments the tool's input schema rejects. vibe
+2.26 validates the arguments a ``pre_tool`` hook lets through (its
+``effective_arguments``) against the tool's schema once more, and an invalid set
+there is not a tool error: the harness rejects it as an invalid command and the
+whole chat turn ends with ``Core rejected durable input``. (The sandbox's own
+check before the hook lets an invalid call through when the schema nests a
+model as the ``$defs``/``$ref`` pydantic writes.) A denial is the one answer
+that skips that check, so the guard validates each stack call against the
+schema the stack pool last listed (the broker's ``tool_schema`` op) and denies
+with what is wrong and what the argument takes. That denial is capped like a
+path denial: the same mistake repeated ``_MAX_DENIALS`` times goes through, and
+the turn ends where a person sees it. No schema known, no core to ask, or
+anything going wrong while checking allows as before.
+
 The hook contract is "exit 0 and print a JSON object on stdout", so every failure
 path here still prints ``{"decision": "allow"}``: a broken guard must never be
 able to block work.
+
+A stack tool is called from ``run_typescript``, and under vibe 2.26.1 that
+program -- so the model -- gets only ``tool_skipped`` back from a denial, never
+its reason. So every denial of a stack call is also left with the core
+(:class:`DenialNotes`, broker op ``record_denial``), and the LLM shim adds the
+reason to the result the model reads (:func:`medmcp.llmshim.note_denied_calls`).
+Local models only: a cloud model does not go through the shim.
 """
 
 import contextlib
@@ -35,12 +56,17 @@ import hashlib
 import json
 import os
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from medmcp import harness
+from medmcp import brokerclient, harness
 from medmcp.pathcheck import PathFinding, check_tool_call_paths
 from medmcp.statefile import atomic_write_json, read_json
+
+if TYPE_CHECKING:
+    from jsonschema.exceptions import ValidationError
 
 # Refusals of the same call before the hook gives up and lets a human look at it.
 _MAX_DENIALS = 2
@@ -164,6 +190,162 @@ def container_stack_names() -> list[str]:
         return []
 
 
+# Bounds on the "Expected:" hint: nesting rendered, alternatives listed, length.
+_HINT_DEPTH = 3
+_HINT_ENUM = 8
+_HINT_CHARS = 300
+
+
+def _resolve_ref(schema: dict[str, Any], root: dict[str, Any]) -> dict[str, Any]:
+    """*schema* with a local ``$ref`` (``#/$defs/X``) followed, else unchanged."""
+    ref = schema.get("$ref")
+    if not isinstance(ref, str) or not ref.startswith("#/"):
+        return schema
+    node: Any = root
+    for part in ref[2:].split("/"):
+        try:
+            node = node[part.replace("~1", "/").replace("~0", "~")]
+        except (KeyError, TypeError):
+            return schema
+    return cast("dict[str, Any]", node) if isinstance(node, dict) else schema
+
+
+def schema_hint(schema: object, root: dict[str, Any], depth: int = 0) -> str:
+    """A short, readable rendering of what *schema* accepts ("string or array of string")."""
+    if not isinstance(schema, dict):
+        return "any value"
+    node = _resolve_ref(cast("dict[str, Any]", schema), root)
+    if depth >= _HINT_DEPTH:
+        return "…"
+    for key in ("anyOf", "oneOf"):
+        options = node.get(key)
+        if isinstance(options, list):
+            hints = [schema_hint(o, root, depth + 1) for o in cast("list[object]", options)]
+            return " or ".join(dict.fromkeys(hints))
+    if "const" in node:
+        return json.dumps(node["const"])
+    enum = node.get("enum")
+    if isinstance(enum, list):
+        values = [json.dumps(v) for v in cast("list[object]", enum)]
+        more = ", …" if len(values) > _HINT_ENUM else ""
+        return "one of " + ", ".join(values[:_HINT_ENUM]) + more
+    kind = node.get("type")
+    if isinstance(kind, list):
+        return " or ".join(str(k) for k in cast("list[object]", kind))
+    if kind == "array":
+        items = node.get("items")
+        return f"array of {schema_hint(items, root, depth + 1)}" if items else "array"
+    if kind == "object" or "properties" in node:
+        props = node.get("properties")
+        if isinstance(props, dict) and props:
+            names = list(cast("dict[str, Any]", props))
+            more = ", …" if len(names) > _HINT_ENUM else ""
+            return "object with " + ", ".join(names[:_HINT_ENUM]) + more
+        return "object"
+    return str(kind) if isinstance(kind, str) else "any value"
+
+
+def _where(path: list[object]) -> str:
+    """A JSON path as the model wrote it: ``criteria.labels[0]``; the root is "(arguments)"."""
+    out = ""
+    for part in path:
+        out += f"[{part}]" if isinstance(part, int) else (f".{part}" if out else str(part))
+    return out or "(arguments)"
+
+
+def _holds(error: "ValidationError", target: "ValidationError") -> bool:
+    """True if *target* is *error* or one of the errors under it (``anyOf`` branches)."""
+    return error is target or any(_holds(sub, target) for sub in error.context)
+
+
+def schema_problem(tool: str, tool_input: object, schema: dict[str, Any]) -> str | None:
+    """Why *tool_input* does not satisfy *schema*, written for the model; ``None`` if it does.
+
+    Names the most specific error (``best_match``) and, as the hint, what the
+    argument it sits under takes -- the top-level error's schema, so a value that
+    fits none of an ``anyOf`` is shown all the shapes it may take.
+    """
+    # Imported here: a hook that cannot import it must still answer "allow".
+    from jsonschema import Draft202012Validator, exceptions, validators
+
+    validator = validators.validator_for(schema, default=Draft202012Validator)(schema)
+    errors = list(validator.iter_errors(cast("Any", tool_input)))
+    if not errors:
+        return None
+    # best_match is unannotated in the stubs; it returns one of the errors.
+    deep = cast("ValidationError", exceptions.best_match(errors))  # pyright: ignore[reportUnknownMemberType]
+    top = next((e for e in errors if _holds(e, deep)), deep)
+    if top.validator == "required":
+        required = ", ".join(repr(r) for r in cast("list[object]", top.validator_value))
+        expected = f"{_where(list(top.absolute_path))} requires {required}"
+    else:
+        expected = f"{_where(list(top.absolute_path))} takes " + schema_hint(top.schema, schema)
+    if len(expected) > _HINT_CHARS:
+        expected = expected[: _HINT_CHARS - 1] + "…"
+    # The message quotes the offending value, which the model wrote and may be long.
+    message = deep.message
+    if len(message) > _HINT_CHARS:
+        message = message[: _HINT_CHARS - 1] + "…"
+    return (
+        f"{tool} arguments are invalid: {_where(list(deep.absolute_path))}: {message}. "
+        f"Expected: {expected}.\n\n"
+        "Nobody refused this call and the tool did not run. Fix only this argument, "
+        f"keep every other argument exactly as it was, and call {tool} again now."
+    )
+
+
+def _known_schema(route: str) -> dict[str, Any] | None:
+    """The input schema of the stack tool *route* names, from the core; ``None`` if unknown.
+
+    Asked over the broker (``tool_schema``), which answers from the tool lists the
+    stack pool keeps and starts nothing. Only MCP routes (``mcp_<stack>.<tool>``)
+    are asked about: the harness validates its own tools itself.
+    """
+    group, dot, _tool = route.partition(".")
+    if not dot or not group.startswith("mcp_") or route in harness.BUILTIN_ROUTES:
+        return None
+    response = brokerclient.ask_sync("tool_schema", {"tool": route})
+    schema = response.get("schema") if response is not None else None
+    return cast("dict[str, Any]", schema) if isinstance(schema, dict) else None
+
+
+def check_schema(route: str, tool_input: object, session_id: str = "") -> dict[str, Any] | None:
+    """The answer for a call its tool's schema rejects; ``None`` to go on (also on any error).
+
+    A denial with what is wrong, until the same mistake has been turned back
+    ``_MAX_DENIALS`` times in this chat: then the guard stands aside, as it does
+    for a path, so a model that is not converging surfaces instead of looping.
+    """
+    try:
+        schema = _known_schema(route)
+        if schema is None:
+            return None
+        tool = route.partition(".")[2] or route
+        problem = schema_problem(tool, tool_input, schema)
+        if not problem:
+            return None
+        ledger_file = _ledger_path()
+        ledger = _load_ledger(ledger_file)
+        # Keyed on the complaint, so a different mistake gets its own budget.
+        complaint = problem.partition("\n")[0].encode("utf-8", "replace")
+        key = f"{session_id}:{route}:schema:{hashlib.sha256(complaint).hexdigest()[:16]}"
+        seen = ledger.get(key, 0)
+        if seen >= _MAX_DENIALS:
+            return {
+                "decision": "allow",
+                "system_message": (
+                    f"path guard: allowing {tool} after {seen} refusals — "
+                    "the agent did not correct its arguments"
+                ),
+            }
+        ledger[key] = seen + 1
+        _save_ledger(ledger_file, ledger)
+    except Exception as exc:
+        print(f"medmcp-pathguard: schema check skipped: {exc}", file=sys.stderr)
+        return None
+    return {"decision": "deny", "reason": problem}
+
+
 def decide(invocation: dict[str, Any]) -> dict[str, Any]:
     """Return the hook response for one ``pre_tool`` invocation."""
     # The harness names a tool by route (``mcp_medmcp_neuro.skull_strip``,
@@ -173,6 +355,11 @@ def decide(invocation: dict[str, Any]) -> dict[str, Any]:
     )
     session_id = str(invocation.get("session_id") or "")
     tool_input = invocation.get("tool_input")
+
+    # First: an invalid call let through here would end the turn, not fail the call.
+    answer = check_schema(str(invocation.get("tool_name") or ""), tool_input, session_id)
+    if answer is not None:
+        return answer
 
     # The agent's cwd is the workspace (session/new is started there); the env var
     # is preferred so the two cannot disagree if that ever changes.
@@ -208,16 +395,88 @@ def decide(invocation: dict[str, Any]) -> dict[str, Any]:
     return {"decision": "deny", "reason": build_reason(errors, workspace)}
 
 
+# Longest denial reason the core keeps for the shim; the guard's own run to a few
+# hundred characters.
+_MAX_REASON = 4000
+
+
+class DenialNotes:
+    """The guard's recent denials of stack calls, until the LLM shim takes them.
+
+    Held by the core. The guard hands each denial over (``record_denial``); the
+    shim, finding a skipped call in the next request to the model, takes the
+    oldest live denial of the tool the program's error names (``take_denial``).
+    The tool name is all both sides can see -- the shim has the program's error,
+    not the arguments the program built -- so two chats denied the same tool in
+    the same moment could swap reasons. Denials expire after *ttl_sec* and at most
+    *limit* are kept, so one nobody took cannot resurface much later.
+    """
+
+    def __init__(
+        self,
+        ttl_sec: float = 120.0,
+        limit: int = 100,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """Keep up to *limit* denials, each for *ttl_sec*."""
+        self._ttl = ttl_sec
+        self._limit = limit
+        self._clock = clock
+        self._denials: list[tuple[float, str, str]] = []
+
+    def _live(self) -> list[tuple[float, str, str]]:
+        now = self._clock()
+        self._denials = [d for d in self._denials if now - d[0] < self._ttl]
+        return self._denials
+
+    def add(self, tool: str, reason: str) -> None:
+        """Record that a call of *tool* (its bare name) was denied for *reason*."""
+        live = self._live()
+        live.append((self._clock(), tool, reason[:_MAX_REASON]))
+        del live[: max(0, len(live) - self._limit)]
+
+    def take(self, tool: str) -> str | None:
+        """The reason of the oldest live denial of *tool*, removed; ``None`` if none."""
+        for i, (_, name, reason) in enumerate(self._live()):
+            if name == tool:
+                del self._denials[i]
+                return reason
+        return None
+
+
+def record_denial(invocation: dict[str, Any], response: dict[str, Any]) -> None:
+    """Hand a stack call's denial to the core for the LLM shim; best-effort.
+
+    Only MCP routes (``mcp_<stack>.<tool>``): those are called from
+    ``run_typescript``, whose program never sees the reason. The harness's own
+    tools are called directly and their denial reason reaches the model as is.
+    """
+    if response.get("decision") != "deny":
+        return
+    group, dot, tool = str(invocation.get("tool_name") or "").partition(".")
+    if not dot or not group.startswith("mcp_"):
+        return
+    from medmcp import brokerclient  # only on a denial: keep the common path lean
+
+    brokerclient.ask_sync("record_denial", {"tool": tool, "reason": str(response["reason"])})
+
+
 def main() -> int:
     """Read a ``pre_tool`` invocation on stdin, print the decision on stdout."""
     response: dict[str, Any] = {"decision": "allow"}
+    invocation: dict[str, Any] = {}
     try:
         parsed = json.loads(sys.stdin.read() or "{}")
         if isinstance(parsed, dict):
-            response = decide(cast("dict[str, Any]", parsed))
+            invocation = cast("dict[str, Any]", parsed)
+            response = decide(invocation)
     except Exception as exc:
         print(f"medmcp-pathguard: {exc}", file=sys.stderr)
         response = {"decision": "allow"}
+    try:
+        record_denial(invocation, response)
+    except Exception as exc:  # the decision stands whether or not the core heard of it
+        print(f"medmcp-pathguard: denial not recorded: {exc}", file=sys.stderr)
     json.dump(response, sys.stdout)
     return 0
 

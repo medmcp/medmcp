@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "medmcp"
-version = "0.7.3"
+version = "0.8.0"
 description = "A local medical imaging agent"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -40,6 +40,8 @@ dependencies = [
     "mcp>=1.28",
     # Chat export renders the transcript's Markdown server-side (raw HTML off).
     "markdown-it-py>=3",
+    # The path guard checks a stack call's arguments against the tool's schema.
+    "jsonschema>=4.18",
 ]
 
 [project.urls]
@@ -67,7 +69,8 @@ quality = [
     "ruff>=0.17.1",
     "pyright>=1.1.414",
     "pre-commit>=4.7.0",
-    "types-pyyaml>=6.0.12.20260906"
+    "types-pyyaml>=6.0.12.20260906",
+    "types-jsonschema>=4.23",
 ]
 dev = [
     { include-group = "test" },
@@ -81,7 +84,20 @@ default-groups = ["dev"]
 # The CA bundle is data, so overriding it cannot break vibe.
 # gitpython likewise (CVE-2026-114145, submodule clone into .git/hooks); vibe
 # only reads repos and fetches, which 3.2 leaves as it was.
-override-dependencies = ["certifi>=2026.10.19", "gitpython>=3.2.1"]
+# mcp likewise (CVE-2026-116685, client headers follow a redirect to another host;
+# CVE-2026-116686, a tool's output schema makes the client fetch URLs and files);
+# 1.30 is a minor release of the same API. pyasn1 likewise (CVE-2026-119194..7,
+# quadratic decoding), a bug-fix release. soupsieve likewise (CVE-2026-126190..3,
+# polynomial/exponential matching and parsing of CSS selectors): vibe converts
+# fetched web pages with BeautifulSoup, i.e. untrusted HTML; beautifulsoup4 only
+# requires soupsieve>1.2.
+override-dependencies = [
+    "certifi>=2026.10.19",
+    "gitpython>=3.2.1",
+    "mcp>=1.30.0,<2",
+    "pyasn1>=0.6.5",
+    "soupsieve>=4.1",
+]
 
 
 [tool.ruff]

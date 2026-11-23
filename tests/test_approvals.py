@@ -24,3 +24,13 @@ def test_an_unused_approval_expires() -> None:
     ledger.grant("s", "t", {})
     now[0] = 11
     assert ledger.consume("s", "t", {}) is False
+
+
+def test_a_spent_approval_names_the_chat_it_was_given_in() -> None:
+    """What a call sets in motion (a job) is attributed to the chat that approved it."""
+    ledger = approvals.ApprovalLedger()
+    ledger.grant("s", "t", {"a": 1}, session="chat-1")
+    ledger.grant("s", "t", {"a": 1})
+    assert ledger.spend("s", "t", {"a": 1}) == approvals.Approval(session="chat-1")
+    assert ledger.spend("s", "t", {"a": 1}) == approvals.Approval(session="")
+    assert ledger.spend("s", "t", {"a": 1}) is None

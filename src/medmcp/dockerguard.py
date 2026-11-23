@@ -20,6 +20,13 @@ hands the core a filtered one. It forwards only what the core does:
   the daemon recorded from a registry pull, ``medmcp-update apply``, its fixed
   mounts, and an environment whose every value is what this install already
   runs with. Every container created gets a label marking it as the guard's;
+- a *job* container (:mod:`medmcp.jobs`: named ``medmcp-job-…`` and labelled
+  ``org.medmcp.job``) only in the one shape the core starts it in: no network,
+  the workspace as its only mount, all capabilities dropped, a task limit, no
+  restart policy, and a command line that begins with the job entrypoint the
+  image itself declares, followed by one of the tools it declares and a single
+  arguments value. No other container may carry a job label or name, and no
+  container at all is created from an image that carries one;
 - start, attach, wait, resize, kill, stop, remove and copy-out only for
   containers carrying that label.
 
@@ -48,6 +55,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import httpx
 
+from medmcp import jobspec
 from medmcp.update import CORE_ENV_VARS
 
 log: logging.Logger = logging.getLogger("medmcp.dockerguard")
@@ -167,13 +175,30 @@ def _bind_source(bind: str) -> str:
     return bind.split(":", 1)[0]
 
 
-def check_create(body: JsonDict, ctx: GuardContext, repo_digests: list[str]) -> str | None:
+def check_create(
+    body: JsonDict,
+    ctx: GuardContext,
+    repo_digests: list[str],
+    *,
+    name: str = "",
+    image_labels: JsonDict | None = None,
+) -> str | None:
     """Why a ``POST /containers/create`` body must be refused, or ``None``.
 
     *repo_digests* are the ``repo@digest`` references the daemon recorded for the
     body's image when it was pulled (none for an image that was not), which is
-    how the update helper's image is recognised.
+    how the update helper's image is recognised. *name* is the container name
+    asked for and *image_labels* the image's own labels, which is how a job
+    container is recognised and checked (see :func:`check_job`).
     """
+    if jobspec.carries_job_label(image_labels):
+        # Containers inherit their image's labels: such an image would make
+        # every container started from it look like a job.
+        return "the image carries a job label"
+    if name.startswith(jobspec.NAME_PREFIX) or jobspec.carries_job_label(body.get("Labels")):
+        reason = check_job(body, ctx, name, image_labels or {})
+        if reason is not None:
+            return reason
     host = cast("JsonDict", body.get("HostConfig") or {})
     if host.get("Privileged"):
         return "privileged containers are not allowed"
@@ -217,6 +242,62 @@ def check_create(body: JsonDict, ctx: GuardContext, repo_digests: list[str]) -> 
     for source in sources:
         if source not in allowed:
             return f"mount source {source!r} is not the workspace or one of the core's volumes"
+    return None
+
+
+def check_job(body: JsonDict, ctx: GuardContext, name: str, image_labels: JsonDict) -> str | None:
+    """Why a create that is named or labelled as a job is not one, or ``None``.
+
+    A job outlives the pool, the chat and the core, so the container that gets
+    to be one is pinned down further than a stack's: exactly the isolation the
+    core gives it, and a command line whose fixed part is the one the image
+    declares for jobs — the core cannot be talked into running anything else
+    under the name. The general checks of :func:`check_create` still follow.
+    """
+    labels = cast("JsonDict", body.get("Labels") or {})
+    host = cast("JsonDict", body.get("HostConfig") or {})
+    job_id = str(labels.get(jobspec.ID_LABEL) or "")
+    if labels.get(jobspec.JOB_LABEL) != "1" or not jobspec.valid_id(job_id):
+        return "a job container must carry the job label and a job id"
+    if name != jobspec.container_name(job_id):
+        return "a job container must be named after its job id"
+    if labels.get(jobspec.WORKSPACE_LABEL) != ctx.workspace:
+        return "a job must be labelled with this workspace"
+    if str(host.get("NetworkMode") or "") != "none":
+        return "a job container may not have a network"
+    binds = [str(b) for b in cast("list[Any]", host.get("Binds") or [])]
+    ws = ctx.workspace
+    if host.get("Mounts") or any(b not in {f"{ws}:{ws}", f"{ws}:{ws}:rw"} for b in binds):
+        return "a job container may mount only the workspace"
+    if {str(c).upper() for c in cast("list[Any]", host.get("CapDrop") or [])} != {"ALL"}:
+        return "a job container must drop all capabilities"
+    opts = {str(o) for o in cast("list[Any]", host.get("SecurityOpt") or [])}
+    if not opts & _SAFE_SECURITY_OPTS:
+        return "a job container must set no-new-privileges"
+    pids = host.get("PidsLimit")
+    if not isinstance(pids, int) or pids <= 0:
+        return "a job container must have a task limit"
+    restart = cast("JsonDict", host.get("RestartPolicy") or {})
+    if str(restart.get("Name") or "") not in {"", "no"}:
+        return "a job container may not have a restart policy"
+    if body.get("Entrypoint") or body.get("User"):
+        return "a job container may not override the image's entrypoint or user"
+    try:
+        meta: object = json.loads(str(image_labels.get(jobspec.STACK_IMAGE_LABEL) or ""))
+    except json.JSONDecodeError:
+        meta = None
+    stack_meta = cast("JsonDict", meta) if isinstance(meta, dict) else {}
+    runner = jobspec.parse_declaration(stack_meta.get("job"))
+    if runner is None:
+        return "the image declares no job runner"
+    if labels.get(jobspec.STACK_LABEL) != stack_meta.get("name"):
+        return "the job's stack label is not the image's stack"
+    cmd = [str(c) for c in cast("list[Any]", body.get("Cmd") or [])]
+    fixed = len(runner.command)
+    if len(cmd) != fixed + 2 or tuple(cmd[:fixed]) != runner.command:
+        return "the job's command is not the image's job runner"
+    if cmd[fixed] not in runner.tools or labels.get(jobspec.TOOL_LABEL) != cmd[fixed]:
+        return "the job's tool is not one the image runs as a job"
     return None
 
 
@@ -348,6 +429,13 @@ class Daemon:
             return []
         return [str(d) for d in cast("list[Any]", found.get("RepoDigests") or [])]
 
+    def image_labels(self, ref: str) -> JsonDict:
+        """The labels an image itself carries (empty for an unknown image)."""
+        found = self._get(f"/images/{ref}/json") if ref else None
+        if not isinstance(found, dict):
+            return {}
+        return cast("JsonDict", cast("JsonDict", found.get("Config") or {}).get("Labels") or {})
+
     def _service(self, service: str) -> JsonDict | None:
         flt = json.dumps(
             {
@@ -429,7 +517,15 @@ def check_request(method: str, target: str, body: bytes, daemon: Daemon) -> Deci
         except json.JSONDecodeError:
             return Decision(False, "create body is not JSON")
         ctx = daemon.context()
-        reason = check_create(parsed, ctx, daemon.repo_digests(str(parsed.get("Image") or "")))
+        image = str(parsed.get("Image") or "")
+        query = parse_qs(parts.query, keep_blank_values=True)
+        reason = check_create(
+            parsed,
+            ctx,
+            daemon.repo_digests(image),
+            name=(query.get("name") or [""])[-1],
+            image_labels=daemon.image_labels(image),
+        )
         if reason is not None:
             return Decision(False, reason)
         return Decision(True, body=json.dumps(with_guard_label(parsed)).encode())

@@ -9,16 +9,19 @@ exercisable without a live vibe-acp subprocess.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import io
+import logging
+import os
 import zipfile
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import pytest
 import yaml
-from fastapi import HTTPException
+from fastapi import HTTPException, WebSocketDisconnect
 from fastapi.testclient import TestClient
 
 from medmcp import provenance, server, sessions, settings
@@ -55,6 +58,103 @@ class TestRawFiles:
         assert head.headers["etag"] == got.headers["etag"]
         (workspace_root / "seg.nii.gz").write_bytes(b"v2-longer")
         assert client.head("/api/raw/seg.nii.gz").headers["etag"] != got.headers["etag"]
+
+    def test_optional_raw_answers_a_missing_file_with_204(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """An optional sidecar that is absent is not an error; the traversal guard still holds."""
+        assert client.get("/api/raw/seg_labels.csv").status_code == 404
+        missing = client.get("/api/raw/seg_labels.csv?optional=1")
+        assert missing.status_code == 204
+        assert missing.content == b""
+        (workspace_root / "seg_labels.csv").write_text("label,structure\n1,liver\n")
+        there = client.get("/api/raw/seg_labels.csv?optional=1")
+        assert there.status_code == 200
+        assert there.text == "label,structure\n1,liver\n"
+        outside = client.get("/api/raw/%2e%2e/%2e%2e/etc/passwd?optional=1")
+        assert outside.status_code not in (200, 204)
+
+    def test_raw_answers_a_revalidation_with_304(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """A client that already holds the bytes gets the validators back, not the file."""
+        (workspace_root / "seg.nii.gz").write_bytes(b"v1")
+        first = client.get("/api/raw/seg.nii.gz")
+        etag = first.headers["etag"]
+        again = client.get("/api/raw/seg.nii.gz", headers={"If-None-Match": etag})
+        assert again.status_code == 304
+        assert again.content == b""
+        assert again.headers["etag"] == etag
+        assert again.headers["cache-control"] == "no-cache"
+        assert again.headers["last-modified"] == first.headers["last-modified"]
+        head = client.head("/api/raw/seg.nii.gz", headers={"If-None-Match": etag})
+        assert head.status_code == 304
+
+    def test_raw_resends_the_file_once_the_etag_stops_matching(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """The point of revalidating: a file a tool rewrote is sent again, not withheld."""
+        (workspace_root / "seg.nii.gz").write_bytes(b"v1")
+        stale = client.get("/api/raw/seg.nii.gz").headers["etag"]
+        (workspace_root / "seg.nii.gz").write_bytes(b"v2-longer")
+        fresh = client.get("/api/raw/seg.nii.gz", headers={"If-None-Match": stale})
+        assert fresh.status_code == 200
+        assert fresh.content == b"v2-longer"
+        assert fresh.headers["etag"] != stale
+
+    def test_raw_reads_every_spelling_of_if_none_match(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """Clients send a list, a weak tag or ``*``; each is a valid revalidation."""
+        (workspace_root / "seg.nii.gz").write_bytes(b"v1")
+        etag = client.get("/api/raw/seg.nii.gz").headers["etag"]
+        for header in (f'"other", {etag}', f"W/{etag}", "*"):
+            assert (
+                client.get("/api/raw/seg.nii.gz", headers={"If-None-Match": header}).status_code
+                == 304
+            )
+        assert (
+            client.get("/api/raw/seg.nii.gz", headers={"If-None-Match": '"nope"'}).status_code
+            == 200
+        )
+
+    def test_raw_streams_a_file_larger_than_one_chunk(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """A volume spans several reads; no byte may be dropped or doubled at a seam."""
+        blob = bytes(range(256)) * 12_000  # ~3 MB: three reads at the 1 MiB chunk size
+        (workspace_root / "big.nii.gz").write_bytes(blob)
+        got = client.get("/api/raw/big.nii.gz")
+        assert got.status_code == 200
+        assert got.content == blob
+        assert got.headers["content-length"] == str(len(blob))
+
+    def test_raw_still_serves_ranges_and_head(
+        self, workspace_root: Path, client: TestClient
+    ) -> None:
+        """The response subclass keeps what ``FileResponse`` gave: ranges, HEAD, ``no-cache``."""
+        blob = bytes(range(256)) * 8_200  # ~2 MB, so a range can straddle a chunk seam
+        (workspace_root / "big.nii.gz").write_bytes(blob)
+        seam = 1024 * 1024
+        part = client.get("/api/raw/big.nii.gz", headers={"Range": f"bytes={seam - 10}-{seam + 9}"})
+        assert part.status_code == 206
+        assert part.content == blob[seam - 10 : seam + 10]
+        assert part.headers["content-range"] == f"bytes {seam - 10}-{seam + 9}/{len(blob)}"
+        assert part.headers["cache-control"] == "no-cache"
+        tail = client.get("/api/raw/big.nii.gz", headers={"Range": "bytes=-5"})
+        assert tail.status_code == 206
+        assert tail.content == blob[-5:]
+        head = client.head("/api/raw/big.nii.gz")
+        assert head.status_code == 200
+        assert head.content == b""
+        assert head.headers["content-length"] == str(len(blob))
+        assert head.headers["cache-control"] == "no-cache"
+        assert head.headers["accept-ranges"] == "bytes"
+        full = client.get("/api/raw/big.nii.gz")
+        assert full.headers["cache-control"] == "no-cache"
+        stale = client.head("/api/raw/big.nii.gz", headers={"If-None-Match": full.headers["etag"]})
+        assert stale.status_code == 304
+        assert stale.headers["cache-control"] == "no-cache"
 
     def test_raw_html_and_svg_are_sandboxed(self, workspace_root: Path, client: TestClient) -> None:
         """Opened directly, a workspace page must not run with the app's origin."""
@@ -884,13 +984,13 @@ class TestReadOnlySessionApproval:
             self._bash_options(("command_pattern", "ls *"))
         )
         assert [o["optionId"] for o in visible] == ["allow_once", "allow_always", "reject_once"]
-        assert visible[1]["name"] == "Allow ls for this chat"
+        assert visible[1]["name"] == "Allow reading files in this chat"
 
     def test_names_every_command_of_a_compound(self) -> None:
         """``ls; wc -l x`` needs two rules; both are read-only, so both are named."""
         options = self._bash_options(("command_pattern", "ls *"), ("command_pattern", "wc *"))
         visible = server._visible_permission_options(options)
-        assert visible[1]["name"] == "Allow ls, wc for this chat"
+        assert visible[1]["name"] == "Allow reading files in this chat"
 
     @pytest.mark.parametrize(
         "rules",
@@ -1024,6 +1124,147 @@ def _prov_dir_in(tmp_path: Path) -> Callable[[str], Path]:
         return tmp_path / session_id
 
     return _prov_dir
+
+
+class TestReadOnlyGrantForTheChat:
+    """One "allow looking at files" covers every later read-only command in the chat."""
+
+    @pytest.fixture
+    def responses(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, object]]:
+        """Capture what is answered to vibe; provenance and explanations off."""
+        sent: list[tuple[int, object]] = []
+
+        async def _respond(req_id: int, result: object) -> None:
+            sent.append((req_id, result))
+
+        monkeypatch.setattr(server._client, "respond", _respond)
+        monkeypatch.setattr(settings, "load_provenance_enabled", lambda: False)
+        monkeypatch.setattr(settings, "load_explain_enabled", lambda: False)
+        monkeypatch.delenv(server.READ_ONLY_APPROVAL_ENV_VAR, raising=False)
+        return sent
+
+    @staticmethod
+    def _request(req_id: int, command: str, *rules: tuple[str, str]) -> dict[str, object]:
+        return {
+            "id": req_id,
+            "method": "session/request_permission",
+            "params": {
+                "toolCall": {
+                    "toolCallId": f"c{req_id}",
+                    "title": "bash",
+                    "rawInput": {"command": command},
+                },
+                "options": TestReadOnlySessionApproval._bash_options(*rules),
+            },
+        }
+
+    async def _answer(
+        self, conn: server._ChatConnection, req: dict[str, object], option: str
+    ) -> None:
+        """Run the handler until its dialog is shown, then choose *option*."""
+        task = asyncio.create_task(conn._handle_permission(req))
+        await asyncio.sleep(0.05)
+        conn._pending_perms[cast("int", req["id"])].set_result(option)
+        await task
+
+    async def test_later_read_only_commands_are_allowed_without_a_dialog(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """After approving ``ls`` for the chat, a ``grep`` goes through unasked."""
+        conn, _ = _connection()
+        await self._answer(
+            conn, self._request(1, "ls", ("command_pattern", "ls *")), "allow_always"
+        )
+        await conn._handle_permission(
+            self._request(2, "grep -c x a.csv", ("command_pattern", "grep *"))
+        )
+        assert responses[-1] == (
+            2,
+            {"outcome": {"outcome": "selected", "optionId": "allow_always"}},
+        )
+        dialogs = [
+            m for m in cast("_StubWs", conn.ws).sent if m.get("type") == "permission_request"
+        ]
+        assert len(dialogs) == 1
+
+    async def test_a_path_scoped_read_is_allowed_once(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """``wc -l <file>`` comes with path-scoped options only; it is allowed once."""
+        conn, _ = _connection()
+        await self._answer(
+            conn, self._request(1, "ls", ("command_pattern", "ls *")), "allow_always"
+        )
+        req = self._request(2, f"wc -l {server.WORKSPACE_ROOT}/a.csv")
+        cast("Any", req["params"])["options"] = [
+            {"optionId": "allow_once", "name": "Allow once"},
+            {"optionId": "allow_session_exact", "name": "Allow a.csv", "kind": "allow_always"},
+            {"optionId": "reject_once", "name": "Deny"},
+        ]
+        await conn._handle_permission(req)
+        assert responses[-1] == (2, {"outcome": {"outcome": "selected", "optionId": "allow_once"}})
+
+    @pytest.mark.parametrize(
+        ("command", "read_only"),
+        [
+            ("ls -1 {ws}/x | wc -l", True),
+            ("ls -la {ws} 2>&1 | head -n 5", True),
+            ("head -n 5 a.csv; grep -c x b.csv", True),
+            ('cat "{ws}/a b.csv"', True),
+            ("cat /etc/passwd", False),
+            ('cat /etc/"passwd"', False),
+            ("cat ../../etc/passwd", False),
+            ("ls {ws}/../secret", False),
+            ("ls ~", False),
+            ("ls $HOME", False),
+            ("ls > out.txt", False),
+            ("ls $(rm -rf x)", False),
+            ("ls `rm x`", False),
+            ("cat <(rm x)", False),
+            ("ls | xargs rm", False),
+            ("ls && rm x", False),
+            ("echo hi", False),
+        ],
+    )
+    def test_read_only_command(self, command: str, read_only: bool, tmp_path: Path) -> None:
+        """Only read-only commands on workspace paths, with nothing executed inside."""
+        assert server._is_read_only_command(command.format(ws=tmp_path), tmp_path) is read_only
+
+    async def test_a_write_still_asks(self, responses: list[tuple[int, object]]) -> None:
+        """The grant never covers a command outside the read-only set."""
+        conn, _ = _connection()
+        await self._answer(
+            conn, self._request(1, "ls", ("command_pattern", "ls *")), "allow_always"
+        )
+        task = asyncio.create_task(
+            conn._handle_permission(self._request(2, "rm a.csv", ("command_pattern", "rm *")))
+        )
+        await asyncio.sleep(0.05)
+        dialogs = [
+            m for m in cast("_StubWs", conn.ws).sent if m.get("type") == "permission_request"
+        ]
+        assert len(dialogs) == 2
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    async def test_allow_once_grants_nothing_more(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """Plain "Allow" on a read-only command leaves the next one asking."""
+        conn, _ = _connection()
+        await self._answer(conn, self._request(1, "ls", ("command_pattern", "ls *")), "allow_once")
+        task = asyncio.create_task(
+            conn._handle_permission(self._request(2, "ls", ("command_pattern", "ls *")))
+        )
+        await asyncio.sleep(0.05)
+        dialogs = [
+            m for m in cast("_StubWs", conn.ws).sent if m.get("type") == "permission_request"
+        ]
+        assert len(dialogs) == 2
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
 
 class TestSessionsApi:
@@ -1360,7 +1601,28 @@ class TestReplayRuns:
             yield _call
 
         monkeypatch.setattr(replay, "mcp_caller", fake_caller)
+
+        # The test client's loop ends with the socket; keep record-keeping on it.
+        async def inline(fn: Callable[[], object]) -> object:
+            return fn()
+
+        def no_image(image: str) -> dict[str, Any]:
+            return {"digest": "sha256:" + "ab" * 32, "id": None}
+
+        monkeypatch.setattr(runs, "_to_thread", inline)
+        monkeypatch.setattr(settings, "image_identity", no_image)
+        # A fresh grant store per test: no token outlives the test that got it.
+        from medmcp import previewgrant
+
+        monkeypatch.setattr(server, "_preview_grants", previewgrant.PreviewGrants())
         return workspace
+
+    @staticmethod
+    def _token(client: TestClient, name: str, bindings: list[dict[str, str]]) -> str:
+        """Preview *bindings* and return the token that may run them."""
+        body = client.post(f"/api/workflows/{name}/replay-preview", json={"runs": bindings}).json()
+        assert body["ok"] is True and isinstance(body["token"], str)
+        return body["token"]
 
     def test_preview_flags_a_missing_input_per_item(self, env: Path, client: TestClient) -> None:
         """A row pointing at a file that is not there is reported before anything runs."""
@@ -1381,8 +1643,9 @@ class TestReplayRuns:
         self, env: Path, client: TestClient
     ) -> None:
         """Closing the socket detaches; the run finishes and a later attach replays it."""
+        token = self._token(client, "strip", [{"in_1": "t1.nii.gz"}])
         with client.websocket_connect("/ws/replay", headers=WS_HEADERS) as ws:
-            ws.send_json({"name": "strip", "runs": [{"in_1": "t1.nii.gz"}]})
+            ws.send_json({"name": "strip", "runs": [{"in_1": "t1.nii.gz"}], "preview_token": token})
             started = ws.receive_json()
             assert started["type"] == "started"
             run_id = started["run_id"]
@@ -1408,6 +1671,540 @@ class TestReplayRuns:
         )
         assert client.delete(f"/api/runs/{run_id}").status_code == 200
         assert client.get(f"/api/runs/{run_id}").status_code == 404
+
+    def _import_reorient(self, client: TestClient) -> None:
+        """A workflow that reads ``in_1`` and writes the file ``in_2``."""
+        envelope = yaml.safe_dump(
+            {
+                "medmcp_workflow": 1,
+                "name": "reorient",
+                "description": "demo",
+                "inputs": [
+                    {"name": "in_1", "example": "/d/p1/consensus_gt.nii.gz"},
+                    {"name": "in_2", "example": "/d/out/consensus_gt_RAS.nii.gz"},
+                ],
+                "steps": [
+                    {
+                        "server": "medmcp-neuro",
+                        "tool": "reorient",
+                        "arguments": {"input_path": "{{in_1}}", "output_path": "{{in_2}}"},
+                    }
+                ],
+            }
+        )
+        assert client.post("/api/workflows/import", json={"content": envelope}).status_code == 200
+
+    def test_preview_refuses_an_output_on_its_input(self, env: Path, client: TestClient) -> None:
+        """Output bound to the input file: the item is refused with the reason."""
+        self._import_reorient(client)
+        (env / "b.nii.gz").write_bytes(b"x")
+        resp = client.post(
+            "/api/workflows/reorient/replay-preview",
+            json={
+                "runs": [
+                    {"in_1": "t1.nii.gz", "in_2": "t1.nii.gz"},
+                    {"in_1": "b.nii.gz", "in_2": "new/deep/b_RAS.nii.gz"},
+                ]
+            },
+        )
+        items = resp.json()["items"]
+        assert [i["ok"] for i in items] == [False, True]
+        assert "overwrite its own input" in items[0]["error"]
+        # The output folder does not exist yet: that is the run's job, not an error.
+        out = next(f for f in items[1]["findings"] if f["role"] == "output")
+        assert out["severity"] == "info" and "created" in out["note"]
+
+    def test_preview_refuses_two_items_with_one_output(self, env: Path, client: TestClient) -> None:
+        """Both rows that would write the same file are refused, each naming the other."""
+        self._import_reorient(client)
+        (env / "b.nii.gz").write_bytes(b"x")
+        resp = client.post(
+            "/api/workflows/reorient/replay-preview",
+            json={
+                "runs": [
+                    {"in_1": "t1.nii.gz", "in_2": "out/r.nii.gz"},
+                    {"in_1": "b.nii.gz", "in_2": "out/r.nii.gz"},
+                ]
+            },
+        )
+        body = resp.json()
+        assert body["ok"] is False
+        assert "item 2" in body["items"][0]["error"] and "item 1" in body["items"][1]["error"]
+
+    def test_batch_from_plan_places_outputs_under_a_root(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """The plan's file column feeds the input; the output gets a folder per subject."""
+        self._import_reorient(client)
+        for subject in ("p1", "p2"):
+            (env / subject).mkdir()
+            (env / subject / "consensus_gt.nii.gz").write_bytes(b"x")
+        plan = env / "batch_plan.csv"
+        plan.write_text(
+            "subject,consensus_gt,status,reason\n"
+            f"1,{env}/p1/consensus_gt.nii.gz,ok,\n"
+            f"2,{env}/p2/consensus_gt.nii.gz,ok,\n"
+        )
+        body = client.post(
+            "/api/workflows/reorient/batch-from-plan", json={"plan_csv": "batch_plan.csv"}
+        ).json()
+        assert body["ok"] is True
+        assert body["column_map"] == {"in_1": "consensus_gt"}
+        assert body["labels"] == ["1", "2"]
+        assert body["output_root"] == str(env / "results" / "reorient")
+        assert [r["in_2"] for r in body["runs"]] == [
+            str(env / "results" / "reorient" / s / "consensus_gt_RAS.nii.gz") for s in ("1", "2")
+        ]
+        chosen = client.post(
+            "/api/workflows/reorient/batch-from-plan",
+            json={"plan_csv": "batch_plan.csv", "output_root": "mine"},
+        ).json()
+        assert chosen["runs"][0]["in_2"] == str(env / "mine" / "1" / "consensus_gt_RAS.nii.gz")
+        outside = client.post(
+            "/api/workflows/reorient/batch-from-plan",
+            json={"plan_csv": "batch_plan.csv", "output_root": "/etc"},
+        )
+        assert outside.status_code == 400
+
+    def test_batch_from_plan_names_the_columns_when_it_cannot_map(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """An unmatched input comes back with the columns to choose from, and a map fixes it."""
+        self._import_reorient(client)
+        plan = env / "batch_plan.csv"
+        plan.write_text(
+            f"subject,mask,lesions,status,reason\n1,{env}/t1.nii.gz,{env}/x.nii.gz,ok,\n"
+        )
+        body = client.post(
+            "/api/workflows/reorient/batch-from-plan", json={"plan_csv": "batch_plan.csv"}
+        ).json()
+        assert body["ok"] is False
+        assert body["columns"] == ["mask", "lesions"] and body["unmapped"] == ["in_1"]
+        fixed = client.post(
+            "/api/workflows/reorient/batch-from-plan",
+            json={"plan_csv": "batch_plan.csv", "column_map": {"in_1": "mask"}},
+        ).json()
+        assert fixed["ok"] is True and fixed["runs"][0]["in_1"] == str(env / "t1.nii.gz")
+
+    def test_run_record_is_self_contained_and_exportable(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """Labels, manifest copy, environment, results and confirmation reach the record."""
+        (env / "sel.csv").write_text("subject_id,path\nP1,t1.nii.gz\n")
+        (env / "brain.nii.gz").write_bytes(b"brain")
+        bindings = [{"in_1": "t1.nii.gz"}]
+        token = self._token(client, "strip", bindings)
+        with client.websocket_connect("/ws/replay", headers=WS_HEADERS) as ws:
+            ws.send_json(
+                {
+                    "name": "strip",
+                    "runs": bindings,
+                    "labels": ["P1/ses-1"],
+                    "manifest": "sel.csv",
+                    "preview_token": token,
+                }
+            )
+            frames: list[dict[str, Any]] = []
+            while not frames or frames[-1]["type"] != "result":
+                frames.append(ws.receive_json())
+        assert frames[0]["labels"] == ["P1/ses-1"]
+        run_id = frames[0]["run_id"]
+
+        record = client.get(f"/api/runs/{run_id}").json()
+        assert record["items"][0]["label"] == "P1/ses-1"
+        step = record["items"][0]["steps"][0]
+        assert step["result"] == {"brain_path": str(env / "brain.nii.gz")}
+        assert record["recipe"]["steps"][0]["tool"] == "skull_strip"
+        assert record["confirmation"]["previewed"] is True
+        assert record["confirmation"]["previewed_at"]
+        assert record["manifest"]["copy"] == "manifest.csv"
+        assert record["environment"]["medmcp"]["version"]
+
+        exported = client.get(f"/api/runs/{run_id}/export")
+        assert exported.headers["content-disposition"].endswith(f'run-{run_id}.json"')
+        assert exported.json()["manifest"]["text"].startswith("subject_id,path")
+        report = client.get(f"/api/runs/{run_id}/export", params={"format": "md"})
+        assert "# MedMCP run report" in report.text and "P1/ses-1" in report.text
+        assert client.get("/api/runs/nope/export").status_code == 404
+
+    def _count_calls(self, env: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        """Re-patch the engine's tool caller to record every call it is asked to make."""
+        import contextlib
+        from collections.abc import AsyncGenerator
+
+        from medmcp import replay
+
+        calls: list[str] = []
+
+        @contextlib.asynccontextmanager
+        async def counting(*_a: object, **_k: object) -> AsyncGenerator[replay.ToolCaller]:
+            async def _call(
+                srv: str, tool: str, args: dict[str, Any]
+            ) -> tuple[bool, dict[str, Any], str | None]:
+                calls.append(tool)
+                return True, {"brain_path": str(env / "brain.nii.gz")}, None
+
+            yield _call
+
+        monkeypatch.setattr(replay, "mcp_caller", counting)
+        return calls
+
+    def _refused(
+        self, client: TestClient, message: dict[str, Any], calls: list[str], reason: str
+    ) -> None:
+        """One refusal naming *reason* answers the start; nothing ran, nothing was recorded."""
+        frames = self._run(client, message)
+        assert frames == [{"type": "result", "ok": False, "error": frames[0]["error"]}]
+        assert reason in frames[0]["error"]
+        assert calls == []
+        assert client.get("/api/runs").json()["runs"] == []
+
+    def test_a_start_without_a_preview_is_refused(
+        self, env: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No token: no run, no record, and the refusal is in the audit trail."""
+        calls = self._count_calls(env, monkeypatch)
+        audit: list[logging.LogRecord] = []
+
+        class Collect(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                audit.append(record)
+
+        handler = Collect(logging.WARNING)
+        server._audit.addHandler(handler)
+        try:
+            message: dict[str, Any] = {"name": "strip", "runs": [{"in_1": "t1.nii.gz"}]}
+            self._refused(client, message, calls, "not previewed")
+            self._refused(client, {**message, "preview_token": "made-up"}, calls, "unknown")
+        finally:
+            server._audit.removeHandler(handler)
+        lines = [r.getMessage() for r in audit if "replay refused" in r.getMessage()]
+        assert len(lines) == 2
+        assert "strip" in lines[0] and "not previewed" in lines[0] and "unknown" in lines[1]
+
+    def test_a_token_runs_only_what_its_preview_showed(
+        self, env: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Other rows, another workflow, or a recipe changed on disk: refused."""
+        calls = self._count_calls(env, monkeypatch)
+        self._import_reorient(client)
+        (env / "b.nii.gz").write_bytes(b"x")
+        shown = [{"in_1": "t1.nii.gz"}]
+
+        other_rows = [{"in_1": "b.nii.gz"}]
+        token = self._token(client, "strip", shown)
+        message = {"name": "strip", "runs": other_rows, "preview_token": token}
+        self._refused(client, message, calls, "differ from the ones the preview showed")
+        # One more row than was shown is other rows too.
+        token = self._token(client, "strip", shown)
+        message = {"name": "strip", "runs": shown + other_rows, "preview_token": token}
+        self._refused(client, message, calls, "differ from the ones the preview showed")
+
+        token = self._token(client, "strip", shown)
+        rows = [{"in_1": "t1.nii.gz", "in_2": "out/t1_RAS.nii.gz"}]
+        message = {"name": "reorient", "runs": rows, "preview_token": token}
+        self._refused(client, message, calls, "was for workflow 'strip'")
+
+        token = self._token(client, "strip", shown)
+        recipe_file = provenance.VIBE_HOME / "workflows" / "strip" / "recipe.yaml"
+        assert recipe_file.is_file()
+        recipe_file.write_text(recipe_file.read_text().replace("skull_strip", "bet"))
+        message = {"name": "strip", "runs": shown, "preview_token": token}
+        self._refused(client, message, calls, "changed after the preview")
+
+    def test_a_token_works_once(
+        self, env: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The previewed run starts, with a record saying so; the same token again does not."""
+        calls = self._count_calls(env, monkeypatch)
+        shown = [{"in_1": "t1.nii.gz"}]
+        token = self._token(client, "strip", shown)
+        message = {"name": "strip", "runs": shown, "preview_token": token}
+        frames = self._run(client, message)
+        assert frames[0]["type"] == "started" and frames[-1]["ok"] is True
+        assert calls == ["skull_strip"]
+        record = client.get(f"/api/runs/{frames[0]['run_id']}").json()
+        assert record["confirmation"]["previewed"] is True
+
+        again = self._run(client, message)
+        assert again == [{"type": "result", "ok": False, "error": again[0]["error"]}]
+        assert "already used" in again[0]["error"]
+        assert calls == ["skull_strip"]
+
+    def test_an_expired_token_is_refused(
+        self, env: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A preview older than its lifetime no longer starts anything."""
+        from medmcp import previewgrant
+
+        calls = self._count_calls(env, monkeypatch)
+        clock = [1000.0]
+        grants = previewgrant.PreviewGrants(ttl_s=60, clock=lambda: clock[0])
+        monkeypatch.setattr(server, "_preview_grants", grants)
+        shown = [{"in_1": "t1.nii.gz"}]
+        body = client.post("/api/workflows/strip/replay-preview", json={"runs": shown}).json()
+        assert body["expires_in"] == 60
+        clock[0] += 61
+        message = {"name": "strip", "runs": shown, "preview_token": body["token"]}
+        self._refused(client, message, calls, "expired")
+
+    def test_a_batch_runs_the_rows_that_passed_its_preview(
+        self, env: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The token admits the rows the preview found runnable: those run, all of them."""
+        calls = self._count_calls(env, monkeypatch)
+        (env / "b.nii.gz").write_bytes(b"x")
+        rows = [{"in_1": "t1.nii.gz"}, {"in_1": "typo.nii.gz"}, {"in_1": "b.nii.gz"}]
+        body = client.post("/api/workflows/strip/replay-preview", json={"runs": rows}).json()
+        assert [i["ok"] for i in body["items"]] == [True, False, True]
+        message = {"name": "strip", "runs": rows, "preview_token": body["token"]}
+        self._refused(client, message, calls, "differ from the ones the preview showed")
+
+        body = client.post("/api/workflows/strip/replay-preview", json={"runs": rows}).json()
+        message = {"name": "strip", "runs": [rows[0], rows[2]], "preview_token": body["token"]}
+        frames = self._run(client, message)
+        assert frames[-1]["ok"] is True
+        assert [f["ok"] for f in frames if f["type"] == "item_result"] == [True, True]
+        assert calls == ["skull_strip", "skull_strip"]
+
+    def test_a_preview_with_nothing_runnable_gives_no_token(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """Every row failed its checks: there is nothing a token could start."""
+        body = client.post(
+            "/api/workflows/strip/replay-preview", json={"runs": [{"in_1": "typo.nii.gz"}]}
+        ).json()
+        assert body["ok"] is False and body["token"] is None
+
+    def test_a_selection_manifest_feeds_the_roll_out(self, env: Path, client: TestClient) -> None:
+        """One row per selected series: the single input takes ``path``, no status needed."""
+        for subject in ("P1", "P2"):
+            (env / subject).mkdir()
+            (env / subject / "FLAIR.nii.gz").write_bytes(b"x")
+        (env / ".medmcp").mkdir()
+        (env / ".medmcp" / "sel_series.csv").write_text(
+            "subject_id,session_id,sequence,contrast,plane,path\n"
+            f"P1,ses-1,FLAIR,no,axial,{env}/P1/FLAIR.nii.gz\n"
+            "P2,ses-1,FLAIR,no,axial,P2/FLAIR.nii.gz\n"
+        )
+        body = client.post(
+            "/api/workflows/strip/batch-from-plan", json={"plan_csv": ".medmcp/sel_series.csv"}
+        ).json()
+        assert body["ok"] is True and body["kind"] == "selection"
+        assert body["labels"] == ["P1/ses-1", "P2/ses-1"]
+        assert [r["in_1"] for r in body["runs"]] == [
+            str(env / "P1" / "FLAIR.nii.gz"),
+            str(env / "P2" / "FLAIR.nii.gz"),
+        ]
+        assert body["roles"] == [{"role": "FLAIR-contrast", "series": 2, "units": 2}]
+
+    def _import_lesions(self, client: TestClient) -> None:
+        """A workflow reading a T1, a T1 with contrast and a FLAIR, writing one file."""
+        envelope = yaml.safe_dump(
+            {
+                "medmcp_workflow": 1,
+                "name": "lesions",
+                "description": "demo",
+                "inputs": [
+                    {"name": "in_1", "example": "/d/T1.nii.gz"},
+                    {"name": "in_2", "example": "/d/T1KM.nii.gz"},
+                    {"name": "in_3", "example": "/d/FLAIR.nii.gz"},
+                    {"name": "in_4", "example": "/d/out/lesions.nii.gz"},
+                ],
+                "steps": [
+                    {
+                        "server": "medmcp-neuro",
+                        "tool": "segment_lesions",
+                        "arguments": {
+                            "t1_path": "{{in_1}}",
+                            "t1ce_path": "{{in_2}}",
+                            "flair_path": "{{in_3}}",
+                            "output_path": "{{in_4}}",
+                        },
+                    }
+                ],
+            }
+        )
+        assert client.post("/api/workflows/import", json={"content": envelope}).status_code == 200
+
+    def _study(self, env: Path) -> Path:
+        """The cohort tools' confirmed selection (tests/fixtures/confirmed) in a study folder.
+
+        Every series it names exists, so the preview finds the files.
+        """
+        folder = env / "study" / ".medmcp"
+        folder.mkdir(parents=True)
+        fixtures = Path(__file__).parent / "fixtures" / "confirmed"
+        for name in ("lesions_series.csv", "lesions_confirmed.csv", "lesions_confirmed.json"):
+            (folder / name).write_bytes((fixtures / name).read_bytes())
+        for line in (folder / "lesions_series.csv").read_text().splitlines()[1:]:
+            scan = env / "study" / line.split(",")[11]
+            scan.parent.mkdir(parents=True, exist_ok=True)
+            scan.write_bytes(b"x")
+        return folder
+
+    ROLES: ClassVar[dict[str, str]] = {
+        "in_1": "T1-contrast",
+        "in_2": "T1+contrast",
+        "in_3": "FLAIR",
+    }
+
+    def test_a_plain_selection_is_refused_for_several_inputs(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """No roles are asked for: the answer says to review and confirm the selection."""
+        self._import_lesions(client)
+        self._study(env)
+        for role_map in ({}, self.ROLES):
+            body = client.post(
+                "/api/workflows/lesions/batch-from-plan",
+                json={"plan_csv": "study/.medmcp/lesions_series.csv", "role_map": role_map},
+            ).json()
+            assert body["ok"] is False and body["refused"] is True
+            assert "reviewed and confirmed first" in body["error"]
+            assert "unmapped" not in body
+        # One input is never ambiguous: the same selection still feeds it, a run per series.
+        one = client.post(
+            "/api/workflows/strip/batch-from-plan",
+            json={"plan_csv": "study/.medmcp/lesions_series.csv"},
+        ).json()
+        assert one["ok"] is True and len(one["runs"]) == 10 and one["confirmation"] is None
+
+    def test_a_confirmed_selection_asks_for_its_roles_then_binds(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """The roles offered are the confirmed labels; the answer carries the confirmation."""
+        self._import_lesions(client)
+        folder = self._study(env)
+        plan = {"plan_csv": "study/.medmcp/lesions_confirmed.csv"}
+        asked = client.post("/api/workflows/lesions/batch-from-plan", json=plan).json()
+        assert asked["ok"] is False and asked["unmapped"] == ["in_1", "in_2", "in_3"]
+        assert [r["role"] for r in asked["roles"]] == ["T1-contrast", "T1+contrast", "FLAIR"]
+        assert asked["roles"][0] == {"role": "T1-contrast", "series": 2, "units": 2}
+
+        bound = client.post(
+            "/api/workflows/lesions/batch-from-plan", json={**plan, "role_map": self.ROLES}
+        ).json()
+        assert bound["ok"] is True and bound["labels"] == ["P01/ses-01", "P02/ses-01"]
+        assert bound["runs"][1]["in_1"] == str(env / "study" / "P02" / "ses-01" / "s06.nii.gz")
+        assert bound["runs"][1]["in_4"] == str(
+            env / "results" / "lesions" / "P02" / "ses-01" / "lesions.nii.gz"
+        )
+        info = bound["confirmation"]
+        assert info["rule_version"] == "2" and info["overrides"] == 1 and info["excluded"] == 1
+        assert info["confirmed_at"] and info["path"] == str(folder / "lesions_confirmed.json")
+
+        csv_path = folder / "lesions_confirmed.csv"
+        csv_path.write_text(csv_path.read_text().replace("s06.nii.gz", "s05.nii.gz"))
+        refused = client.post(
+            "/api/workflows/lesions/batch-from-plan", json={**plan, "role_map": self.ROLES}
+        ).json()
+        assert refused["ok"] is False and refused["refused"] is True
+        assert "the confirmed selection was changed after confirmation" in refused["error"]
+
+    def _run(self, client: TestClient, message: dict[str, Any]) -> list[dict[str, Any]]:
+        with client.websocket_connect("/ws/replay", headers=WS_HEADERS) as ws:
+            ws.send_json(message)
+            frames: list[dict[str, Any]] = []
+            while not frames or frames[-1]["type"] != "result":
+                frames.append(ws.receive_json())
+        return frames
+
+    def test_a_confirmed_roll_out_records_its_confirmation(
+        self, env: Path, client: TestClient
+    ) -> None:
+        """The run cites the record by path and hash, with the source manifest and index."""
+        from medmcp import runs
+
+        self._import_lesions(client)
+        folder = self._study(env)
+        manifest = "study/.medmcp/lesions_confirmed.csv"
+        bound = client.post(
+            "/api/workflows/lesions/batch-from-plan",
+            json={"plan_csv": manifest, "role_map": self.ROLES},
+        ).json()
+        frames = self._run(
+            client,
+            {
+                "name": "lesions",
+                "runs": bound["runs"],
+                "labels": bound["labels"],
+                "manifest": manifest,
+                "preview_token": self._token(client, "lesions", bound["runs"]),
+            },
+        )
+        assert frames[-1]["ok"] is True
+        run_id = frames[0]["run_id"]
+
+        record = client.get(f"/api/runs/{run_id}").json()
+        selection = record["manifest"]["confirmed_selection"]
+        record_file = folder / "lesions_confirmed.json"
+        csv_bytes = (folder / "lesions_confirmed.csv").read_bytes()
+        assert selection["path"] == str(record_file)
+        assert selection["sha256"] == hashlib.sha256(record_file.read_bytes()).hexdigest()
+        assert selection["confirmed_csv_sha256"] == hashlib.sha256(csv_bytes).hexdigest()
+        assert record["manifest"]["sha256"] == selection["confirmed_csv_sha256"]
+        assert (
+            selection["source_manifest"]["sha256"]
+            == hashlib.sha256((folder / "lesions_series.csv").read_bytes()).hexdigest()
+        )
+        assert selection["index"]["sha256"]
+        assert selection["copy"] == "confirmation.json" and "error" not in selection
+        copied = runs.run_folder(run_id) / "confirmation.json"
+        assert copied.read_bytes() == record_file.read_bytes()
+
+        exported = client.get(f"/api/runs/{run_id}/export").json()
+        assert (
+            exported["manifest"]["confirmed_selection"]["record"]["counts"]["overrides_applied"]
+            == 1
+        )
+        report = client.get(f"/api/runs/{run_id}/export", params={"format": "md"}).text
+        assert "**Confirmed selection:**" in report and selection["sha256"] in report
+
+    def test_a_run_rechecks_the_manifest_at_its_start(self, env: Path, client: TestClient) -> None:
+        """Edited after binding, or a plain selection under several inputs: no run starts."""
+        self._import_lesions(client)
+        folder = self._study(env)
+        manifest = "study/.medmcp/lesions_confirmed.csv"
+        bound = client.post(
+            "/api/workflows/lesions/batch-from-plan",
+            json={"plan_csv": manifest, "role_map": self.ROLES},
+        ).json()
+        csv_path = folder / "lesions_confirmed.csv"
+        csv_path.write_bytes(csv_path.read_bytes() + b"\n")
+        message = {"name": "lesions", "runs": bound["runs"], "manifest": manifest}
+        frames = self._run(
+            client, {**message, "preview_token": self._token(client, "lesions", bound["runs"])}
+        )
+        assert frames == [
+            {"type": "result", "ok": False, "error": frames[0]["error"]},
+        ]
+        assert "the confirmed selection was changed after confirmation" in frames[0]["error"]
+
+        csv_path.write_bytes(csv_path.read_bytes()[:-1])  # as confirmed again
+        edited = [dict(r) for r in bound["runs"]]
+        edited[1]["in_1"] = str(env / "study" / "P02" / "ses-01" / "s05.nii.gz")
+        frames = self._run(
+            client,
+            {
+                **message,
+                "runs": edited,
+                "preview_token": self._token(client, "lesions", edited),
+            },
+        )
+        assert frames[0]["ok"] is False
+        assert "item 2 reads" in frames[0]["error"] and "not a series of" in frames[0]["error"]
+
+        plain = self._run(
+            client,
+            {
+                **message,
+                "manifest": "study/.medmcp/lesions_series.csv",
+                "preview_token": self._token(client, "lesions", bound["runs"]),
+            },
+        )
+        assert plain[0]["ok"] is False and "reviewed and confirmed first" in plain[0]["error"]
+        assert client.get("/api/runs", params={"workflow": "lesions"}).json()["runs"] == []
 
     def test_bad_first_message_is_refused(self, env: Path, client: TestClient) -> None:
         """Neither a start nor an attach: the socket answers with an error and closes."""
@@ -1453,6 +2250,14 @@ class TestFolderTransfer:
         )
         assert resp.status_code == 200
         assert (root / "case1" / "series2" / "IM0001.dcm").read_bytes() == b"dicom-bytes"
+
+    def test_upload_over_a_folder_is_a_conflict(self, root: Path, client: TestClient) -> None:
+        """A file named like an existing folder is refused with a reason, not a 500."""
+        (root / "scans").mkdir()
+        resp = client.post("/api/files/upload", files={"file": ("scans", b"x")})
+        assert resp.status_code == 409
+        assert "folder" in resp.json()["detail"]
+        assert (root / "scans").is_dir()
 
     def test_upload_rejects_dot_names(self, client: TestClient) -> None:
         """A file named ``..`` cannot land beside the target folder."""
@@ -1525,6 +2330,10 @@ class _FakeAcpClient:
         self.cancel_delay = cancel_delay
         self.hang = hang
         self._turn: asyncio.Future[dict[str, object]] | None = None
+        # Set to a connection's queue to act like vibe-acp taking an approval's
+        # answer in: ``answer_delay`` later the turn's next frame arrives there.
+        self.frames: asyncio.Queue[dict[str, object]] | None = None
+        self.answer_delay = 0.05
 
     async def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
         del params
@@ -1552,7 +2361,21 @@ class _FakeAcpClient:
             )
 
     async def respond(self, req_id: int, result: dict[str, object]) -> None:
-        del req_id, result
+        del req_id
+        outcome = cast("dict[str, object]", result.get("outcome") or {})
+        self.calls.append(("respond", str(outcome.get("outcome"))))
+        frames = self.frames
+        if frames is not None:
+            asyncio.get_running_loop().call_later(self.answer_delay, self._take_answer, frames)
+
+    def _take_answer(self, frames: asyncio.Queue[dict[str, object]]) -> None:
+        self.calls.append(("answer-taken", ""))
+        frames.put_nowait(
+            {
+                "method": "session/update",
+                "params": {"update": {"sessionUpdate": "tool_call_update", "status": "failed"}},
+            }
+        )
 
     def unregister_session(self, session_id: str) -> None:
         del session_id
@@ -1623,6 +2446,260 @@ class TestChatSessionLifecycle:
         ]
 
 
+def _approval_request(req_id: int) -> dict[str, object]:
+    """A ``session/request_permission`` frame for a shell command."""
+    return {
+        "id": req_id,
+        "method": "session/request_permission",
+        "params": {
+            "toolCall": {
+                "toolCallId": f"c{req_id}",
+                "title": "bash: echo hi",
+                "toolName": "bash",
+                "rawInput": {"command": "echo hi"},
+            },
+            "options": [
+                {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+                {"optionId": "reject_once", "name": "Deny", "kind": "reject_once"},
+            ],
+        },
+    }
+
+
+class TestCancelWithAnApprovalOpen:
+    """An approval is answered and taken in before its turn is interrupted.
+
+    vibe 2.26 corrupts the session store when the answer and the interrupt
+    arrive together: the chat then refuses every prompt and cannot be reopened.
+    """
+
+    @pytest.fixture
+    def fake(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _FakeAcpClient:
+        """Swap vibe-acp for the recorder; provenance and explanations off."""
+        client = _FakeAcpClient()
+        monkeypatch.setattr(server, "_client", client)
+        monkeypatch.setattr(server, "WORKSPACE_ROOT", tmp_path)
+        monkeypatch.setattr(server.settings, "load_provenance_enabled", lambda: False)
+        monkeypatch.setattr(server.settings, "load_explain_enabled", lambda: False)
+        return client
+
+    @staticmethod
+    async def _dialog_shown(conn: server._ChatConnection) -> None:
+        ws = cast("_StubWs", conn.ws)
+        for _ in range(200):
+            if any(m.get("type") == "permission_request" for m in ws.sent):
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("the approval dialog was never shown")
+
+    @staticmethod
+    def _assert_answered_then_interrupted(fake: _FakeAcpClient) -> None:
+        answered = fake.calls.index(("respond", "cancelled"))
+        taken = fake.calls.index(("answer-taken", ""))
+        interrupted = fake.calls.index(("notify", "session/cancel"))
+        assert answered < taken < interrupted
+
+    async def test_open_dialog_is_answered_and_taken_before_the_interrupt(
+        self, fake: _FakeAcpClient
+    ) -> None:
+        """Stop, a new prompt or a reload with the dialog open: answer, wait, interrupt."""
+        conn, queue = _connection()
+        fake.frames = queue
+        conn._prompt_task = asyncio.create_task(conn._run_prompt("first"))
+        await asyncio.sleep(0.01)
+        await queue.put(_approval_request(7))
+        await self._dialog_shown(conn)
+        await conn._cancel_prompt()
+        self._assert_answered_then_interrupted(fake)
+        assert fake.calls[-1] == ("turn-ended", "session/prompt")
+        assert queue.empty()
+
+    async def test_queued_request_is_answered_and_taken_before_the_interrupt(
+        self, fake: _FakeAcpClient
+    ) -> None:
+        """A request the relay had not reached yet is not left for after the interrupt."""
+        conn, queue = _connection()
+        fake.frames = queue
+        conn._prompt_rpc = asyncio.create_task(fake.request("session/prompt", {}))
+        conn._prompt_task = asyncio.create_task(asyncio.sleep(60))
+        await asyncio.sleep(0.01)
+        await queue.put(_approval_request(8))
+        await conn._cancel_prompt()
+        self._assert_answered_then_interrupted(fake)
+
+    async def test_interrupt_still_goes_out_when_vibe_never_takes_the_answer(
+        self, fake: _FakeAcpClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A silent vibe-acp delays the interrupt by the timeout, not forever."""
+        monkeypatch.setattr(server, "PERMISSION_SETTLE_TIMEOUT", 0.05)
+        conn, queue = _connection()
+        conn._prompt_task = asyncio.create_task(conn._run_prompt("first"))
+        await asyncio.sleep(0.01)
+        await queue.put(_approval_request(9))
+        await self._dialog_shown(conn)
+        await asyncio.wait_for(conn._cancel_prompt(), timeout=1.0)
+        assert ("notify", "session/cancel") in fake.calls
+
+    async def test_close_marks_the_session_until_vibe_released_it(
+        self, fake: _FakeAcpClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A resume can tell that the chat's last socket is still closing it."""
+        monkeypatch.setattr(server, "_closing_sessions", dict[str, asyncio.Event]())
+        conn, _ = _connection()
+        marked: list[bool] = []
+        plain_request = fake.request
+
+        async def _request(method: str, params: dict[str, object]) -> dict[str, object]:
+            if method == "session/close":
+                event = server._closing_sessions.get("sid")
+                marked.append(event is not None and not event.is_set())
+            return await plain_request(method, params)
+
+        monkeypatch.setattr(fake, "request", _request)
+        await conn.close()
+        assert marked == [True]
+        assert server._closing_sessions == {}
+
+
+class _StubChatWs(_StubWs):
+    """A browser socket that connects and leaves again at once."""
+
+    async def accept(self) -> None:
+        """Nothing to negotiate."""
+
+    async def receive_json(self) -> dict[str, object]:
+        raise WebSocketDisconnect
+
+    async def close(self) -> None:
+        """Nothing to release."""
+
+
+class _FakeSessionClient(_FakeAcpClient):
+    """vibe-acp as ``ws_chat`` and the fork endpoint see it: sessions open and close."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.requests: list[tuple[str, dict[str, object]]] = []
+
+    async def ensure_started(self) -> None:
+        """Already running."""
+
+    async def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+        self.requests.append((method, params))
+        self.calls.append(("request", method))
+        if method in ("session/new", "session/fork"):
+            return {"result": {"sessionId": "fresh"}}
+        return {"result": {}}
+
+    def register_session(self, session_id: str) -> asyncio.Queue[dict[str, object]]:
+        self.calls.append(("register", session_id))
+        return asyncio.Queue()
+
+    def unregister_session(self, session_id: str) -> None:
+        self.calls.append(("unregister", session_id))
+
+
+class TestOneAttachmentPerSession:
+    """vibe 2.26 attaches an open session again instead of refusing; we never ask it to."""
+
+    @pytest.fixture
+    def fake(self, monkeypatch: pytest.MonkeyPatch) -> _FakeSessionClient:
+        """Swap vibe-acp for the recorder and keep every disk access out of the way."""
+
+        async def _no_window() -> None:
+            return None
+
+        def _no_servers() -> list[dict[str, object]]:
+            return []
+
+        def _no_sync(servers: list[dict[str, object]]) -> None:
+            del servers
+
+        def _no_model() -> None:
+            return None
+
+        def _no_stop_ids(session_id: str) -> set[str]:
+            del session_id
+            return set()
+
+        def _own_tip(sid: str, stop_ids: set[str] | None = None) -> str:
+            del stop_ids
+            return sid
+
+        def _no_title(sid: str) -> None:
+            del sid
+
+        def _no_purge(sid: str, stop_ids: set[str] | None = None) -> None:
+            del sid, stop_ids
+
+        def _no_copy(src: str, dst: str) -> None:
+            del src, dst
+
+        def _no_entry(sid: str) -> dict[str, object]:
+            del sid
+            return {}
+
+        def _titled(sid: str, title: str) -> bool:
+            del sid, title
+            return True
+
+        client = _FakeSessionClient()
+        monkeypatch.setattr(server, "_client", client)
+        monkeypatch.setattr(server, "_connections", set[server._ChatConnection]())
+        monkeypatch.setattr(server, "_closing_sessions", dict[str, asyncio.Event]())
+        monkeypatch.setattr(server, "_chain_stop_ids", _no_stop_ids)
+        monkeypatch.setattr(server.settings, "active_servers", _no_servers)
+        monkeypatch.setattr(server.settings, "sync_servers_to_vibe_config", _no_sync)
+        monkeypatch.setattr(server.settings, "active_cloud_model", _no_model)
+        monkeypatch.setattr(server.settings, "load_local_model", _no_model)
+        monkeypatch.setattr(server.settings, "fetch_context_window", _no_window)
+        monkeypatch.setattr(provenance, "vibe_chain_tip", _own_tip)
+        monkeypatch.setattr(provenance, "vibe_session_title", _no_title)
+        monkeypatch.setattr(provenance, "purge_session", _no_purge)
+        monkeypatch.setattr(provenance, "copy_transcript", _no_copy)
+        monkeypatch.setattr(sessions, "get_entry", _no_entry)
+        monkeypatch.setattr(sessions, "set_auto_title", _titled)
+        return client
+
+    async def test_branch_is_released_before_the_browser_opens_it(
+        self, fake: _FakeSessionClient
+    ) -> None:
+        """session/fork leaves the fork attached; loading it on top doubled every frame."""
+        assert await server.fork_session("src") == {"id": "fresh"}
+        methods = [method for method, _ in fake.requests]
+        assert methods == ["session/fork", "session/close"]
+        assert fake.requests[-1][1] == {"sessionId": "fresh"}
+
+    async def test_resume_waits_for_the_socket_still_closing_the_chat(
+        self, fake: _FakeSessionClient
+    ) -> None:
+        """A reload's new socket loads the chat only once the old one released it."""
+        released = asyncio.Event()
+        server._closing_sessions["sid"] = released
+        ws = _StubChatWs()
+        task = asyncio.create_task(server.ws_chat(cast("Any", ws), resume="sid"))
+        await asyncio.sleep(0.05)
+        assert ("request", "session/load") not in fake.calls
+        released.set()
+        await asyncio.wait_for(task, timeout=1.0)
+        assert ("request", "session/load") in fake.calls
+        assert ws.sent[0]["sessionId"] == "sid"
+
+    async def test_chat_open_in_another_socket_is_not_loaded_again(
+        self, fake: _FakeSessionClient
+    ) -> None:
+        """A second tab gets a fresh chat; the first keeps its session and its frames."""
+        first, _ = _connection()
+        server._connections.add(first)
+        ws = _StubChatWs()
+        await server.ws_chat(cast("Any", ws), resume="sid")
+        assert ("request", "session/load") not in fake.calls
+        assert ("register", "sid") not in fake.calls
+        assert ("unregister", "sid") not in fake.calls
+        assert ("request", "session/new") in fake.calls
+        assert ws.sent[0]["sessionId"] == "fresh"
+
+
 class TestPathGuardDenial:
     """A call the path guard turned back renders as a note, not a failure."""
 
@@ -1673,3 +2750,318 @@ def test_an_approved_stack_call_is_granted_to_the_broker() -> None:
     assert ledger.consume("medmcp-neuro-core", "skull_strip", {"input_path": "/w/t1.nii"})
     assert not ledger.consume("medmcp-neuro-core", "skull_strip", {"input_path": "/w/t1.nii"})
     assert not ledger.consume("builtin", "bash", {"command": "ls"})
+
+
+class TestStackToolGrantForTheChat:
+    """A stack tool approved for the chat runs unasked, unless a call needs a look."""
+
+    @pytest.fixture
+    def responses(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> list[tuple[int, object]]:
+        """Capture what is answered to vibe; provenance and explanations off."""
+        sent: list[tuple[int, object]] = []
+
+        async def _respond(req_id: int, result: object) -> None:
+            sent.append((req_id, result))
+
+        monkeypatch.setattr(server._client, "respond", _respond)
+        monkeypatch.setattr(settings, "load_provenance_enabled", lambda: False)
+        monkeypatch.setattr(settings, "load_explain_enabled", lambda: False)
+        monkeypatch.setattr(server, "WORKSPACE_ROOT", tmp_path)
+        monkeypatch.delenv(server.STACK_TOOL_APPROVAL_ENV_VAR, raising=False)
+        (tmp_path / "study").mkdir()
+        return sent
+
+    @staticmethod
+    def _request(req_id: int, tool: str, **arguments: str) -> dict[str, object]:
+        return {
+            "id": req_id,
+            "method": "session/request_permission",
+            "params": {
+                "toolCall": {
+                    "toolCallId": f"c{req_id}",
+                    "title": tool,
+                    "toolName": tool,
+                    "rawInput": arguments,
+                },
+                "options": [
+                    {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "allow_always", "name": "Always", "kind": "allow_always"},
+                    {"optionId": "reject_once", "name": "Deny", "kind": "reject_once"},
+                ],
+            },
+        }
+
+    @staticmethod
+    def _dialogs(conn: server._ChatConnection) -> list[dict[str, Any]]:
+        return [m for m in cast("_StubWs", conn.ws).sent if m.get("type") == "permission_request"]
+
+    async def _answer(
+        self, conn: server._ChatConnection, req: dict[str, object], option: str
+    ) -> None:
+        """Run the handler until its dialog is shown, then choose *option*."""
+        task = asyncio.create_task(conn._handle_permission(req))
+        await asyncio.sleep(0.05)
+        conn._pending_perms[cast("int", req["id"])].set_result(option)
+        await task
+
+    async def test_the_dialog_offers_the_tool_for_the_rest_of_the_chat(
+        self, responses: list[tuple[int, object]], tmp_path: Path
+    ) -> None:
+        """The option names the tool, and vibe's own "always" stays hidden."""
+        conn, _ = _connection()
+        req = self._request(1, "medmcp-cohort_index_dataset", dataset_dir=str(tmp_path / "study"))
+        await self._answer(conn, req, "allow_once")
+        offered = {o["optionId"]: o["name"] for o in self._dialogs(conn)[0]["options"]}
+        assert offered[server._STACK_TOOL_CHAT_OPTION] == ("Allow index_dataset in this chat")
+        assert "allow_always" not in offered
+
+    async def test_later_calls_of_that_tool_are_allowed_without_a_dialog(
+        self, responses: list[tuple[int, object]], tmp_path: Path
+    ) -> None:
+        """Vibe is answered ``allow_once`` each time; only the first call shows a dialog."""
+        conn, _ = _connection()
+        folder = str(tmp_path / "study")
+        await self._answer(
+            conn,
+            self._request(1, "medmcp-cohort_summarize_dataset", index_path=folder),
+            server._STACK_TOOL_CHAT_OPTION,
+        )
+        await conn._handle_permission(
+            self._request(2, "medmcp-cohort_summarize_dataset", index_path=folder)
+        )
+        allow = {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
+        assert responses == [(1, allow), (2, allow)]
+        assert len(self._dialogs(conn)) == 1
+
+    async def test_another_tool_still_asks(
+        self, responses: list[tuple[int, object]], tmp_path: Path
+    ) -> None:
+        """The approval is for one tool of one stack, not for the stack."""
+        conn, _ = _connection()
+        folder = str(tmp_path / "study")
+        await self._answer(
+            conn,
+            self._request(1, "medmcp-cohort_summarize_dataset", index_path=folder),
+            server._STACK_TOOL_CHAT_OPTION,
+        )
+        await self._answer(
+            conn, self._request(2, "medmcp-cohort_select_series", index_path=folder), "allow_once"
+        )
+        assert len(self._dialogs(conn)) == 2
+
+    async def test_a_call_that_would_overwrite_a_file_asks_again(
+        self, responses: list[tuple[int, object]], tmp_path: Path
+    ) -> None:
+        """An approved tool is shown again, without the chat option, when it would overwrite."""
+        conn, _ = _connection()
+        scan = tmp_path / "study" / "scan.nii.gz"
+        scan.write_bytes(b"")
+        existing = tmp_path / "study" / "out.nii.gz"
+        await self._answer(
+            conn,
+            self._request(
+                1, "medmcp-tptbox_process_nifti", input_path=str(scan), output_path=str(existing)
+            ),
+            server._STACK_TOOL_CHAT_OPTION,
+        )
+        existing.write_bytes(b"")
+        await self._answer(
+            conn,
+            self._request(
+                2, "medmcp-tptbox_process_nifti", input_path=str(scan), output_path=str(existing)
+            ),
+            "allow_once",
+        )
+        dialogs = self._dialogs(conn)
+        assert len(dialogs) == 2
+        assert server._STACK_TOOL_CHAT_OPTION not in {o["optionId"] for o in dialogs[1]["options"]}
+
+    async def test_a_path_outside_the_workspace_is_never_covered(
+        self, responses: list[tuple[int, object]], tmp_path: Path
+    ) -> None:
+        """Neither offered for nor covered by the chat approval."""
+        conn, _ = _connection()
+        await self._answer(
+            conn, self._request(1, "medmcp-cohort_index_dataset", dataset_dir="/etc"), "allow_once"
+        )
+        assert server._STACK_TOOL_CHAT_OPTION not in {
+            o["optionId"] for o in self._dialogs(conn)[0]["options"]
+        }
+
+    async def test_the_shell_is_never_offered_it(self, responses: list[tuple[int, object]]) -> None:
+        """Built-in tools keep their own rules."""
+        conn, _ = _connection()
+        req = self._request(1, "bash", command="python3 script.py")
+        await self._answer(conn, req, "allow_once")
+        assert server._STACK_TOOL_CHAT_OPTION not in {
+            o["optionId"] for o in self._dialogs(conn)[0]["options"]
+        }
+
+    async def test_the_kill_switch_restores_per_call_approval(
+        self,
+        responses: list[tuple[int, object]],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """``MEDMCP_STACK_TOOL_APPROVAL=0`` removes the option."""
+        monkeypatch.setenv(server.STACK_TOOL_APPROVAL_ENV_VAR, "0")
+        conn, _ = _connection()
+        req = self._request(1, "medmcp-cohort_index_dataset", dataset_dir=str(tmp_path / "study"))
+        await self._answer(conn, req, "allow_once")
+        assert server._STACK_TOOL_CHAT_OPTION not in {
+            o["optionId"] for o in self._dialogs(conn)[0]["options"]
+        }
+
+
+class TestWhatAChatLongApprovalNeverCovers:
+    """Jobs, external servers, and another tool's ``command`` argument still ask."""
+
+    responses = TestStackToolGrantForTheChat.responses
+    _request = staticmethod(TestStackToolGrantForTheChat._request)
+    _dialogs = staticmethod(TestStackToolGrantForTheChat._dialogs)
+    _answer = TestStackToolGrantForTheChat._answer
+
+    async def test_a_tool_that_starts_a_job_is_asked_every_time(
+        self,
+        responses: list[tuple[int, object]],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A job runs for hours on its own arguments; one approval is one job."""
+
+        class _Jobs:
+            def declares(self, stack: str, tool: str) -> bool:
+                return (stack, tool) == ("medmcp-foo", "start_long_run")
+
+        monkeypatch.setattr(server, "_jobs", _Jobs())
+        conn, _ = _connection()
+        req = self._request(1, "medmcp-foo_start_long_run", data=str(tmp_path / "study"))
+        await self._answer(conn, req, "allow_once")
+        offered = {o["optionId"] for o in self._dialogs(conn)[0]["options"]}
+        assert server._STACK_TOOL_CHAT_OPTION not in offered
+
+    async def test_an_external_server_is_asked_every_time(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """Each call of an external server sends data out; none is covered."""
+        conn, _ = _connection()
+        conn.servers = [{"name": "remote", "url": "https://mcp.example/mcp"}]
+        await self._answer(conn, self._request(1, "remote_lookup", query="x"), "allow_once")
+        offered = {o["optionId"] for o in self._dialogs(conn)[0]["options"]}
+        assert server._STACK_TOOL_CHAT_OPTION not in offered
+
+    async def test_the_read_only_grant_is_for_the_shell_only(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """A stack tool with a ``command`` argument is not a read-only shell command."""
+        conn, _ = _connection()
+        conn.servers = [{"name": "medmcp-foo"}]
+        conn._read_only_granted = True
+        task = asyncio.create_task(
+            conn._handle_permission(self._request(1, "medmcp-foo_run", command="ls"))
+        )
+        await asyncio.sleep(0.05)
+        assert len(self._dialogs(conn)) == 1
+        conn._pending_perms[1].set_result("reject_once")
+        await task
+
+
+class TestAssistantCode:
+    """Code the assistant wrote itself is always put to the user, or refused."""
+
+    @pytest.fixture
+    def responses(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, object]]:
+        """Capture what is answered to vibe; provenance and explanations off."""
+        sent: list[tuple[int, object]] = []
+
+        async def _respond(req_id: int, result: object) -> None:
+            sent.append((req_id, result))
+
+        monkeypatch.setattr(server._client, "respond", _respond)
+        monkeypatch.setattr(settings, "load_provenance_enabled", lambda: False)
+        monkeypatch.setattr(settings, "load_explain_enabled", lambda: False)
+        monkeypatch.delenv(server.READ_ONLY_APPROVAL_ENV_VAR, raising=False)
+        monkeypatch.delenv(server.ASSISTANT_CODE_ENV_VAR, raising=False)
+        return sent
+
+    @staticmethod
+    def _dialogs(conn: server._ChatConnection) -> list[dict[str, Any]]:
+        return [m for m in cast("_StubWs", conn.ws).sent if m.get("type") == "permission_request"]
+
+    async def test_a_label_only_the_model_gave_is_not_shown(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """The dialog carries the fixed rules' labels, not the model's own reading."""
+        conn, _ = _connection()
+        req = TestReadOnlyGrantForTheChat._request(1, "python3 - <<'PY'\nprint(1)\nPY")
+        cast("dict[str, Any]", req["params"])["toolCall"]["risks"] = ["privacy"]
+        task = asyncio.create_task(conn._handle_permission(req))
+        await asyncio.sleep(0.05)
+        keys = {r["key"] for r in self._dialogs(conn)[-1]["risks"]}
+        assert "assistant_code" in keys
+        assert "privacy" not in keys
+        conn._pending_perms[1].set_result("reject_once")
+        await task
+
+    async def test_script_is_labelled_in_the_dialog(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """A Python heredoc is shown with the assistant_code label."""
+        conn, _ = _connection()
+        req = TestReadOnlyGrantForTheChat._request(1, "python3 - <<'PY'\nprint(1)\nPY")
+        task = asyncio.create_task(conn._handle_permission(req))
+        await asyncio.sleep(0.05)
+        dialog = self._dialogs(conn)[-1]
+        assert "assistant_code" in {r["key"] for r in dialog["risks"]}
+        assert [o["optionId"] for o in dialog["options"]] == ["allow_once", "reject_once"]
+        conn._pending_perms[1].set_result("reject_once")
+        await task
+
+    async def test_deny_mode_refuses_without_a_dialog(
+        self, responses: list[tuple[int, object]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MEDMCP_ASSISTANT_CODE=deny answers reject at once; nothing is shown."""
+        monkeypatch.setenv(server.ASSISTANT_CODE_ENV_VAR, "deny")
+        conn, _ = _connection()
+        await conn._handle_permission(TestReadOnlyGrantForTheChat._request(1, "Rscript analysis.R"))
+        assert responses[-1] == (1, {"outcome": {"outcome": "selected", "optionId": "reject_once"}})
+        assert self._dialogs(conn) == []
+
+    async def test_read_only_grant_never_covers_code(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """After "allow looking at files", an awk program still asks."""
+        conn, _ = _connection()
+        await TestReadOnlyGrantForTheChat()._answer(
+            conn,
+            TestReadOnlyGrantForTheChat._request(1, "ls", ("command_pattern", "ls *")),
+            "allow_always",
+        )
+        req = TestReadOnlyGrantForTheChat._request(
+            2, "awk -F, '{s+=$2} END {print s}' a.csv", ("command_pattern", "awk *")
+        )
+        task = asyncio.create_task(conn._handle_permission(req))
+        await asyncio.sleep(0.05)
+        assert len(self._dialogs(conn)) == 2
+        conn._pending_perms[2].set_result("reject_once")
+        await task
+
+
+def test_workspace_is_exported_without_the_stack_pool(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The running server exports the resolved workspace, pool or no pool.
+
+    Container-stack manifests mount ``${MEDMCP_WORKSPACE}``; unset, the literal
+    reaches ``docker run`` and every container stack fails discovery.
+    """
+    resolved = tmp_path.resolve()
+    monkeypatch.setattr(server, "WORKSPACE_ROOT", resolved)
+    monkeypatch.setattr(settings, "stack_pool_enabled", lambda: False)
+    # setenv so monkeypatch restores the variable the lifespan assigns.
+    monkeypatch.setenv("MEDMCP_WORKSPACE", "relative/elsewhere")
+
+    with TestClient(server.app, base_url="http://127.0.0.1:8100"):
+        assert os.environ["MEDMCP_WORKSPACE"] == str(resolved)

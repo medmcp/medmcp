@@ -3,12 +3,17 @@
 /** dataTransfer MIME carrying a workspace-relative path when dragging a file. */
 export const DRAG_PATH_MIME = 'application/medmcp-path'
 
-/** One node of the explorer tree (mirrors /api/tree). Directories have `children`. */
+/** One node of the explorer tree (see /api/tree/dir). Directories have `children`,
+ *  empty until the folder is first opened and its level fetched (`loaded`). */
 export interface TreeNode {
   id: string
   name: string
   children?: TreeNode[]
   size?: number
+  /** A folder whose own entries have been fetched at least once. */
+  loaded?: boolean
+  /** Not an entry: the row saying how many entries a capped listing left out. */
+  more?: boolean
 }
 
 /** Tool-call state accumulated from tool_call / tool_call_update frames. */
@@ -25,6 +30,9 @@ export interface ToolCallState {
   /** The path guard turned this call back before it ran: the agent corrects the
    *  path and retries, so it renders as a quiet note rather than a failure. */
   pathGuardRetry?: boolean
+  /** Browser time (ms) the call was seen to start running in a live turn; unset
+   *  for a replayed call, one waiting for approval, and once the turn ended. */
+  startedAt?: number
 }
 
 /** A risk tag resolved by the server from the fixed taxonomy. */
@@ -89,6 +97,25 @@ export interface StackInfo {
   name: string
   version?: string | null
   active: boolean
+}
+
+/** A background job (from GET /api/jobs): one approved stack call running in
+ *  its own container, which outlives the chat that started it. */
+export interface JobInfo {
+  id: string
+  stack: string
+  tool: string
+  /** A short name the stack gave the job (may be empty). */
+  name: string
+  status: 'running' | 'finished' | 'stopped' | 'failed'
+  started_at: string | null
+  finished_at?: string | null
+  /** Id of the chat that started it (may be empty). */
+  session?: string
+  /** Name of that chat (empty while it has none). */
+  session_title?: string
+  /** What the job last reported about itself (running jobs only). */
+  progress?: { fraction?: number; text?: string; updated_at?: number } | null
 }
 
 /** A container-installed stack (from GET /api/stacks); uninstallable via the UI. */
@@ -160,7 +187,7 @@ export interface WorkflowDetail {
   replay_error: string | null
 }
 
-/** A flagged manifest row from plan_batch that isn't ready to run. */
+/** A flagged manifest row that isn't ready to run. */
 export interface BatchPlanSkip {
   subject?: string
   session?: string
@@ -168,14 +195,47 @@ export interface BatchPlanSkip {
   reason?: string
 }
 
+/** What the confirmation record says about a confirmed selection (its
+ *  `<name>_confirmed.json`), as checked against the CSV being rolled out. */
+export interface SelectionConfirmation {
+  path: string
+  sha256: string
+  confirmed_csv_sha256: string
+  confirmed_at: string | null
+  note: string
+  rule_version: string | null
+  roles: string[]
+  overrides: number
+  excluded: number
+}
+
 /** Result of POST /api/workflows/{name}/batch-from-plan: rows to pre-fill the
- *  batch editor from a plan_batch manifest, plus the flagged rows to resolve. */
+ *  batch editor from a manifest, plus the flagged rows to resolve. */
 export interface BatchFromPlanResult {
   ok: boolean
   error: string | null
+  /** The manifest cannot be rolled out as it is (`error` says why and what to
+   *  do): a confirmed selection changed since confirmation, or a selection that
+   *  was never confirmed under a workflow that reads several scans. */
+  refused?: boolean
+  /** For a confirmed selection: its confirmation record. */
+  confirmation?: SelectionConfirmation | null
+  /** Which manifest it was: a batch plan or a selection of scans. */
+  kind?: 'plan' | 'selection'
   runs: Record<string, string>[]
+  /** subject[/session] per run, aligned with `runs`. */
+  labels?: string[]
   skipped: BatchPlanSkip[]
   column_map?: Record<string, string>
+  /** A plan's file columns, to choose from when an input could not be matched. */
+  columns?: string[]
+  /** A selection's series roles (FLAIR, T1+contrast, …) with how many there are. */
+  roles?: { role: string; series: number; units: number }[]
+  role_map?: Record<string, string>
+  /** Inputs that still need a column (plan) or a role (selection). */
+  unmapped?: string[]
+  /** The folder each item's results go under, one sub-folder per subject. */
+  output_root?: string
 }
 
 /** One resolved step from POST /api/workflows/{name}/replay-preview. */
@@ -201,6 +261,10 @@ export interface ReplayPreviewResult {
   /** The resolved steps of the first item that can run. */
   steps: ReplayPreviewStep[]
   items: ReplayPreviewItem[]
+  /** Starts exactly the rows that passed, once; null when nothing can run. */
+  token: string | null
+  /** Seconds the token stays valid. */
+  expires_in: number | null
 }
 
 export type RunStatus = 'running' | 'done' | 'failed' | 'cancelled'
@@ -229,6 +293,8 @@ export type ReplayFrame =
       steps_per_item: number
       started_at: string
       runs: Record<string, string>[]
+      /** Who each item is (subject/session), "" where the rows were picked by hand. */
+      labels?: string[]
     }
   | {
       type: 'step_started'

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 
 import pytest
 
@@ -154,5 +155,19 @@ async def test_ensure_replaces_a_backend_that_fails_its_ping(
         assert second is not first
         assert not first.alive
         assert second.alive
+    finally:
+        await pool.aclose()
+
+
+async def test_evicting_a_stack_forgets_its_schemas(tmp_path: Path) -> None:
+    """A deactivated stack's tool list is not trusted when it comes back."""
+    cache = tmp_path / "tool_schemas.json"
+    pool = BackendPool(resolve_spec=resolver({"fake": fake_spec("fake")}), schema_cache=cache)
+    try:
+        await pool.list_tools("fake")
+        assert pool.known_tools("fake")
+        await pool.evict("fake")
+        assert pool.known_tools("fake") is None
+        assert BackendPool(resolve_spec=resolver({}), schema_cache=cache).known_stacks() == []
     finally:
         await pool.aclose()

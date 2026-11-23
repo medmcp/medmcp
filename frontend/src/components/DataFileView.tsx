@@ -72,6 +72,9 @@ export function DataFileView({ url, path, kind }: { url: string; path: string; k
         }
         const text = await r.text()
         if (kind === 'table') return { sheets: [parseDelimited(text, name)] }
+        // JSON is parsed whole: a cut-off document never parses, and the tree
+        // view only renders the first children of a large array anyway.
+        if (kind === 'json') return { text }
         return { text: text.length > MAX_TEXT ? text.slice(0, MAX_TEXT) + '\n… (truncated)' : text }
       })
       .then((v) => {

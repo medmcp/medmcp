@@ -10,6 +10,67 @@ Notable, user-visible changes to MedMCP. Format follows
 
 - Tool stacks: `medmcp-tptbox` (BIDS dataset queries, NIfTI geometry and label reports, chained image and mask operations, vertebra centroids, STL surface export) in both install catalogs. CPU only.
 
+## 0.8.0 — 2026-11-23
+
+### Added
+
+- Stacks: background jobs (e.g. an nnU-Net training) run in their own container, with progress and Stop in a header pill.
+- Workflows: roll out a reviewed selection of scans; each subject's results go to their own folder.
+- Workflows: past runs can be reopened and downloaded, with their inputs, steps, results and file checksums.
+- Approvals: a stack tool can be allowed for the rest of a chat; code the assistant wrote always asks.
+- Chat: an active stack's dataset index tells the assistant what a named folder contains.
+- Viewer: zoom and pan the slices; right-click a volume in the explorer to overlay it.
+- Explorer: an uploaded `.zip` can be unpacked; it never replaces an existing file.
+- Chat: names the open file "this image" means, shows how long a tool call runs, and "Thinking…".
+- Help: the `?` button says what MedMCP is, its limits, and the main shortcuts.
+- Catalog: medmcp-stats and medmcp-cohort.
+
+### Changed
+
+- Approvals: one row of buttons; path checks only when something is wrong; risk labels only from fixed rules.
+- Explorer: loads one folder at a time, so a large workspace opens at once.
+- Viewer: volumes load faster and are not downloaded again unless they changed.
+- Prompt: results go where the tool puts them; per-stack routing lives in the stacks' own skills.
+- Interface: keyboard focus stays in windows, disabled buttons look disabled, icons are sharper.
+- Dependencies: frontend packages, httpx2 and CI actions updated.
+
+### Fixed
+
+- Chats: branched chats, second tabs, and a reload or Stop during an approval no longer break a chat.
+- Chat: a schema-invalid stack call no longer ends the turn; the local model reads why a call was refused.
+- Stacks: a reinstalled stack serves its new tools; installs from the catalog work again with `docker compose`.
+- Workflows: roll-outs no longer bind outputs to inputs or overwrite inputs; run file lists are complete.
+- Viewer: a file that cannot be loaded says so; `.hdr`/`.img` pairs open in any letter case.
+- Explorer: a drop lands on the folder under the pointer; the first click on a folder opens it.
+- Login: a refused request shows its reason instead of "Wrong password."
+- Provenance: records name each stack's image digest and the commit the image was built from.
+
+### Security
+
+- Workflows: a run starts only from the preview that showed its resolved steps.
+- Jobs: job containers get no network and only the workspace; the docker guard enforces it.
+- Approvals: chat-long approval is not offered for background jobs or external MCP servers.
+- Runs: deleting a run accepts only a run id.
+- Images: uv 0.13.7 and Docker Compose 5.7.0 for critical advisories in bundled libraries.
+
+## 0.7.4 — 2026-11-04
+
+### Added
+
+- LLM shim: `MEDMCP_SHIM_SEED` seeds sampling per conversation, so a chat can be rerun with the same draws.
+
+### Fixed
+
+- Replay: a workflow that uses two stacks no longer ends in an error after its last step.
+- Muse Glimmer: a tool call whose parameter tags the model broke keeps its value; skill loads no longer fail on empty arguments.
+- System prompt: names the cohort stack's tools only for when that stack is active.
+- System prompt: the agent asks which data is meant when several scans, subjects or series match a request.
+- Release: the compose artifact publishes again (the runner image moved to Docker Compose 5).
+
+### Security
+
+- Dependencies: mcp 1.30 (client redirect and output-schema fixes) and pyasn1 0.6.5.
+
 ## 0.7.3 — 2026-10-23
 
 ### Changed
@@ -97,6 +158,9 @@ Notable, user-visible changes to MedMCP. Format follows
 
 - Image build: the agent (mistral-vibe) is patched so every chat shares one scratchpad path (the model's cached prompt is reused) and a chat-long approval never covers a redirect; the build fails if a vibe update no longer matches.
 - Chats: consecutive calls of one tool share a single card, and shell commands no longer get View/Overlay chips.
+### Added
+
+- Tool stacks: `medmcp-stats` (statistical tests with effect sizes and a draft results sentence; publication figures restyled without re-running the analysis) and `medmcp-cohort` (clinical tables, biomarker merging, sub-cohorts, Table 1, regression, survival) in both install catalogs. The agent now sends statistics and plots to the stats tools, with a cohort exported to CSV first.
 
 ## 0.5.0 — 2026-10-16
 

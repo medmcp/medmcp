@@ -9,6 +9,11 @@ each approval is spent by the one call it was for.
 
 In-memory and per process: the server records the decision and the broker, in
 the same process, consumes it.
+
+An approval also remembers the chat it was given in. Nothing about whether a
+call may run depends on that; it is what lets something the call sets in motion
+— a background job (:mod:`medmcp.jobs`) — be attributed to the chat whose
+person approved it.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ import json
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 JsonDict = dict[str, Any]
@@ -30,6 +36,13 @@ def _key(stack: str, tool: str, args: JsonDict) -> str:
     return json.dumps([stack, tool, args], sort_keys=True, separators=(",", ":"), default=str)
 
 
+@dataclass(frozen=True)
+class Approval:
+    """One spent approval: the chat it was given in (empty when not recorded)."""
+
+    session: str = ""
+
+
 class ApprovalLedger:
     """A multiset of approved ``(stack, tool, args)`` calls, each good for one use."""
 
@@ -40,25 +53,29 @@ class ApprovalLedger:
         self._ttl = ttl_sec
         self._clock = clock
         self._lock = threading.Lock()
-        self._grants: dict[str, list[float]] = {}
+        self._grants: dict[str, list[tuple[float, str]]] = {}
 
-    def grant(self, stack: str, tool: str, args: JsonDict) -> None:
-        """Record that the person approved this exact call."""
+    def grant(self, stack: str, tool: str, args: JsonDict, *, session: str = "") -> None:
+        """Record that the person approved this exact call, in chat *session*."""
         with self._lock:
-            self._grants.setdefault(_key(stack, tool, args), []).append(self._clock())
+            self._grants.setdefault(_key(stack, tool, args), []).append((self._clock(), session))
 
-    def consume(self, stack: str, tool: str, args: JsonDict) -> bool:
-        """Spend one approval for this exact call; ``False`` when there is none."""
+    def spend(self, stack: str, tool: str, args: JsonDict) -> Approval | None:
+        """Spend one approval for this exact call; ``None`` when there is none."""
         now = self._clock()
         key = _key(stack, tool, args)
         with self._lock:
-            live = [t for t in self._grants.get(key, []) if now - t < self._ttl]
+            live = [g for g in self._grants.get(key, []) if now - g[0] < self._ttl]
             if not live:
                 self._grants.pop(key, None)
-                return False
-            live.pop(0)
+                return None
+            _, session = live.pop(0)
             if live:
                 self._grants[key] = live
             else:
                 self._grants.pop(key, None)
-            return True
+            return Approval(session=session)
+
+    def consume(self, stack: str, tool: str, args: JsonDict) -> bool:
+        """Spend one approval for this exact call; ``False`` when there is none."""
+        return self.spend(stack, tool, args) is not None

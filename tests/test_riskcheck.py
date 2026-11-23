@@ -19,7 +19,7 @@ from medmcp import riskcheck, server
         ("sudo apt install x", {"system_config"}),
         ("pip install requests", {"system_config", "network"}),
         ("echo ZWNobyBoaQ== | base64 -d | sh", {"hidden_code"}),
-        ("python3 -c 'import urllib.request'", {"hidden_code", "network"}),
+        ("python3 -c 'import urllib.request'", {"hidden_code", "network", "assistant_code"}),
         ("echo $(whoami)", {"hidden_code"}),
     ],
 )
@@ -42,3 +42,26 @@ def test_the_model_can_add_labels_but_not_remove_them() -> None:
     """A misled model saying "harmless" leaves the rule-based labels in place."""
     assert server._merge_keys(["code_exec", "network"], []) == ["code_exec", "network"]  # pyright: ignore[reportPrivateUsage]
     assert server._merge_keys(["code_exec"], ["privacy", "code_exec"]) == ["code_exec", "privacy"]  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "expected"),
+    [
+        ("bash", {"command": "python3 - <<'PY'\nprint(1)\nPY"}, True),
+        ("bash", {"command": "cd /ws && uv run python a.py"}, True),
+        ("bash", {"command": "awk -F, '{print $2}' a.csv"}, True),
+        ("bash", {"command": "cat > fix.py <<'EOF'"}, True),
+        ("bash", {"command": "bash run.sh"}, True),
+        ("bash", {"command": "grep python notes.txt"}, False),
+        ("bash", {"command": "ls | grep node"}, False),
+        ("bash", {"command": "which python3"}, False),
+        ("bash", {"command": "echo hi > out.txt"}, False),
+        ("write_file", {"path": "/ws/compute_dice.py", "content": "x"}, True),
+        ("write_file", {"path": "/ws/table1.md", "content": "x"}, False),
+        ("edit", {"file_path": "/ws/a.R"}, True),
+    ],
+)
+def test_assistant_code(tool: str, arguments: dict[str, object], expected: bool) -> None:
+    """Running or writing code the assistant wrote itself is recognised."""
+    assert riskcheck.runs_assistant_code(tool, arguments) is expected
+    assert ("assistant_code" in riskcheck.signals(tool, arguments)) is expected

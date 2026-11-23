@@ -10,6 +10,7 @@ import {
 import type { CloudModelConfig, CloudModelState, CloudProviderPreset } from '../types'
 import { Row } from './SettingsControls'
 import { XIcon } from './icons'
+import { modalLayer } from '../modalLayer'
 
 interface CloudModelWindowProps {
   open: boolean
@@ -29,7 +30,7 @@ export function CloudModelWindow({ open, onClose, onChanged }: CloudModelWindowP
   return (
     <>
       <div className="modal-backdrop" onClick={onClose} />
-      <div className="extwin" role="dialog">
+      <div ref={modalLayer} className="extwin" role="dialog" aria-modal="true" aria-label="Cloud model">
         <div className="panel-header">
           <span>Cloud model</span>
           <span className="panel-actions">
@@ -228,6 +229,7 @@ function CloudModelSection({ onChanged }: { onChanged?: () => void }) {
         createPortal(
           <div className="modal-backdrop over-window" onClick={() => setConsenting(false)}>
             <div
+              ref={modalLayer}
               className="modal ext-mcp-consent"
               role="dialog"
               aria-modal="true"

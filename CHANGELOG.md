@@ -6,6 +6,10 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Added
+
+- Tool stacks: `medmcp-tptbox` (BIDS dataset queries, NIfTI geometry and label reports, chained image and mask operations, vertebra centroids, STL surface export) in both install catalogs. CPU only.
+
 ## 0.8.0 — 2026-11-23
 
 ### Added

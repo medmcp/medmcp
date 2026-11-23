@@ -32,12 +32,12 @@ import { DRAG_PATH_MIME } from '../types'
 import {
   BookmarkPlusIcon,
   ChevronRightIcon,
-  DownloadIcon,
   FileIcon,
   PlayIcon,
   RefreshIcon,
   StopSquareIcon,
   TableIcon,
+  UploadIcon,
   XIcon,
 } from './icons'
 
@@ -1697,7 +1697,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
             disabled={busy !== null}
             onClick={() => fileInputRef.current?.click()}
           >
-            <DownloadIcon />
+            <UploadIcon />
           </button>
           <button className="btn-icon" aria-label="Refresh" onClick={() => void reload()}>
             <RefreshIcon />

@@ -6,78 +6,48 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+## 0.8.0 — 2026-11-23
+
 ### Added
 
-- Viewer: zoom the slices with Ctrl/⌘ + wheel, a trackpad pinch or `+`/`-`/`0`, and pan with Shift + drag; the zoom is shown in the status bar and kept per file.
-- Viewer: right-click a volume in the explorer → Overlay on image.
-- Help: the `?` button in the bottom-right corner, or the `?` key, says what MedMCP is, where its limits are, and lists the main keyboard and mouse controls.
-- Jobs: a pill in the header shows running background jobs with their progress (e.g. "nnunet · start_training · epoch 41/100 · pseudo-Dice 0.88 · ~30 min left"), and a finished or failed job until it has been looked at; click for the list with Stop. A job may report progress by writing `{"fraction", "text"}` to the file named in `MEDMCP_JOB_PROGRESS`; the core keeps only a clamped fraction and one short line.
-- Approvals: code the assistant wrote itself (a Python heredoc or `-c`, `Rscript`, `node`, an awk program, a shell on a string, a `.py`/`.R`/`.sh` file it writes) is labelled as such in the approval dialog and is never covered by a chat-long approval. `MEDMCP_ASSISTANT_CODE=deny` refuses it outright, so only tools run.
-- Approvals: a stack tool can be allowed for the rest of the chat ("Allow index_dataset in this chat"). Later calls of that tool run without a dialog; a call that would overwrite a file or touch a path outside the workspace is still shown, and the shell keeps its own rules. `MEDMCP_STACK_TOOL_APPROVAL=0` restores a dialog for every call.
-- Chat: when a message names a workspace folder and an active stack declares a dataset index (`dataset_index` in its image label), the assistant is told what that index says about the folder, or which tool builds it first. Without such a stack nothing is added. See [docs/stack-dataset-index.md](docs/stack-dataset-index.md).
-- Catalog: medmcp-stats (statistical tests and publication figures) and medmcp-cohort.
-- Workflows: a cohort roll-out writes each subject's results to its own folder under an output folder (`results/<workflow>/<subject>` unless you choose another) and creates missing folders itself.
-- Workflows: `batch-from-plan` and `medmcp replay --batch` take an explicit input-to-column mapping and an output folder.
-- Workflows: every run keeps a self-contained record in `.vibe/runs/<id>/`: the workflow as it ran, the plan it came from, and per subject the inputs, each step's arguments, duration, error and result, with SHA-256 checksums of the files read and written. It also names the MedMCP build and each stack's image digest, and says whether the run was started from the preview.
-- Workflows: a selection of scans can be rolled out directly ("Selection" in the run editor): once per scan for a one-input workflow; a workflow with several inputs runs once per subject and session, only from a selection that was reviewed and confirmed, read with its hash-checked record, which the run keeps and cites. See [docs/rollout.md](docs/rollout.md).
-- Workflows: when a cohort plan's columns cannot be matched to a workflow's inputs, the run editor asks which column is which.
-- Workflows: a workflow lists its past runs; each can be reopened and downloaded as one JSON file or a Markdown report (`GET /api/runs/{id}/export`).
-- Provenance: a chat's record names each stack's image digest and the MedMCP version.
-- Stacks: background jobs. A stack can declare a job runner in its image label; an approved call of one of its job tools (an nnU-Net training) then runs in its own container, which keeps running when the chat is idle or closed, when another GPU stack is used and when MedMCP restarts. One job at a time by default (`MEDMCP_MAX_JOBS`); `MEDMCP_STACK_JOBS=0` turns jobs off.
-- Jobs: `/api/jobs` lists, shows and stops them; the Tool stacks window shows running jobs with a Stop button; a job's start, image and arguments are recorded in the provenance of the chat that approved it.
-- Explorer: an uploaded `.zip` can be unpacked on the server; an archive that would replace an existing file is refused.
-- Chat: the message box says which open file "this image" means (Viewing t1.nii.gz); ✕ leaves it out until you open a file again.
-- Chat: a running tool call shows how long it has been running.
-- Chat: "Thinking…" shows while the assistant works before its first word.
-- Chat: the browser tab is marked "(!)" while an approval is waiting.
+- Stacks: background jobs (e.g. an nnU-Net training) run in their own container, with progress and Stop in a header pill.
+- Workflows: roll out a reviewed selection of scans; each subject's results go to their own folder.
+- Workflows: past runs can be reopened and downloaded, with their inputs, steps, results and file checksums.
+- Approvals: a stack tool can be allowed for the rest of a chat; code the assistant wrote always asks.
+- Chat: an active stack's dataset index tells the assistant what a named folder contains.
+- Viewer: zoom and pan the slices; right-click a volume in the explorer to overlay it.
+- Explorer: an uploaded `.zip` can be unpacked; it never replaces an existing file.
+- Chat: names the open file "this image" means, shows how long a tool call runs, and "Thinking…".
+- Help: the `?` button says what MedMCP is, its limits, and the main shortcuts.
+- Catalog: medmcp-stats and medmcp-cohort.
 
 ### Changed
 
-- Dependencies: frontend packages (react-resizable-panels 4.24, Vite 8.3.8, KaTeX 0.19.1), httpx2 2.16, and CI actions updated.
-- Prompt: the assistant no longer creates a `results/` folder before a call; results go where the tool puts them (beside the input) unless you name a folder.
-- Prompt: the per-tool routing for the cohort and stats stacks is gone from the system prompt; the stacks' own skills carry it. The general rules stay (use the tool, never compute a statistic by hand, ask before writing code).
-- Viewer: volumes load faster. An unchanged file is not downloaded again, and a `.nii.gz` is unpacked once instead of on every panel resize.
-- Approvals: one row of buttons (Allow once, the chat-long option, Deny); path checks only when something is wrong; risk labels only from fixed rules.
-- Workflows: the record of a confirmed selection is a core format (`medmcp_selection_confirmation: 1`, `role_labels`) that any stack can write; messages no longer name a stack's tools. See [docs/rollout.md](docs/rollout.md).
-- Explorer: the second upload button and the folder menu's upload entries are removed again; Upload acts on the selected folder.
-- Explorer: the file list loads one folder at a time, so a large workspace opens at once; a folder lists up to 5,000 entries (was 500).
+- Approvals: one row of buttons; path checks only when something is wrong; risk labels only from fixed rules.
+- Explorer: loads one folder at a time, so a large workspace opens at once.
+- Viewer: volumes load faster and are not downloaded again unless they changed.
+- Prompt: results go where the tool puts them; per-stack routing lives in the stacks' own skills.
+- Interface: keyboard focus stays in windows, disabled buttons look disabled, icons are sharper.
+- Dependencies: frontend packages, httpx2 and CI actions updated.
 
 ### Fixed
 
-- Chat: an output path in a message is no longer taken for a dataset to index.
-- Stacks: container stacks start when MedMCP runs from source without `MEDMCP_WORKSPACE` set; before, their workspace mount was invalid and they had no tools.
-- Login: a request refused for its origin or host shows the server's reason instead of "Wrong password."
-- Chats: a branched chat no longer shows every message twice.
-- Chats: opening a chat in a second tab starts a new chat instead of attaching to the same one (approvals asked twice, then "App server client closed").
-- Chats: reloading the page, pressing Stop or sending a new message while an approval is open no longer breaks the chat ("A turn is already running", the chat missing from the list).
-- Chat: a stack call with arguments the tool does not accept is turned back to the assistant with what is wrong; before, the whole turn ended with `Core rejected durable input`.
-- Explorer: the rows no longer jump when a file is dragged in, so a drop lands on the folder under the pointer.
-- Explorer: uploading a file named like an existing folder says so instead of failing with a server error.
-- Viewer: a `.hdr`/`.img` pair opens whatever the case of its file names, from either file; only an upper-case `.HDR` did. A missing half is named.
-- Viewer: Ctrl/⌘ + wheel over the empty viewer, or over a volume that is loading or failed to load, no longer zooms the browser page.
-- Viewer: a volume or overlay that cannot be loaded (empty, truncated, not a volume, deleted) says so and names the file; the panel stayed blank and a failed overlay vanished silently.
-- Stacks: reinstalling a stack that is already running (a new image under the same name) now stops the running copy, so the next call uses the new image. Before, the old copy kept serving its old tools until it went idle.
-- Stacks: after a stack is updated or reinstalled under the same image name, the assistant sees its new tools. Before, it kept the previous tool list for up to a day, so a newly added tool such as `check_dataset` could not be found.
-- Stacks: installing a stack from the catalog or by image works again with `docker compose`; since 0.7.2 the docker guard refused the image lookup.
-- Workflows: a cohort roll-out no longer binds a tool's output file to the subject's input file. A plan column whose name appeared in the output's file name was taken for it, so every subject's output pointed at its own scan.
-- Workflows: a run whose output would overwrite one of its inputs, and two rows that would write the same file, are refused in the preview and by the engine, with the reason per row. They were shown with a warning before.
-- Workflows: a plan no longer fails to load for a workflow whose output folder has a default.
-- Workflows: a run lists the files it wrote when the output path was chosen by the caller; it showed none before.
-- Provenance: the record of a chat run from an image names the commit the image was built from; it was empty. Images must be built with `MEDMCP_REVISION`, as the release and `:main` builds are.
-- Chat: a local model is told why the path guard turned a stack call back (a file that does not exist); before, it only read that the call was skipped.
-- Explorer: the first click on a folder opens it.
-- Explorer: New folder works when the selected folder is scrolled out of view.
-- Explorer: a failed upload names each file with its reason and stays until dismissed.
-- Chat: scrolling up while a reply streams stays where you are; the transcript follows new text only from the bottom.
+- Chats: branched chats, second tabs, and a reload or Stop during an approval no longer break a chat.
+- Chat: a schema-invalid stack call no longer ends the turn; the local model reads why a call was refused.
+- Stacks: a reinstalled stack serves its new tools; installs from the catalog work again with `docker compose`.
+- Workflows: roll-outs no longer bind outputs to inputs or overwrite inputs; run file lists are complete.
+- Viewer: a file that cannot be loaded says so; `.hdr`/`.img` pairs open in any letter case.
+- Explorer: a drop lands on the folder under the pointer; the first click on a folder opens it.
+- Login: a refused request shows its reason instead of "Wrong password."
+- Provenance: records name each stack's image digest and the commit the image was built from.
 
 ### Security
 
-- Runs: `DELETE /api/runs/{id}` only accepts a run id; `..` removed the folder above the run records.
-- Approvals: "for the rest of this chat" is not offered for a tool that starts a background job or for an external MCP server, and the read-only shell approval covers the shell only, not another tool's `command` argument.
-- Jobs: a progress file is read only if it is a regular file; a pipe left in its place blocked the server.
-- Docker guard: a container named or labelled as a job is created only with no network, the workspace as its only mount and the job command its image declares; images carrying a job label are refused.
-- Images: uv 0.13.7 and Docker Compose 5.7.0, for critical advisories in their bundled zip and gRPC libraries.
-- Workflows: the run editor shows the resolved steps, and a run starts only from the preview that showed them.
+- Workflows: a run starts only from the preview that showed its resolved steps.
+- Jobs: job containers get no network and only the workspace; the docker guard enforces it.
+- Approvals: chat-long approval is not offered for background jobs or external MCP servers.
+- Runs: deleting a run accepts only a run id.
+- Images: uv 0.13.7 and Docker Compose 5.7.0 for critical advisories in bundled libraries.
 
 ## 0.7.4 — 2026-11-04
 

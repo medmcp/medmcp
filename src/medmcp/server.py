@@ -927,6 +927,8 @@ async def post_upload(file: UploadFile, dir: str = "") -> JsonDict:
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise HTTPException(status_code=400, detail="a link with that name exists") from exc
+        if exc.errno == errno.EISDIR:
+            raise HTTPException(status_code=409, detail="a folder with that name exists") from exc
         raise
     with os.fdopen(fd, "wb") as fh:
         while chunk := await file.read(1024 * 1024):

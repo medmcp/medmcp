@@ -2154,6 +2154,14 @@ class TestFolderTransfer:
         assert resp.status_code == 200
         assert (root / "case1" / "series2" / "IM0001.dcm").read_bytes() == b"dicom-bytes"
 
+    def test_upload_over_a_folder_is_a_conflict(self, root: Path, client: TestClient) -> None:
+        """A file named like an existing folder is refused with a reason, not a 500."""
+        (root / "scans").mkdir()
+        resp = client.post("/api/files/upload", files={"file": ("scans", b"x")})
+        assert resp.status_code == 409
+        assert "folder" in resp.json()["detail"]
+        assert (root / "scans").is_dir()
+
     def test_upload_rejects_dot_names(self, client: TestClient) -> None:
         """A file named ``..`` cannot land beside the target folder."""
         resp = client.post("/api/files/upload", params={"dir": "a"}, files={"file": ("..", b"x")})

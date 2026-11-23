@@ -10,11 +10,12 @@ import { FileExplorer } from './components/FileExplorer'
 import { JobPill } from './components/JobPill'
 import { StackMarketplace } from './components/StackMarketplace'
 import { SettingsDrawer } from './components/SettingsDrawer'
+import { ShortcutsWindow } from './components/ShortcutsWindow'
 import { UpdateWindow } from './components/UpdateWindow'
 import { Viewer } from './components/Viewer'
-import { EMPTY_OVERLAY, type OverlayState } from './components/viewerData'
+import { EMPTY_OVERLAY, overlayFor, type OverlayState } from './components/viewerData'
 import { WorkflowPanel } from './components/WorkflowPanel'
-import { GearIcon, StoreIcon, XIcon } from './components/icons'
+import { GearIcon, HelpIcon, StoreIcon, XIcon } from './components/icons'
 import {
   ackUpdateResult,
   checkForUpdate,
@@ -47,11 +48,17 @@ function describeUpdateResult(r: NonNullable<UpdateState['last_result']>): strin
 export default function App() {
   const [openPath, setOpenPath] = useState<string | null>(null)
   // What is overlaid on the open volume. Lives here rather than in the viewer so
-  // the chat can set it (a tool result's "Overlay" chip) and so it survives the
-  // viewer's resize rebuild.
+  // the explorer's menu can set it and so it survives the viewer's resize rebuild.
   const [overlay, setOverlay] = useState<OverlayState>(EMPTY_OVERLAY)
   // Files multi-selected in the explorer — feeds the workflow batch editor.
   const [selectedPaths, setSelectedPaths] = useState<string[]>([])
+  // The explorer menu's "Overlay on image": the same state a drop on the viewer sets.
+  const overlayOnOpen = useCallback(
+    (p: string) => {
+      if (openPath) setOverlay(overlayFor(openPath, p))
+    },
+    [openPath],
+  )
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsAdvanced, setSettingsAdvanced] = useState(false)
   // The external-MCP window: reached from Advanced, or straight from the warning
@@ -69,6 +76,29 @@ export default function App() {
   const [modelsOpen, setModelsOpen] = useState(false)
   const openModels = useCallback(() => setModelsOpen(true), [])
   const [marketOpen, setMarketOpen] = useState(false)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const closeShortcuts = useCallback(() => setShortcutsOpen(false), [])
+  // `?` opens the shortcut list. The app's only standing hotkey — every other
+  // window listener here is mounted with the thing it closes — so the guard is
+  // the whole of it: a `?` belongs to whatever field is being typed in, a
+  // modified key to the browser, and nothing opens over another window, the
+  // settings drawer or a dialog (each has a backdrop while it is up).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== '?' || e.ctrlKey || e.metaKey || e.altKey) return
+      const t = e.target as HTMLElement | null
+      const typing = t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable)
+      if (typing) return
+      if (document.querySelector('.modal-backdrop, .drawer-backdrop')) return
+      e.preventDefault()
+      // Capture-phase and stopped, so the key cannot also land in the file
+      // tree's 600 ms type-ahead buffer and corrupt the next search.
+      e.stopPropagation()
+      setShortcutsOpen(true)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [])
   // The release record the server keeps (checked daily there); the header
   // notice and the Settings row both read it, the window applies it.
   const [updateState, setUpdateState] = useState<UpdateState | null>(null)
@@ -262,6 +292,22 @@ export default function App() {
       />
       <ModelsWindow open={modelsOpen} onClose={() => setModelsOpen(false)} />
       <StackMarketplace open={marketOpen} onClose={() => setMarketOpen(false)} />
+      <ShortcutsWindow open={shortcutsOpen} onClose={closeShortcuts} />
+      {/* Fixed in the page's bottom-right corner, beside the chat's Send button
+          (the composer keeps that strip free, see .chat-input-row) and under
+          every backdrop. Focused by hand before opening: not every browser
+          focuses a clicked button, and the window hands focus back to whatever
+          held it. */}
+      <button
+        className="help-fab"
+        aria-label="Help"
+        onClick={(e) => {
+          e.currentTarget.focus()
+          setShortcutsOpen(true)
+        }}
+      >
+        <HelpIcon size={14} />
+      </button>
       <Group
         orientation="vertical"
         className="app-main"
@@ -280,6 +326,8 @@ export default function App() {
                 refreshSignal={fsVersion}
                 onSelectionChange={setSelectedPaths}
                 isResizing={resizing}
+                overlayBase={openPath}
+                onOverlay={overlayOnOpen}
               />
             </Panel>
             <Separator className="sep sep-v" />

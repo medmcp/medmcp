@@ -315,3 +315,15 @@ export function ListIcon(props: IconProps) {
     </Icon>
   )
 }
+
+/** A question mark — the list of shortcuts and controls. Drawn rather than
+ *  typed, so it is centred in its box whatever the font's metrics are. The
+ *  view box is cropped to the glyph: at size 14 one unit is one pixel. */
+export function HelpIcon(props: IconProps) {
+  return (
+    <Icon viewBox="5 5 14 14" {...props}>
+      <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+      <path d="M12 17h.01" />
+    </Icon>
+  )
+}

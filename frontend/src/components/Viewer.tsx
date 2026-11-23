@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState, useMemo } from 'react'
-import { Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
+import { DRAG_MODE, Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import type { NVImage, NiiVueLocation } from '@niivue/niivue'
 import { rawUrl } from '../api'
 import { getDraggedFilePath } from '../dragState'
@@ -89,23 +89,30 @@ function routeThroughAtlasShader(vol: NVImage, maxId: number): boolean {
   return true
 }
 
-// ── Volume bytes cache ───────────────────────────────────────────
+// ── Volume cache ─────────────────────────────────────────────────
 //
 // Every file open, panel resize and overlay restore remounts the Niivue view,
-// which would re-download the volume each time. The bytes are kept per URL (a
-// handful of compressed files) and revalidated with a HEAD request against the
-// server's Last-Modified/Content-Length, so a file the agent rewrote in place is
-// fetched again rather than shown stale.
+// which would re-download and re-inflate the volume each time. What is kept per
+// URL is therefore the volume as Niivue will read it — inflated, for a `.nii.gz`
+// — so a remount is a buffer handoff rather than a quarter of a gigabyte of
+// gzip. Each entry is revalidated against the server, so a file the agent
+// rewrote in place is fetched again rather than shown stale.
 
 interface CachedVolume {
+  /** The bytes to hand Niivue, inflated when `inflated` says so. */
   buffer: ArrayBuffer
+  /** The server's ETag for the file these bytes came from. */
   etag: string
+  /** True once the gzip stream has been inflated, which also means Niivue must
+   *  be told the name without its `.gz`. */
+  inflated: boolean
 }
 
 const volumeCache = new Map<string, CachedVolume>()
-/** Byte budget for the cache: a few compressed volumes, not a few of whatever
- *  size the server sends — four uncompressed 512³ int16 scans would be a GB. */
-const VOLUME_CACHE_BYTES = 256 * 1024 * 1024
+/** Hard byte bound on the cache. Entries are inflated volumes, so 1 GiB holds a
+ *  large CT (~500 MB of int16) plus its label map; a volume that does not fit
+ *  on its own is not cached. */
+const VOLUME_CACHE_BYTES = 1024 * 1024 * 1024
 
 function cachedBytes(): number {
   let n = 0
@@ -113,60 +120,216 @@ function cachedBytes(): number {
   return n
 }
 
-function headerStamp(r: Response): string {
-  return `${r.headers.get('last-modified') ?? ''}|${r.headers.get('content-length') ?? ''}|${r.headers.get('etag') ?? ''}`
+/** Inflate a gzip stream with the browser's own decompressor, or null when
+ *  these bytes are not one.
+ *
+ *  Niivue inflates `.nii.gz` itself, with the same `DecompressionStream`, but it
+ *  does so on every load — and the viewer reloads the same file on each resize
+ *  and overlay change. Doing it here puts the result in the cache instead.
+ *  Restricted to `.nii.gz` by the caller: Niivue picks its reader from the file
+ *  name, so inflated bytes need a name to present them under, and `.mgz` or
+ *  `.nrrd.gz` have none.
+ *
+ *  The chunks go into one buffer sized from gzip's own ISIZE footer rather than
+ *  through `new Response(stream).arrayBuffer()`, which concatenates them: for
+ *  the 515 MB test volume that measured 3.1 s against 4.0 s, same bytes out.
+ *  ISIZE is only the true size modulo 4 GiB, so a mismatch falls back to the
+ *  compressed bytes rather than to a half-filled buffer. */
+async function inflateGzip(bytes: ArrayBuffer): Promise<ArrayBuffer | null> {
+  if (typeof DecompressionStream === 'undefined' || bytes.byteLength < 18) return null
+  try {
+    const size = new DataView(bytes, bytes.byteLength - 4).getUint32(0, true)
+    const out = new Uint8Array(size)
+    const gz = new Response(bytes).body?.pipeThrough(new DecompressionStream('gzip'))
+    if (!gz) return null
+    const reader = gz.getReader()
+    let at = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value || at + value.length > size) {
+        await reader.cancel()
+        return null
+      }
+      out.set(value, at)
+      at += value.length
+    }
+    return at === size ? out.buffer : null
+  } catch {
+    // Truncated, or not gzip after all: leave the bytes alone and let Niivue
+    // fail on them with its own message.
+    return null
+  }
 }
 
-async function fetchVolumeBytes(url: string): Promise<ArrayBuffer> {
+/** A file the server does not have (HTTP 404): deleted by a tool since the
+ *  explorer listed it, or the absent half of a header/image pair. */
+class MissingFileError extends Error {}
+
+/** A failure as the viewer words it: the reason, without the `Error:` prefix. */
+function failureReason(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
+
+/** The volume at *url*, from the cache when the server says it is still current.
+ *  Throws an Error whose message is the reason, worded for the viewer.
+ *
+ *  One conditional GET does the revalidation and the download together: the
+ *  server answers 304 while the ETag holds, where this used to cost a HEAD and
+ *  then a second, full round trip. Without an entry of our own (a page reload)
+ *  the request is `no-cache`, as every other fetch of a workspace file is: the
+ *  browser revalidates whatever copy it kept, so that can be a 304 as well. */
+async function fetchVolume(url: string, gzipped: boolean): Promise<CachedVolume> {
   const hit = volumeCache.get(url)
-  if (hit) {
-    try {
-      const head = await fetch(url, { method: 'HEAD', cache: 'no-cache' })
-      if (head.ok && headerStamp(head) === hit.etag) {
-        volumeCache.delete(url)
-        volumeCache.set(url, hit)
-        return hit.buffer
-      }
-    } catch {
-      // revalidation failed — fall through to a full fetch
-    }
+  const r = await fetch(
+    url,
+    hit?.etag
+      ? { cache: 'no-store', headers: { 'If-None-Match': hit.etag } }
+      : { cache: 'no-cache' },
+  )
+  if (hit && r.status === 304) {
+    volumeCache.delete(url)
+    volumeCache.set(url, hit)
+    return hit
   }
-  // Always revalidate with the server: a tool rewrites files in place, and a
-  // browser otherwise treats a days-old file's response as fresh for hours.
-  const r = await fetch(url, { cache: 'no-cache' })
-  if (!r.ok) throw new Error(`could not load volume (HTTP ${r.status})`)
-  const buffer = await r.arrayBuffer()
-  volumeCache.set(url, { buffer, etag: headerStamp(r) })
-  // Evict least recently used until under budget; the newest entry always stays.
+  if (!r.ok) {
+    volumeCache.delete(url)
+    if (r.status === 404) throw new MissingFileError('the file no longer exists')
+    throw new Error(`the server answered HTTP ${r.status}`)
+  }
+  const raw = await r.arrayBuffer()
+  // Niivue reads the bytes from the buffer only while it has some; an empty one
+  // would send it back to the network for a name that is not a URL.
+  if (raw.byteLength === 0) throw new Error('the file is empty')
+  const plain = gzipped ? await inflateGzip(raw) : null
+  const entry: CachedVolume = {
+    buffer: plain ?? raw,
+    etag: r.headers.get('etag') ?? '',
+    inflated: plain !== null,
+  }
+  // A stale entry for this URL goes either way; the new one is kept only if it
+  // fits the budget on its own, evicting least recently used to make room.
+  volumeCache.delete(url)
+  if (entry.buffer.byteLength > VOLUME_CACHE_BYTES) return entry
+  volumeCache.set(url, entry)
   while (volumeCache.size > 1 && cachedBytes() > VOLUME_CACHE_BYTES) {
     const oldest = volumeCache.keys().next().value
     if (oldest === undefined) break
     volumeCache.delete(oldest)
   }
-  return buffer
+  return entry
+}
+
+/** A header/image pair (`.hdr` + `.img`), in any letter case. */
+const PAIR_EXT = /\.(hdr|img)$/i
+
+/** Names the other half of the pair *name* may go by, likeliest first: the
+ *  extension in the case this half is written in (`x.hdr` → `x.img`, `X.HDR` →
+ *  `X.IMG`, `X.Hdr` → `X.Img`), then lower case, then upper case. */
+function pairSiblingNames(name: string): string[] {
+  const stem = name.slice(0, -3)
+  const ext = name.slice(-3)
+  const other = ext.toLowerCase() === 'hdr' ? 'img' : 'hdr'
+  const sameCase = [...other]
+    .map((c, i) => (ext[i] !== ext[i].toLowerCase() ? c.toUpperCase() : c))
+    .join('')
+  return [...new Set([sameCase, other, other.toUpperCase()])].map((e) => stem + e)
+}
+
+/** Both halves of the header/image pair that *path* is one half of.
+ *
+ *  Niivue would look for the image itself, by replacing a literal upper-case
+ *  `HDR` in the URL with `IMG` — so only an upper-case pair ever loaded, and
+ *  only when opened by its header. Both files are fetched here instead, through
+ *  the volume cache, and the sibling is looked for under each case it may have. */
+async function fetchPair(
+  path: string,
+): Promise<{ hdrName: string; hdr: CachedVolume; img: CachedVolume }> {
+  const name = path.split('/').pop() ?? path
+  const dir = path.slice(0, path.length - name.length)
+  const own = await fetchVolume(rawUrl(path), false)
+  const candidates = pairSiblingNames(name)
+  for (const candidate of candidates) {
+    try {
+      const sibling = await fetchVolume(rawUrl(dir + candidate), false)
+      return /\.hdr$/i.test(name)
+        ? { hdrName: name, hdr: own, img: sibling }
+        : { hdrName: candidate, hdr: sibling, img: own }
+    } catch (e) {
+      if (!(e instanceof MissingFileError)) throw e
+    }
+  }
+  throw new Error(`${candidates[0]} is missing`)
 }
 
 /** Load *path* into `nv` as the base volume (replace = true) or as an added
- *  overlay, from the bytes cache. Niivue takes the file type from `name`.
- *
- *  Analyze pairs (`.hdr` + `.img`) bypass the cache: Niivue finds the sibling
- *  by rewriting the URL's extension, which a blob URL has none of. */
-async function loadVolume(nv: Niivue, path: string, opts: { opacity?: number; replace: boolean }) {
+ *  overlay, from the volume cache. Niivue takes the file type from `name`.
+ *  Returns the file's ETag ('' when unknown), which changes when a tool
+ *  rewrites the file; a header/image pair returns both files' ETags. Throws an Error whose message is the reason, worded for
+ *  the viewer. */
+async function loadVolume(
+  nv: Niivue,
+  path: string,
+  opts: { opacity?: number; replace: boolean },
+): Promise<string> {
   const name = path.split('/').pop() ?? path
-  if (/\.(hdr|img)$/i.test(name)) {
-    const url = rawUrl(path)
-    if (opts.replace) await nv.loadVolumes([{ url, name }])
-    else await nv.addVolumeFromUrl({ url, name, opacity: opts.opacity ?? 1 })
-    return
-  }
-  const bytes = await fetchVolumeBytes(rawUrl(path))
-  const blobUrl = URL.createObjectURL(new Blob([bytes]))
+  const before = opts.replace ? 0 : nv.volumes.length
+  const etag = await addVolume(nv, path, name, opts)
+  // Niivue reports some unreadable files by adding nothing rather than throwing.
+  if (nv.volumes.length !== before + 1) throw new Error('not a readable volume')
+  return etag
+}
+
+/** `addVolumeFromUrl`, with Niivue's parser errors (a trace of its own
+ *  internals, for a truncated or mislabelled file) replaced by one reason. */
+async function addParsedVolume(
+  nv: Niivue,
+  options: Parameters<Niivue['addVolumeFromUrl']>[0],
+): Promise<void> {
   try {
-    if (opts.replace) await nv.loadVolumes([{ url: blobUrl, name }])
-    else await nv.addVolumeFromUrl({ url: blobUrl, name, opacity: opts.opacity ?? 1 })
-  } finally {
-    URL.revokeObjectURL(blobUrl)
+    await nv.addVolumeFromUrl(options)
+  } catch {
+    throw new Error('not a readable volume')
   }
+}
+
+async function addVolume(
+  nv: Niivue,
+  path: string,
+  name: string,
+  opts: { opacity?: number; replace: boolean },
+): Promise<string> {
+  if (PAIR_EXT.test(name)) {
+    const { hdrName, hdr, img } = await fetchPair(path)
+    // Niivue takes the paired image as a URL only, so the bytes held here are
+    // lent to it as an object URL for the length of the load.
+    const imgUrl = URL.createObjectURL(new Blob([img.buffer]))
+    try {
+      if (opts.replace) nv.volumes = []
+      await addParsedVolume(nv, {
+        url: hdrName,
+        name: hdrName,
+        buffer: hdr.buffer,
+        urlImgData: imgUrl,
+        opacity: opts.opacity ?? 1,
+      })
+    } finally {
+      URL.revokeObjectURL(imgUrl)
+    }
+    // Rewriting either file makes it another image.
+    return hdr.etag && img.etag ? `${hdr.etag} ${img.etag}` : ''
+  }
+  const entry = await fetchVolume(rawUrl(path), /\.nii\.gz$/i.test(name))
+  // Niivue reads `buffer` straight through and takes the format from `name`,
+  // leaving `url` as a label — no Blob copy, no object URL, and no fetch of it.
+  // `loadVolumes` cannot be used for this: it rebuilds its own options object
+  // and drops `buffer` on the way (Niivue 0.69), so the base volume is cleared
+  // and added instead. On this path the instance is always a fresh one with no
+  // volumes, but the contract should not depend on that.
+  const as = entry.inflated ? name.replace(/\.gz$/i, '') : name
+  if (opts.replace) nv.volumes = []
+  await addParsedVolume(nv, { url: as, name: as, buffer: entry.buffer, opacity: opts.opacity ?? 1 })
+  return entry.etag
 }
 
 /** What the loaded overlay turned out to be — derived from its data once. */
@@ -277,6 +440,63 @@ function applyViewerSettings(nv: Niivue, s: ViewerSettings, labelOverlay: boolea
 const INITIAL_AZIMUTH = 110
 const INITIAL_ELEVATION = 10
 
+/** Zoom limits, and the factor one key press applies. */
+const ZOOM_MIN = 0.5
+const ZOOM_MAX = 8
+const ZOOM_KEY_FACTOR = 1.1
+
+/** Wheel zoom follows `deltaY`: a trackpad pinch arrives as dozens of events of
+ *  a few px each, a mouse notch as one of about 100, so a fixed step per event
+ *  would throw a pinch straight to the limit. It is 1% per px, capped per
+ *  event so that a notch is about one key press. */
+const ZOOM_PER_WHEEL_PX = 0.01
+const WHEEL_PX_PER_EVENT_MAX = 10
+/** Pixels per unit of `deltaY` for WheelEvent.deltaMode 0 (pixel), 1 (line), 2 (page). */
+const WHEEL_DELTA_PX = [1, 33, 800]
+
+/** The zoom factor for one wheel event; 1 (no change) when it carries no
+ *  vertical movement, as a ctrl + horizontal scroll does. */
+function wheelZoomFactor(e: WheelEvent): number {
+  const px = e.deltaY * (WHEEL_DELTA_PX[e.deltaMode] ?? 1)
+  const bounded = Math.max(-WHEEL_PX_PER_EVENT_MAX, Math.min(WHEEL_PX_PER_EVENT_MAX, px))
+  return Math.exp(-bounded * ZOOM_PER_WHEEL_PX)
+}
+
+/** Slices back to 1x with the pan centred. Leaves the crosshair and the 3D
+ *  render alone; the caller redraws. */
+function clearZoom(nv: Niivue): void {
+  nv.scene.pan2Dxyzmm = [0, 0, 0, 1]
+}
+
+/** Zoom the slices about the crosshair. The 3D render keeps its own scale
+ *  (`volScaleMultiplier`, which a plain wheel over that tile changes).
+ *
+ * `pan2Dxyzmm[3]` is the 2D zoom factor. The pan is shifted by the change in
+ * zoom times the crosshair's millimetre position, so the structure under the
+ * crosshair stays put instead of the volume growing out of a corner — the same
+ * correction Niivue applies on its own zoom path. Returns the zoom in force
+ * afterwards.
+ */
+function applyZoom(nv: Niivue, factor: number): number {
+  const current = nv.scene.pan2Dxyzmm[3]
+  let next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, current * factor))
+  // Land on 1x exactly when a step comes within rounding of it, so zooming in
+  // and back out clears the readout.
+  if (Math.abs(next - 1) < 1e-6) next = 1
+  if (next === current) return current
+  const change = current - next
+  const mm = nv.frac2mm(nv.scene.crosshairPos)
+  nv.scene.pan2Dxyzmm[3] = next
+  for (let i = 0; i < 3; i++) nv.scene.pan2Dxyzmm[i] += change * mm[i]
+  nv.drawScene()
+  return next
+}
+
+/** The zoom as the status bar shows it. */
+function zoomPercent(zoom: number): number {
+  return Math.round(zoom * 100)
+}
+
 /** Return pan, zoom, rotation, and slice position to their just-loaded state.
  *
  * Deliberately not Niivue's `setDefaults()`: that also replaces the whole opts
@@ -286,7 +506,7 @@ const INITIAL_ELEVATION = 10
  * the view and nothing else.
  */
 function resetView(nv: Niivue): void {
-  nv.scene.pan2Dxyzmm = [0, 0, 0, 1]
+  clearZoom(nv)
   nv.scene.volScaleMultiplier = 1
   nv.scene.renderAzimuth = INITIAL_AZIMUTH
   nv.scene.renderElevation = INITIAL_ELEVATION
@@ -346,12 +566,16 @@ async function describeOverlay(vol: NVImage, path: string, forcedKind: OverlayKi
   }
 }
 
-/** The first label-name sidecar that exists next to the segmentation. */
+/** The first label-name sidecar that exists next to the segmentation.
+ *
+ *  The file is optional, and asked for as such: the server then answers a
+ *  missing one with 204 rather than 404, which the browser would log to the
+ *  console as a failed request on every label overlay. */
 async function fetchLabelNames(volumePath: string): Promise<Map<number, string>> {
   for (const candidate of labelFileCandidates(volumePath)) {
     try {
-      const r = await fetch(rawUrl(candidate))
-      if (!r.ok) continue
+      const r = await fetch(`${rawUrl(candidate)}?optional=1`, { cache: 'no-cache' })
+      if (r.status !== 200) continue
       const names = parseLabelNames(await r.text())
       if (names.size > 0) return names
     } catch {
@@ -433,6 +657,19 @@ const lastFrameByPath = new Map<string, number>()
  *  bounds, a right-drag) is remembered. */
 const lastWindowByPath = new Map<string, { min: number; max: number }>()
 
+/** The zoom and pan last left per file, for the same reason again: a reader who
+ *  has zoomed into a vertebra and then nudges the panel separator should not
+ *  have to find it twice. Saved when the view goes away, which is exactly when
+ *  the remount happens, with the file's ETag: a pan is in the image's own
+ *  millimetres, so it is dropped once a tool has rewritten the file. The
+ *  crosshair (the slice shown in each pane) goes with it: the pan was shifted
+ *  to keep that point still, so restoring one without the other shows another
+ *  place at the same zoom. */
+const lastViewByPath = new Map<
+  string,
+  { pan: [number, number, number, number]; crosshair: [number, number, number]; etag: string }
+>()
+
 type OverlayVol = {
   path: string
   vol: NVImage
@@ -491,10 +728,14 @@ function VolumeView({
   const dropRef = useRef<HTMLDivElement>(null)
   const nvRef = useRef<Niivue | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  // Kept apart from the base image's error: a failed overlay puts the overlay
+  // state back to "none", and the pass that follows must not wipe either message.
+  const [overlayError, setOverlayError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [dragOver, setDragOver] = useState(false)
   const [readout, setReadout] = useState<Readout | null>(null)
   const [win, setWin] = useState<{ min: number; max: number } | null>(null)
+  const [zoom, setZoom] = useState(1)
   const [baseInfo, setBaseInfo] = useState<{
     dims: [number, number, number]
     pixDims: [number, number, number]
@@ -575,6 +816,39 @@ function VolumeView({
       obs.disconnect()
       if (timer != null) window.clearTimeout(timer)
     }
+  }, [])
+
+  // Ctrl/Cmd + wheel zooms the slices about the crosshair; a trackpad pinch
+  // reaches the page as exactly that, so pinch-to-zoom comes with it. A plain
+  // wheel is left for Niivue, which scrolls slices with it — what a reader
+  // expects — except during a pan drag, where Niivue would zoom on its own
+  // path, past the limits and behind the readout: there every wheel is
+  // swallowed.
+  //
+  // Bound natively rather than as onWheelCapture because React attaches `wheel`
+  // as a passive listener, where preventDefault() is ignored — and without it
+  // the browser zooms the whole page. Capture phase for the same reason the drop
+  // handlers use it: Niivue's own wheel listener stops propagation on the canvas
+  // below, so a bubble-phase handler here would never run.
+  useEffect(() => {
+    const drop = dropRef.current
+    if (!drop) return
+    const onWheel = (e: WheelEvent) => {
+      const nv = nvRef.current
+      if (!nv || nv.volumes.length === 0) return
+      const zooming = e.ctrlKey || e.metaKey
+      const panning = nv.uiData.activeDragMode === DRAG_MODE.pan
+      if (!zooming && !panning) return
+      e.preventDefault()
+      e.stopPropagation()
+      // Not mid-drag either: the drag re-derives the pan from where it began,
+      // which would undo the shift that keeps the crosshair in place.
+      if (panning) return
+      const factor = wheelZoomFactor(e)
+      if (factor !== 1) setZoom(applyZoom(nv, factor))
+    }
+    drop.addEventListener('wheel', onWheel, { capture: true, passive: false })
+    return () => drop.removeEventListener('wheel', onWheel, { capture: true })
   }, [])
 
   // Overlay operations are serialized on a promise chain, seeded with the
@@ -674,7 +948,9 @@ function VolumeView({
    *  otherwise just restyle. Idempotent, so it can run after every change. */
   const applyOverlay = useCallback(async () => {
     const nv = nvRef.current
-    if (!nv) return
+    // Without a base image (still loading, or it failed) there is nothing to
+    // overlay; the base load restores a persisted overlay itself.
+    if (!nv || nv.volumes.length === 0) return
     const state = overlayRef.current
     const current = overlayVolRef.current
     try {
@@ -689,6 +965,9 @@ function VolumeView({
       overlayVolRef.current = null
       setOverlayVol(null)
       if (state.path) {
+        // A new attempt replaces the message of the last one. Not cleared when
+        // there is no path: that is also the pass a failure itself triggers.
+        setOverlayError(null)
         await loadVolume(nv, state.path, { opacity: state.opacity, replace: false })
         const vol = nv.volumes[nv.volumes.length - 1]
         const info = await describeOverlay(vol, state.path, state.kind)
@@ -713,12 +992,24 @@ function VolumeView({
         settingsRef.current.interpolation === 'nearest' ||
           overlayVolRef.current?.info.kind === 'label',
       )
-      setLoadError(null)
     } catch (e) {
       // A torn-down instance must not clear the overlay a newer mount is restoring.
       if (nvRef.current !== nv) return
+      // Leave the base image alone on screen: drop whatever the failed attempt
+      // added before it broke, so no layer is drawn that no control addresses.
+      try {
+        while (nv.volumes.length > 1) nv.removeVolume(nv.volumes[nv.volumes.length - 1])
+      } catch {
+        // best-effort; the base volume is index 0 and was not touched
+      }
+      overlayVolRef.current = null
+      setOverlayVol(null)
+      nv.setInterpolation(settingsRef.current.interpolation === 'nearest')
+      // Superseded by a newer choice: that one's own pass reports its outcome.
+      if (overlayRef.current.path !== state.path) return
+      const name = state.path.split('/').pop() ?? state.path
+      setOverlayError(`Could not load overlay ${name}: ${failureReason(e)}`)
       onOverlayChangeRef.current({ ...EMPTY_OVERLAY, base: path })
-      setLoadError(`Could not load overlay: ${String(e)}`)
     }
   }, [path, applyFrame])
 
@@ -777,6 +1068,8 @@ function VolumeView({
       }
     }
     let cancelled = false
+    // The base file's validator, for the zoom/pan memory (see lastViewByPath).
+    let baseEtag = ''
     const load = async () => {
       setLoading(true)
       setLoadError(null)
@@ -793,6 +1086,22 @@ function VolumeView({
         // the dropzone, whose handler owns the keys; wheel scrolling does not
         // need focus.
         canvas.removeAttribute('tabindex')
+        // Zoomed in, the reader has to be able to pan. Niivue already pans on
+        // a middle-button drag whatever the drag mode, which a trackpad or a
+        // two-button mouse cannot do, so panning is also put on shift/ctrl +
+        // left. The middle and right buttons are spelled out as what they
+        // already did: right-drag windowing is what the status bar's Window
+        // hint promises. Shift as well as ctrl because macOS turns a
+        // ctrl-click into a right-click.
+        nv.setMouseEventConfig({
+          leftButton: {
+            primary: DRAG_MODE.crosshair,
+            withShift: DRAG_MODE.pan,
+            withCtrl: DRAG_MODE.pan,
+          },
+          rightButton: DRAG_MODE.contrast,
+          centerButton: DRAG_MODE.pan,
+        })
         // Niivue streams the download/inflate, but parsing the volume and the
         // initial WebGL upload + 3D render run synchronously on the main thread
         // — a big volume briefly freezes the tab. Yield a frame here so the
@@ -800,7 +1109,7 @@ function VolumeView({
         // instead of the viewer just appearing hung.
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
         if (cancelled) return
-        await loadVolume(nv, path, { replace: true })
+        baseEtag = await loadVolume(nv, path, { replace: true })
         if (cancelled) return
         applyViewerSettings(nv, settingsRef.current, overlayVolRef.current?.info.kind === 'label')
         const base = nv.volumes[0]
@@ -826,6 +1135,18 @@ function VolumeView({
           nv.updateGLVolume()
         }
         setWin({ min: base.cal_min ?? gmin, max: base.cal_max ?? gmax })
+        // Likewise the zoom and pan from before a rebuild, unless the file
+        // has been rewritten since: they described the old image.
+        const keptView = lastViewByPath.get(path)
+        if (keptView && keptView.etag === baseEtag) {
+          const [px, py, pz, pzoom] = keptView.pan
+          nv.scene.pan2Dxyzmm = [px, py, pz, pzoom]
+          nv.scene.crosshairPos = [...keptView.crosshair]
+          setZoom(pzoom)
+          nv.drawScene()
+        } else {
+          lastViewByPath.delete(path)
+        }
         nv.createOnLocationChange()
         // Resume a 4D file on the frame it was last shown at.
         if (frameRef.current > 0) applyFrame(frameRef.current)
@@ -835,7 +1156,9 @@ function VolumeView({
           await applyOverlay()
         }
       } catch (e) {
-        if (!cancelled) setLoadError(String(e))
+        if (!cancelled) {
+          setLoadError(`Could not load ${path.split('/').pop() ?? path}: ${failureReason(e)}`)
+        }
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -846,6 +1169,22 @@ function VolumeView({
     overlayOpRef.current = load()
     return () => {
       cancelled = true
+      // Remember the zoom, pan and crosshair for the remount a resize or a
+      // reopen brings. Read before cleanup() below, while the scene is intact.
+      if (nv.volumes.length > 0) {
+        const [px, py, pz, pzoom] = nv.scene.pan2Dxyzmm
+        const [cx, cy, cz] = nv.scene.crosshairPos
+        const moved = pzoom !== 1 || px !== 0 || py !== 0 || pz !== 0
+        if (moved || cx !== 0.5 || cy !== 0.5 || cz !== 0.5) {
+          lastViewByPath.set(path, {
+            pan: [px, py, pz, pzoom],
+            crosshair: [cx, cy, cz],
+            etag: baseEtag,
+          })
+        } else {
+          lastViewByPath.delete(path)
+        }
+      }
       nvRef.current = null
       overlayVolRef.current = null
       if (raf) cancelAnimationFrame(raf)
@@ -883,9 +1222,11 @@ function VolumeView({
     const nv = nvRef.current
     if (nv && nv.volumes.length > 0) {
       resetView(nv)
+      lastViewByPath.delete(path)
+      setZoom(1)
       applyFrame(0)
     }
-  }, [resetToken, applyFrame])
+  }, [resetToken, applyFrame, path])
 
   // Playback: advance the frame on a timer; the interval dies with the view.
   useEffect(() => {
@@ -908,8 +1249,9 @@ function VolumeView({
   // Every overlay change goes through the serialized chain; applyOverlay works
   // out whether that means a load, a re-read or only a restyle.
   useEffect(() => {
-    // A rejected link must not end the chain: every later change would be ignored.
-    overlayOpRef.current = overlayOpRef.current.then(applyOverlay, () => undefined)
+    // A rejected link must not end the chain, nor swallow this change with it:
+    // every later change would be ignored.
+    overlayOpRef.current = overlayOpRef.current.catch(() => undefined).then(applyOverlay)
   }, [overlay, applyOverlay])
 
   const patchOverlay = (patch: Partial<OverlayState>) =>
@@ -956,6 +1298,20 @@ function VolumeView({
     if (e.ctrlKey || e.metaKey || e.altKey) return
     if (e.key === 'o' || e.key === 'O') {
       if (overlayRef.current.path) patchOverlay({ hidden: !overlayRef.current.hidden })
+      e.preventDefault()
+      return
+    }
+    // +/- zoom, 0 back to 1x. Bare keys: the modifier check above already
+    // handed ctrl/cmd combinations back to the browser.
+    if (e.key === '+' || e.key === '=' || e.key === '-') {
+      setZoom(applyZoom(nv, e.key === '-' ? 1 / ZOOM_KEY_FACTOR : ZOOM_KEY_FACTOR))
+      e.preventDefault()
+      return
+    }
+    if (e.key === '0') {
+      clearZoom(nv)
+      nv.drawScene()
+      setZoom(1)
       e.preventDefault()
       return
     }
@@ -1076,9 +1432,9 @@ function VolumeView({
 
   return (
     <div className="volume-view">
-      {/* Only rendered once something is actually overlaid: with drag-and-drop
-          as the only way in, an always-present bar would be a permanent strip of
-          controls for a state the viewer is usually not in. */}
+      {/* Only rendered once something is actually overlaid: an always-present
+          bar would be a permanent strip of controls for a state the viewer is
+          usually not in. A drop, or the explorer's menu, is the way in. */}
       {overlay.path && (
         <div className="overlay-bar">
           <span className="overlay-label">
@@ -1147,8 +1503,27 @@ function VolumeView({
           </button>
         </div>
       )}
-      {loadError && <div className="panel-error">{loadError}</div>}
       <div className="niivue-sizer" ref={sizerRef}>
+        {/* Laid over the canvas rather than above it: a strip that took its own
+            row would resize the WebGL canvas and reflow the panes of the image
+            the failed overlay was meant to leave alone. */}
+        {(loadError || overlayError) && (
+          <div className="volume-errors">
+            {loadError && <div className="panel-error">{loadError}</div>}
+            {overlayError && (
+              <div className="panel-error">
+                <span>{overlayError}</span>
+                <button
+                  className="btn-icon"
+                  aria-label="Dismiss"
+                  onClick={() => setOverlayError(null)}
+                >
+                  <XIcon size={12} />
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         <div
           ref={dropRef}
           className={`niivue-dropzone${dragOver ? ' drag-over' : ''}`}
@@ -1206,6 +1581,12 @@ function VolumeView({
                       ? '–'
                       : formatIntensity(readout.overlayValue, false)}
               </span>
+            </span>
+          )}
+          {zoomPercent(zoom) !== 100 && (
+            <span className="st-item">
+              <span className="st-key">Zoom</span>
+              <span className="st-val st-strong">{zoomPercent(zoom)}%</span>
             </span>
           )}
           <span className="status-spacer" />
@@ -1544,6 +1925,21 @@ function WindowPopover({
   )
 }
 
+/** A ref for the element that holds a volume, or the empty viewer: Ctrl/Cmd +
+ *  wheel over it never zooms the browser page. The volume view's own handler
+ *  only covers the canvas once an image is on it — not the loading cover, a
+ *  failed load or the empty panel, where the same gesture zoomed the whole app.
+ *  Native and non-passive for the reason given there; it does not stop
+ *  propagation, so that handler still does the zooming. */
+function keepPageZoomOut(el: HTMLElement | null): (() => void) | undefined {
+  if (!el) return
+  const onWheel = (e: WheelEvent) => {
+    if (e.ctrlKey || e.metaKey) e.preventDefault()
+  }
+  el.addEventListener('wheel', onWheel, { capture: true, passive: false })
+  return () => el.removeEventListener('wheel', onWheel, { capture: true })
+}
+
 /** Routes the selected file to the right renderer (volume / PDF / image / text). */
 // Memoized so a separator drag doesn't re-render the viewer (and its WebGL/React
 // subtree) every frame; props from App are stable except when the open file
@@ -1618,7 +2014,7 @@ export const Viewer = memo(function Viewer({
         {/* Black is the right ground for an image and the wrong one for an
             empty panel, where it reads as a hole in the app. The layout stays,
             only the colour changes. */}
-        <div className="panel-body viewer-body is-empty">
+        <div className="panel-body viewer-body is-empty" ref={keepPageZoomOut}>
           <div className="viewer-message">Select a file in the explorer to view it here.</div>
         </div>
       </div>
@@ -1673,7 +2069,7 @@ export const Viewer = memo(function Viewer({
       </div>
       <div className="panel-body viewer-body">
         {kind === 'volume' && (
-          <div className={`volume-slot${rebuilding ? ' rebuilding' : ''}`}>
+          <div className={`volume-slot${rebuilding ? ' rebuilding' : ''}`} ref={keepPageZoomOut}>
             <VolumeView
               key={`${path}#${resizeGen}#${settings.antialias ? 'aa' : 'noaa'}#${settings.renderScale}`}
               path={path}

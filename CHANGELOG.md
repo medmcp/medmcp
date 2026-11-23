@@ -8,6 +8,9 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Added
 
+- Viewer: zoom the slices with Ctrl/⌘ + wheel, a trackpad pinch or `+`/`-`/`0`, and pan with Shift + drag; the zoom is shown in the status bar and kept per file.
+- Viewer: right-click a volume in the explorer → Overlay on image.
+- Help: the `?` button in the bottom-right corner, or the `?` key, says what MedMCP is, where its limits are, and lists the main keyboard and mouse controls.
 - Jobs: a pill in the header shows running background jobs with their progress (e.g. "nnunet · start_training · epoch 41/100 · pseudo-Dice 0.88 · ~30 min left"), and a finished or failed job until it has been looked at; click for the list with Stop. A job may report progress by writing `{"fraction", "text"}` to the file named in `MEDMCP_JOB_PROGRESS`; the core keeps only a clamped fraction and one short line.
 - Approvals: code the assistant wrote itself (a Python heredoc or `-c`, `Rscript`, `node`, an awk program, a shell on a string, a `.py`/`.R`/`.sh` file it writes) is labelled as such in the approval dialog and is never covered by a chat-long approval. `MEDMCP_ASSISTANT_CODE=deny` refuses it outright, so only tools run.
 - Approvals: a stack tool can be allowed for the rest of the chat ("Allow index_dataset for the rest of this chat"). Later calls of that tool run without a dialog; a call that would overwrite a file or touch a path outside the workspace is still shown, and the shell keeps its own rules. `MEDMCP_STACK_TOOL_APPROVAL=0` restores a dialog for every call.
@@ -29,6 +32,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Dependencies: frontend packages (react-resizable-panels 4.24, Vite 8.3.8, KaTeX 0.19.1), httpx2 2.16, and CI actions updated.
 - Prompt: the assistant no longer creates a `results/` folder before a call; results go where the tool puts them (beside the input) unless you name a folder.
 - Prompt: the per-tool routing for the cohort and stats stacks is gone from the system prompt; the stacks' own skills carry it. The general rules stay (use the tool, never compute a statistic by hand, ask before writing code).
+- Viewer: volumes load faster. An unchanged file is not downloaded again, and a `.nii.gz` is unpacked once instead of on every panel resize.
 - Workflows: the record of a confirmed selection is a core format (`medmcp_selection_confirmation: 1`, `role_labels`) that any stack can write; messages no longer name a stack's tools. See [docs/rollout.md](docs/rollout.md).
 - Explorer: the second upload button and the folder menu's upload entries are removed again; Upload acts on the selected folder.
 - Explorer: the file list loads one folder at a time, so a large workspace opens at once; a folder lists up to 5,000 entries (was 500).
@@ -44,6 +48,9 @@ Notable, user-visible changes to MedMCP. Format follows
 - Chat: a stack call with arguments the tool does not accept is turned back to the assistant with what is wrong; before, the whole turn ended with `Core rejected durable input`.
 - Explorer: the rows no longer jump when a file is dragged in, so a drop lands on the folder under the pointer.
 - Explorer: uploading a file named like an existing folder says so instead of failing with a server error.
+- Viewer: a `.hdr`/`.img` pair opens whatever the case of its file names, from either file; only an upper-case `.HDR` did. A missing half is named.
+- Viewer: Ctrl/⌘ + wheel over the empty viewer, or over a volume that is loading or failed to load, no longer zooms the browser page.
+- Viewer: a volume or overlay that cannot be loaded (empty, truncated, not a volume, deleted) says so and names the file; the panel stayed blank and a failed overlay vanished silently.
 - Stacks: reinstalling a stack that is already running (a new image under the same name) now stops the running copy, so the next call uses the new image. Before, the old copy kept serving its old tools until it went idle.
 - Stacks: after a stack is updated or reinstalled under the same image name, the assistant sees its new tools. Before, it kept the previous tool list for up to a day, so a newly added tool such as `check_dataset` could not be found.
 - Stacks: installing a stack from the catalog or by image works again with `docker compose`; since 0.7.2 the docker guard refused the image lookup.

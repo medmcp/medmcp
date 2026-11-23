@@ -923,6 +923,32 @@ button:hover {
   display: flex;
 }
 
+/* Load failures, laid over the top of the canvas so they never resize it. */
+.volume-errors {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  background: var(--dark2);
+}
+
+.volume-errors .panel-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* The viewer's keys (slice stepping, `o`, space, zoom) only fire while this
+   dropzone holds focus, and clicking the chat or the tree silently takes it
+   away. Nothing said so before, which made the shortcut list look broken.
+   Inset so the ring sits inside the pane instead of over its neighbours. */
+.niivue-dropzone:focus-visible {
+  outline: 1px solid var(--blue-xl);
+  outline-offset: -1px;
+}
+
 .niivue-dropzone.drag-over::after {
   content: '';
   position: absolute;
@@ -1646,6 +1672,11 @@ button.model-name:hover {
   display: flex;
   gap: 10px;
   padding: 12px 18px 16px;
+  /* The page's ? button (.help-fab) sits in the bottom-right corner, 46px wide
+     with its inset. While this row reaches that corner its right padding grows
+     to keep Send clear of it; once the panel is wide enough for the centred
+     row to end short of the corner it is the plain 18px again. */
+  padding-right: clamp(18px, calc(46px - (100% - 860px) / 2), 46px);
   border-top: 1px solid var(--border);
   flex-shrink: 0;
   max-width: 860px;
@@ -4619,4 +4650,141 @@ textarea.wf-input {
 
 .confirm-dialog p.login-error {
   color: var(--red-tint);
+}
+
+/* ── Shortcuts: the ? button and its window ──────────────────────────────── */
+
+/* Fixed to the page, in the strip the chat composer keeps free beside Send.
+   Above the panels, below every backdrop (the lowest is .drawer-backdrop, 20),
+   so it never floats over a drawer, a window or a dialog. Even dimensions, as
+   every centred control here (see the switch). */
+.help-fab {
+  position: fixed;
+  right: 10px;
+  bottom: 16px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--muted);
+  background: var(--card);
+  border: 1px solid var(--border2);
+  border-radius: 50%;
+}
+
+.help-fab:hover,
+.help-fab:focus-visible {
+  color: var(--text);
+  background: var(--card2);
+  border-color: var(--border2);
+}
+
+.help-fab:focus-visible {
+  outline: 2px solid var(--blue-xl);
+  outline-offset: 2px;
+}
+
+/* Two columns, so the whole list shows without scrolling: the viewer on the
+   left, everything else on the right. One column when the window is narrow. */
+.sc-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 32px;
+}
+
+/* The about text spans both columns, above the shortcuts. */
+.sc-about {
+  grid-column: 1 / -1;
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sc-about .settings-section:first-child {
+  margin-top: 2px;
+}
+
+.sc-about .settings-section {
+  margin-top: 14px;
+}
+
+.sc-about p,
+.sc-about li {
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--muted2);
+}
+
+.sc-about p {
+  margin: 0;
+}
+
+.sc-about ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.sc-about li + li {
+  margin-top: 4px;
+}
+
+.sc-group .settings-section {
+  margin-top: 14px;
+}
+
+.sc-col > .sc-group:first-child .settings-section {
+  margin-top: 2px;
+}
+
+.sc-group-hint {
+  font-size: 11.5px;
+  color: var(--muted2);
+  line-height: 16px;
+  margin: 8px 0 0;
+}
+
+.sc-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 28px;
+}
+
+.sc-action {
+  font-size: 13px;
+  line-height: 16px;
+}
+
+.sc-keys {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+@media (max-width: 560px) {
+  .sc-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* The window takes focus when it opens (see ShortcutsWindow); it is not a
+   control, so it shows no ring for it. */
+.sc-body:focus {
+  outline: none;
+}
+
+.scwin kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 15px;
+  white-space: nowrap;
+  padding: 1px 6px;
+  color: var(--muted2);
+  background: var(--card2);
+  border: 1px solid var(--border2);
+  border-radius: 4px;
 }

@@ -1836,16 +1836,25 @@ button.model-name:hover {
   font-variant-numeric: tabular-nums;
 }
 
-.tool-card details {
-  margin-top: 5px;
-}
-
+/* A disclosure row is 24px to click (14px of text, 5px above and below), where
+   it used to be the 14px of its text. The space above the first row and below
+   the last is the same as before; rows that follow one another sit 5px further
+   apart. */
 .tool-card summary {
   cursor: pointer;
   color: var(--muted);
   font-size: 11.5px;
   font-weight: 500;
+  line-height: 14px;
+  padding: 5px 0;
   user-select: none;
+}
+
+/* The last row's lower padding lies inside the card's own. */
+.tool-card > details:last-child:not([open]),
+.tool-card > .tool-group-call:last-child > details:not([open]),
+.tool-card > .tool-group-call:last-child > details > details:last-child:not([open]) {
+  margin-bottom: -5px;
 }
 
 .tool-card summary:hover {
@@ -1891,7 +1900,7 @@ button.model-name:hover {
   font-family: var(--mono);
   font-size: 11.5px;
   line-height: 1.55;
-  margin: 6px 0 2px;
+  margin: 1px 0 2px;
   color: var(--muted2);
 }
 

@@ -3265,8 +3265,9 @@ def _read_only_session_label(option: JsonDict, command: str | None = None) -> st
         if pattern not in _READ_ONLY_SESSION_PATTERNS:
             return None
         patterns.append(str(pattern))
-    commands = ", ".join(p.removesuffix(" *") for p in patterns)
-    return f"Allow looking at files for the rest of this chat ({commands})"
+    # The grant covers every read-only command in the chat (see _handle_permission),
+    # so the label names that, not the one command in hand.
+    return "Allow reading files in this chat"
 
 
 def _visible_permission_options(
@@ -4171,7 +4172,7 @@ class _ChatConnection:
                     *options,
                     {
                         "optionId": _STACK_TOOL_CHAT_OPTION,
-                        "name": f"Allow {tool} for the rest of this chat",
+                        "name": f"Allow {tool} in this chat",
                         "kind": "allow_always",
                     },
                 ]

@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import importlib
 import io
+import os
 import zipfile
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -2485,3 +2486,21 @@ class TestAssistantCode:
         assert len(self._dialogs(conn)) == 2
         conn._pending_perms[2].set_result("reject_once")
         await task
+
+
+def test_workspace_is_exported_without_the_stack_pool(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The running server exports the resolved workspace, pool or no pool.
+
+    Container-stack manifests mount ``${MEDMCP_WORKSPACE}``; unset, the literal
+    reaches ``docker run`` and every container stack fails discovery.
+    """
+    resolved = tmp_path.resolve()
+    monkeypatch.setattr(server, "WORKSPACE_ROOT", resolved)
+    monkeypatch.setattr(settings, "stack_pool_enabled", lambda: False)
+    # setenv so monkeypatch restores the variable the lifespan assigns.
+    monkeypatch.setenv("MEDMCP_WORKSPACE", "relative/elsewhere")
+
+    with TestClient(server.app, base_url="http://127.0.0.1:8100"):
+        assert os.environ["MEDMCP_WORKSPACE"] == str(resolved)

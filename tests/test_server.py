@@ -2992,6 +2992,21 @@ class TestAssistantCode:
     def _dialogs(conn: server._ChatConnection) -> list[dict[str, Any]]:
         return [m for m in cast("_StubWs", conn.ws).sent if m.get("type") == "permission_request"]
 
+    async def test_a_label_only_the_model_gave_is_not_shown(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """The dialog carries the fixed rules' labels, not the model's own reading."""
+        conn, _ = _connection()
+        req = TestReadOnlyGrantForTheChat._request(1, "python3 - <<'PY'\nprint(1)\nPY")
+        cast("dict[str, Any]", req["params"])["toolCall"]["risks"] = ["privacy"]
+        task = asyncio.create_task(conn._handle_permission(req))
+        await asyncio.sleep(0.05)
+        keys = {r["key"] for r in self._dialogs(conn)[-1]["risks"]}
+        assert "assistant_code" in keys
+        assert "privacy" not in keys
+        conn._pending_perms[1].set_result("reject_once")
+        await task
+
     async def test_script_is_labelled_in_the_dialog(
         self, responses: list[tuple[int, object]]
     ) -> None:

@@ -506,27 +506,24 @@ function PermissionCard({
           )}
         </ul>
       )}
+      {/* One row of buttons, all the same height: this call, a wider approval in
+          the server's own words (it names what is being allowed), then Deny.
+          Without a reject option, Deny cancels the request. */}
       <div className="approval-btns">
         {allow && (
           <button className="btn-primary" onClick={() => onDecide(allow.optionId)}>
-            {allowIsOnce ? 'Allow' : (allow.name ?? allow.optionId)}
+            {allowIsOnce ? (more.length > 0 ? 'Allow once' : 'Allow') : (allow.name ?? allow.optionId)}
           </button>
         )}
-        {/* Without a reject option, Deny cancels the request. */}
-        <button className="abtn-deny" onClick={() => onDecide(reject ? reject.optionId : null)}>
+        {more.map((opt) => (
+          <button key={opt.optionId} className="abtn-plain" onClick={() => onDecide(opt.optionId)}>
+            {opt.name ?? opt.optionId}
+          </button>
+        ))}
+        <button className="abtn-plain" onClick={() => onDecide(reject ? reject.optionId : null)}>
           Deny
         </button>
       </div>
-      {more.length > 0 && (
-        // Wider approvals stay out of the button row: named in full, never primary.
-        <div className="approval-more">
-          {more.map((opt) => (
-            <button key={opt.optionId} onClick={() => onDecide(opt.optionId)}>
-              {opt.name ?? opt.optionId}
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   )
 }

@@ -1293,7 +1293,7 @@ button:hover {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  padding: 18px;
+  padding: 18px 18px 34px;
   max-width: 860px;
   width: 100%;
   margin: 0 auto;
@@ -1691,18 +1691,33 @@ button.model-name:hover {
   flex: 0 0 100%;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   min-width: 0;
   font-size: 11.5px;
+  line-height: 20px;
   color: var(--muted);
 }
 
+/* A long path loses its head, not its file name: the box is laid out right to
+ * left so the ellipsis lands on the left, and <bdi> keeps the path itself in
+ * reading order. */
 .chat-context-path {
+  min-width: 0;
   font-family: var(--mono);
   color: var(--muted2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.chat-input-row .chat-context-clear {
+  flex: none;
+  align-self: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
 }
 
 .chat-input-row textarea {
@@ -1789,6 +1804,13 @@ button.model-name:hover {
   color: var(--muted);
   font-size: 11.5px;
   margin-left: auto;
+}
+
+/* A running call's age, after its status. */
+.tool-elapsed {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .tool-card details {

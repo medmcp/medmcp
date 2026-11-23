@@ -26,6 +26,9 @@ Notable, user-visible changes to MedMCP. Format follows
 - Stacks: background jobs. A stack can declare a job runner in its image label; an approved call of one of its job tools (an nnU-Net training) then runs in its own container, which keeps running when the chat is idle or closed, when another GPU stack is used and when MedMCP restarts. One job at a time by default (`MEDMCP_MAX_JOBS`); `MEDMCP_STACK_JOBS=0` turns jobs off.
 - Jobs: `/api/jobs` lists, shows and stops them; the Tool stacks window shows running jobs with a Stop button; a job's start, image and arguments are recorded in the provenance of the chat that approved it.
 - Explorer: an uploaded `.zip` can be unpacked on the server; an archive that would replace an existing file is refused.
+- Chat: the file "this image" refers to is named above the message box; ✕ leaves it out of the next message.
+- Chat: a running tool call shows how long it has been running.
+- Chat: the browser tab is marked "(!)" while an approval is waiting.
 
 ### Changed
 
@@ -63,6 +66,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Explorer: the first click on a folder opens it.
 - Explorer: New folder works when the selected folder is scrolled out of view.
 - Explorer: a failed upload names each file with its reason and stays until dismissed.
+- Chat: scrolling up while a reply streams stays where you are; the transcript follows new text only from the bottom.
 
 ### Security
 

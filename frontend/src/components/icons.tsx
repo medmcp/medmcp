@@ -316,13 +316,14 @@ export function ListIcon(props: IconProps) {
   )
 }
 
-/** A keyboard — the list of shortcuts and controls. */
-export function KeyboardIcon(props: IconProps) {
+/** A question mark — the list of shortcuts and controls. Drawn rather than
+ *  typed, so it is centred in its box whatever the font's metrics are. The
+ *  view box is cropped to the glyph: at size 14 one unit is one pixel. */
+export function HelpIcon(props: IconProps) {
   return (
-    <Icon {...props}>
-      <rect x="2" y="6" width="20" height="12" rx="2" />
-      <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M18 14h.01" />
-      <line x1="9.5" y1="14" x2="14.5" y2="14" />
+    <Icon viewBox="5 5 14 14" {...props}>
+      <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+      <path d="M12 17h.01" />
     </Icon>
   )
 }

@@ -799,71 +799,6 @@ button:hover {
   font-weight: 400;
 }
 
-/* The overlay picker reuses .vs-popover's frame, but lists paths rather than
-   controls: wider, and scrolling once the workspace has more volumes than fit. */
-.overlay-picker {
-  width: 420px;
-  max-width: calc(100vw - 32px);
-  gap: 8px;
-}
-
-.overlay-picker-search {
-  padding: 5px 8px;
-  background: var(--dark2);
-  color: var(--fg);
-  border: 1px solid var(--border2);
-  border-radius: 6px;
-  font-size: 12px;
-}
-
-.overlay-picker-search:focus {
-  outline: none;
-  border-color: var(--blue-l);
-}
-
-.overlay-picker-list {
-  display: flex;
-  flex-direction: column;
-  max-height: 320px;
-  overflow-y: auto;
-}
-
-/* One file per row: its name first, then its folder, muted. A long folder is
-   what gets clipped, so the name stays readable however deep the file is. */
-.overlay-picker-item {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex-shrink: 0;
-  padding: 5px 7px;
-  background: none;
-  border: 0;
-  border-radius: 5px;
-  color: var(--fg);
-  font-family: var(--mono);
-  font-size: 11.5px;
-  line-height: 16px;
-  text-align: left;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.overlay-picker-name,
-.overlay-picker-dir {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.overlay-picker-dir {
-  flex: 1 1 0;
-  color: var(--muted);
-}
-
-.overlay-picker-item:hover {
-  background: var(--dark2);
-}
-
 .vs-row {
   display: flex;
   align-items: center;
@@ -1720,6 +1655,11 @@ button.model-name:hover {
   display: flex;
   gap: 10px;
   padding: 12px 18px 16px;
+  /* The page's ? button (.help-fab) sits in the bottom-right corner, 46px wide
+     with its inset. While this row reaches that corner its right padding grows
+     to keep Send clear of it; once the panel is wide enough for the centred
+     row to end short of the corner it is the plain 18px again. */
+  padding-right: clamp(18px, calc(46px - (100% - 860px) / 2), 46px);
   border-top: 1px solid var(--border);
   flex-shrink: 0;
   max-width: 860px;
@@ -4695,7 +4635,40 @@ textarea.wf-input {
   color: var(--red-tint);
 }
 
-/* ── Shortcuts and controls window ───────────────────────────────────────── */
+/* ── Shortcuts: the ? button and its window ──────────────────────────────── */
+
+/* Fixed to the page, in the strip the chat composer keeps free beside Send.
+   Above the panels, below every backdrop (the lowest is .drawer-backdrop, 20),
+   so it never floats over a drawer, a window or a dialog. Even dimensions, as
+   every centred control here (see the switch). */
+.help-fab {
+  position: fixed;
+  right: 10px;
+  bottom: 16px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--muted);
+  background: var(--card);
+  border: 1px solid var(--border2);
+  border-radius: 50%;
+}
+
+.help-fab:hover,
+.help-fab:focus-visible {
+  color: var(--text);
+  background: var(--card2);
+  border-color: var(--border2);
+}
+
+.help-fab:focus-visible {
+  outline: 2px solid var(--blue-xl);
+  outline-offset: 2px;
+}
 
 /* A dense reference list, so the rows are tighter than `.settings-row`: at ~40
    bindings that spacing would double the window's height for no gain. The

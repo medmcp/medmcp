@@ -47,6 +47,7 @@ const GROUPS: Group[] = [
       { keys: ['*'], action: 'Open every folder beside this one' },
       { keys: ['a…z'], action: 'Jump to a visible name starting with what you type' },
       { keys: ['Ctrl / ⌘ + click', 'Shift + click'], action: 'Add a row or a range to the selection' },
+      { keys: ['Right-click'], action: 'Row menu; on a volume, Overlay on image' },
     ],
   },
   {
@@ -71,6 +72,7 @@ const GROUPS: Group[] = [
       { keys: ['Double-click'], action: 'Reset the intensity window' },
       { keys: ['Wheel'], action: 'Step slices; zoom the 3D view' },
       { keys: ['Ctrl / ⌘ + wheel', 'Trackpad pinch'], action: 'Zoom the slices about the crosshair' },
+      { keys: ['Drag a volume from Files'], action: 'Overlay it on the image' },
     ],
   },
   {
@@ -107,7 +109,7 @@ export function ShortcutsWindow({ open, onClose }: ShortcutsWindowProps) {
 
   // Focus moves into the window while it is open, so the keyboard scrolls the
   // list rather than driving what is behind the backdrop, and goes back to
-  // where it came from (the header button, or the viewer) on close.
+  // where it came from (the ? button, or the viewer) on close.
   useEffect(() => {
     if (!open) return
     const before = document.activeElement
@@ -125,11 +127,11 @@ export function ShortcutsWindow({ open, onClose }: ShortcutsWindowProps) {
         ref={winRef}
         className="extwin scwin"
         role="dialog"
-        aria-label="Shortcuts and controls"
+        aria-label="Keyboard shortcuts"
         tabIndex={-1}
       >
         <div className="panel-header">
-          <span>Shortcuts and controls</span>
+          <span>Keyboard shortcuts</span>
           <span className="panel-actions">
             <button className="btn-icon" aria-label="Close" onClick={onClose}>
               <XIcon />

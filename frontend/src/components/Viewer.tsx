@@ -1,16 +1,15 @@
 import { memo, useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import { DRAG_MODE, Niivue, SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import type { NVImage, NiiVueLocation } from '@niivue/niivue'
-import { fetchTree, rawUrl } from '../api'
+import { rawUrl } from '../api'
 import { getDraggedFilePath } from '../dragState'
 import { classify, isVolumePath } from '../fileKinds'
-import { DRAG_PATH_MIME, type TreeNode } from '../types'
+import { DRAG_PATH_MIME } from '../types'
 import {
   CameraIcon,
   EyeIcon,
   EyeOffIcon,
   GearIcon,
-  LayersIcon,
   ListIcon,
   PauseIcon,
   PlayIcon,
@@ -1304,7 +1303,7 @@ function VolumeView({
     <div className="volume-view">
       {/* Only rendered once something is actually overlaid: an always-present
           bar would be a permanent strip of controls for a state the viewer is
-          usually not in. The header's overlay button is the way in. */}
+          usually not in. A drop, or the explorer's menu, is the way in. */}
       {overlay.path && (
         <div className="overlay-bar">
           <span className="overlay-label">
@@ -1776,105 +1775,6 @@ function WindowPopover({
   )
 }
 
-/** Every volume in the workspace, deepest-first, as the tree gives them. */
-function volumePaths(nodes: TreeNode[], out: string[] = []): string[] {
-  for (const n of nodes) {
-    if (n.children) volumePaths(n.children, out)
-    else if (isVolumePath(n.id)) out.push(n.id)
-  }
-  return out
-}
-
-/** Rows the overlay picker renders at once; the rest are reached by filtering,
- *  so a workspace of thousands of volumes cannot stall the popover. */
-const PICKER_MAX_ROWS = 100
-
-/** Pick a file to overlay on the open volume.
- *
- *  Dragging one in from the explorer is the quick way when it is already on
- *  screen; this is for one that is not, and it is the affordance that says the
- *  viewer can overlay at all — a drag target nothing advertises is a feature
- *  only its author knows about. */
-function OverlayPicker({
-  base,
-  onPick,
-  onClose,
-}: {
-  base: string
-  onPick: (path: string) => void
-  onClose: () => void
-}) {
-  const [paths, setPaths] = useState<string[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [query, setQuery] = useState('')
-  useEffect(() => {
-    let cancelled = false
-    fetchTree()
-      .then((tree) => {
-        if (!cancelled) setPaths(volumePaths(tree).filter((p) => p !== base))
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setError(String(e))
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [base])
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-  const matches = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    return (paths ?? []).filter((p) => !q || p.toLowerCase().includes(q))
-  }, [paths, query])
-  const shown = matches.slice(0, PICKER_MAX_ROWS)
-  return (
-    <>
-      <div className="vs-backdrop" onClick={onClose} />
-      <div className="vs-popover overlay-picker" role="dialog">
-        <input
-          className="overlay-picker-search"
-          type="search"
-          placeholder="Filter by name"
-          aria-label="Filter volumes"
-          autoFocus
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-        {error !== null && <span className="vs-label">{error}</span>}
-        {error === null && paths === null && <span className="vs-label">Reading the workspace…</span>}
-        {error === null && paths !== null && shown.length === 0 && (
-          <span className="vs-label">
-            {paths.length === 0 ? 'No other volume in the workspace.' : 'No match.'}
-          </span>
-        )}
-        <div className="overlay-picker-list">
-          {shown.map((p) => (
-            <button
-              key={p}
-              className="overlay-picker-item"
-              onClick={() => {
-                onPick(p)
-                onClose()
-              }}
-            >
-              <span className="overlay-picker-name">{p.split('/').pop()}</span>
-              <span className="overlay-picker-dir">{p.split('/').slice(0, -1).join('/')}</span>
-            </button>
-          ))}
-        </div>
-        {matches.length > shown.length && (
-          <span className="vs-label">{matches.length - shown.length} more — type to filter</span>
-        )}
-      </div>
-    </>
-  )
-}
-
 /** Routes the selected file to the right renderer (volume / PDF / image / text). */
 // Memoized so a separator drag doesn't re-render the viewer (and its WebGL/React
 // subtree) every frame; props from App are stable except when the open file
@@ -1906,7 +1806,6 @@ export const Viewer = memo(function Viewer({
   const didResizeRef = useRef(false)
   const [settings, setSettings] = useState<ViewerSettings>(loadViewerSettings)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [pickerOpen, setPickerOpen] = useState(false)
   const [resetToken, setResetToken] = useState(0)
   const [snapshotToken, setSnapshotToken] = useState(0)
   // The overlay is tagged with the base file it belongs to, so it's transparently
@@ -1965,24 +1864,6 @@ export const Viewer = memo(function Viewer({
           {path}
         </span>
         <span className="panel-actions">
-          {kind === 'volume' && (
-            <span className="viewer-settings-anchor">
-              <button
-                className={pickerOpen ? 'btn-icon active' : 'btn-icon'}
-                aria-label="Overlay a segmentation or map on this image"
-                onClick={() => setPickerOpen((v) => !v)}
-              >
-                <LayersIcon />
-              </button>
-              {pickerOpen && (
-                <OverlayPicker
-                  base={path}
-                  onPick={(p) => onOverlayChange(overlayFor(path, p))}
-                  onClose={() => setPickerOpen(false)}
-                />
-              )}
-            </span>
-          )}
           {kind === 'volume' && (
             <button
               className="btn-icon"

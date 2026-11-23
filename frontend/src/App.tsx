@@ -13,9 +13,9 @@ import { SettingsDrawer } from './components/SettingsDrawer'
 import { ShortcutsWindow } from './components/ShortcutsWindow'
 import { UpdateWindow } from './components/UpdateWindow'
 import { Viewer } from './components/Viewer'
-import { EMPTY_OVERLAY, type OverlayState } from './components/viewerData'
+import { EMPTY_OVERLAY, overlayFor, type OverlayState } from './components/viewerData'
 import { WorkflowPanel } from './components/WorkflowPanel'
-import { GearIcon, KeyboardIcon, StoreIcon, XIcon } from './components/icons'
+import { GearIcon, HelpIcon, StoreIcon, XIcon } from './components/icons'
 import {
   ackUpdateResult,
   checkForUpdate,
@@ -48,10 +48,17 @@ function describeUpdateResult(r: NonNullable<UpdateState['last_result']>): strin
 export default function App() {
   const [openPath, setOpenPath] = useState<string | null>(null)
   // What is overlaid on the open volume. Lives here rather than in the viewer so
-  // it survives the viewer's resize rebuild.
+  // the explorer's menu can set it and so it survives the viewer's resize rebuild.
   const [overlay, setOverlay] = useState<OverlayState>(EMPTY_OVERLAY)
   // Files multi-selected in the explorer — feeds the workflow batch editor.
   const [selectedPaths, setSelectedPaths] = useState<string[]>([])
+  // The explorer menu's "Overlay on image": the same state a drop on the viewer sets.
+  const overlayOnOpen = useCallback(
+    (p: string) => {
+      if (openPath) setOverlay(overlayFor(openPath, p))
+    },
+    [openPath],
+  )
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsAdvanced, setSettingsAdvanced] = useState(false)
   // The external-MCP window: reached from Advanced, or straight from the warning
@@ -231,13 +238,6 @@ export default function App() {
           <button className="btn-icon" aria-label="Tool stacks" onClick={() => setMarketOpen(true)}>
             <StoreIcon />
           </button>
-          <button
-            className="btn-icon"
-            aria-label="Shortcuts and controls"
-            onClick={() => setShortcutsOpen(true)}
-          >
-            <KeyboardIcon />
-          </button>
           <button className="btn-icon" aria-label="Settings" onClick={() => setSettingsOpen(true)}>
             <GearIcon />
           </button>
@@ -293,6 +293,21 @@ export default function App() {
       <ModelsWindow open={modelsOpen} onClose={() => setModelsOpen(false)} />
       <StackMarketplace open={marketOpen} onClose={() => setMarketOpen(false)} />
       <ShortcutsWindow open={shortcutsOpen} onClose={closeShortcuts} />
+      {/* Fixed in the page's bottom-right corner, beside the chat's Send button
+          (the composer keeps that strip free, see .chat-input-row) and under
+          every backdrop. Focused by hand before opening: not every browser
+          focuses a clicked button, and the window hands focus back to whatever
+          held it. */}
+      <button
+        className="help-fab"
+        aria-label="Keyboard shortcuts"
+        onClick={(e) => {
+          e.currentTarget.focus()
+          setShortcutsOpen(true)
+        }}
+      >
+        <HelpIcon size={14} />
+      </button>
       <Group
         orientation="vertical"
         className="app-main"
@@ -311,6 +326,8 @@ export default function App() {
                 refreshSignal={fsVersion}
                 onSelectionChange={setSelectedPaths}
                 isResizing={resizing}
+                overlayBase={openPath}
+                onOverlay={overlayOnOpen}
               />
             </Panel>
             <Separator className="sep sep-v" />

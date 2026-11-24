@@ -33,6 +33,37 @@ export interface ToolCallState {
   /** Browser time (ms) the call was seen to start running in a live turn; unset
    *  for a replayed call, one waiting for approval, and once the turn ended. */
   startedAt?: number
+  /** The call outlived its first answer and continues as a background task. */
+  task?: TaskBrief
+}
+
+/** What a tool card knows about the task its call became. */
+export interface TaskBrief {
+  taskId: string
+  /** working | completed | failed | cancelled (unknown: no longer kept). */
+  status: string
+  statusMessage?: string
+  /** The task's result (or error), once it ended. */
+  output?: string | null
+  /** The notice shown once when the call became a task ("Task … started …"). */
+  started?: string
+}
+
+/** A task (from GET /api/tasks): a long stack call that finishes in the background. */
+export interface TaskInfo {
+  taskId: string
+  status: 'working' | 'completed' | 'failed' | 'cancelled'
+  statusMessage: string
+  stack: string
+  tool: string
+  createdAt: string | null
+  lastUpdatedAt: string | null
+  elapsedSec: number
+  session: string
+  session_title?: string
+  error?: string
+  /** The call's arguments, as approved. */
+  arguments?: Record<string, unknown>
 }
 
 /** A risk tag resolved by the server from the fixed taxonomy. */
@@ -117,6 +148,8 @@ export interface JobInfo {
   session_title?: string
   /** What the job last reported about itself (running jobs only). */
   progress?: { fraction?: number; text?: string; updated_at?: number } | null
+  /** The approved call's arguments. */
+  arguments?: Record<string, unknown>
 }
 
 /** A container-installed stack (from GET /api/stacks); uninstallable via the UI. */
@@ -358,8 +391,9 @@ export type ChatItem = { id: number } & (
   | { kind: 'assistant'; text: string }
   | { kind: 'tool'; toolCallId: string }
   | { kind: 'error'; text: string }
-  // A non-error note from the server (e.g. the turn stopped at the step limit).
-  | { kind: 'notice'; text: string }
+  // A non-error note from the server (e.g. the turn stopped at the step limit);
+  // `task`: the core started this turn because a background task finished.
+  | { kind: 'notice'; text: string; task?: boolean }
 )
 
 /** What a rewind would restore (preview) / did restore (perform). */
@@ -394,6 +428,8 @@ export type ServerFrame =
       /** A settled call replayed on resume carries its output here. */
       output?: string | null
       pathGuardRetry?: boolean
+      /** The call became a background task. */
+      task?: TaskBrief
     }
   | {
       type: 'tool_call_update'
@@ -404,6 +440,19 @@ export type ServerFrame =
       rawInput?: unknown
       /** Server-tagged: the path guard turned the call back before it ran. */
       pathGuardRetry?: boolean
+      /** The call answered with a task handle and continues in the background. */
+      task?: TaskBrief
+    }
+  /** The core started a turn because tasks finished (`live`), or its replay. */
+  | { type: 'task_notice'; text: string; taskIds: string[]; live: boolean }
+  /** A task of this chat ended. */
+  | {
+      type: 'task_update'
+      taskId: string
+      toolCallId: string
+      status: string
+      statusMessage: string
+      output?: string | null
     }
   | { type: 'usage'; used: number; size?: number }
   | {

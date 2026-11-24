@@ -18,13 +18,17 @@ import type {
   ToolCallState,
 } from '../types'
 import { ChatsMenu } from './ChatsMenu'
+import { JobPill } from './JobPill'
 import {
   AlertIcon,
+  ArrowUpIcon,
   CheckIcon,
   ChevronRightIcon,
+  FileIcon,
   PlusIcon,
   RewindIcon,
   ShieldIcon,
+  StopSquareIcon,
   XIcon,
 } from './icons'
 
@@ -111,8 +115,26 @@ const PlanCard = memo(function PlanCard({ items }: { items: TodoItem[] }) {
 /** Frames after new output in which a following transcript is pinned again. */
 const SETTLE_FRAMES = 3
 
+// How long after the last streamed text "Thinking…" may show again.
+const WRITING_QUIET_MS = 1500
+
 function settled(tc: ToolCallState): boolean {
   return tc.status === 'completed' || tc.status === 'failed'
+}
+
+/** A call's state as its card shows it: a call that became a task follows the task. */
+function shownStatus(tc: ToolCallState): { cls: string; label: string } {
+  const task = tc.task
+  if (task && tc.status === 'completed') {
+    if (task.status === 'working') {
+      return { cls: 'busy', label: `running in the background · ${task.taskId}` }
+    }
+    if (task.status === 'completed') return { cls: 'ok', label: 'completed' }
+    if (task.status === 'cancelled') return { cls: 'fail', label: 'stopped' }
+    if (task.status === 'failed') return { cls: 'fail', label: 'failed' }
+  }
+  const cls = tc.status === 'completed' ? 'ok' : tc.status === 'failed' ? 'fail' : 'busy'
+  return { cls, label: tc.status }
 }
 
 /** The call's clock start, while it is running one. */
@@ -181,15 +203,14 @@ const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
     const plan = parsePlan(tc.rawInput)
     if (plan.length > 0) return <PlanCard items={plan} />
   }
-  const statusClass =
-    tc.status === 'completed' ? 'ok' : tc.status === 'failed' ? 'fail' : 'busy'
+  const shown = shownStatus(tc)
   const since = clockStart(tc)
   return (
     <div className="tool-card">
       <div className="tool-card-head">
-        <span className={`status-dot ${statusClass}`} />
+        <span className={`status-dot ${shown.cls}`} />
         <span className="tool-title">{tc.title}</span>
-        <span className="tool-status">{tc.status}</span>
+        <span className="tool-status">{shown.label}</span>
         {since != null && <ToolElapsed key={since} since={since} />}
       </div>
       {tc.rawInput != null && (
@@ -211,12 +232,16 @@ const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
 /** Whether this call may fold into a run of calls to the same tool. */
 function groupable(tc: ToolCallState): boolean {
   return (
-    !!tc.toolName && tc.toolName !== TODO_TOOL && tc.toolName !== TOOL_SEARCH && !tc.pathGuardRetry
+    !!tc.toolName &&
+    tc.toolName !== TODO_TOOL &&
+    tc.toolName !== TOOL_SEARCH &&
+    !tc.pathGuardRetry &&
+    !tc.task
   )
 }
 
-function callStatusClass(status: string): string {
-  return status === 'completed' ? 'ok' : status === 'failed' ? 'fail' : 'busy'
+function callStatusClass(tc: ToolCallState): string {
+  return shownStatus(tc).cls
 }
 
 // Several calls to one tool in a row — an agent listing its way through a
@@ -227,11 +252,22 @@ const ToolGroup = memo(
   function ToolGroup({ calls }: { calls: ToolCallState[] }) {
     const tool = calls[0].toolName ?? 'tool'
     const running = calls.filter((c) => !settled(c)).length
-    const failed = calls.filter((c) => c.status === 'failed').length
-    const statusClass = running > 0 ? 'busy' : failed > 0 ? 'fail' : 'ok'
+    const background = calls.filter((c) => c.task?.status === 'working').length
+    const stopped = calls.filter((c) => c.task?.status === 'cancelled').length
+    const failed = calls.filter((c) => callStatusClass(c) === 'fail').length - stopped
+    const statusClass =
+      running + background > 0 ? 'busy' : failed + stopped > 0 ? 'fail' : 'ok'
     const status =
       `${calls.length} calls` +
-      (running > 0 ? ', running' : failed > 0 ? `, ${failed} failed` : '')
+      (running > 0
+        ? ', running'
+        : background > 0
+          ? ', running in the background'
+          : failed > 0
+            ? `, ${failed} failed`
+            : stopped > 0
+              ? `, ${stopped} stopped`
+              : '')
     const since = calls.map(clockStart).find((t) => t != null)
     return (
       <div className="tool-card tool-group">
@@ -248,7 +284,7 @@ const ToolGroup = memo(
             <div key={tc.toolCallId} className="tool-group-call">
               <details>
                 <summary>
-                  <span className={`status-dot ${callStatusClass(tc.status)}`} />
+                  <span className={`status-dot ${callStatusClass(tc)}`} />
                   <span className="tool-group-label">{label}</span>
                 </summary>
                 {tc.rawInput != null && (
@@ -422,7 +458,6 @@ const AssistantMessage = memo(function AssistantMessage({
   }, [text, streaming])
   return (
     <div className="msg msg-ai">
-      <div className="msg-avatar avatar-ai">AI</div>
       <div className="msg-bubble bubble-ai">
         {head && <MarkdownBlock source={head} />}
         {tail && <MarkdownBlock source={tail} />}
@@ -537,6 +572,9 @@ function PermissionCard({
   )
 }
 
+/** The message box's tallest, in pixels, before it scrolls: eight lines. */
+const COMPOSER_MAX_PX = 8 * 22 + 12
+
 // The message composer, split out (with its own draft state) so a keystroke
 // re-renders only this textarea — not the whole transcript above it. Memoized,
 // so a streaming flush in the parent doesn't re-render it either. Enter sends
@@ -548,6 +586,7 @@ const ChatInput = memo(function ChatInput({
   onSend,
   onCancel,
   onClearContext,
+  bgSignal,
 }: {
   busy: boolean
   canSend: boolean
@@ -555,59 +594,114 @@ const ChatInput = memo(function ChatInput({
   onSend: (text: string) => void
   onCancel: () => void
   onClearContext: () => void
+  bgSignal: number
 }) {
   const [input, setInput] = useState('')
+  // The box keeps focus after a send so the next message can follow at once,
+  // but nothing needs attention there: its highlight goes until the person
+  // types, clicks into it or comes back to it.
+  const [sent, setSent] = useState(false)
+  const field = useRef<HTMLTextAreaElement>(null)
   const submit = () => {
     const text = input.trim()
     if (!text || !canSend) return
     onSend(text)
     setInput('')
+    setSent(true)
   }
+
+  // The box grows with its text up to a cap, then scrolls. Measured again when
+  // its width changes (a separator drag re-wraps the text).
+  useLayoutEffect(() => {
+    const el = field.current
+    if (!el) return
+    let width = -1
+    const fit = () => {
+      el.style.height = 'auto'
+      el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_PX)}px`
+      el.style.overflowY = el.scrollHeight > COMPOSER_MAX_PX ? 'auto' : 'hidden'
+    }
+    fit()
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth !== width) {
+        width = el.clientWidth
+        fit()
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [input])
+
   return (
-    <div className="chat-input-row">
-      <textarea
-        value={input}
-        placeholder="Message the agent… (Enter to send, Shift+Enter for newline)"
-        rows={2}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && !e.shiftKey) {
+    <div className="composer">
+      {/* A click on the card's empty space puts the cursor in the box. */}
+      <div
+        className={sent ? 'composer-card composer-sent' : 'composer-card'}
+        onMouseDown={(e) => {
+          setSent(false)
+          if (e.target === e.currentTarget || e.target === e.currentTarget.lastChild) {
             e.preventDefault()
-            submit()
+            field.current?.focus()
           }
         }}
-      />
-      {busy ? (
-        <button className="btn-danger" onClick={onCancel}>
-          Stop
-        </button>
-      ) : (
-        <button className="btn-primary" onClick={submit} disabled={!canSend}>
-          Send
-        </button>
-      )}
-      {/* What "this image" will resolve to. The server appends the open file to
-          the prompt as a workspace-context note and strips it from the
-          transcript, so without this the pointer is invisible — "segment this"
-          would act on whatever happened to be open. ✕ sends prompts
-          without it. The line keeps its height when empty, so the message box
-          never moves when a file is opened, dropped or sent. */}
-      <div className="chat-viewing">
-        {contextPath && (
-          <>
-            <span className="chat-viewing-label">Viewing</span>
-            <span className="chat-viewing-name">
-              <bdi>{contextPath.slice(contextPath.lastIndexOf('/') + 1)}</bdi>
+      >
+        <textarea
+          ref={field}
+          value={input}
+          placeholder="Message the agent…"
+          rows={1}
+          onChange={(e) => {
+            setInput(e.target.value)
+            setSent(false)
+          }}
+          onFocus={() => setSent(false)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              submit()
+            }
+          }}
+        />
+        <div className="composer-bar">
+          {/* What "this image" will resolve to. The server appends the open file
+              to the prompt as a workspace-context note and strips it from the
+              transcript, so without this the pointer is invisible — "segment
+              this" would act on whatever happened to be open. ✕ sends prompts
+              without it. The bar's height is the send button's, so the box
+              never moves when a file is opened, dropped or sent. */}
+          {contextPath && (
+            <span className="composer-file">
+              <FileIcon size={12} />
+              <span className="composer-file-label">Viewing</span>
+              <span className="composer-file-name">
+                <bdi>{contextPath.slice(contextPath.lastIndexOf('/') + 1)}</bdi>
+              </span>
+              <button
+                className="composer-file-clear"
+                aria-label="Don't send this file with my messages"
+                onClick={onClearContext}
+              >
+                <XIcon size={12} />
+              </button>
             </span>
-            <button
-              className="btn-icon chat-viewing-clear"
-              aria-label="Don't send this file with my messages"
-              onClick={onClearContext}
-            >
-              <XIcon size={12} />
+          )}
+          {/* Background work (tasks and jobs): "1 running task", next to send. */}
+          <JobPill refreshSignal={bgSignal} />
+          {busy ? (
+            <button className="composer-send composer-stop" aria-label="Stop" onClick={onCancel}>
+              <StopSquareIcon fill="currentColor" />
             </button>
-          </>
-        )}
+          ) : (
+            <button
+              className="composer-send"
+              aria-label="Send"
+              onClick={submit}
+              disabled={!canSend || !input.trim()}
+            >
+              <ArrowUpIcon />
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -653,6 +747,8 @@ export const Chat = memo(function Chat({
 }) {
   const [items, setItems] = useState<ChatItem[]>([])
   const [toolCalls, setToolCalls] = useState<Record<string, ToolCallState>>({})
+  const toolRunning = Object.values(toolCalls).some((tc) => !settled(tc))
+  const [writing, setWriting] = useState(false)
   const rows = useMemo(() => groupRows(items, toolCalls), [items, toolCalls])
   const [status, setStatus] = useState<ChatSocketStatus>('connecting')
   const [busy, setBusy] = useState(false)
@@ -681,6 +777,21 @@ export const Chat = memo(function Chat({
   const socketRef = useRef<ChatSocket | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // The transcript's right margin gives up exactly the scrollbar's width so its
+  // edge lines up with the message box. Measured, because browsers differ (9px
+  // here in Chromium, other widths in Firefox, none with overlay scrollbars).
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const measure = () => {
+      const bar = el.offsetWidth - el.clientWidth
+      el.style.setProperty('--scrollbar-here', `${Math.max(0, bar)}px`)
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
   // Whether the transcript follows new output: true while the reader is at the
   // bottom. Kept from scroll events, never measured after the DOM has grown —
   // by then "not at the bottom" is true of every reader.
@@ -693,6 +804,9 @@ export const Chat = memo(function Chat({
   const heldCallRef = useRef<string | null>(null)
   // The frame handler below is a mount-once closure; route the callback
   // through a ref so it always sees the latest prop.
+  // Bumped when a tool call settles or a task changes, so the background-work
+  // indicator under the message box refreshes at once instead of on its next poll.
+  const [bgSignal, setBgSignal] = useState(0)
   const onToolActivityRef = useRef(onToolActivity)
   useEffect(() => {
     onToolActivityRef.current = onToolActivity
@@ -720,6 +834,9 @@ export const Chat = memo(function Chat({
     // (each re-parsing the accumulated markdown).
     let chunkBuffer = ''
     let flushTimer: number | null = null
+    // While text arrives the text itself shows the model at work; "Thinking…"
+    // comes back only after a quiet moment (the model working on its next step).
+    let quietTimer: number | null = null
     const flushChunks = () => {
       if (flushTimer != null) {
         clearTimeout(flushTimer)
@@ -735,6 +852,9 @@ export const Chat = memo(function Chat({
         }
         return [...prev, { id: nextItemId(), kind: 'assistant', text }]
       })
+      setWriting(true)
+      if (quietTimer != null) clearTimeout(quietTimer)
+      quietTimer = window.setTimeout(() => setWriting(false), WRITING_QUIET_MS)
     }
     // A call gets its clock when it is first seen running in a live turn. One
     // still queued (`pending`) or waiting at its approval box has not started.
@@ -788,9 +908,11 @@ export const Chat = memo(function Chat({
                 kind: frame.kind,
                 toolName: frame.toolName,
                 rawInput: frame.rawInput,
-                output: frame.output ?? prev[frame.toolCallId]?.output,
+                // A replayed call that became a task shows the task's result.
+                output: frame.task?.output ?? frame.output ?? prev[frame.toolCallId]?.output,
                 pathGuardRetry: frame.pathGuardRetry || prev[frame.toolCallId]?.pathGuardRetry,
                 startedAt: prev[frame.toolCallId]?.startedAt ?? startedAt,
+                task: frame.task ?? prev[frame.toolCallId]?.task,
               },
             }))
           }
@@ -808,17 +930,55 @@ export const Chat = memo(function Chat({
                 ...tc,
                 status,
                 startedAt: settled({ ...tc, status }) ? undefined : (tc.startedAt ?? startedAt),
-                output: frame.output ?? tc.output,
+                output: frame.task?.output ?? frame.output ?? tc.output,
                 // Sent again once the model finished streaming the arguments;
                 // the opening frame's copy can be empty or partial.
                 rawInput: frame.rawInput ?? tc.rawInput,
                 pathGuardRetry: frame.pathGuardRetry || tc.pathGuardRetry,
+                task: frame.task ?? tc.task,
               },
             }
           })
-          if (frame.status === 'completed') onToolActivityRef.current?.()
+          if (frame.status === 'completed') {
+            onToolActivityRef.current?.()
+            setBgSignal((n) => n + 1)
+          }
           break
         }
+        case 'task_update':
+          // A task of this chat ended: its card settles with the real result.
+          setToolCalls((prev) => {
+            const id =
+              frame.toolCallId && prev[frame.toolCallId]
+                ? frame.toolCallId
+                : Object.keys(prev).find((k) => prev[k].task?.taskId === frame.taskId)
+            const tc = id ? prev[id] : undefined
+            if (!id || !tc) return prev
+            const task = {
+              ...tc.task,
+              taskId: frame.taskId,
+              status: frame.status,
+              statusMessage: frame.statusMessage,
+              output: frame.output,
+            }
+            return { ...prev, [id]: { ...tc, task, output: frame.output ?? tc.output } }
+          })
+          onToolActivityRef.current?.()
+          setBgSignal((n) => n + 1)
+          break
+        case 'task_notice':
+          // A turn the core started because tasks finished: a system notice,
+          // and (live) the chat is busy until that turn is done.
+          setItems((prev) => [
+            ...prev,
+            { id: nextItemId(), kind: 'notice', text: frame.text, task: true },
+          ])
+          if (frame.live) {
+            setBusy(true)
+            turnLiveRef.current = true
+            followRef.current = { ...followRef.current, following: true }
+          }
+          break
         case 'usage':
           setUsage({ used: frame.used, size: frame.size ?? null })
           break
@@ -854,6 +1014,7 @@ export const Chat = memo(function Chat({
           setRetrying(null)
           setPermission(null)
           onToolActivityRef.current?.()
+          setBgSignal((n) => n + 1)
           break
         case 'error':
           endTurn()
@@ -937,6 +1098,7 @@ export const Chat = memo(function Chat({
     return () => {
       socket.close()
       if (flushTimer != null) clearTimeout(flushTimer)
+      if (quietTimer != null) clearTimeout(quietTimer)
     }
   }, [])
 
@@ -1099,15 +1261,12 @@ export const Chat = memo(function Chat({
             </button>
           )}
           {usage != null && <ContextMeter used={usage.used} size={usage.size} />}
-          <span
-            className={`conn conn-${retrying ? 'retrying' : status}`}
-          >
-            {retrying
-              ? `retrying… ${retrying.category.replace(/_/g, ' ')}`
-              : status === 'open'
-                ? 'running'
-                : status}
-          </span>
+          {/* Only when the connection needs a word: connected is the normal state. */}
+          {(retrying || status !== 'open') && (
+            <span className={`conn conn-${retrying ? 'retrying' : status}`}>
+              {retrying ? `retrying… ${retrying.category.replace(/_/g, ' ')}` : status}
+            </span>
+          )}
         </span>
       </div>
       <div className="panel-body chat-scroll" ref={scrollRef} onScroll={onScroll}>
@@ -1131,6 +1290,15 @@ export const Chat = memo(function Chat({
           const { item, index: i } = row
           if (item.kind === 'tool') {
             const tc = toolCalls[item.toolCallId]
+            // A call that became a task turns into its notice; the finished
+            // notice and the assistant's reply carry the result.
+            if (tc?.task) {
+              return (
+                <div key={item.id} className="msg-notice msg-task-notice">
+                  {tc.task.started ?? 'Task started in the background'}
+                </div>
+              )
+            }
             return tc ? (
               <ToolCard
                 key={item.id}
@@ -1152,7 +1320,6 @@ export const Chat = memo(function Chat({
                       <RewindIcon />
                     </button>
                   )}
-                  <div className="msg-avatar avatar-user">You</div>
                   <div className="msg-bubble bubble-user">{item.text}</div>
                 </div>
                 {rewind && rewind.messageId === mid && (
@@ -1201,7 +1368,7 @@ export const Chat = memo(function Chat({
           }
           if (item.kind === 'notice') {
             return (
-              <div key={item.id} className="msg-notice">
+              <div key={item.id} className={item.task ? 'msg-notice msg-task-notice' : 'msg-notice'}>
                 {item.text}
               </div>
             )
@@ -1213,7 +1380,14 @@ export const Chat = memo(function Chat({
           )
         })}
         {permission && <PermissionCard perm={permission} onDecide={decide} />}
-        {busy && !permission && <div className="thinking">Thinking…</div>}
+        {/* Only while the model itself works: not while a tool runs or an
+            approval waits — those have their own card — and not while text arrives. */}
+        {busy &&
+          !permission &&
+          !toolRunning &&
+          !writing &&
+          // Where the answer will appear: the column's left edge.
+          <div className="thinking">Thinking…</div>}
       </div>
       <ChatInput
         busy={busy}
@@ -1222,6 +1396,7 @@ export const Chat = memo(function Chat({
         onSend={send}
         onCancel={cancel}
         onClearContext={clearContext}
+        bgSignal={bgSignal}
       />
     </div>
   )

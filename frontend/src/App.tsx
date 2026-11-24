@@ -46,11 +46,8 @@ function describeUpdateResult(r: NonNullable<UpdateState['last_result']>): strin
  */
 export default function App() {
   const [openPath, setOpenPath] = useState<string | null>(null)
-  // Counts opens, so the chat can tell the same file being opened again.
-  const [openSeq, setOpenSeq] = useState(0)
   const openFile = useCallback((path: string) => {
     setOpenPath(path)
-    setOpenSeq((n) => n + 1)
   }, [])
   // What is overlaid on the open volume. Lives here rather than in the viewer so
   // the explorer's menu can set it and so it survives the viewer's resize rebuild.
@@ -361,7 +358,6 @@ export default function App() {
                 key={chatKey}
                 onPromptedSession={setDistillSessionId}
                 viewedPath={openPath}
-                viewedSeq={openSeq}
                 onToolActivity={notifyFsChanged}
                 resumeSessionId={resumeId}
                 onSessionEstablished={handleSessionEstablished}

@@ -26,7 +26,6 @@ import {
   CheckIcon,
   ChevronRightIcon,
   CopyIcon,
-  FileIcon,
   PlusIcon,
   RewindIcon,
   ShieldIcon,
@@ -398,6 +397,30 @@ function splitMarkdownBlocks(text: string): string[] {
   return blocks
 }
 
+// Models also write LaTeX's own delimiters, \[…\] for a display equation and
+// \(…\) inline; remark-math knows only $$…$$ and $…$, and Markdown reads \[ as an
+// escaped bracket, so those formulas showed as raw text. Rewrite them to the
+// dollar forms before parsing, never inside fenced or inline code.
+function normalizeLatexDelimiters(text: string): string {
+  if (!text.includes('\\[') && !text.includes('\\(')) return text
+  const rewrite = (prose: string) =>
+    prose
+      .replace(/\\\[([\s\S]+?)\\\]/g, (_m, tex: string) => `\n$$\n${tex.trim()}\n$$\n`)
+      .replace(/\\\(([\s\S]+?)\\\)/g, (_m, tex: string) => `$${tex.trim()}$`)
+  // Fenced blocks first, then inline code spans within the prose between them.
+  return text
+    .split(/(^[ \t]*(?:```|~~~)[\s\S]*?^[ \t]*(?:```|~~~)[ \t]*$)/m)
+    .map((part, i) =>
+      i % 2 === 1
+        ? part
+        : part
+            .split(/(`+[^`]*?`+)/)
+            .map((piece, j) => (j % 2 === 1 ? piece : rewrite(piece)))
+            .join(''),
+    )
+    .join('')
+}
+
 // remark-math only renders $$…$$ as a centered *display* block when the fences
 // sit on their own lines; a single-line $$…$$ (which models routinely emit)
 // parses as inline math — no displaystyle, no .katex-display scroll container.
@@ -530,7 +553,7 @@ const AssistantMessage = memo(function AssistantMessage({
   // so only that small tail re-parses per flush. A settled message renders as a
   // single document — fully correct, parsed once.
   const { head, tail } = useMemo(() => {
-    const md = promoteDisplayMath(text)
+    const md = promoteDisplayMath(normalizeLatexDelimiters(text))
     if (!streaming) return { head: md, tail: '' }
     const blocks = splitMarkdownBlocks(md)
     return {
@@ -664,18 +687,14 @@ const COMPOSER_MAX_PX = 8 * 22 + 10
 const ChatInput = memo(function ChatInput({
   busy,
   canSend,
-  contextPath,
   onSend,
   onCancel,
-  onClearContext,
   bgSignal,
 }: {
   busy: boolean
   canSend: boolean
-  contextPath: string | null
   onSend: (text: string) => void
   onCancel: () => void
-  onClearContext: () => void
   bgSignal: number
 }) {
   const [input, setInput] = useState('')
@@ -728,29 +747,6 @@ const ChatInput = memo(function ChatInput({
           }
         }}
       >
-        {/* What "this image" will resolve to. The server appends the open file
-            to the prompt as a workspace-context note and strips it from the
-            transcript, so without this the pointer is invisible — "segment
-            this" would act on whatever happened to be open. ✕ sends prompts
-            without it. Shown only while a file is open, above the text. */}
-        {contextPath && (
-          <div className="composer-files">
-            <span className="composer-file">
-              <FileIcon size={12} />
-              <span className="composer-file-label">Viewing</span>
-              <span className="composer-file-name">
-                <bdi>{contextPath.slice(contextPath.lastIndexOf('/') + 1)}</bdi>
-              </span>
-              <button
-                className="composer-file-clear"
-                aria-label="Don't send this file with my messages"
-                onClick={onClearContext}
-              >
-                <XIcon size={12} />
-              </button>
-            </span>
-          </div>
-        )}
         {/* One line by default: the text, then background work and send beside
             it; the text grows upward only when it needs more lines. */}
         <div className="composer-row">
@@ -800,7 +796,6 @@ const ChatInput = memo(function ChatInput({
 export const Chat = memo(function Chat({
   onPromptedSession,
   viewedPath,
-  viewedSeq = 0,
   onToolActivity,
   resumeSessionId,
   onSessionEstablished,
@@ -811,11 +806,9 @@ export const Chat = memo(function Chat({
 }: {
   /** Called with the vibe session id whenever a prompt is sent into it. */
   onPromptedSession?: (id: string) => void
-  /** Workspace-relative file open in the viewer, offered as prompt context
-   *  (named in a line under the message box, which the reader can clear). */
+  /** Workspace-relative file open in the viewer, sent as prompt context (the
+   *  explorer marks it). */
   viewedPath?: string | null
-  /** Bumped on every open in the viewer, so reopening the same file counts. */
-  viewedSeq?: number
   /** Called when a tool call completes / a turn ends (may have written files). */
   onToolActivity?: () => void
   /** Session to resume on connect; the server reloads it and replays history. */
@@ -854,12 +847,9 @@ export const Chat = memo(function Chat({
     paths: string[]
     busy: boolean
   } | null>(null)
-  // The file the next prompt resolves "this image" to: the one in the viewer,
-  // unless the reader dropped it. A drop holds until a file is opened again
-  // (the same one included); sending a message does not bring it back.
-  const [dropped, setDropped] = useState<{ path: string; seq: number } | null>(null)
-  const contextPath =
-    viewedPath && !(dropped?.path === viewedPath && dropped.seq === viewedSeq) ? viewedPath : null
+  // The file the next prompt resolves "this image" to: the one in the viewer
+  // (the explorer marks it).
+  const contextPath = viewedPath ?? null
   const socketRef = useRef<ChatSocket | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -1270,11 +1260,6 @@ export const Chat = memo(function Chat({
     [contextPath, onPromptedSession],
   )
 
-  // Stable for the same reason as `send`.
-  const clearContext = useCallback(() => {
-    if (viewedPath) setDropped({ path: viewedPath, seq: viewedSeq })
-  }, [viewedPath, viewedSeq])
-
   const cancel = useCallback(() => socketRef.current?.cancel(), [])
 
   const decide = (optionId: string | null) => {
@@ -1496,10 +1481,8 @@ export const Chat = memo(function Chat({
       <ChatInput
         busy={busy}
         canSend={status === 'open'}
-        contextPath={contextPath}
         onSend={send}
         onCancel={cancel}
-        onClearContext={clearContext}
         bgSignal={bgSignal}
       />
     </div>

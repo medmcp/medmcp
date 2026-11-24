@@ -16,12 +16,14 @@ Notable, user-visible changes to MedMCP. Format follows
 ### Changed
 
 - Chat: one centred column without avatars; answers as plain text, your messages as right-aligned bubbles; the message box starts as one line, with background work as a chip beside Send.
+- Chat: the file open in the viewer is marked in the explorer instead of named under the message box; it is still sent with each message.
 - The `docs/` folder is gone; the stack-author contracts for background jobs and the dataset index are in `jobspec.py` and `workspace_note.py`.
 
 ### Fixed
 
 - The workspace page loads fresh after an update instead of showing the previous version.
 - Chat: a message sent while an answer streams no longer gets the old answer's last words.
+- Chat: formulas written as `\[…\]` or `\(…\)` render as math.
 - Stacks: a second call to a busy stack no longer kills the running one, and a stopped call ends at once instead of hanging for hours.
 - `just install-stack` keeps a stack on mcp 1.x; it picked up mcp 2, which stacks cannot import.
 - Chats: opening a new chat no longer fails when the assistant was just closed.

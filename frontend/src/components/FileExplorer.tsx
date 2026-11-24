@@ -164,6 +164,7 @@ function NodeRow({
   onMenu,
   loading,
   dropDir,
+  openPath,
 }: NodeRendererProps<TreeNode> & RowExtras) {
   if (node.data.more) {
     return (
@@ -185,7 +186,7 @@ function NodeRow({
       style={style}
       className={`tree-row${node.isSelected ? ' selected' : ''}${
         isDir && node.data.id === dropDir ? ' drop-into' : ''
-      }`}
+      }${!isDir && node.data.id === openPath ? ' is-open' : ''}`}
       data-path={node.data.id}
       data-dir={isDir ? '' : undefined}
       onClick={() => {
@@ -259,12 +260,15 @@ interface RowExtras {
   loading: ReadonlySet<string>
   /** Folder a desktop drag would upload into; its row is marked. */
   dropDir: string | null
+  /** The file open in the viewer — the one the chat's "this" means; marked. */
+  openPath: string | null
 }
 
 const RowContext = createContext<RowExtras>({
   onMenu: () => undefined,
   loading: new Set(),
   dropDir: null,
+  openPath: null,
 })
 
 /**
@@ -913,7 +917,7 @@ export const FileExplorer = memo(function FileExplorer({
             This workspace is empty. Upload files, or drop files or folders here.
           </div>
         )}
-        <RowContext.Provider value={{ onMenu: openMenu, loading, dropDir }}>
+        <RowContext.Provider value={{ onMenu: openMenu, loading, dropDir, openPath: overlayBase ?? null }}>
         <Tree<TreeNode>
           ref={treeRef}
           data={data}

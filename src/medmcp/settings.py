@@ -2363,6 +2363,7 @@ def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:
       vibe-specific fields such as ``startup_timeout_sec`` are preserved and only
       ``command``/``args`` are updated; an entry with no ``startup_timeout_sec``
       is given one (vibe's 10 s default is too tight for a container cold start).
+      Every entry gets ``sampling_enabled = false``.
       With the backend pool on, stdio stacks are rewritten through the proxy.
     - ``providers``/``models``/``active_model`` — the chosen local or cloud model.
     - ``system_prompt_id`` — the base prompt or a derived variant, unless a
@@ -2461,6 +2462,13 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
         entry["startup_timeout_sec"] = (
             DEFAULT_STACK_STARTUP_TIMEOUT_SEC if is_container else DEFAULT_STARTUP_TIMEOUT_SEC
         )
+
+    # MCP sampling lets a server ask the client for model completions: a stack or
+    # an external server could spend the user's model and steer what it is sent.
+    # Nothing here needs it, vibe allows it by default, and the 2026-07-28 spec
+    # deprecates it, so it is off for every entry, a hand-set value included.
+    for entry in new_entries:
+        entry["sampling_enabled"] = False
 
     # Route every stack through the pre-warm proxy when the pool is enabled. vibe
     # then spawns the cheap `medmcp-mcp-proxy <stack>` shim, which forwards to the

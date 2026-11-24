@@ -261,6 +261,22 @@ class TestSyncServersToVibeConfig:
         assert entry["startup_timeout_sec"] == 30.0
         assert entry["tool_timeout_sec"] == 3600.0
 
+    def test_sampling_is_off_for_every_server(self, tmp_path: Path) -> None:
+        """No server may ask the client for model completions, a hand-set value included."""
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(
+            '[[mcp_servers]]\nname = "medmcp-neuro"\ncommand = "medmcp-neuro"\n'
+            "sampling_enabled = true\n"
+        )
+        servers: list[JsonDict] = [
+            {"name": "medmcp-neuro", "command": "uvx", "args": ["medmcp-neuro"], "env": []},
+            {"name": "medmcp-dicom", "command": "docker", "args": ["run"], "env": []},
+        ]
+        with patch("medmcp.settings.VIBE_HOME", tmp_path):
+            result = synced_config(tmp_path, servers)
+
+        assert [e["sampling_enabled"] for e in result["mcp_servers"]] == [False, False]
+
     def test_preserves_other_config_keys(self, tmp_path: Path) -> None:
         """Non-mcp_servers settings in config.toml are not disturbed."""
         cfg_path = tmp_path / "config.toml"

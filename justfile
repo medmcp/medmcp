@@ -69,7 +69,7 @@ pull-config:
 # Usage: just install-stack ../medmcp-neuro
 #        just install-stack "git+ssh://git@github.com/medmcp/medmcp-neuro.git"
 install-stack STACK:
-    uv tool install {{STACK}}
+    uv tool install --constraints {{justfile_directory()}}/stack-constraints.txt {{STACK}}
 
 # Uninstall a stack package from its isolated uv environment.
 # Usage: just uninstall-stack medmcp-neuro

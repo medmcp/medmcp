@@ -200,7 +200,9 @@ class BackendBroker:
 
         if op == "list_tools":
             tools = await self._pool.list_tools(stack)
-            dumped = [t.model_dump(mode="json") for t in tools]
+            # By alias, so a tool's ``_meta`` (which carries its declared effect,
+            # see medmcp.tooleffect) survives the proxy's model_validate.
+            dumped = [t.model_dump(mode="json", by_alias=True) for t in tools]
             return {"id": req_id, "ok": True, "tools": dumped}
 
         if op == "call_tool":

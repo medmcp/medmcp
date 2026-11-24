@@ -6,6 +6,10 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Fixed
+
+- `just install-stack` keeps a stack on mcp 1.x; it picked up mcp 2, which stacks cannot import.
+
 ### Security
 
 - MCP: stacks and external servers can no longer request completions from your model (sampling is off).

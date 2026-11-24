@@ -1,0 +1,3 @@
+# Applied to every `just install-stack` (uv tool install ignores a stack's lock).
+# Stacks are built on mcp 1.x FastMCP, which mcp 2 removed.
+mcp<2

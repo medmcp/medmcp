@@ -2186,6 +2186,13 @@ button.model-name:hover {
   border: 1px solid rgba(210, 34, 41, 0.3);
 }
 
+/* A stack tool that writes new files: information, not a warning, so brand blue. */
+.risk-info {
+  background: rgba(58, 99, 204, 0.16);
+  color: var(--blue-xl);
+  border: 1px solid rgba(127, 168, 245, 0.3);
+}
+
 /* ── Path existence checks (under the approval box's arguments) ── */
 
 .approval-paths {
@@ -3890,6 +3897,73 @@ textarea.wf-input {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* An installed stack's tools: closed by default, one line per tool. */
+.market-tools summary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  list-style: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 16px;
+  user-select: none;
+}
+
+.market-tools summary::-webkit-details-marker {
+  display: none;
+}
+
+.market-tools summary::before {
+  content: '';
+  flex: none;
+  width: 12px;
+  height: 12px;
+  background: currentColor;
+  mask: var(--icon-chevron-right) center / 12px 12px no-repeat;
+  -webkit-mask: var(--icon-chevron-right) center / 12px 12px no-repeat;
+  transition: transform 0.12s ease;
+}
+
+.market-tools[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.market-tools summary:hover {
+  color: var(--text);
+}
+
+.market-tools ul {
+  list-style: none;
+  margin: 6px 0 0 16px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.market-tools li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+}
+
+.market-tools code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.market-tools .risk-chip {
+  flex: none;
+  font-size: 10px;
+  padding: 1px 6px;
 }
 
 .market-card-foot {

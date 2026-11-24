@@ -6,28 +6,27 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+## 0.9.0 — 2026-11-24
+
 ### Added
 
+- Long stack calls continue in the background as tasks: the chat stays usable, the message box shows how many run, with Stop, and the assistant picks up the result when it is ready; it can also stop a task or job, after asking you.
 - Approvals: a stack tool's declared effect (read-only, writes new files, destructive) shows on the approval card and in Tool stacks; a destructive tool asks every time.
-- Long stack calls continue in the background as tasks: the chat stays usable, the message box shows how many run, with Stop, and the assistant picks up the result when it is ready.
-- Chat: the assistant can stop a running task or background job; it asks you first.
-- Chat: copy buttons on code blocks (Markdown included) and on equations, which copy their LaTeX.
+- Chat: copy buttons on code blocks and on equations (their LaTeX).
 
 ### Changed
 
-- Chat: one centred column without avatars; answers as plain text, your messages as right-aligned bubbles; the message box starts as one line, with background work as a chip beside Send.
-- Chat: the file open in the viewer is marked in the explorer instead of named under the message box; it is still sent with each message.
+- Chat: one centred column without avatars, a one-line message box, and the open file marked in the explorer.
+- Ollama 0.40.17 is the default model server.
 - The `docs/` folder is gone; the stack-author contracts for background jobs and the dataset index are in `jobspec.py` and `workspace_note.py`.
 
 ### Fixed
 
-- The workspace page loads fresh after an update instead of showing the previous version.
-- Chat: a message sent while an answer streams no longer gets the old answer's last words.
-- Chat: formulas written as `\[…\]` or `\(…\)` render as math.
-- Stacks: a second call to a busy stack no longer kills the running one, and a stopped call ends at once instead of hanging for hours.
-- `just install-stack` keeps a stack on mcp 1.x; it picked up mcp 2, which stacks cannot import.
-- Chats: opening a new chat no longer fails when the assistant was just closed.
-- Stacks: a stack's new or changed tools show up after an install or update, not a day later.
+- Stacks: a second call to a busy stack no longer kills the running one, and a stopped call ends at once.
+- Chat: a message sent mid-answer no longer picks up the old answer's last words; `\[…\]` and `\(…\)` formulas render.
+- Chats: opening a new chat no longer fails right after the assistant was closed.
+- Stacks: new or changed tools show up right after an install or update; `just install-stack` keeps stacks on mcp 1.x.
+- The workspace page loads fresh after an update.
 
 ### Security
 

@@ -6,6 +6,10 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Security
+
+- MCP: stacks and external servers can no longer request completions from your model (sampling is off).
+
 ## 0.8.0 — 2026-11-23
 
 ### Added

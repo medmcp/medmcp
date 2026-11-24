@@ -54,10 +54,12 @@ async def test_lifespan_enabled_starts_and_stops_broker(
     monkeypatch.setenv("MEDMCP_STACK_POOL", "1")
     monkeypatch.setenv("MEDMCP_WORKSPACE", str(tmp_path))
     monkeypatch.setattr(settings, "VIBE_HOME", tmp_path)
+    monkeypatch.setattr(settings, "VIBE_STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(settings, "get_uv_tool_dir", lambda: None)
     settings.load_mcp_servers.cache_clear()
     monkeypatch.setattr(server, "_pool", None)
     monkeypatch.setattr(server, "_broker", None)
+    monkeypatch.setattr(server, "_tasks", None)
 
     sock = tmp_path / "backend.sock"
     async with server._lifespan(server.app):

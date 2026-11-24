@@ -431,18 +431,13 @@ def log_permission(session_id: str, *, title: str, decision: str) -> None:
         f.write(f"{_utc_now_iso()}\t{decision}\t{title}\n")
 
 
-def record_tool_event(session_id: str, tc_id: str, info: JsonDict, server_names: list[str]) -> None:
-    """Append a normalized run-log event for a completed tool call (best-effort).
+def build_tool_event(tc_id: str, info: JsonDict, server_names: list[str]) -> JsonDict:
+    """The normalized run-log event for a completed tool call (nothing written).
 
     ``info`` is the UI's accumulated tool-call state (title, rawInput, status,
     rawOutput/outputText, decision, risks, humanReadable, ``_started`` monotonic
-    timestamp). Idempotent per call via the ``_logged`` marker, since
-    ``tool_call_update`` can fire more than once. Never raises — provenance
-    must not break a chat.
+    timestamp).
     """
-    if info.get("_logged"):
-        return
-    info["_logged"] = True
     started = info.get("_started")
     duration = time.monotonic() - started if isinstance(started, (int, float)) else None
     title = info.get("title")
@@ -458,7 +453,7 @@ def record_tool_event(session_id: str, tc_id: str, info: JsonDict, server_names:
     decision = info.get("decision")
     human_readable = info.get("humanReadable")
     output_text = info.get("outputText")
-    event = normalize_tool_event(
+    return normalize_tool_event(
         tool_call_id=tc_id,
         title=title_str,
         server=server,
@@ -472,8 +467,106 @@ def record_tool_event(session_id: str, tc_id: str, info: JsonDict, server_names:
         human_readable=human_readable if isinstance(human_readable, str) else None,
         duration_sec=duration,
     )
+
+
+def record_tool_event(session_id: str, tc_id: str, info: JsonDict, server_names: list[str]) -> None:
+    """Append a normalized run-log event for a completed tool call (best-effort).
+
+    See :func:`build_tool_event` for ``info``. Idempotent per call via the
+    ``_logged`` marker, since ``tool_call_update`` can fire more than once.
+    Never raises — provenance must not break a chat.
+    """
+    if info.get("_logged"):
+        return
+    info["_logged"] = True
     with contextlib.suppress(Exception):
-        append_run_event(session_id, event)
+        append_run_event(session_id, build_tool_event(tc_id, info, server_names))
+
+
+# ── Tasks (a stack call that finished in the background, see medmcp.tasks) ───
+
+TASK_STARTED = "task_started"
+TASK_FINISHED = "task_finished"
+
+
+def record_task_started(
+    session_id: str, *, task_id: str, server: str, tool: str, arguments: JsonDict, waited: bool
+) -> None:
+    """Note in the run log that a stack call became a task (it still runs)."""
+    append_run_event(
+        session_id,
+        {
+            "event": TASK_STARTED,
+            "task_id": task_id,
+            "server": server,
+            "tool": tool,
+            "status": "working",
+            "arguments": arguments,
+            "queued_for_gpu": waited,
+        },
+    )
+
+
+def task_call_event(
+    call_event: JsonDict, *, task_id: str, status: str, duration_sec: float, output: object
+) -> JsonDict:
+    """*call_event* (a held-back tool event) with the task's final output and status."""
+    event = dict(call_event)
+    event["status"] = "completed" if status == "completed" else "failed"
+    event.pop("output_text", None)
+    event["output"] = output
+    event["duration_sec"] = round(duration_sec, 3)
+    event["task"] = {"id": task_id, "status": status}
+    return event
+
+
+def record_task_finished(
+    session_id: str,
+    *,
+    task_id: str,
+    server: str,
+    tool: str,
+    status: str,
+    duration_sec: float,
+    summary: str,
+    call_event: JsonDict | None,
+    output: object,
+) -> None:
+    """Note a task's end in the run log, with the call's event carrying the final result.
+
+    *call_event* is the event of the tool call that got the task's handle
+    (:func:`build_tool_event`), held back until now: it is written here with
+    the task's real output, status and duration, so the run log shows what the
+    call produced rather than the handle.
+    """
+    if call_event is not None:
+        append_run_event(
+            session_id,
+            task_call_event(
+                call_event,
+                task_id=task_id,
+                status=status,
+                duration_sec=duration_sec,
+                output=output,
+            ),
+        )
+    append_run_event(
+        session_id,
+        {
+            "event": TASK_FINISHED,
+            "task_id": task_id,
+            "server": server,
+            "tool": tool,
+            "status": status,
+            "duration_sec": round(duration_sec, 3),
+            "summary": summary,
+        },
+    )
+
+
+def task_result_record(task_id: str, status: str, content: str) -> JsonDict:
+    """The transcript record of a task's final result (folded into its call by distill)."""
+    return {"role": "task_result", "task_id": task_id, "status": status, "content": content}
 
 
 JOB_STARTED = "job_started"

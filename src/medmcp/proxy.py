@@ -31,7 +31,7 @@ from mcp.client.stdio import stdio_client
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
-from medmcp import tooleffect
+from medmcp import tasks, tooleffect
 from medmcp.acp import VIBE_HOME
 from medmcp.backend_broker import STREAM_LIMIT
 
@@ -203,6 +203,20 @@ def with_effect_line(tool: mcp_types.Tool) -> mcp_types.Tool:
     return tool.model_copy(update={"description": tooleffect.describe(tool.description, effect)})
 
 
+def with_task_handle(tool: mcp_types.Tool) -> mcp_types.Tool:
+    """*tool* with a task handle accepted as its output.
+
+    A call the core turns into a task (:mod:`medmcp.tasks`) answers with a handle
+    in its structured content, and vibe validates structured content against the
+    tool's output schema; the schema is widened so the handle passes. A tool
+    without an output schema is returned unchanged.
+    """
+    widened = tasks.with_handle_schema(tool.outputSchema)
+    if widened is None:
+        return tool
+    return tool.model_copy(update={"outputSchema": widened})
+
+
 async def _serve(stack: str) -> None:
     """Run the proxy MCP server for *stack* over stdio until vibe disconnects."""
     server: Server[object, object] = Server(f"medmcp-proxy-{stack}")
@@ -214,7 +228,7 @@ async def _serve(stack: str) -> None:
         # Hide pool-machinery tools (e.g. ``warmup``) from the model; the pool still
         # discovers them by listing tools directly on the backend.
         tools = await forwarder.list_tools()
-        return [with_effect_line(t) for t in tools if t.name not in _HIDDEN_TOOLS]
+        return [with_task_handle(with_effect_line(t)) for t in tools if t.name not in _HIDDEN_TOOLS]
 
     @server.call_tool(validate_input=False)
     async def _call_tool(  # pyright: ignore[reportUnusedFunction]

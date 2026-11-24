@@ -21,7 +21,9 @@ SECURITY MODEL
    expose the port over a network.
 2. Every tool call is gated by an interactive permission request forwarded to
    the browser; the user must click Approve before any side effect occurs.
-   There is no auto-approval path. Do not add one.
+   There is no auto-approval path. Do not add one. (One written, narrow
+   exception: ``get_task`` reading a task of the same chat, see
+   ``_ChatConnection._handle_permission``.)
 3. Permission decisions are logged via the ``medmcp.audit`` logger (stderr)
    and mirrored to the session's provenance record when capture is enabled.
 4. The filesystem API refuses paths that resolve outside ``WORKSPACE_ROOT``.
@@ -46,7 +48,7 @@ import re
 import shutil
 import time
 import zipfile
-from collections.abc import AsyncGenerator, Collection, Coroutine, Iterator
+from collections.abc import AsyncGenerator, Callable, Collection, Coroutine, Iterator
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -96,6 +98,7 @@ from medmcp import (
     settings,
     share,
     signing,
+    tasks,
     titles,
     update,
     workflow,
@@ -261,6 +264,148 @@ def _tool_schema_op(req: JsonDict) -> JsonDict:
 _core_ops["tool_schema"] = _tool_schema_op
 
 
+# ── Tasks (a long stack call that finishes in the background; see tasks.py) ──
+# None with the stack pool off (no broker, every call stays synchronous) and
+# with MEDMCP_TASK_AFTER_SEC=0.
+_tasks: tasks.TaskManager | None = None
+
+
+def _task_args(req: JsonDict) -> tuple[JsonDict, str]:
+    raw = req.get("args")
+    args = cast("JsonDict", raw) if isinstance(raw, dict) else {}
+    return args, str(args.get("task_id") or "")
+
+
+def _task_get_op(req: JsonDict) -> JsonDict:
+    """Broker op ``task_get``: what ``get_task`` returns for a task (reads only)."""
+    _args, task_id = _task_args(req)
+    result = (
+        _tasks.tool_result(task_id) if _tasks is not None else tasks.unknown_task_result(task_id)
+    )
+    return {"result": result.model_dump(mode="json", by_alias=True, exclude_none=True)}
+
+
+async def _task_cancel_op(req: JsonDict) -> JsonDict:
+    """Broker op ``task_cancel``: stop a task, on the person's approval of exactly this call.
+
+    Anything that reaches the socket can send the op, so like ``call_tool`` it
+    runs only by spending the approval the person gave ``cancel_task`` with
+    these arguments in the chat (see medmcp.approvals).
+    """
+    args, task_id = _task_args(req)
+
+    def answer(text: str, *, error: bool = False) -> JsonDict:
+        result = mcp_types.CallToolResult(
+            content=[mcp_types.TextContent(type="text", text=text)], isError=error
+        )
+        return {"result": result.model_dump(mode="json", by_alias=True, exclude_none=True)}
+
+    if not _approvals.consume(tasks.TASK_SERVER, tasks.CANCEL_TASK, args):
+        _audit.warning("broker refused unapproved task cancel: %s", task_id)
+        return answer("cancel_task was not approved for these arguments.", error=True)
+    if _tasks is None or _tasks.get(task_id) is None:
+        return await _stop_job_from_chat(task_id, answer)
+    record = await _tasks.cancel(task_id)
+    assert record is not None
+    # The model asked for this stop and reads the outcome here: no automatic turn
+    # to tell it again (a stop from the UI's list still is handed to the chat).
+    _tasks.claim_delivery(record.session, [task_id])
+    _audit.info("task cancelled from the chat: %s (%s)", task_id, record.status)
+    if record.status == tasks.CANCELLED:
+        return answer(f"Task {task_id} was stopped.")
+    return answer(f"Task {task_id} had already ended: {record.status}.")
+
+
+async def _stop_job_from_chat(job_id: str, answer: Callable[[str], JsonDict]) -> JsonDict:
+    """cancel_task for a background job (its id from the job's start): stop it, as Stop does."""
+    if _jobs is None:
+        return answer(f"No task or job {job_id!r} is known.")
+    try:
+        job = await asyncio.to_thread(_jobs.get, job_id)
+    except jobs.JobError:
+        return answer(f"No task or job {job_id!r} is known.")
+    if not job.running:
+        return answer(f"Job {job_id} had already ended: {job.status}.")
+    await asyncio.to_thread(_jobs.stop, job_id)
+    _audit.info("job stopped from the chat: %s", job_id)
+    return answer(f"Job {job_id} was stopped.")
+
+
+_core_ops["task_get"] = _task_get_op
+_core_ops["task_cancel"] = _task_cancel_op
+
+
+def _chat_of(session: str) -> _ChatConnection | None:
+    """The live connection of chat *session* (canonical id), if one is open."""
+    return next((c for c in _connections if c.canonical_id == session), None)
+
+
+async def _stop_task_backend(stack: str) -> None:
+    """Stop *stack*'s backend for a cancelled task, unless another call still runs on it."""
+    if _pool is not None and _pool.inflight(stack) == 0:
+        await _pool.stop(stack)
+
+
+async def _on_task_promoted(record: tasks.TaskRecord) -> None:
+    """A stack call became a task: note it in the owning chat's provenance."""
+    if not record.session or not settings.load_provenance_enabled():
+        return
+    waited = record.status_message.startswith("Waiting")
+    with contextlib.suppress(Exception):
+        await asyncio.to_thread(
+            lambda: provenance.record_task_started(
+                record.session,
+                task_id=record.task_id,
+                server=record.stack,
+                tool=record.tool,
+                arguments=record.arguments,
+                waited=waited,
+            )
+        )
+
+
+def _task_output(record: tasks.TaskRecord) -> tuple[str, object]:
+    """A finished task's result as the model reads it, and its value for provenance."""
+    if record.result is not None:
+        result = mcp_types.CallToolResult.model_validate(record.result)
+        return tasks.result_text(result), tasks.result_value(result)
+    text = record.summary if record.status == tasks.COMPLETED else (record.error or "")
+    return text, text
+
+
+def _record_task_end(record: tasks.TaskRecord, call_event: JsonDict | None) -> None:
+    """Write a finished task into its chat's transcript and provenance (blocking)."""
+    text, value = _task_output(record)
+    provenance.append_transcript(
+        record.session, provenance.task_result_record(record.task_id, record.status, text)
+    )
+    if not settings.load_provenance_enabled():
+        return
+    provenance.record_task_finished(
+        record.session,
+        task_id=record.task_id,
+        server=record.stack,
+        tool=record.tool,
+        status=record.status,
+        duration_sec=record.elapsed_sec(time.time()),
+        summary=tasks.clip(text, 500),
+        call_event=call_event,
+        output=value,
+    )
+
+
+async def _on_task_finished(record: tasks.TaskRecord) -> None:
+    """A task ended: record it, settle its card and tell the chat (now or when opened)."""
+    if not record.session:
+        return
+    call_event = _tasks.take_call_event(record.task_id) if _tasks is not None else None
+    with contextlib.suppress(Exception):
+        await asyncio.to_thread(_record_task_end, record, call_event)
+    conn = _chat_of(record.session)
+    if conn is not None:
+        await conn.task_finished(record)
+
+
 def tool_effect(stack: str, tool: str) -> str | None:
     """The effect *stack*'s *tool* declared (``read_only`` …), or ``None`` (untagged).
 
@@ -322,7 +467,7 @@ def _resolve_backend_spec(name: str) -> BackendSpec | None:
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     """Start the stack pool + broker on boot (when enabled); tear them down on exit."""
-    global _pool, _broker, _gateway, _jobs
+    global _pool, _broker, _gateway, _jobs, _tasks
     _audit.info("workspace password %s", "required" if access.required() else "not set")
     _audit.info(
         "agent runs %s",
@@ -378,12 +523,30 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
                 resolve_server=_active_server,
                 max_jobs=settings.max_jobs,
             )
+        if settings.stack_tasks_enabled():
+            pool = _pool
+            _tasks = tasks.TaskManager(
+                after_sec=tasks.after_sec(),
+                state_path=settings.VIBE_STATE_DIR / "tasks.json",
+                is_gpu=pool.is_gpu,
+                stop_backend=_stop_task_backend,
+                on_promoted=_on_task_promoted,
+                on_finished=_on_task_finished,
+            )
+            # A task the previous process was running did not survive it: its
+            # chat is told on its next open, and its provenance says so now.
+            for record in await asyncio.to_thread(_tasks.load):
+                _audit.warning("task %s marked failed: %s", record.task_id, record.error)
+                call_event = _tasks.take_call_event(record.task_id)
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(_record_task_end, record, call_event)
         _broker = BackendBroker(
             _pool,
             settings.backend_socket_path(),
             _approvals.spend,
             _after_stack_call,
             ops=_core_ops,
+            tasks=_tasks,
         )
         try:
             await _broker.start()
@@ -407,6 +570,8 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
             await _client.stop()
         if _broker is not None:
             await _broker.aclose()
+        if _tasks is not None:
+            await _tasks.aclose()
         if _pool is not None:
             await _pool.aclose()
         if _gateway is not None:
@@ -417,6 +582,7 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         _pool = None
         _gateway = None
         _jobs = None
+        _tasks = None
 
 
 async def _update_check_loop() -> None:
@@ -2882,6 +3048,35 @@ async def delete_job(job_id: str) -> JsonDict:
     return {"ok": True}
 
 
+# ── Tasks ──────────────────────────────────────────────────
+
+
+@app.get("/api/tasks")
+async def get_tasks() -> JsonDict:
+    """Tasks of this workspace, working and finished (newest first; finished ones for an hour)."""
+    if _tasks is None:
+        return {"enabled": False, "tasks": []}
+    out: list[JsonDict] = []
+    for record in _tasks.list():
+        entry = _tasks.public(record)
+        entry["session_title"] = (
+            await asyncio.to_thread(sessions.chat_title, record.session) if record.session else None
+        ) or ""
+        out.append(entry)
+    return {"enabled": True, "tasks": out}
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+async def post_cancel_task(task_id: str) -> JsonDict:
+    """Stop a working task (the person's own Stop in the header; no further approval)."""
+    if _tasks is None or _tasks.get(task_id) is None:
+        raise HTTPException(status_code=404, detail=f"no task {task_id!r}")
+    record = await _tasks.cancel(task_id)
+    assert record is not None
+    _audit.info("task stopped from the UI: %s (%s)", task_id, record.status)
+    return _tasks.public(record)
+
+
 # ── WebSocket chat ─────────────────────────────────────────
 #
 # Wire protocol (JSON messages):
@@ -2905,6 +3100,12 @@ async def delete_job(job_id: str) -> JsonDict:
 #                 "severity": str, "note": str}]}
 #     {"type": "permission_update", "requestId": int,
 #      "explanation": str | None, "risks": [...]}
+#     {"type": "task_notice", "text": str, "taskIds": [str], "live": bool}
+#         # a turn the core started because a task finished (live), or its
+#         # replayed trigger; shown as a system notice, never as a user bubble
+#     {"type": "task_update", "taskId": str, "toolCallId": str, "status": str,
+#      "statusMessage": str, "output": str | None}  # a task of this chat ended
+#     (tool_call / tool_call_update carry "task": {...} when the call became one)
 #     {"type": "done"} | {"type": "error", "message": str}
 #
 #   client → server
@@ -3468,6 +3669,14 @@ class _ChatConnection:
         # this connection (a person's name for a chat is final).
         self._title_locked = False
         self._prompted: bool = False
+        # Finished tasks (ids) this chat is still to be told about, and the
+        # background task that starts that turn once the chat is idle.
+        self._deliveries: list[str] = []
+        self._delivery_task: asyncio.Task[None] | None = None
+        # Held while a turn is being started, so a user prompt and a task's
+        # automatic turn never start at once (see _deliver).
+        self._turn_lock = asyncio.Lock()
+        self._closed = False
 
     async def run(self) -> None:
         """Receive client messages until the socket closes."""
@@ -3480,11 +3689,12 @@ class _ChatConnection:
                     continue
                 viewed = data.get("viewedPath")
                 viewed_path = viewed if isinstance(viewed, str) and viewed else None
-                # The warm-up pump must not race the turn loop for the queue.
-                await self._stop_idle_pump()
-                # A new prompt while one is streaming cancels the old one.
-                await self._cancel_prompt()
-                self._prompt_task = asyncio.create_task(self._run_prompt(text, viewed_path))
+                async with self._turn_lock:
+                    # The warm-up pump must not race the turn loop for the queue.
+                    await self._stop_idle_pump()
+                    # A new prompt while one is streaming cancels the old one.
+                    await self._cancel_prompt()
+                    self._start_turn(self._run_prompt(text, viewed_path))
             elif kind == "permission":
                 req_id = data.get("requestId")
                 if isinstance(req_id, int):
@@ -3499,6 +3709,7 @@ class _ChatConnection:
                 # would clobber a newer turn's state), so an intentional Stop
                 # resets the client explicitly.
                 await self._send({"type": "done"})
+                self._kick_delivery()
 
     async def close(self) -> None:
         """Abort any in-flight prompt and drop the session queue.
@@ -3513,7 +3724,11 @@ class _ChatConnection:
         # still being closed.
         released = asyncio.Event()
         _closing_sessions[self.session_id] = released
+        self._closed = True
         try:
+            delivery = self._delivery_task
+            if delivery is not None and not delivery.done():
+                delivery.cancel()
             await self._stop_idle_pump()
             await self._cancel_prompt()
             for task in [*self._explain_tasks, *self._title_tasks]:
@@ -3645,6 +3860,138 @@ class _ChatConnection:
         with contextlib.suppress(Exception):
             await self.ws.send_json(msg)
 
+    # ── finished tasks ───────────────────────────────────────────────────────
+
+    def _start_turn(self, coro: Coroutine[Any, Any, None]) -> None:
+        """Run *coro* as the chat's turn; the caller holds ``_turn_lock``."""
+        task = asyncio.create_task(coro)
+        self._prompt_task = task
+        task.add_done_callback(self._turn_ended)
+
+    def _turn_ended(self, task: asyncio.Task[None]) -> None:
+        # A turn superseded by a newer prompt (or stopped) ends cancelled: the
+        # newer turn's end, or the Stop handler, hands finished tasks over.
+        if not task.cancelled() and not self._closed:
+            self._kick_delivery()
+
+    def _turn_running(self) -> bool:
+        task = self._prompt_task
+        return (task is not None and not task.done()) or bool(self._pending_perms)
+
+    def offer_tasks(self, task_ids: Collection[str]) -> None:
+        """Tell this chat about finished tasks as soon as it is idle (each once)."""
+        for task_id in task_ids:
+            if task_id not in self._deliveries:
+                self._deliveries.append(task_id)
+        self._kick_delivery()
+
+    def _kick_delivery(self) -> None:
+        if not self._deliveries or self._closed or _tasks is None:
+            return
+        running = self._delivery_task
+        if running is not None and not running.done():
+            return
+        self._delivery_task = asyncio.create_task(self._deliver())
+
+    async def _deliver(self) -> None:
+        """Start a turn that hands finished tasks to the assistant, if the chat is idle.
+
+        Never during a turn (a user prompt in flight, an approval open): that
+        turn's end calls back here. A user prompt that arrives first takes the
+        lock first and runs first. The tasks are marked told before the turn
+        starts, so none is handed over twice.
+        """
+        async with self._turn_lock:
+            if self._closed or _tasks is None or not self._deliveries or self._turn_running():
+                return
+            ids, self._deliveries = self._deliveries, []
+            records = _tasks.claim_delivery(self.canonical_id, ids)
+            if not records:
+                return
+            prompt, display = tasks.delivery_prompt(records)
+            task_ids = [r.task_id for r in records]
+            await self._stop_idle_pump()
+            _audit.info("finished task(s) handed to the chat: %s", ", ".join(task_ids))
+            # Recorded here, not from vibe's echo: the echo carries only the
+            # notice lines, and the model read the results too.
+            self._record(
+                {"role": "user", "content": prompt, "injected": True, "medmcp_tasks": task_ids}
+            )
+            notices = [tasks.notice_text(r) for r in records]
+            await self._send(
+                {
+                    "type": "task_notice",
+                    "text": "\n".join(notices),
+                    "taskIds": task_ids,
+                    "live": True,
+                }
+            )
+            self._start_turn(self._run_prompt(prompt, automatic=display))
+
+    async def task_finished(self, record: tasks.TaskRecord) -> None:
+        """A task of this chat ended: settle its card, then tell the assistant."""
+        text, _value = _task_output(record)
+        await self._send(
+            {
+                "type": "task_update",
+                "taskId": record.task_id,
+                "toolCallId": record.tool_call_id,
+                "status": record.status,
+                "statusMessage": record.status_message,
+                "output": _clip_output(text) if text else None,
+            }
+        )
+        self.offer_tasks([record.task_id])
+
+    def _task_brief(self, output: str, raw_output: object) -> JsonDict | None:
+        """What a tool card needs about the task a call's output is the handle of."""
+        task_id = tasks.handle_task_id(raw_output) or tasks.handle_task_id(output)
+        if task_id is None:
+            return None
+        record = _tasks.get(task_id) if _tasks is not None else None
+        if record is None:
+            return {"taskId": task_id, "status": "unknown", "statusMessage": ""}
+        brief: JsonDict = {
+            "taskId": task_id,
+            "status": record.status,
+            "statusMessage": record.status_message,
+            "started": tasks.started_text(record),
+        }
+        if record.finished:
+            text, _value = _task_output(record)
+            brief["output"] = _clip_output(text) if text else None
+        return brief
+
+    def _bind_task_call(self, tc_id: str, info: JsonDict, task_id: str) -> None:
+        """Link a call that got a task handle to its task; its run-log event waits for it.
+
+        The event is written when the task ends, with the final result (see
+        provenance.record_task_finished) — or now, if the task has already ended.
+        """
+        record = _tasks.get(task_id) if _tasks is not None else None
+        if _tasks is None or record is None or record.session != self.canonical_id:
+            return
+        event: JsonDict | None = None
+        if settings.load_provenance_enabled() and not info.get("_logged"):
+            with contextlib.suppress(Exception):
+                event = provenance.build_tool_event(tc_id, info, self._server_names)
+        info["_logged"] = True  # the handle is never recorded as the call's result
+        _tasks.bind_call(task_id, tc_id, event)
+        late = _tasks.take_call_event(task_id) if record.finished else None
+        if late is not None:
+            _text, value = _task_output(record)
+            with contextlib.suppress(Exception):
+                provenance.append_run_event(
+                    self.canonical_id,
+                    provenance.task_call_event(
+                        late,
+                        task_id=task_id,
+                        status=record.status,
+                        duration_sec=record.elapsed_sec(time.time()),
+                        output=value,
+                    ),
+                )
+
     async def replay_history(self) -> None:
         """Relay the transcript frames vibe re-emitted during ``session/load``.
 
@@ -3688,7 +4035,9 @@ class _ChatConnection:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-    async def _run_prompt(self, text: str, viewed_path: str | None = None) -> None:
+    async def _run_prompt(
+        self, text: str, viewed_path: str | None = None, *, automatic: str | None = None
+    ) -> None:
         """Send one ``session/prompt`` and stream its frames to the browser.
 
         ``viewed_path`` is the workspace-relative file currently open in the
@@ -3698,6 +4047,11 @@ class _ChatConnection:
         expect. The block's ``automatic`` meta keeps it out of vibe's auto-title
         derivation, and the prompt's ``user_display_content`` meta records the
         note-free text vibe echoes back on transcript replay.
+
+        ``automatic`` makes this a turn the core started, not the person (a
+        finished task, see :meth:`_deliver`): *text* goes as one block flagged
+        ``automatic`` — kept out of titles, like the workspace note — carrying no
+        notes, and ``automatic`` is what the chat shows of it.
 
         Race loop: wait for either the next inbound session frame or the
         prompt response, then drain whatever is left in the queue once the
@@ -3729,8 +4083,10 @@ class _ChatConnection:
         # stays byte-identical to the old appended format, so strip_workspace_note
         # keeps working on every transcript vintage. Every note starts with
         # "[workspace context:", so that one pattern removes them all.
+        if automatic is not None:
+            params["prompt"] = [{"type": "text", "text": text, "_meta": {"automatic": True}}]
         notes: list[str] = []
-        if viewed_path is not None:
+        if viewed_path is not None and automatic is None:
             notes.append(_workspace_note(viewed_path).lstrip())
         # What an active stack's index already says about a folder the prompt
         # names, or that none exists yet. Only for stacks that declare such an
@@ -3738,12 +4094,10 @@ class _ChatConnection:
         # event loop like every other disk access.
         with contextlib.suppress(Exception):
             viewed_abs = _resolve_input_path(viewed_path) if viewed_path is not None else None
+            # None on a turn the person did not write (no index: nothing is added).
+            indexes = dataset_indexes(self.servers) if automatic is None else []
             dataset_notes = await asyncio.to_thread(
-                build_dataset_notes,
-                text,
-                viewed_abs,
-                WORKSPACE_ROOT,
-                dataset_indexes(self.servers),
+                build_dataset_notes, text, viewed_abs, WORKSPACE_ROOT, indexes
             )
             if dataset_notes:
                 notes.append(dataset_notes)
@@ -3759,6 +4113,14 @@ class _ChatConnection:
                     "version": "1",
                     "host": "medmcp",
                     "content": [{"type": "text", "text": text}],
+                }
+            }
+        if automatic is not None:
+            params["_meta"] = {
+                "user_display_content": {
+                    "version": "1",
+                    "host": "medmcp",
+                    "content": [{"type": "text", "text": automatic}],
                 }
             }
         prompt_fut = asyncio.create_task(_client.request("session/prompt", params))
@@ -3958,7 +4320,21 @@ class _ChatConnection:
                 # echo of the *live* prompt carrying its messageId; the browser
                 # merges that echo into the locally-rendered bubble.
                 text = _replayed_user_text(update)
-                if text:
+                if text and tasks.parse_notice(text) is not None:
+                    # A turn the core started because tasks finished: a notice,
+                    # never a user bubble. Live, _deliver already showed and
+                    # recorded it; replayed, it is shown again.
+                    if replay:
+                        lines = [ln for ln in text.splitlines() if tasks.parse_notice(ln)]
+                        await self._send(
+                            {
+                                "type": "task_notice",
+                                "text": "\n".join(tasks.notice_text(ln) for ln in lines),
+                                "taskIds": [p[0] for ln in lines if (p := tasks.parse_notice(ln))],
+                                "live": False,
+                            }
+                        )
+                elif text:
                     frame: JsonDict = {"type": "user", "text": text}
                     # The message id anchors per-turn actions (rewind targets).
                     mid = update.get("messageId")
@@ -3975,7 +4351,9 @@ class _ChatConnection:
                 status = str(update.get("status") or "pending")
                 info = self._tool_calls.setdefault(tc_id, {"_started": time.monotonic()})
                 route = _tool_name(update)
-                tool_name = harness.canonical_tool_name(route, self._server_names)
+                tool_name = harness.canonical_tool_name(
+                    route, [*self._server_names, tasks.TASK_SERVER]
+                )
                 title = _display_title(update.get("title"), route, tool_name)
                 info["title"] = title
                 info["status"] = status
@@ -3990,19 +4368,26 @@ class _ChatConnection:
                     info["rawOutput"] = raw_output
                 if output:
                     info["outputText"] = output
-                await self._send(
-                    {
-                        "type": "tool_call",
-                        "toolCallId": tc_id,
-                        "title": title,
-                        "status": status,
-                        "kind": update.get("kind"),
-                        "toolName": tool_name,
-                        "rawInput": update.get("rawInput"),
-                        "output": _clip_output(output) if output else None,
-                        "pathGuardRetry": _is_pathguard_denial(output),
-                    }
+                call_frame: JsonDict = {
+                    "type": "tool_call",
+                    "toolCallId": tc_id,
+                    "title": title,
+                    "status": status,
+                    "kind": update.get("kind"),
+                    "toolName": tool_name,
+                    "rawInput": update.get("rawInput"),
+                    "output": _clip_output(output) if output else None,
+                    "pathGuardRetry": _is_pathguard_denial(output),
+                }
+                # A replayed call that became a task: the card shows the task.
+                brief = (
+                    self._task_brief(output, raw_output)
+                    if output and not tasks.is_task_tool(tool_name)
+                    else None
                 )
+                if brief is not None:
+                    call_frame["task"] = brief
+                await self._send(call_frame)
             elif update_type == "tool_call_update":
                 tc_id = str(update.get("toolCallId") or "")
                 output, raw_output = _tool_output(update)
@@ -4028,16 +4413,27 @@ class _ChatConnection:
                 # corrects and retries on its own, so rendering it as a failure
                 # would be both untrue and alarming. Flagged here rather than left
                 # to the browser to pattern-match vibe's denial wording.
-                await self._send(
-                    {
-                        "type": "tool_call_update",
-                        "toolCallId": tc_id,
-                        "status": status,
-                        "output": _clip_output(output) if output else None,
-                        "rawInput": raw_input,
-                        "pathGuardRetry": _is_pathguard_denial(output),
-                    }
+                update_frame: JsonDict = {
+                    "type": "tool_call_update",
+                    "toolCallId": tc_id,
+                    "status": status,
+                    "output": _clip_output(output) if output else None,
+                    "rawInput": raw_input,
+                    "pathGuardRetry": _is_pathguard_denial(output),
+                }
+                # The call became a task: its card says so until the task ends,
+                # and its run-log event waits for the task's real result.
+                called = str((info or {}).get("toolName") or "")
+                brief = (
+                    self._task_brief(output, raw_output)
+                    if status == "completed" and not tasks.is_task_tool(called)
+                    else None
                 )
+                if brief is not None:
+                    update_frame["task"] = brief
+                    if info is not None and not replay:
+                        self._bind_task_call(tc_id, info, str(brief["taskId"]))
+                await self._send(update_frame)
                 if status in ("completed", "failed") and info is not None:
                     if not replay:
                         self._record_tool_call(tc_id, info, status)
@@ -4107,6 +4503,24 @@ class _ChatConnection:
             await _client.respond(req_id_raw, {"outcome": {"outcome": "cancelled"}})
             return
 
+        # THE ONE WRITTEN EXCEPTION TO "no auto-approval" (owner's decision): a
+        # ``get_task`` call on the core's own ``medmcp-tasks`` server is allowed
+        # without a dialog, and only when the task it reads was started in THIS
+        # chat — the person approved that call here, and get_task only reads its
+        # status and result back. Every such answer is audit-logged. Anything
+        # else asks as usual: get_task for another chat's task or an unknown id,
+        # cancel_task, any other tool. Do not widen this.
+        task_tool = tasks.task_tool(str(tool_call.get("toolName") or title))
+        if task_tool == tasks.GET_TASK and _tasks is not None:
+            task_id = str(
+                pathcheck.coerce_arguments(tool_call.get("rawInput")).get("task_id") or ""
+            )
+            offered_ids = {o.get("optionId") for o in options}
+            if _tasks.belongs_to(task_id, self.canonical_id) and "allow_once" in offered_ids:
+                _audit.info("task status read without dialog: %s", task_id)
+                await self._resolve_permission(req_id_raw, title, cached, "allow_once")
+                return
+
         # One "allow looking at files" covers every read-only command in this chat.
         # vibe offers its session option only for some of them (a file argument
         # gets path-scoped options, which are never shown), so the core reads the
@@ -4174,7 +4588,9 @@ class _ChatConnection:
         # data off the premises, and its arguments carry no paths that would bring
         # the dialog back).
         external = any(s.get("name") == stack and s.get("url") for s in self.servers)
-        stack_tool = stack != "builtin" and not external
+        # The core's task tools are not a stack's: no declared effect, and no
+        # chat-long option (cancel_task asks every time).
+        stack_tool = stack != "builtin" and not external and stack != tasks.TASK_SERVER
         # Rule-based labels from the call itself: shown whatever the model says,
         # and the model's own labels can only add to them (see medmcp.riskcheck).
         # A stack tool is labelled by the effect its stack declares, first.
@@ -4296,7 +4712,8 @@ class _ChatConnection:
         """Let the broker run the stack call just approved, once, as approved."""
         name = str(tool_call.get("toolName") or tool_call.get("title") or "")
         stack, tool = provenance.split_tool_name(name, self._server_names)
-        if stack == "builtin":
+        # get_task runs nothing and the broker never asks for its approval.
+        if stack == "builtin" or (stack == tasks.TASK_SERVER and tool == tasks.GET_TASK):
             return
         _approvals.grant(
             stack,
@@ -4862,6 +5279,10 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
         if replayed:
             await conn.replay_history()
         conn.start_idle_pump()
+        if _tasks is not None:
+            # Tasks that finished while no socket held this chat (or before a
+            # restart): the assistant is told now that it is open again.
+            conn.offer_tasks([r.task_id for r in _tasks.undelivered(conn.canonical_id)])
         await conn.run()
     except WebSocketDisconnect:
         pass

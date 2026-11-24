@@ -167,6 +167,9 @@ services:
       # them off; MEDMCP_MAX_JOBS is how many may run at once (default 1).
       MEDMCP_STACK_JOBS: "${MEDMCP_STACK_JOBS:-}"
       MEDMCP_MAX_JOBS: "${MEDMCP_MAX_JOBS:-}"
+      # A stack call still running after this many seconds continues in the
+      # background as a task (needs the stack pool). Empty = 20, 0 = off.
+      MEDMCP_TASK_AFTER_SEC: "${MEDMCP_TASK_AFTER_SEC:-}"
       # Tool-call repair shim between vibe and Ollama. On by default: without it
       # Ollama's Glimmer parser silently drops roughly half of all tool-using
       # turns, and the failure is invisible — no error, just a chat that never

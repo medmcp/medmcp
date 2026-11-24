@@ -285,6 +285,11 @@ class Backend:
         return self._inflight > 0
 
     @property
+    def inflight(self) -> int:
+        """How many calls are currently in flight."""
+        return self._inflight
+
+    @property
     def last_used(self) -> float:
         """Monotonic timestamp of the last call (drives idle-TTL and LRU)."""
         return self._last_used
@@ -510,6 +515,28 @@ class BackendPool:
         self._effects.pop(name, None)
         if self._known.pop(name, None) is not None:
             self._save_schemas()
+
+    async def stop(self, name: str) -> None:
+        """Tear down *name*'s backend now, killing any call still running on it.
+
+        The evict path without forgetting the stack's tool list: a cancelled task
+        (:mod:`medmcp.tasks`) stops its work this way, and the stack itself is
+        unchanged, so its schemas and effects stay valid.
+        """
+        await self._drop(name)
+
+    def inflight(self, name: str) -> int:
+        """How many calls are running on *name*'s backend right now."""
+        backend = self._backends.get(name)
+        return backend.inflight if backend is not None else 0
+
+    def is_gpu(self, name: str) -> bool:
+        """Whether stack *name* holds VRAM (from its spec; ``False`` when not installed)."""
+        backend = self._backends.get(name)
+        if backend is not None:
+            return backend.spec.gpu
+        spec = self._resolve(name)
+        return spec is not None and spec.gpu
 
     def warm_names(self) -> list[str]:
         """Names of currently-live backends."""

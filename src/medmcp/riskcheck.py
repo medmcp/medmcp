@@ -103,6 +103,10 @@ def effect_key(effect: str | None) -> str | None:
     return f"effect_{effect}" if effect in tooleffect.EFFECTS else None
 
 
+# The core's task tools (medmcp.tasks.TASK_SERVER), named like an external tool.
+_TASK_TOOL_PREFIX = "medmcp-tasks_"
+
+
 def signals(
     tool: str,
     arguments: JsonDict,
@@ -140,6 +144,8 @@ def signals(
         _add(keys, "network")
     elif tool == "skill":
         _add(keys, "skill_load")
+    elif tool.startswith(_TASK_TOOL_PREFIX):
+        pass  # the core's own get_task / cancel_task: they touch no files
     elif "_" in tool:
         # A tool of no installed stack (an external server's, say): it reads its
         # inputs, and writes when it is given somewhere to.

@@ -65,3 +65,10 @@ def test_assistant_code(tool: str, arguments: dict[str, object], expected: bool)
     """Running or writing code the assistant wrote itself is recognised."""
     assert riskcheck.runs_assistant_code(tool, arguments) is expected
     assert ("assistant_code" in riskcheck.signals(tool, arguments)) is expected
+
+
+def test_the_cores_task_tools_carry_no_file_labels() -> None:
+    """get_task / cancel_task touch no files, unlike an external server's tool."""
+    for tool in ("medmcp-tasks_get_task", "medmcp-tasks_cancel_task"):
+        assert riskcheck.signals(tool, {"task_id": "tsk_0123456789abcdef"}) == []
+    assert "file_read" in riskcheck.signals("ext_lookup", {"id": "1"})

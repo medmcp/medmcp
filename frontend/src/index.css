@@ -3839,6 +3839,9 @@ textarea.wf-input {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(255px, 1fr));
   gap: 12px;
+  /* Each card keeps its own height, so opening one card's tool list does not
+     stretch the other cards in its row. */
+  align-items: start;
 }
 
 .market-card {

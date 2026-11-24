@@ -1398,22 +1398,23 @@ button:disabled {
 /* One column for the whole chat, as in common AI chat apps: 768px at most, the
  * message box (.composer) and the transcript sharing its edges; 18px side
  * padding, the right one grown to keep clear of the page's ? button.
- * The scrollbar sits inside the column's right edge, so the right padding gives
- * up exactly its width (measured by Chat.tsx as --scrollbar-here, since browsers
- * draw it differently) and the transcript ends where the box ends. */
+ * The scroll area spans the whole panel, so the wheel scrolls the chat anywhere
+ * over it, and its padding centres the column: the empty space beside a narrower
+ * column (--side) plus the composer's own padding on each side. The scrollbar
+ * sits at the panel's right edge, so the right padding gives up exactly its
+ * width (measured by Chat.tsx as --scrollbar-here, since browsers draw it
+ * differently) and the transcript ends where the box ends. */
 .chat-scroll {
+  --side: max(0px, calc((100% - 768px) / 2));
   display: flex;
   flex-direction: column;
   gap: 16px;
   padding: 18px
     calc(
-      clamp(18px, calc(46px - (100% - 768px) / 2), 46px) -
+      var(--side) + clamp(18px, calc(46px - (100% - 768px) / 2), 46px) -
         var(--scrollbar-here, var(--scrollbar))
     )
-    34px 18px;
-  max-width: 768px;
-  width: 100%;
-  margin: 0 auto;
+    34px calc(var(--side) + 18px);
   scrollbar-gutter: stable;
 }
 
@@ -1441,7 +1442,6 @@ button:disabled {
 .msg-user {
   align-self: flex-end;
   max-width: 80%;
-  margin-right: 6px;
 }
 
 /* Rewind (replayed user turns): ghost button revealed on hover, plus the
@@ -1506,25 +1506,13 @@ button:disabled {
   min-width: 0;
 }
 
-/* A speech bubble: a small tail at the bottom right, its tip on the column's
- * right edge (the row leaves 6px for it, see .msg-user). */
+/* A minimal speech bubble: flat brand blue, one tighter corner at the bottom
+ * right pointing at the edge it speaks from. */
 .bubble-user {
-  position: relative;
-  background: linear-gradient(135deg, var(--blue), var(--blue-l));
+  background: var(--blue);
   color: #fff;
   border-radius: 16px 16px 4px 16px;
   white-space: pre-wrap;
-}
-
-.bubble-user::after {
-  content: '';
-  position: absolute;
-  right: -6px;
-  bottom: 0;
-  width: 12px;
-  height: 14px;
-  background: var(--blue-l);
-  clip-path: path('M 0 0 C 1 8, 5 13, 12 14 L 0 14 Z');
 }
 
 .msg-bubble.bubble-ai {

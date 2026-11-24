@@ -9,6 +9,8 @@ Notable, user-visible changes to MedMCP. Format follows
 ### Fixed
 
 - `just install-stack` keeps a stack on mcp 1.x; it picked up mcp 2, which stacks cannot import.
+- Chats: opening a new chat no longer fails when the assistant was just closed.
+- Stacks: a stack's new or changed tools show up after an install or update, not a day later.
 
 ### Security
 

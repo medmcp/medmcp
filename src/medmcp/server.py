@@ -46,7 +46,7 @@ import re
 import shutil
 import time
 import zipfile
-from collections.abc import AsyncGenerator, Coroutine, Iterator
+from collections.abc import AsyncGenerator, Collection, Coroutine, Iterator
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -1114,7 +1114,7 @@ async def put_settings(payload: SettingsPayload) -> JsonDict:
     restart_needed, newly_active, newly_inactive = await asyncio.to_thread(_apply)
     if restart_needed:
         _audit.info("settings changed; restarting vibe-acp")
-        await _restart_vibe()
+        await _restart_vibe(newly_active | newly_inactive)
     await _apply_pool_changes(newly_active, newly_inactive)
     return {"ok": True, "restarted": restart_needed}
 
@@ -1132,9 +1132,15 @@ async def _apply_pool_changes(newly_active: set[str], newly_inactive: set[str]) 
         _spawn_background(_pool.prewarm(newly_active))
 
 
-async def _restart_vibe() -> None:
-    """Stop the shared vibe-acp process and drop every live chat socket."""
+async def _restart_vibe(changed_stacks: Collection[str] = ()) -> None:
+    """Stop the shared vibe-acp process and drop every live chat socket.
+
+    *changed_stacks* lose their cached tool lists while vibe-acp is down, so the
+    next start asks them again (see :func:`settings.clear_tool_cache`).
+    """
     await _client.stop()
+    if changed_stacks:
+        await asyncio.to_thread(settings.clear_tool_cache, changed_stacks)
     for conn in list(_connections):
         with contextlib.suppress(Exception):
             await conn.ws.close()
@@ -1433,7 +1439,7 @@ async def post_stack_install(payload: StackInstallPayload) -> JsonDict:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     await asyncio.to_thread(_apply_stack_change)
     _audit.info("stack installed: %s (%s)", name, payload.image)
-    await _restart_vibe()
+    await _restart_vibe({name})
     # A reinstall replaces the image under a running backend: drop it, so the
     # next start runs the new image instead of the pool serving the old one.
     await _apply_pool_changes({name}, {name})
@@ -1451,7 +1457,7 @@ async def post_stack_uninstall(payload: StackUninstallPayload) -> JsonDict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await asyncio.to_thread(_apply_stack_change)
     _audit.info("stack uninstalled: %s", payload.name)
-    await _restart_vibe()
+    await _restart_vibe({payload.name})
     await _apply_pool_changes(set(), {payload.name})
     return {"ok": True, "restarted": True}
 
@@ -1493,7 +1499,7 @@ async def ws_stack_install(ws: WebSocket) -> None:
             )
             await asyncio.to_thread(_apply_stack_change)
             _audit.info("stack installed: %s (%s)", name, image)
-            await _restart_vibe()
+            await _restart_vibe({name})
             await _apply_pool_changes({name}, {name})  # drop a backend on the old image
             await queue.put({"type": "done", "name": name})
         except settings.NetworkConsentRequiredError as exc:
@@ -4650,24 +4656,33 @@ async def delete_session(session_id: str) -> JsonDict:
 # host still holds for its runtime identity, and a session just released by
 # ``session/close`` answers that with "The child Runtime access method is not
 # implemented yet" until its teardown completes — so opening a chat right after
-# closing one fails for a moment. Observed three times in one afternoon, each a
-# few hundred milliseconds after a close; a retry a moment later succeeds.
+# closing one fails for a moment. In 38 new chats it struck 19, which cleared
+# after 0.5 s (3), 1 s (11) and only at the fourth and last try, 1.5 s (5). The
+# first retries keep that 0.5 s pace; later ones back off to 1 s, 8 attempts and
+# 5.25 s in all, so a window three times the longest seen still opens the chat.
 _SESSION_RACE_MARKER = "child Runtime access"
-_SESSION_RACE_ATTEMPTS = 4
-_SESSION_RACE_DELAY = 0.5
+_SESSION_RACE_DELAYS: tuple[float, ...] = (0.5, 0.5, 0.5, 0.75, 1.0, 1.0, 1.0)
+
+
+def _is_session_race(resp: JsonDict) -> bool:
+    """Whether *resp* is vibe's post-close race error."""
+    error = resp.get("error")
+    message = str(cast("JsonDict", error).get("message", "")) if isinstance(error, dict) else ""
+    return _SESSION_RACE_MARKER in message
 
 
 async def _session_request(method: str, params: JsonDict) -> JsonDict:
     """A ``session/new`` or ``session/load`` that waits out vibe's post-close race."""
     resp = await _client.request(method, params)
-    for attempt in range(1, _SESSION_RACE_ATTEMPTS):
-        error = resp.get("error")
-        message = str(cast("JsonDict", error).get("message", "")) if isinstance(error, dict) else ""
-        if _SESSION_RACE_MARKER not in message:
-            break
+    for attempt, delay in enumerate(_SESSION_RACE_DELAYS, start=1):
+        if not _is_session_race(resp):
+            return resp
         log.warning("%s hit vibe's post-close race (attempt %d); retrying", method, attempt)
-        await asyncio.sleep(_SESSION_RACE_DELAY)
+        await asyncio.sleep(delay)
         resp = await _client.request(method, params)
+    if _is_session_race(resp):
+        attempts = len(_SESSION_RACE_DELAYS) + 1
+        log.error("%s: vibe's post-close race outlasted %d attempts", method, attempts)
     return resp
 
 

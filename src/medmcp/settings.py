@@ -31,7 +31,7 @@ import shutil
 import subprocess
 import threading
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -2350,6 +2350,37 @@ def _stamp_stack_revisions(entries: list[JsonDict], revisions: dict[str, str | N
             entry["env"] = env
         else:
             entry.pop("env", None)
+
+
+# Where vibe 2.26 keeps those tool lists: beside its session logs, one JSON record
+# per server under ``unified/``, ``legacy/`` and ``plugins/``, each naming its server
+# as ``sourceName``. The revision stamp above covers container stacks only; a
+# host-native or hand-configured stack keeps its launch entry when its tools change.
+# The containerised agent writes here too: its ``logs/`` is the core's logs volume.
+TOOL_CACHE_DIR: Path = VIBE_HOME / "logs" / "mcp-descriptors"
+
+
+def clear_tool_cache(names: Iterable[str], root: Path | None = None) -> int:
+    """Remove vibe's cached tool lists for the servers *names*; return how many went.
+
+    Run while vibe-acp is stopped, so its next start asks those servers for their
+    tools again. Records of other servers, and everything outside the cache, stay.
+    """
+    wanted = set(names)
+    removed = 0
+    for path in (root or TOOL_CACHE_DIR).glob("*/*.json"):
+        try:
+            record = json.loads(path.read_bytes())
+        except (OSError, ValueError):
+            continue  # vibe reads an unreadable record as a miss too
+        if not isinstance(record, dict) or cast("JsonDict", record).get("sourceName") not in wanted:
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError as exc:
+            log.warning("Could not clear cached tool list %s: %s", path, exc)
+    return removed
 
 
 def sync_servers_to_vibe_config(servers: list[JsonDict]) -> None:

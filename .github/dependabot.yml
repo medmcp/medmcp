@@ -9,6 +9,10 @@ updates:
       python-dependencies:
         patterns:
           - "*"
+    ignore:
+      # vibe 3.x is a migration (60 s cap on stack calls, crashed stacks not restarted).
+      - dependency-name: "mistral-vibe"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"

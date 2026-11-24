@@ -107,6 +107,13 @@ user control:
   "Starts a job that keeps running after this chat". One job runs at a time by
   default; running jobs are listed, and can be stopped, in the Tool stacks
   window and at `/api/jobs`. See [docs/stack-jobs.md](docs/stack-jobs.md).
+- **Tasks: one read without a dialog.** A stack call that runs past
+  `MEDMCP_TASK_AFTER_SEC` continues in the background as a task. The assistant
+  may read a task's status and result with `get_task` without an approval
+  dialog, but only for a task started in the same chat (you approved the call
+  behind it); each such read is audit-logged. `get_task` for another chat's
+  task, and `cancel_task` always, ask as usual, and the core stops a task for
+  the assistant only on that approval.
 
 ## What contacts the internet
 

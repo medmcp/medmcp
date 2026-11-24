@@ -217,7 +217,8 @@ class Backend:
 
         A transport-level failure (the process having died) propagates so the pool
         can evict and respawn; a tool that merely *reports* failure returns a
-        normal :class:`~mcp.types.CallToolResult` with ``isError`` set.
+        normal :class:`~mcp.types.CallToolResult` with ``isError`` set. Stopping
+        the backend while the call runs fails it with :class:`BackendError`.
         """
         session = self._session
         if session is None or not self.alive:
@@ -225,9 +226,21 @@ class Backend:
         timeout = timedelta(seconds=self.spec.tool_timeout_sec)
         self._inflight += 1
         self._last_used = time.monotonic()
+        # Raced against the close signal: when the backend is stopped (evicted,
+        # replaced, the pool shutting down) the session is torn down by
+        # cancellation, which never answers a request still waiting for its
+        # response — the call would otherwise sit until the tool timeout (hours).
+        call = asyncio.ensure_future(session.call_tool(tool, args, read_timeout_seconds=timeout))
+        closing = asyncio.ensure_future(self._closing.wait())
         try:
-            return await session.call_tool(tool, args, read_timeout_seconds=timeout)
+            done, _ = await asyncio.wait({call, closing}, return_when=asyncio.FIRST_COMPLETED)
+            if call in done:
+                return call.result()
+            raise BackendError(f"stack {self.spec.name!r} was stopped while {tool!r} was running")
         finally:
+            closing.cancel()
+            if not call.done():
+                call.cancel()
             self._inflight -= 1
             self._last_used = time.monotonic()
 
@@ -327,12 +340,16 @@ class BackendPool:
     async def ensure(self, name: str) -> Backend:
         """Return a live backend for *name*, starting (or restarting) it if needed.
 
-        A pre-existing backend is probed with a bounded ping first, so a stack that
-        died while idle is transparently replaced. Concurrent ``ensure`` calls for
+        A pre-existing idle backend is probed with a bounded ping first, so a stack
+        that died while idle is transparently replaced; a busy one is never replaced
+        while its process lives. Concurrent ``ensure`` calls for
         the same name are serialized so the server is started only once.
         """
         probed = self._backends.get(name)
-        if probed is not None and probed.alive and await probed.healthy():
+        # A busy backend is not pinged: a stack in the middle of heavy work may not
+        # answer within the ping bound, and replacing it would kill the call that is
+        # running. Calls share its session, so the new one is simply served later.
+        if probed is not None and probed.alive and (probed.busy or await probed.healthy()):
             return probed
 
         async with self._name_lock(name):

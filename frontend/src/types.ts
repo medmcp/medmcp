@@ -454,6 +454,8 @@ export type ServerFrame =
       statusMessage: string
       output?: string | null
     }
+  /** A new answer starts: what follows belongs to the message just sent. */
+  | { type: 'turn_start' }
   | { type: 'usage'; used: number; size?: number }
   | {
       type: 'permission_request'

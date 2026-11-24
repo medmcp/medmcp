@@ -234,6 +234,16 @@ export function ChevronUpIcon(props: IconProps) {
   )
 }
 
+/** Two sheets — copy to the clipboard. */
+export function CopyIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="9" y="9" width="12" height="12" rx="2" />
+      <path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1" />
+    </Icon>
+  )
+}
+
 /** A tick — done, present, allowed. */
 export function CheckIcon(props: IconProps) {
   return (

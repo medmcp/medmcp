@@ -11,6 +11,7 @@ Notable, user-visible changes to MedMCP. Format follows
 - Approvals: a stack tool's declared effect (read-only, writes new files, destructive) shows on the approval card and in Tool stacks; a destructive tool asks every time.
 - Long stack calls continue in the background as tasks: the chat stays usable, the message box shows how many run, with Stop, and the assistant picks up the result when it is ready.
 - Chat: the assistant can stop a running task or background job; it asks you first.
+- Chat: copy an answer as Markdown (LaTeX source included) or a code block's contents.
 
 ### Changed
 
@@ -20,6 +21,7 @@ Notable, user-visible changes to MedMCP. Format follows
 ### Fixed
 
 - The workspace page loads fresh after an update instead of showing the previous version.
+- Chat: a message sent while an answer streams no longer gets the old answer's last words.
 - Stacks: a second call to a busy stack no longer kills the running one, and a stopped call ends at once instead of hanging for hours.
 - `just install-stack` keeps a stack on mcp 1.x; it picked up mcp 2, which stacks cannot import.
 - Chats: opening a new chat no longer fails when the assistant was just closed.

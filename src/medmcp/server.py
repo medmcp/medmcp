@@ -4073,6 +4073,9 @@ class _ChatConnection:
         # (vibe-acp processes session/cancel asynchronously); drop them now so
         # the old turn can't bleed into this one.
         await self._drain_stale_frames()
+        # Everything the browser receives from here on belongs to this turn: a
+        # superseded answer's last pieces, still on their way, are dropped there.
+        await self._send({"type": "turn_start"})
         params: JsonDict = {
             "session_id": self.session_id,
             "prompt": [{"type": "text", "text": text}],

@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { ComponentPropsWithoutRef, ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -24,6 +24,7 @@ import {
   ArrowUpIcon,
   CheckIcon,
   ChevronRightIcon,
+  CopyIcon,
   FileIcon,
   PlusIcon,
   RewindIcon,
@@ -426,9 +427,61 @@ function promoteDisplayMath(text: string): string {
 // render LaTeX ($…$ inline, $$…$$ display).
 const REMARK_PLUGINS = [remarkGfm, remarkMath]
 const REHYPE_PLUGINS = [rehypeKatex]
+/** Put *text* on the clipboard; the older route where the Clipboard API is missing. */
+async function copyText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  const area = document.createElement('textarea')
+  area.value = text
+  area.style.position = 'fixed'
+  area.style.opacity = '0'
+  document.body.appendChild(area)
+  area.select()
+  document.execCommand('copy')
+  area.remove()
+}
+
+/** A small copy button that confirms with a tick for a moment. */
+function CopyButton({ label, text }: { label: string; text: () => string }) {
+  const [done, setDone] = useState(false)
+  useEffect(() => {
+    if (!done) return
+    const timer = window.setTimeout(() => setDone(false), 1500)
+    return () => window.clearTimeout(timer)
+  }, [done])
+  return (
+    <button
+      className="btn-icon copy-btn"
+      aria-label={done ? 'Copied' : label}
+      onClick={() => void copyText(text()).then(() => setDone(true))}
+    >
+      {done ? <CheckIcon /> : <CopyIcon />}
+    </button>
+  )
+}
+
+/** A code block with a copy button for its contents. */
+function CodeBlock(props: ComponentPropsWithoutRef<'pre'>) {
+  const pre = useRef<HTMLPreElement>(null)
+  return (
+    <div className="code-wrap">
+      <pre ref={pre} {...props} />
+      <CopyButton label="Copy code" text={() => pre.current?.innerText ?? ''} />
+    </div>
+  )
+}
+
+const MARKDOWN_COMPONENTS = { pre: CodeBlock }
+
 const MarkdownBlock = memo(function MarkdownBlock({ source }: { source: string }) {
   return (
-    <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
+    <ReactMarkdown
+      remarkPlugins={REMARK_PLUGINS}
+      rehypePlugins={REHYPE_PLUGINS}
+      components={MARKDOWN_COMPONENTS}
+    >
       {source}
     </ReactMarkdown>
   )
@@ -461,6 +514,13 @@ const AssistantMessage = memo(function AssistantMessage({
       <div className="msg-bubble bubble-ai">
         {head && <MarkdownBlock source={head} />}
         {tail && <MarkdownBlock source={tail} />}
+        {/* The answer as the model wrote it: Markdown and LaTeX source, which a
+            text selection of the rendered page cannot give. */}
+        {!streaming && (
+          <div className="msg-actions">
+            <CopyButton label="Copy as Markdown" text={() => text} />
+          </div>
+        )}
       </div>
     </div>
   )
@@ -777,6 +837,11 @@ export const Chat = memo(function Chat({
   const socketRef = useRef<ChatSocket | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // Set by the socket effect: writes buffered answer text out at once.
+  const flushRef = useRef<(() => void) | null>(null)
+  // Between sending a message and the server's `turn_start`: leftover text of
+  // the interrupted answer is dropped.
+  const awaitingTurnRef = useRef(false)
   // The transcript's right margin gives up exactly the scrollbar's width so its
   // edge lines up with the message box. Measured, because browsers differ (9px
   // here in Chromium, other widths in Firefox, none with overlay scrollbars).
@@ -837,6 +902,7 @@ export const Chat = memo(function Chat({
     // While text arrives the text itself shows the model at work; "Thinking…"
     // comes back only after a quiet moment (the model working on its next step).
     let quietTimer: number | null = null
+    flushRef.current = () => flushChunks()
     const flushChunks = () => {
       if (flushTimer != null) {
         clearTimeout(flushTimer)
@@ -871,6 +937,9 @@ export const Chat = memo(function Chat({
       if (frame.type !== 'chunk') flushChunks()
       switch (frame.type) {
         case 'chunk':
+          // Last pieces of an answer the person interrupted by sending: they
+          // belong above their message, not in the new answer.
+          if (awaitingTurnRef.current) break
           setRetrying(null)
           chunkBuffer += frame.text
           if (flushTimer == null) {
@@ -1016,7 +1085,11 @@ export const Chat = memo(function Chat({
           onToolActivityRef.current?.()
           setBgSignal((n) => n + 1)
           break
+        case 'turn_start':
+          awaitingTurnRef.current = false
+          break
         case 'error':
+          awaitingTurnRef.current = false
           endTurn()
           setRetrying(null)
           setItems((prev) => [...prev, { id: nextItemId(), kind: 'error', text: frame.message }])
@@ -1068,6 +1141,7 @@ export const Chat = memo(function Chat({
             flushTimer = null
           }
           sessionIdRef.current = frame.sessionId
+          awaitingTurnRef.current = false
           setItems([])
           setToolCalls({})
           setBusy(false)
@@ -1153,6 +1227,10 @@ export const Chat = memo(function Chat({
   // the trim/empty + open-socket guards live in ChatInput.
   const send = useCallback(
     (text: string) => {
+      // Text of a still-streaming answer goes into that answer first; anything
+      // of it still on its way is dropped until the new turn starts.
+      flushRef.current?.()
+      awaitingTurnRef.current = true
       setItems((prev) => [...prev, { id: nextItemId(), kind: 'user', text }])
       setBusy(true)
       // A new prompt supersedes whatever was running, and is read from the bottom.

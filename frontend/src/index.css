@@ -1494,6 +1494,36 @@ button:disabled {
   margin-top: 10px;
 }
 
+/* Copy buttons: under an answer (its Markdown source) and on a code block (its
+ * code). Revealed on hover or keyboard focus, like the rewind button. */
+.msg-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.copy-btn {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.msg-ai:hover .msg-actions .copy-btn,
+.code-wrap:hover .copy-btn,
+.copy-btn:focus-visible {
+  opacity: 1;
+}
+
+.code-wrap {
+  position: relative;
+}
+
+.code-wrap > .copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: var(--card);
+}
+
 /* The assistant's answer: plain text across the whole column, no bubble. */
 .msg-ai {
   align-self: stretch;

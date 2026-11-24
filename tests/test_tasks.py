@@ -725,6 +725,9 @@ class TestDelivery:
         assert display["content"][0]["text"] == tasks.notice_line(record)
         notice = _sent(conn, "task_notice")
         assert notice and notice[0]["live"] is True and "segment" in notice[0]["text"]
+        # The turn opens with the marker the page uses to drop an interrupted
+        # answer's last pieces.
+        assert _sent(conn, "turn_start")
         assert not _sent(conn, "user")  # never a user bubble
         vibe.end_turn()
 

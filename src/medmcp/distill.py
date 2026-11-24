@@ -21,7 +21,7 @@ from collections.abc import Collection
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
-from medmcp import harness, provenance, workflow
+from medmcp import harness, provenance, tasks, workflow
 from medmcp.pathcheck import looks_like_path
 from medmcp.toolresult import looks_failed, parse_structured_blob
 from medmcp.workflow import Recipe, RecipeStep, StackRequirement, WorkflowInput
@@ -131,7 +131,22 @@ def _iter_tool_calls(messages: list[JsonDict]) -> list[tuple[str, JsonDict, str]
 
     Pairs each assistant ``tool_calls`` entry with its matching ``role="tool"``
     result by ``tool_call_id``. Calls without a result (interrupted) are skipped.
+
+    A call that became a task (:mod:`medmcp.tasks`) answered with a handle; its
+    real result is the ``task_result`` record written when the task finished,
+    and that is what the call yields, so the recipe runs the tool synchronously
+    as before. A call whose task never finished is skipped like an interrupted
+    one, and the task tools themselves (``get_task``, ``cancel_task``) are not
+    workflow steps.
     """
+    task_results: dict[str, str] = {}
+    for msg in messages:
+        if msg.get("role") == "task_result":
+            task_id = msg.get("task_id")
+            if isinstance(task_id, str):
+                content = str(msg.get("content") or "")
+                ok = msg.get("status") == tasks.COMPLETED
+                task_results[task_id] = content if ok else f"Error executing tool: {content}"
     results: dict[str, str] = {}
     for msg in messages:
         if msg.get("role") == "tool":
@@ -141,6 +156,11 @@ def _iter_tool_calls(messages: list[JsonDict]) -> list[tuple[str, JsonDict, str]
                 # a failed call's text alone may not say so.
                 failed = msg.get("status") == "failed"
                 content = str(msg.get("content") or "")
+                task_id = tasks.handle_task_id(content)
+                if task_id is not None:
+                    if task_id in task_results:
+                        results[call_id] = task_results[task_id]
+                    continue
                 results[call_id] = f"Error executing tool: {content}" if failed else content
 
     calls: list[tuple[str, JsonDict, str]] = []
@@ -153,7 +173,12 @@ def _iter_tool_calls(messages: list[JsonDict]) -> list[tuple[str, JsonDict, str]
             # routes still names ``vibe.todo``; translate on the way in.
             name = harness.canonical_tool_name(str(fn.get("name") or ""))
             call_id = str(tc.get("id") or "")
-            if not name or call_id not in results or harness.is_harness_tool(name):
+            if (
+                not name
+                or call_id not in results
+                or harness.is_harness_tool(name)
+                or tasks.is_task_tool(name)
+            ):
                 continue
             try:
                 args = cast("JsonDict", json.loads(str(fn.get("arguments") or "{}")))

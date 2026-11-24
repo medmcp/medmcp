@@ -6,6 +6,7 @@ import type {
   GpuInfo,
   InstalledStack,
   JobInfo,
+  TaskInfo,
   LocalModelsState,
   ReplayPreviewResult,
   RunSummary,
@@ -267,6 +268,18 @@ export async function fetchJobs(): Promise<JobInfo[]> {
 /** Stop a running background job. */
 export async function stopJob(id: string): Promise<void> {
   await postJson(`/api/jobs/${encodeURIComponent(id)}/stop`, {})
+}
+
+/** Tasks of this workspace, newest first (empty when tasks are off). */
+export async function fetchTasks(): Promise<TaskInfo[]> {
+  const res = await check(await fetch('/api/tasks'))
+  const body = (await res.json()) as { tasks: TaskInfo[] }
+  return body.tasks
+}
+
+/** Stop a working task. */
+export async function cancelTask(id: string): Promise<void> {
+  await postJson(`/api/tasks/${encodeURIComponent(id)}/cancel`, {})
 }
 
 /** Fetch the curated install catalog (each entry flagged whether it's installed). */

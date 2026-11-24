@@ -1,107 +1,167 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { fetchJobs, stopJob } from '../api'
-import type { JobInfo } from '../types'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { cancelTask, fetchJobs, fetchTasks, stopJob } from '../api'
+import type { JobInfo, TaskInfo } from '../types'
 
 const POLL_MS = 10_000
-const SEEN_KEY = 'medmcp.jobs.seen'
+// While a task runs: its status line ("Waiting for the GPU (1 ahead)") moves faster.
+const TASK_POLL_MS = 3_000
+const POP_WIDTH = 360
+const POP_GAP = 6
+const VIEWPORT_MARGIN = 8
 
-/** Ids of finished jobs the person has already looked at (per browser). */
-function loadSeen(): Set<string> {
-  try {
-    return new Set(JSON.parse(localStorage.getItem(SEEN_KEY) ?? '[]') as string[])
-  } catch {
-    return new Set()
-  }
-}
-
-function saveSeen(seen: Set<string>): void {
-  try {
-    localStorage.setItem(SEEN_KEY, JSON.stringify([...seen].slice(-100)))
-  } catch {
-    /* private mode: the pill just shows finished jobs again next time */
-  }
-}
-
-function label(job: JobInfo): string {
-  return job.name || `${job.stack.replace(/^medmcp-/, '')} · ${job.tool}`
-}
-
-/** How long the job ran: until now while running, until it ended otherwise. */
-function elapsed(job: JobInfo): string {
-  if (!job.started_at) return ''
-  const end = job.status === 'running' || !job.finished_at ? Date.now() : Date.parse(job.finished_at)
-  const sec = Math.max(0, (end - Date.parse(job.started_at)) / 1000)
-  const h = Math.floor(sec / 3600)
-  const m = Math.floor((sec % 3600) / 60)
-  return h ? `${h} h ${m} min` : `${m} min`
+interface PopPlace {
+  bottom: number
+  right: number
+  width: number
+  maxHeight: number
 }
 
 /**
- * Background jobs at a glance: a pill in the header while a job runs (with its
- * progress line, e.g. "epoch 41/100 · pseudo-Dice 0.88"), and after one ends
- * until the person has looked at it. Click for the list with Stop.
+ * The list opens upward from the chip, right edges aligned. It is portalled to
+ * the document because the chat panel clips its overflow and is a containment
+ * root, which cuts off even a `position: fixed` child at the panel edge.
  */
-export function JobPill() {
-  const [jobs, setJobs] = useState<JobInfo[]>([])
+function placePop(rect: DOMRect): PopPlace {
+  const vw = window.innerWidth
+  const width = Math.min(POP_WIDTH, vw - 2 * VIEWPORT_MARGIN)
+  const right = Math.max(VIEWPORT_MARGIN, Math.min(vw - rect.right, vw - width - VIEWPORT_MARGIN))
+  return {
+    bottom: window.innerHeight - rect.top + POP_GAP,
+    right,
+    width,
+    maxHeight: Math.max(120, rect.top - POP_GAP - VIEWPORT_MARGIN),
+  }
+}
+
+/** A file the call works on: its argument's name ("input") and the file's name. */
+interface FileArg {
+  role: string
+  name: string
+}
+
+/** A running job or task, as one entry of the list. */
+interface Row {
+  id: string
+  tool: string
+  stack: string
+  files: FileArg[]
+  /** "Waiting for the GPU (1 ahead)", a job's progress line, or "Running for 3 min". */
+  status: string
+  stop: () => Promise<void>
+}
+
+function duration(sec: number): string {
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  if (h) return `${h} h ${m} min`
+  return m ? `${m} min` : `${Math.floor(sec)} s`
+}
+
+/** The path arguments of a call: `input_path` → input, `output_dir` → output. */
+function fileArgs(args: Record<string, unknown> | undefined): FileArg[] {
+  return Object.entries(args ?? {})
+    .filter((e): e is [string, string] => typeof e[1] === 'string' && e[1].includes('/'))
+    .map(([key, value]) => ({
+      role: key.replace(/_(path|dir|file|folder)$/, '').replace(/_/g, ' '),
+      name: value.replace(/\/+$/, '').split('/').pop() ?? value,
+    }))
+}
+
+function jobRow(job: JobInfo): Row {
+  const sec = job.started_at ? Math.max(0, (Date.now() - Date.parse(job.started_at)) / 1000) : 0
+  return {
+    id: job.id,
+    tool: job.name || job.tool,
+    stack: job.stack.replace(/^medmcp-/, ''),
+    files: fileArgs(job.arguments),
+    status: job.progress?.text || `Running for ${duration(sec)}`,
+    stop: () => stopJob(job.id),
+  }
+}
+
+function taskRow(task: TaskInfo): Row {
+  return {
+    id: `task:${task.taskId}`,
+    tool: task.tool,
+    stack: task.stack.replace(/^medmcp-/, ''),
+    files: fileArgs(task.arguments),
+    // A queue position says more than a duration; "Running" says nothing.
+    status:
+      task.statusMessage && task.statusMessage !== 'Running'
+        ? task.statusMessage
+        : `Running for ${duration(task.elapsedSec)}`,
+    stop: () => cancelTask(task.taskId),
+  }
+}
+
+/**
+ * Background work at a glance, in the message box's bar next to send: "1 running
+ * task" while jobs or tasks run, nothing otherwise — the chat's own notice says
+ * when one has finished. Click for the list: tool, stack, the files it works on,
+ * its status, and Stop.
+ * `refreshSignal` changes when a chat's tool call settles, so a call that just
+ * became a task shows at once.
+ */
+export function JobPill({ refreshSignal = 0 }: { refreshSignal?: number }) {
+  const [rows, setRows] = useState<Row[]>([])
   const [open, setOpen] = useState(false)
-  const [seen, setSeen] = useState<Set<string>>(loadSeen)
+  const [place, setPlace] = useState<PopPlace | null>(null)
   const box = useRef<HTMLDivElement>(null)
+  const pop = useRef<HTMLDivElement>(null)
 
   const refresh = useCallback(() => {
-    fetchJobs()
-      .then(setJobs)
-      .catch(() => setJobs([]))
+    void Promise.all([
+      fetchTasks().catch(() => [] as TaskInfo[]),
+      fetchJobs().catch(() => [] as JobInfo[]),
+    ]).then(([tasks, jobs]) =>
+      setRows([
+        ...tasks.filter((t) => t.status === 'working').map(taskRow),
+        ...jobs.filter((j) => j.status === 'running').map(jobRow),
+      ]),
+    )
   }, [])
 
+  const taskRunning = rows.some((r) => r.id.startsWith('task:'))
   useEffect(() => {
     refresh()
-    const timer = window.setInterval(refresh, POLL_MS)
+    const timer = window.setInterval(refresh, taskRunning ? TASK_POLL_MS : POLL_MS)
     return () => window.clearInterval(timer)
-  }, [refresh])
+  }, [refresh, taskRunning, refreshSignal])
+
+  const shown = open && rows.length > 0
+  useLayoutEffect(() => {
+    if (!shown) return
+    const update = () => {
+      if (box.current) setPlace(placePop(box.current.getBoundingClientRect()))
+    }
+    update()
+    window.addEventListener('resize', update)
+    return () => window.removeEventListener('resize', update)
+  }, [shown])
 
   useEffect(() => {
-    if (!open) return
+    if (!shown) return
     const onDown = (e: MouseEvent) => {
-      if (box.current && !box.current.contains(e.target as Node)) setOpen(false)
+      const target = e.target as Node
+      if (!box.current?.contains(target) && !pop.current?.contains(target)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
     }
     document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [open])
-
-  const running = jobs.filter((j) => j.status === 'running')
-  const unseen = jobs.filter((j) => j.status !== 'running' && !seen.has(j.id))
-  // Opening the list marks finished jobs as seen; the pill stays while the list
-  // is open, so the list does not vanish with it.
-  const first = running[0] ?? unseen[0] ?? (open ? jobs[0] : undefined)
-  if (!first) return null
-
-  const failed = unseen.some((j) => j.status === 'failed')
-  const state = running.length ? 'running' : failed ? 'failed' : 'done'
-  const progress = first.progress
-  // The state goes in its own span so a long job name never hides it.
-  const status = running.length
-    ? [progress?.text || 'running', running.length > 1 ? `+${running.length - 1}` : '']
-        .filter(Boolean)
-        .join(' · ')
-    : first.status === 'failed'
-      ? 'failed'
-      : first.status === 'stopped'
-        ? 'stopped'
-        : 'finished'
-
-  const toggle = () => {
-    setOpen((o) => !o)
-    if (!running.length) {
-      const next = new Set(seen)
-      unseen.forEach((j) => next.add(j.id))
-      setSeen(next)
-      saveSeen(next)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
     }
-  }
+  }, [shown])
 
-  const onStop = async (job: JobInfo) => {
+  if (!rows.length) return null
+
+  const onStop = async (row: Row) => {
     try {
-      await stopJob(job.id)
+      await row.stop()
     } finally {
       refresh()
     }
@@ -109,44 +169,49 @@ export function JobPill() {
 
   return (
     <div className="job-pill-box" ref={box}>
-      <button
-        className={`job-pill job-pill-${state}`}
-        onClick={toggle}
-      >
-        <span className="job-pill-dot" />
-        <span className="job-pill-text">{label(first)}</span>
-        <span className="job-pill-state">{status}</span>
-        {running.length > 0 && typeof progress?.fraction === 'number' && (
-          <span className="job-pill-bar">
-            <span style={{ width: `${Math.round(progress.fraction * 100)}%` }} />
-          </span>
-        )}
+      <button className="job-pill" onClick={() => setOpen((o) => !o)} aria-expanded={shown}>
+        <span className="job-pill-spinner" />
+        {rows.length} running {rows.length === 1 ? 'task' : 'tasks'}
       </button>
-      {open && (
-        <div className="job-pop" role="dialog" aria-label="Background jobs">
-          {jobs.slice(0, 8).map((job) => (
-            <div key={job.id} className="job-row">
-              <div className="job-row-main">
-                <span className={`job-status job-status-${job.status}`}>{job.status}</span>
-                <span className="job-row-name">{label(job)}</span>
+      {shown &&
+        place &&
+        createPortal(
+          <div
+            ref={pop}
+            className="job-pop"
+            role="dialog"
+            aria-label="Running tasks"
+            style={{
+              bottom: place.bottom,
+              right: place.right,
+              width: place.width,
+              maxHeight: place.maxHeight,
+            }}
+          >
+            {rows.map((row) => (
+              <div key={row.id} className="job-row">
+                <div className="job-row-head">
+                  <span className="job-row-tool">{row.tool}</span>
+                  <span className="job-row-stack">{row.stack}</span>
+                  <button className="btn-text" onClick={() => void onStop(row)}>
+                    Stop
+                  </button>
+                </div>
+                {row.files.map((f) => (
+                  <div key={f.role} className="job-row-line">
+                    <span className="job-row-key">{f.role}</span>
+                    <span className="job-row-file">{f.name}</span>
+                  </div>
+                ))}
+                <div className="job-row-line">
+                  <span className="job-row-key">status</span>
+                  <span>{row.status}</span>
+                </div>
               </div>
-              <div className="job-row-detail">
-                {job.progress?.text && <span>{job.progress.text}</span>}
-                <span>{elapsed(job)}</span>
-                {job.session_title && <span>from “{job.session_title}”</span>}
-              </div>
-              {job.status === 'running' && (
-                <button className="btn-text" onClick={() => void onStop(job)}>
-                  Stop
-                </button>
-              )}
-            </div>
-          ))}
-          <div className="job-pop-note">
-            Jobs keep running when this window or the chat is closed.
-          </div>
-        </div>
-      )}
+            ))}
+          </div>,
+          document.body,
+        )}
     </div>
   )
 }

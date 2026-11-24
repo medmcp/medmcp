@@ -6,8 +6,8 @@ shim connects to this broker over a unix domain socket and forwards ``list_tools
 warming the backend if needed — and relays the result back, so the expensive
 spawn/import/CUDA cost is paid once in the pool instead of on every call.
 
-This is the server half of the broker protocol (Layer 1 of
-``docs/stack-prewarm-proxy.md``). Activation pre-warm / eviction are driven
+This is the server half of the broker protocol (the stack pre-warm's Layer 1,
+see :mod:`medmcp.backend_pool`). Activation pre-warm / eviction are driven
 in-process by the workspace server holding the pool directly; the socket carries
 only the per-call forwarding ops.
 
@@ -37,12 +37,17 @@ A call that was authorized may be followed by one more step in this process:
 the result to relay. The server uses it to start a background job a stack asked
 for (:mod:`medmcp.jobs`) — so that request can only ever ride on a call the
 person approved, and never on anything a connection to this socket says.
+
+With a :class:`~medmcp.tasks.TaskManager` (``tasks``), a call still running after
+the manager's threshold is answered with a task handle and finishes in the
+background (``after_call`` included); see :mod:`medmcp.tasks`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import os
@@ -53,6 +58,7 @@ from typing import Any, cast
 import mcp.types as mcp_types
 
 from medmcp.backend_pool import BackendError, BackendPool
+from medmcp.tasks import TaskManager
 
 log: logging.Logger = logging.getLogger(__name__)
 
@@ -72,8 +78,9 @@ AfterCall = Callable[
     [str, str, JsonDict, object, mcp_types.CallToolResult], Awaitable[mcp_types.CallToolResult]
 ]
 
-# An op the server answers itself: the request → the fields of the answer.
-CoreOp = Callable[[JsonDict], JsonDict]
+# An op the server answers itself: the request → the fields of the answer (or an
+# awaitable of them, for an op that has to wait on something).
+CoreOp = Callable[[JsonDict], JsonDict | Awaitable[JsonDict]]
 
 
 class BrokerRequestError(Exception):
@@ -90,6 +97,7 @@ class BackendBroker:
         authorize: Authorize | None = None,
         after_call: AfterCall | None = None,
         ops: Mapping[str, CoreOp] | None = None,
+        tasks: TaskManager | None = None,
     ) -> None:
         """Create a broker; call :meth:`start` to begin listening.
 
@@ -105,7 +113,10 @@ class BackendBroker:
                 returns the one to relay.
             ops: Further ops answered by the server itself, by name. They read
                 core state and must never run a tool: anyone who can reach the
-                socket can send them, no approval asked.
+                socket can send them, no approval asked. An op that changes
+                something (``task_cancel``) checks an approval itself.
+            tasks: Runs each approved call and turns one still running after
+                its threshold into a task; ``None`` keeps every call synchronous.
         """
         self._ops: dict[str, CoreOp] = dict(ops or {})
         if self._ops.keys() & {"list_tools", "call_tool"}:
@@ -114,6 +125,7 @@ class BackendBroker:
         self._socket_path = socket_path
         self._authorize = authorize
         self._after_call = after_call
+        self._tasks = tasks
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -194,7 +206,10 @@ class BackendBroker:
 
     async def _run_op(self, req_id: object, op: object, stack: object, req: JsonDict) -> JsonDict:
         if isinstance(op, str) and op in self._ops:
-            return {**self._ops[op](req), "id": req_id, "ok": True}
+            answer = self._ops[op](req)
+            if inspect.isawaitable(answer):
+                answer = await answer
+            return {**answer, "id": req_id, "ok": True}
         if not isinstance(stack, str) or not stack:
             raise BrokerRequestError("missing 'stack'")
 
@@ -219,9 +234,19 @@ class BackendBroker:
                 if not approval:
                     log.warning("broker refused unapproved call %s.%s", stack, tool)
                     raise BrokerRequestError(f"{stack}.{tool} was not approved for these arguments")
-            result = await self._pool.call(stack, tool, args)
-            if self._after_call is not None and approval:
-                result = await self._after_call(stack, tool, args, approval, result)
+            pool, after_call = self._pool, self._after_call
+
+            async def work() -> mcp_types.CallToolResult:
+                result = await pool.call(stack, tool, args)
+                if after_call is not None and approval:
+                    result = await after_call(stack, tool, args, approval, result)
+                return result
+
+            if self._tasks is not None:
+                session = str(getattr(approval, "session", "") or "")
+                result = await self._tasks.run(stack, tool, args, session=session, work=work)
+            else:
+                result = await work()
             return {"id": req_id, "ok": True, "result": result.model_dump(mode="json")}
 
         raise BrokerRequestError(f"unknown op {op!r}")

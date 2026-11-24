@@ -42,7 +42,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from medmcp import agentbox, jobspec, posture, signing, workspace_note
+from medmcp import agentbox, jobspec, posture, signing, tasks, workspace_note
 from medmcp.acp import PROJECT_ROOT, VIBE_HOME, JsonDict
 from medmcp.statefile import atomic_write_json, atomic_write_toml, read_json
 from medmcp.workflow import list_workflows
@@ -183,6 +183,33 @@ def stack_jobs_enabled() -> bool:
     if os.environ.get("MEDMCP_STACK_JOBS", "").strip().lower() in {"0", "false", "no", "off"}:
         return False
     return stack_pool_enabled()
+
+
+def stack_tasks_enabled() -> bool:
+    """Whether a long stack call becomes a task (see :mod:`medmcp.tasks`).
+
+    Only where the pool is: a task is a pooled call the broker stopped waiting
+    for. ``MEDMCP_TASK_AFTER_SEC=0`` turns it off; with the pool off every call
+    stays synchronous whatever the setting.
+    """
+    return stack_pool_enabled() and tasks.after_sec() > 0
+
+
+def task_server_entry() -> JsonDict:
+    """The ``[[mcp_servers]]`` entry for the core's own task tools (``medmcp-tasks``).
+
+    Spawned directly by vibe, never through the pool proxy: it runs nothing and
+    holds nothing, and asks the core over the broker socket, named here because
+    vibe hands an MCP server only the variables its entry lists.
+    """
+    return {
+        "transport": "stdio",
+        "name": tasks.TASK_SERVER,
+        "command": shutil.which(tasks.TASK_COMMAND) or tasks.TASK_COMMAND,
+        "env": {"MEDMCP_BROKER_SOCK": str(backend_socket_path())},
+        "startup_timeout_sec": DEFAULT_STARTUP_TIMEOUT_SEC,
+        "sampling_enabled": False,
+    }
 
 
 def max_jobs() -> int:
@@ -669,6 +696,9 @@ def load_mcp_servers() -> list[JsonDict]:
             # narrows it away).
             if command and Path(command).name in ("docker", PROXY_COMMAND):
                 log.debug("Skipping orphaned stack config.toml entry %r", name)
+                continue
+            # The core's own task tools: written by the sync, never a stack.
+            if name == tasks.TASK_SERVER or (command and Path(command).name == tasks.TASK_COMMAND):
                 continue
             # An HTTP entry here is one this sync wrote for an external server —
             # source #4 owns those. Re-adopting it would strip it back to a stdio
@@ -2518,6 +2548,12 @@ def _sync_servers_to_vibe_config_locked(servers: list[JsonDict]) -> None:
     else:
         _strip_pool_env(new_entries)
     _stamp_stack_revisions(new_entries, revisions)
+
+    # The task tools ride alongside the stacks while long calls can become tasks.
+    # A stack that happens to carry the name loses to it: the name is the core's.
+    new_entries = [e for e in new_entries if e.get("name") != tasks.TASK_SERVER]
+    if stack_tasks_enabled():
+        new_entries.append(task_server_entry())
 
     cfg["mcp_servers"] = new_entries
 

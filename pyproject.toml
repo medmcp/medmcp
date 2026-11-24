@@ -55,6 +55,7 @@ medmcp-agent = "medmcp.agentbox:main"
 medmcp-docker-guard = "medmcp.dockerguard:main"
 medmcp-llm-shim = "medmcp.llmshim:main"
 medmcp-pathguard = "medmcp.pathguard:main"
+medmcp-task-tool = "medmcp.tasktool:main"
 medmcp-update = "medmcp.updater:main"
 
 [dependency-groups]

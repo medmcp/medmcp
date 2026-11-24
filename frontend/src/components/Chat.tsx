@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { ComponentPropsWithoutRef, ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
+import type { ExtraProps } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
@@ -18,13 +19,17 @@ import type {
   ToolCallState,
 } from '../types'
 import { ChatsMenu } from './ChatsMenu'
+import { JobPill } from './JobPill'
 import {
   AlertIcon,
+  ArrowUpIcon,
   CheckIcon,
   ChevronRightIcon,
+  CopyIcon,
   PlusIcon,
   RewindIcon,
   ShieldIcon,
+  StopSquareIcon,
   XIcon,
 } from './icons'
 
@@ -111,8 +116,26 @@ const PlanCard = memo(function PlanCard({ items }: { items: TodoItem[] }) {
 /** Frames after new output in which a following transcript is pinned again. */
 const SETTLE_FRAMES = 3
 
+// How long after the last streamed text "Thinking…" may show again.
+const WRITING_QUIET_MS = 1500
+
 function settled(tc: ToolCallState): boolean {
   return tc.status === 'completed' || tc.status === 'failed'
+}
+
+/** A call's state as its card shows it: a call that became a task follows the task. */
+function shownStatus(tc: ToolCallState): { cls: string; label: string } {
+  const task = tc.task
+  if (task && tc.status === 'completed') {
+    if (task.status === 'working') {
+      return { cls: 'busy', label: `running in the background · ${task.taskId}` }
+    }
+    if (task.status === 'completed') return { cls: 'ok', label: 'completed' }
+    if (task.status === 'cancelled') return { cls: 'fail', label: 'stopped' }
+    if (task.status === 'failed') return { cls: 'fail', label: 'failed' }
+  }
+  const cls = tc.status === 'completed' ? 'ok' : tc.status === 'failed' ? 'fail' : 'busy'
+  return { cls, label: tc.status }
 }
 
 /** The call's clock start, while it is running one. */
@@ -181,15 +204,14 @@ const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
     const plan = parsePlan(tc.rawInput)
     if (plan.length > 0) return <PlanCard items={plan} />
   }
-  const statusClass =
-    tc.status === 'completed' ? 'ok' : tc.status === 'failed' ? 'fail' : 'busy'
+  const shown = shownStatus(tc)
   const since = clockStart(tc)
   return (
     <div className="tool-card">
       <div className="tool-card-head">
-        <span className={`status-dot ${statusClass}`} />
+        <span className={`status-dot ${shown.cls}`} />
         <span className="tool-title">{tc.title}</span>
-        <span className="tool-status">{tc.status}</span>
+        <span className="tool-status">{shown.label}</span>
         {since != null && <ToolElapsed key={since} since={since} />}
       </div>
       {tc.rawInput != null && (
@@ -211,12 +233,16 @@ const ToolCard = memo(function ToolCard({ tc }: { tc: ToolCallState }) {
 /** Whether this call may fold into a run of calls to the same tool. */
 function groupable(tc: ToolCallState): boolean {
   return (
-    !!tc.toolName && tc.toolName !== TODO_TOOL && tc.toolName !== TOOL_SEARCH && !tc.pathGuardRetry
+    !!tc.toolName &&
+    tc.toolName !== TODO_TOOL &&
+    tc.toolName !== TOOL_SEARCH &&
+    !tc.pathGuardRetry &&
+    !tc.task
   )
 }
 
-function callStatusClass(status: string): string {
-  return status === 'completed' ? 'ok' : status === 'failed' ? 'fail' : 'busy'
+function callStatusClass(tc: ToolCallState): string {
+  return shownStatus(tc).cls
 }
 
 // Several calls to one tool in a row — an agent listing its way through a
@@ -227,11 +253,22 @@ const ToolGroup = memo(
   function ToolGroup({ calls }: { calls: ToolCallState[] }) {
     const tool = calls[0].toolName ?? 'tool'
     const running = calls.filter((c) => !settled(c)).length
-    const failed = calls.filter((c) => c.status === 'failed').length
-    const statusClass = running > 0 ? 'busy' : failed > 0 ? 'fail' : 'ok'
+    const background = calls.filter((c) => c.task?.status === 'working').length
+    const stopped = calls.filter((c) => c.task?.status === 'cancelled').length
+    const failed = calls.filter((c) => callStatusClass(c) === 'fail').length - stopped
+    const statusClass =
+      running + background > 0 ? 'busy' : failed + stopped > 0 ? 'fail' : 'ok'
     const status =
       `${calls.length} calls` +
-      (running > 0 ? ', running' : failed > 0 ? `, ${failed} failed` : '')
+      (running > 0
+        ? ', running'
+        : background > 0
+          ? ', running in the background'
+          : failed > 0
+            ? `, ${failed} failed`
+            : stopped > 0
+              ? `, ${stopped} stopped`
+              : '')
     const since = calls.map(clockStart).find((t) => t != null)
     return (
       <div className="tool-card tool-group">
@@ -248,7 +285,7 @@ const ToolGroup = memo(
             <div key={tc.toolCallId} className="tool-group-call">
               <details>
                 <summary>
-                  <span className={`status-dot ${callStatusClass(tc.status)}`} />
+                  <span className={`status-dot ${callStatusClass(tc)}`} />
                   <span className="tool-group-label">{label}</span>
                 </summary>
                 {tc.rawInput != null && (
@@ -360,6 +397,30 @@ function splitMarkdownBlocks(text: string): string[] {
   return blocks
 }
 
+// Models also write LaTeX's own delimiters, \[…\] for a display equation and
+// \(…\) inline; remark-math knows only $$…$$ and $…$, and Markdown reads \[ as an
+// escaped bracket, so those formulas showed as raw text. Rewrite them to the
+// dollar forms before parsing, never inside fenced or inline code.
+function normalizeLatexDelimiters(text: string): string {
+  if (!text.includes('\\[') && !text.includes('\\(')) return text
+  const rewrite = (prose: string) =>
+    prose
+      .replace(/\\\[([\s\S]+?)\\\]/g, (_m, tex: string) => `\n$$\n${tex.trim()}\n$$\n`)
+      .replace(/\\\(([\s\S]+?)\\\)/g, (_m, tex: string) => `$${tex.trim()}$`)
+  // Fenced blocks first, then inline code spans within the prose between them.
+  return text
+    .split(/(^[ \t]*(?:```|~~~)[\s\S]*?^[ \t]*(?:```|~~~)[ \t]*$)/m)
+    .map((part, i) =>
+      i % 2 === 1
+        ? part
+        : part
+            .split(/(`+[^`]*?`+)/)
+            .map((piece, j) => (j % 2 === 1 ? piece : rewrite(piece)))
+            .join(''),
+    )
+    .join('')
+}
+
 // remark-math only renders $$…$$ as a centered *display* block when the fences
 // sit on their own lines; a single-line $$…$$ (which models routinely emit)
 // parses as inline math — no displaystyle, no .katex-display scroll container.
@@ -390,9 +451,89 @@ function promoteDisplayMath(text: string): string {
 // render LaTeX ($…$ inline, $$…$$ display).
 const REMARK_PLUGINS = [remarkGfm, remarkMath]
 const REHYPE_PLUGINS = [rehypeKatex]
+/** Put *text* on the clipboard; the older route where the Clipboard API is missing. */
+async function copyText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  const area = document.createElement('textarea')
+  area.value = text
+  area.style.position = 'fixed'
+  area.style.opacity = '0'
+  document.body.appendChild(area)
+  area.select()
+  document.execCommand('copy')
+  area.remove()
+}
+
+/** A small copy button that confirms with a tick for a moment. */
+function CopyButton({ label, text }: { label: string; text: () => string }) {
+  const [done, setDone] = useState(false)
+  useEffect(() => {
+    if (!done) return
+    const timer = window.setTimeout(() => setDone(false), 1500)
+    return () => window.clearTimeout(timer)
+  }, [done])
+  return (
+    <button
+      className="btn-icon copy-btn"
+      aria-label={done ? 'Copied' : label}
+      onClick={() => void copyText(text()).then(() => setDone(true))}
+    >
+      {done ? <CheckIcon /> : <CopyIcon />}
+    </button>
+  )
+}
+
+/** The props react-markdown hands a component, minus its syntax-tree node,
+ *  which is not an attribute for the page. */
+function withoutNode<P extends ExtraProps>(given: P): Omit<P, 'node'> {
+  const props = { ...given }
+  delete props.node
+  return props
+}
+
+/** A code block with a copy button for its contents. */
+function CodeBlock(given: ComponentPropsWithoutRef<'pre'> & ExtraProps) {
+  const props = withoutNode(given)
+  const pre = useRef<HTMLPreElement>(null)
+  return (
+    <div className="code-wrap">
+      <pre ref={pre} {...props} />
+      <CopyButton label="Copy code" text={() => pre.current?.innerText ?? ''} />
+    </div>
+  )
+}
+
+/** A span, or — for a displayed equation — the equation with a button that
+ *  copies its LaTeX source (KaTeX keeps it in the MathML annotation). */
+function MathOrSpan(given: ComponentPropsWithoutRef<'span'> & ExtraProps) {
+  const props = withoutNode(given)
+  const math = useRef<HTMLSpanElement>(null)
+  if (!props.className?.split(' ').includes('katex-display')) return <span {...props} />
+  return (
+    <span className="math-wrap">
+      <span ref={math} {...props} />
+      <CopyButton
+        label="Copy LaTeX"
+        text={() => math.current?.querySelector('annotation')?.textContent?.trim() ?? ''}
+      />
+    </span>
+  )
+}
+
+// Copy buttons only where something specific is copied: code (Markdown blocks
+// included) and displayed equations.
+const MARKDOWN_COMPONENTS = { pre: CodeBlock, span: MathOrSpan }
+
 const MarkdownBlock = memo(function MarkdownBlock({ source }: { source: string }) {
   return (
-    <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
+    <ReactMarkdown
+      remarkPlugins={REMARK_PLUGINS}
+      rehypePlugins={REHYPE_PLUGINS}
+      components={MARKDOWN_COMPONENTS}
+    >
       {source}
     </ReactMarkdown>
   )
@@ -412,7 +553,7 @@ const AssistantMessage = memo(function AssistantMessage({
   // so only that small tail re-parses per flush. A settled message renders as a
   // single document — fully correct, parsed once.
   const { head, tail } = useMemo(() => {
-    const md = promoteDisplayMath(text)
+    const md = promoteDisplayMath(normalizeLatexDelimiters(text))
     if (!streaming) return { head: md, tail: '' }
     const blocks = splitMarkdownBlocks(md)
     return {
@@ -422,7 +563,6 @@ const AssistantMessage = memo(function AssistantMessage({
   }, [text, streaming])
   return (
     <div className="msg msg-ai">
-      <div className="msg-avatar avatar-ai">AI</div>
       <div className="msg-bubble bubble-ai">
         {head && <MarkdownBlock source={head} />}
         {tail && <MarkdownBlock source={tail} />}
@@ -537,6 +677,9 @@ function PermissionCard({
   )
 }
 
+/** The message box's tallest, in pixels, before it scrolls: eight lines. */
+const COMPOSER_MAX_PX = 8 * 22 + 10
+
 // The message composer, split out (with its own draft state) so a keystroke
 // re-renders only this textarea — not the whole transcript above it. Memoized,
 // so a streaming flush in the parent doesn't re-render it either. Enter sends
@@ -544,70 +687,103 @@ function PermissionCard({
 const ChatInput = memo(function ChatInput({
   busy,
   canSend,
-  contextPath,
   onSend,
   onCancel,
-  onClearContext,
+  bgSignal,
 }: {
   busy: boolean
   canSend: boolean
-  contextPath: string | null
   onSend: (text: string) => void
   onCancel: () => void
-  onClearContext: () => void
+  bgSignal: number
 }) {
   const [input, setInput] = useState('')
+  // The box keeps focus after a send so the next message can follow at once,
+  // but nothing needs attention there: its highlight goes until the person
+  // types, clicks into it or comes back to it.
+  const [sent, setSent] = useState(false)
+  const field = useRef<HTMLTextAreaElement>(null)
   const submit = () => {
     const text = input.trim()
     if (!text || !canSend) return
     onSend(text)
     setInput('')
+    setSent(true)
   }
+
+  // The box grows with its text up to a cap, then scrolls. Measured again when
+  // its width changes (a separator drag re-wraps the text).
+  useLayoutEffect(() => {
+    const el = field.current
+    if (!el) return
+    let width = -1
+    const fit = () => {
+      el.style.height = 'auto'
+      el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_PX)}px`
+      el.style.overflowY = el.scrollHeight > COMPOSER_MAX_PX ? 'auto' : 'hidden'
+    }
+    fit()
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth !== width) {
+        width = el.clientWidth
+        fit()
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [input])
+
   return (
-    <div className="chat-input-row">
-      <textarea
-        value={input}
-        placeholder="Message the agent… (Enter to send, Shift+Enter for newline)"
-        rows={2}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && !e.shiftKey) {
+    <div className="composer">
+      {/* A click on the card's empty space puts the cursor in the box. */}
+      <div
+        className={sent ? 'composer-card composer-sent' : 'composer-card'}
+        onMouseDown={(e) => {
+          setSent(false)
+          const target = e.target as HTMLElement
+          if (target === e.currentTarget || target.classList.contains('composer-row')) {
             e.preventDefault()
-            submit()
+            field.current?.focus()
           }
         }}
-      />
-      {busy ? (
-        <button className="btn-danger" onClick={onCancel}>
-          Stop
-        </button>
-      ) : (
-        <button className="btn-primary" onClick={submit} disabled={!canSend}>
-          Send
-        </button>
-      )}
-      {/* What "this image" will resolve to. The server appends the open file to
-          the prompt as a workspace-context note and strips it from the
-          transcript, so without this the pointer is invisible — "segment this"
-          would act on whatever happened to be open. ✕ sends prompts
-          without it. The line keeps its height when empty, so the message box
-          never moves when a file is opened, dropped or sent. */}
-      <div className="chat-viewing">
-        {contextPath && (
-          <>
-            <span className="chat-viewing-label">Viewing</span>
-            <span className="chat-viewing-name">
-              <bdi>{contextPath.slice(contextPath.lastIndexOf('/') + 1)}</bdi>
-            </span>
-            <button
-              className="btn-icon chat-viewing-clear"
-              aria-label="Don't send this file with my messages"
-              onClick={onClearContext}
-            >
-              <XIcon size={12} />
+      >
+        {/* One line by default: the text, then background work and send beside
+            it; the text grows upward only when it needs more lines. */}
+        <div className="composer-row">
+          <textarea
+            ref={field}
+            value={input}
+            placeholder="Message the agent…"
+            rows={1}
+            onChange={(e) => {
+              setInput(e.target.value)
+              setSent(false)
+            }}
+            onFocus={() => setSent(false)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                submit()
+              }
+            }}
+          />
+          {/* Background work (tasks and jobs): "1 running task", next to send. */}
+          <JobPill refreshSignal={bgSignal} />
+          {busy ? (
+            <button className="composer-send composer-stop" aria-label="Stop" onClick={onCancel}>
+              <StopSquareIcon fill="currentColor" />
             </button>
-          </>
-        )}
+          ) : (
+            <button
+              className="composer-send"
+              aria-label="Send"
+              onClick={submit}
+              disabled={!canSend || !input.trim()}
+            >
+              <ArrowUpIcon />
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -620,7 +796,6 @@ const ChatInput = memo(function ChatInput({
 export const Chat = memo(function Chat({
   onPromptedSession,
   viewedPath,
-  viewedSeq = 0,
   onToolActivity,
   resumeSessionId,
   onSessionEstablished,
@@ -631,11 +806,9 @@ export const Chat = memo(function Chat({
 }: {
   /** Called with the vibe session id whenever a prompt is sent into it. */
   onPromptedSession?: (id: string) => void
-  /** Workspace-relative file open in the viewer, offered as prompt context
-   *  (named in a line under the message box, which the reader can clear). */
+  /** Workspace-relative file open in the viewer, sent as prompt context (the
+   *  explorer marks it). */
   viewedPath?: string | null
-  /** Bumped on every open in the viewer, so reopening the same file counts. */
-  viewedSeq?: number
   /** Called when a tool call completes / a turn ends (may have written files). */
   onToolActivity?: () => void
   /** Session to resume on connect; the server reloads it and replays history. */
@@ -653,6 +826,8 @@ export const Chat = memo(function Chat({
 }) {
   const [items, setItems] = useState<ChatItem[]>([])
   const [toolCalls, setToolCalls] = useState<Record<string, ToolCallState>>({})
+  const toolRunning = Object.values(toolCalls).some((tc) => !settled(tc))
+  const [writing, setWriting] = useState(false)
   const rows = useMemo(() => groupRows(items, toolCalls), [items, toolCalls])
   const [status, setStatus] = useState<ChatSocketStatus>('connecting')
   const [busy, setBusy] = useState(false)
@@ -672,15 +847,32 @@ export const Chat = memo(function Chat({
     paths: string[]
     busy: boolean
   } | null>(null)
-  // The file the next prompt resolves "this image" to: the one in the viewer,
-  // unless the reader dropped it. A drop holds until a file is opened again
-  // (the same one included); sending a message does not bring it back.
-  const [dropped, setDropped] = useState<{ path: string; seq: number } | null>(null)
-  const contextPath =
-    viewedPath && !(dropped?.path === viewedPath && dropped.seq === viewedSeq) ? viewedPath : null
+  // The file the next prompt resolves "this image" to: the one in the viewer
+  // (the explorer marks it).
+  const contextPath = viewedPath ?? null
   const socketRef = useRef<ChatSocket | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // Set by the socket effect: writes buffered answer text out at once.
+  const flushRef = useRef<(() => void) | null>(null)
+  // Between sending a message and the server's `turn_start`: leftover text of
+  // the interrupted answer is dropped.
+  const awaitingTurnRef = useRef(false)
+  // The transcript's right margin gives up exactly the scrollbar's width so its
+  // edge lines up with the message box. Measured, because browsers differ (9px
+  // here in Chromium, other widths in Firefox, none with overlay scrollbars).
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const measure = () => {
+      const bar = el.offsetWidth - el.clientWidth
+      el.style.setProperty('--scrollbar-here', `${Math.max(0, bar)}px`)
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
   // Whether the transcript follows new output: true while the reader is at the
   // bottom. Kept from scroll events, never measured after the DOM has grown —
   // by then "not at the bottom" is true of every reader.
@@ -693,6 +885,9 @@ export const Chat = memo(function Chat({
   const heldCallRef = useRef<string | null>(null)
   // The frame handler below is a mount-once closure; route the callback
   // through a ref so it always sees the latest prop.
+  // Bumped when a tool call settles or a task changes, so the background-work
+  // indicator under the message box refreshes at once instead of on its next poll.
+  const [bgSignal, setBgSignal] = useState(0)
   const onToolActivityRef = useRef(onToolActivity)
   useEffect(() => {
     onToolActivityRef.current = onToolActivity
@@ -720,6 +915,10 @@ export const Chat = memo(function Chat({
     // (each re-parsing the accumulated markdown).
     let chunkBuffer = ''
     let flushTimer: number | null = null
+    // While text arrives the text itself shows the model at work; "Thinking…"
+    // comes back only after a quiet moment (the model working on its next step).
+    let quietTimer: number | null = null
+    flushRef.current = () => flushChunks()
     const flushChunks = () => {
       if (flushTimer != null) {
         clearTimeout(flushTimer)
@@ -735,6 +934,9 @@ export const Chat = memo(function Chat({
         }
         return [...prev, { id: nextItemId(), kind: 'assistant', text }]
       })
+      setWriting(true)
+      if (quietTimer != null) clearTimeout(quietTimer)
+      quietTimer = window.setTimeout(() => setWriting(false), WRITING_QUIET_MS)
     }
     // A call gets its clock when it is first seen running in a live turn. One
     // still queued (`pending`) or waiting at its approval box has not started.
@@ -751,6 +953,9 @@ export const Chat = memo(function Chat({
       if (frame.type !== 'chunk') flushChunks()
       switch (frame.type) {
         case 'chunk':
+          // Last pieces of an answer the person interrupted by sending: they
+          // belong above their message, not in the new answer.
+          if (awaitingTurnRef.current) break
           setRetrying(null)
           chunkBuffer += frame.text
           if (flushTimer == null) {
@@ -788,9 +993,11 @@ export const Chat = memo(function Chat({
                 kind: frame.kind,
                 toolName: frame.toolName,
                 rawInput: frame.rawInput,
-                output: frame.output ?? prev[frame.toolCallId]?.output,
+                // A replayed call that became a task shows the task's result.
+                output: frame.task?.output ?? frame.output ?? prev[frame.toolCallId]?.output,
                 pathGuardRetry: frame.pathGuardRetry || prev[frame.toolCallId]?.pathGuardRetry,
                 startedAt: prev[frame.toolCallId]?.startedAt ?? startedAt,
+                task: frame.task ?? prev[frame.toolCallId]?.task,
               },
             }))
           }
@@ -808,17 +1015,55 @@ export const Chat = memo(function Chat({
                 ...tc,
                 status,
                 startedAt: settled({ ...tc, status }) ? undefined : (tc.startedAt ?? startedAt),
-                output: frame.output ?? tc.output,
+                output: frame.task?.output ?? frame.output ?? tc.output,
                 // Sent again once the model finished streaming the arguments;
                 // the opening frame's copy can be empty or partial.
                 rawInput: frame.rawInput ?? tc.rawInput,
                 pathGuardRetry: frame.pathGuardRetry || tc.pathGuardRetry,
+                task: frame.task ?? tc.task,
               },
             }
           })
-          if (frame.status === 'completed') onToolActivityRef.current?.()
+          if (frame.status === 'completed') {
+            onToolActivityRef.current?.()
+            setBgSignal((n) => n + 1)
+          }
           break
         }
+        case 'task_update':
+          // A task of this chat ended: its card settles with the real result.
+          setToolCalls((prev) => {
+            const id =
+              frame.toolCallId && prev[frame.toolCallId]
+                ? frame.toolCallId
+                : Object.keys(prev).find((k) => prev[k].task?.taskId === frame.taskId)
+            const tc = id ? prev[id] : undefined
+            if (!id || !tc) return prev
+            const task = {
+              ...tc.task,
+              taskId: frame.taskId,
+              status: frame.status,
+              statusMessage: frame.statusMessage,
+              output: frame.output,
+            }
+            return { ...prev, [id]: { ...tc, task, output: frame.output ?? tc.output } }
+          })
+          onToolActivityRef.current?.()
+          setBgSignal((n) => n + 1)
+          break
+        case 'task_notice':
+          // A turn the core started because tasks finished: a system notice,
+          // and (live) the chat is busy until that turn is done.
+          setItems((prev) => [
+            ...prev,
+            { id: nextItemId(), kind: 'notice', text: frame.text, task: true },
+          ])
+          if (frame.live) {
+            setBusy(true)
+            turnLiveRef.current = true
+            followRef.current = { ...followRef.current, following: true }
+          }
+          break
         case 'usage':
           setUsage({ used: frame.used, size: frame.size ?? null })
           break
@@ -854,8 +1099,13 @@ export const Chat = memo(function Chat({
           setRetrying(null)
           setPermission(null)
           onToolActivityRef.current?.()
+          setBgSignal((n) => n + 1)
+          break
+        case 'turn_start':
+          awaitingTurnRef.current = false
           break
         case 'error':
+          awaitingTurnRef.current = false
           endTurn()
           setRetrying(null)
           setItems((prev) => [...prev, { id: nextItemId(), kind: 'error', text: frame.message }])
@@ -907,6 +1157,7 @@ export const Chat = memo(function Chat({
             flushTimer = null
           }
           sessionIdRef.current = frame.sessionId
+          awaitingTurnRef.current = false
           setItems([])
           setToolCalls({})
           setBusy(false)
@@ -937,6 +1188,7 @@ export const Chat = memo(function Chat({
     return () => {
       socket.close()
       if (flushTimer != null) clearTimeout(flushTimer)
+      if (quietTimer != null) clearTimeout(quietTimer)
     }
   }, [])
 
@@ -991,6 +1243,10 @@ export const Chat = memo(function Chat({
   // the trim/empty + open-socket guards live in ChatInput.
   const send = useCallback(
     (text: string) => {
+      // Text of a still-streaming answer goes into that answer first; anything
+      // of it still on its way is dropped until the new turn starts.
+      flushRef.current?.()
+      awaitingTurnRef.current = true
       setItems((prev) => [...prev, { id: nextItemId(), kind: 'user', text }])
       setBusy(true)
       // A new prompt supersedes whatever was running, and is read from the bottom.
@@ -1003,11 +1259,6 @@ export const Chat = memo(function Chat({
     },
     [contextPath, onPromptedSession],
   )
-
-  // Stable for the same reason as `send`.
-  const clearContext = useCallback(() => {
-    if (viewedPath) setDropped({ path: viewedPath, seq: viewedSeq })
-  }, [viewedPath, viewedSeq])
 
   const cancel = useCallback(() => socketRef.current?.cancel(), [])
 
@@ -1099,15 +1350,12 @@ export const Chat = memo(function Chat({
             </button>
           )}
           {usage != null && <ContextMeter used={usage.used} size={usage.size} />}
-          <span
-            className={`conn conn-${retrying ? 'retrying' : status}`}
-          >
-            {retrying
-              ? `retrying… ${retrying.category.replace(/_/g, ' ')}`
-              : status === 'open'
-                ? 'running'
-                : status}
-          </span>
+          {/* Only when the connection needs a word: connected is the normal state. */}
+          {(retrying || status !== 'open') && (
+            <span className={`conn conn-${retrying ? 'retrying' : status}`}>
+              {retrying ? `retrying… ${retrying.category.replace(/_/g, ' ')}` : status}
+            </span>
+          )}
         </span>
       </div>
       <div className="panel-body chat-scroll" ref={scrollRef} onScroll={onScroll}>
@@ -1131,6 +1379,15 @@ export const Chat = memo(function Chat({
           const { item, index: i } = row
           if (item.kind === 'tool') {
             const tc = toolCalls[item.toolCallId]
+            // A call that became a task turns into its notice; the finished
+            // notice and the assistant's reply carry the result.
+            if (tc?.task) {
+              return (
+                <div key={item.id} className="msg-notice msg-task-notice">
+                  {tc.task.started ?? 'Task started in the background'}
+                </div>
+              )
+            }
             return tc ? (
               <ToolCard
                 key={item.id}
@@ -1152,7 +1409,6 @@ export const Chat = memo(function Chat({
                       <RewindIcon />
                     </button>
                   )}
-                  <div className="msg-avatar avatar-user">You</div>
                   <div className="msg-bubble bubble-user">{item.text}</div>
                 </div>
                 {rewind && rewind.messageId === mid && (
@@ -1201,7 +1457,7 @@ export const Chat = memo(function Chat({
           }
           if (item.kind === 'notice') {
             return (
-              <div key={item.id} className="msg-notice">
+              <div key={item.id} className={item.task ? 'msg-notice msg-task-notice' : 'msg-notice'}>
                 {item.text}
               </div>
             )
@@ -1213,15 +1469,21 @@ export const Chat = memo(function Chat({
           )
         })}
         {permission && <PermissionCard perm={permission} onDecide={decide} />}
-        {busy && !permission && <div className="thinking">Thinking…</div>}
+        {/* Only while the model itself works: not while a tool runs or an
+            approval waits — those have their own card — and not while text arrives. */}
+        {busy &&
+          !permission &&
+          !toolRunning &&
+          !writing &&
+          // Where the answer will appear: the column's left edge.
+          <div className="thinking">Thinking…</div>}
       </div>
       <ChatInput
         busy={busy}
         canSend={status === 'open'}
-        contextPath={contextPath}
         onSend={send}
         onCancel={cancel}
-        onClearContext={clearContext}
+        bgSignal={bgSignal}
       />
     </div>
   )

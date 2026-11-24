@@ -4,7 +4,7 @@ Today every stack tool call spawns a fresh MCP stdio server (``docker run`` +
 import + CUDA init), runs one tool, and tears it down. This module holds each
 stack's server **persistent** so that cost is paid once (ideally pre-warmed at
 activation) instead of on every call. It is the UI/vibe-agnostic core of the
-stack pre-warm design (``docs/stack-prewarm-proxy.md``, Layer 1); the broker and
+stack pre-warm design (Layer 1); the broker and
 proxy shim that connect vibe-acp to this pool live in separate modules.
 
 A :class:`Backend` wraps one long-lived ``stdio_client`` + ``ClientSession`` (the
@@ -217,7 +217,8 @@ class Backend:
 
         A transport-level failure (the process having died) propagates so the pool
         can evict and respawn; a tool that merely *reports* failure returns a
-        normal :class:`~mcp.types.CallToolResult` with ``isError`` set.
+        normal :class:`~mcp.types.CallToolResult` with ``isError`` set. Stopping
+        the backend while the call runs fails it with :class:`BackendError`.
         """
         session = self._session
         if session is None or not self.alive:
@@ -225,9 +226,21 @@ class Backend:
         timeout = timedelta(seconds=self.spec.tool_timeout_sec)
         self._inflight += 1
         self._last_used = time.monotonic()
+        # Raced against the close signal: when the backend is stopped (evicted,
+        # replaced, the pool shutting down) the session is torn down by
+        # cancellation, which never answers a request still waiting for its
+        # response — the call would otherwise sit until the tool timeout (hours).
+        call = asyncio.ensure_future(session.call_tool(tool, args, read_timeout_seconds=timeout))
+        closing = asyncio.ensure_future(self._closing.wait())
         try:
-            return await session.call_tool(tool, args, read_timeout_seconds=timeout)
+            done, _ = await asyncio.wait({call, closing}, return_when=asyncio.FIRST_COMPLETED)
+            if call in done:
+                return call.result()
+            raise BackendError(f"stack {self.spec.name!r} was stopped while {tool!r} was running")
         finally:
+            closing.cancel()
+            if not call.done():
+                call.cancel()
             self._inflight -= 1
             self._last_used = time.monotonic()
 
@@ -270,6 +283,11 @@ class Backend:
     def busy(self) -> bool:
         """Whether at least one call is currently in flight."""
         return self._inflight > 0
+
+    @property
+    def inflight(self) -> int:
+        """How many calls are currently in flight."""
+        return self._inflight
 
     @property
     def last_used(self) -> float:
@@ -327,12 +345,16 @@ class BackendPool:
     async def ensure(self, name: str) -> Backend:
         """Return a live backend for *name*, starting (or restarting) it if needed.
 
-        A pre-existing backend is probed with a bounded ping first, so a stack that
-        died while idle is transparently replaced. Concurrent ``ensure`` calls for
+        A pre-existing idle backend is probed with a bounded ping first, so a stack
+        that died while idle is transparently replaced; a busy one is never replaced
+        while its process lives. Concurrent ``ensure`` calls for
         the same name are serialized so the server is started only once.
         """
         probed = self._backends.get(name)
-        if probed is not None and probed.alive and await probed.healthy():
+        # A busy backend is not pinged: a stack in the middle of heavy work may not
+        # answer within the ping bound, and replacing it would kill the call that is
+        # running. Calls share its session, so the new one is simply served later.
+        if probed is not None and probed.alive and (probed.busy or await probed.healthy()):
             return probed
 
         async with self._name_lock(name):
@@ -493,6 +515,28 @@ class BackendPool:
         self._effects.pop(name, None)
         if self._known.pop(name, None) is not None:
             self._save_schemas()
+
+    async def stop(self, name: str) -> None:
+        """Tear down *name*'s backend now, killing any call still running on it.
+
+        The evict path without forgetting the stack's tool list: a cancelled task
+        (:mod:`medmcp.tasks`) stops its work this way, and the stack itself is
+        unchanged, so its schemas and effects stay valid.
+        """
+        await self._drop(name)
+
+    def inflight(self, name: str) -> int:
+        """How many calls are running on *name*'s backend right now."""
+        backend = self._backends.get(name)
+        return backend.inflight if backend is not None else 0
+
+    def is_gpu(self, name: str) -> bool:
+        """Whether stack *name* holds VRAM (from its spec; ``False`` when not installed)."""
+        backend = self._backends.get(name)
+        if backend is not None:
+            return backend.spec.gpu
+        spec = self._resolve(name)
+        return spec is not None and spec.gpu
 
     def warm_names(self) -> list[str]:
         """Names of currently-live backends."""

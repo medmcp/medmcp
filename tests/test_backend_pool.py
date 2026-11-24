@@ -171,3 +171,42 @@ async def test_evicting_a_stack_forgets_its_schemas(tmp_path: Path) -> None:
         assert BackendPool(resolve_spec=resolver({}), schema_cache=cache).known_stacks() == []
     finally:
         await pool.aclose()
+
+
+async def test_stopping_a_backend_fails_its_running_call() -> None:
+    """A call in flight when its backend is evicted ends at once, not at the tool timeout."""
+    pool = BackendPool(resolve_spec=resolver({"fake": fake_spec("fake")}))
+    try:
+        await pool.ensure("fake")
+        running = asyncio.create_task(pool.call("fake", "sleep", {"seconds": 20}))
+        await asyncio.sleep(0.5)
+        started = time.monotonic()
+        await pool.evict("fake")
+        with pytest.raises(BackendError, match="stopped while 'sleep' was running"):
+            await asyncio.wait_for(running, timeout=10)
+        assert time.monotonic() - started < 10
+    finally:
+        await pool.aclose()
+
+
+async def test_busy_backend_is_not_replaced_when_its_ping_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second call to a stack busy with heavy work reuses it instead of killing the first."""
+    pool = BackendPool(resolve_spec=resolver({"fake": fake_spec("fake")}))
+    try:
+        backend = await pool.ensure("fake")
+        first = asyncio.create_task(pool.call("fake", "sleep", {"seconds": 1.0}))
+        await asyncio.sleep(0.3)
+
+        async def unanswered() -> bool:
+            return False  # a stack busy in synchronous work misses the ping
+
+        monkeypatch.setattr(backend, "healthy", unanswered)
+        second = await pool.call("fake", "echo", {"text": "hi"})
+        assert replay.extract_structured(second) == {"text": "hi"}
+        assert await pool.ensure("fake") is backend  # still busy: reused, not replaced
+        assert replay.extract_structured(await first) == {"slept": 1.0}
+        assert backend.alive
+    finally:
+        await pool.aclose()

@@ -7,7 +7,6 @@ import { ExternalMcpBanner } from './components/ExternalMcpBanner'
 import { ExternalMcpWindow } from './components/ExternalMcpWindow'
 import { ModelsWindow } from './components/ModelsWindow'
 import { FileExplorer } from './components/FileExplorer'
-import { JobPill } from './components/JobPill'
 import { StackMarketplace } from './components/StackMarketplace'
 import { SettingsDrawer } from './components/SettingsDrawer'
 import { ShortcutsWindow } from './components/ShortcutsWindow'
@@ -47,11 +46,8 @@ function describeUpdateResult(r: NonNullable<UpdateState['last_result']>): strin
  */
 export default function App() {
   const [openPath, setOpenPath] = useState<string | null>(null)
-  // Counts opens, so the chat can tell the same file being opened again.
-  const [openSeq, setOpenSeq] = useState(0)
   const openFile = useCallback((path: string) => {
     setOpenPath(path)
-    setOpenSeq((n) => n + 1)
   }, [])
   // What is overlaid on the open volume. Lives here rather than in the viewer so
   // the explorer's menu can set it and so it survives the viewer's resize rebuild.
@@ -232,7 +228,6 @@ export default function App() {
         <span className="app-logo">MedMCP</span>
         <span className="app-subtitle">workspace</span>
         <span className="app-header-right">
-          <JobPill />
           {updateNotice && (
             <button
               className="update-pill"
@@ -300,7 +295,7 @@ export default function App() {
       <StackMarketplace open={marketOpen} onClose={() => setMarketOpen(false)} />
       <ShortcutsWindow open={shortcutsOpen} onClose={closeShortcuts} />
       {/* Fixed in the page's bottom-right corner, beside the chat's Send button
-          (the composer keeps that strip free, see .chat-input-row) and under
+          (the composer keeps that strip free, see .composer) and under
           every backdrop. Focused by hand before opening: not every browser
           focuses a clicked button, and the window hands focus back to whatever
           held it. */}
@@ -363,7 +358,6 @@ export default function App() {
                 key={chatKey}
                 onPromptedSession={setDistillSessionId}
                 viewedPath={openPath}
-                viewedSeq={openSeq}
                 onToolActivity={notifyFsChanged}
                 resumeSessionId={resumeId}
                 onSessionEstablished={handleSessionEstablished}

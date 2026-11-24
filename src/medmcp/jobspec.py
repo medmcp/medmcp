@@ -14,9 +14,38 @@ The declaration::
              "tools": ["start_training", "resume_training"],
              "shm_size": "16g", "watch_sec": 15}}
 
-``command`` is the fixed start of the job's command line; the core appends the
+``command`` is the fixed start of the job's command line (one to four plain
+words or paths, run through the image's own ``ENTRYPOINT``); the core appends the
 tool's name and its approved arguments as one JSON argument, nothing else.
-``tools`` are the only tools whose calls may become a job.
+``tools`` are the only tools whose calls may become a job. ``shm_size``
+(optional) is ``/dev/shm`` for the job if larger than the core's 8 GB floor (at
+most 64 GB); ``watch_sec`` (optional, 0 to 30, default 3) is how long the core
+watches a new job: one that exits non-zero in that time fails the tool call.
+
+The contract, for a stack author:
+
+1. When the core will act on a job request, the pooled stack container has
+   ``MEDMCP_JOBS=1`` in its environment. Without it, do what you did before.
+2. With it, a job tool validates its arguments, starts nothing, and returns a
+   result whose top-level object has ``"medmcp_job": {"name": "<short name>"}``.
+   A failed call (``isError``) starts nothing.
+3. The core starts ``<command> <tool> '<arguments>'`` in a detached container of
+   the same image and replaces ``medmcp_job`` in the result with ``{"started":
+   true, "id": …, "status": …, "note": …}``. If it does not start the job (limit
+   reached, image changed), the call fails with "MedMCP did not start the
+   background job: …". Tell the model to report a start only when ``started`` is
+   true.
+4. The job container gets ``MEDMCP_JOB_ID``, the workspace at its own path and
+   nothing else: no network (also when the stack was installed with egress), no
+   stdin, nobody reading its stdout but ``docker logs``. Keep status and stop in
+   files in the workspace so the stack's ordinary tools can follow and stop the
+   job from any pooled container. Handle SIGTERM: that is what Stop sends.
+   ``MEDMCP_JOB_PROGRESS`` names a file (``<workspace>/.medmcp/jobs/<id>.json``)
+   where the job may write ``{"fraction": 0.41, "text": "epoch 41/100"}`` now
+   and then, atomically (temporary file, then rename); the core keeps the
+   fraction clamped to 0..1 and one line of at most 120 characters.
+5. Validate the arguments again in the job: they are the approved ones, but the
+   workspace may have changed since the tool looked.
 """
 
 from __future__ import annotations

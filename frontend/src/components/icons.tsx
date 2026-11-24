@@ -184,6 +184,14 @@ export function StopSquareIcon(props: IconProps) {
   )
 }
 
+export function ArrowUpIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M12 19V5M5 12l7-7 7 7" />
+    </Icon>
+  )
+}
+
 export function BookmarkPlusIcon(props: IconProps) {
   return (
     <Icon {...props}>
@@ -222,6 +230,16 @@ export function ChevronUpIcon(props: IconProps) {
   return (
     <Icon {...props}>
       <path d="M6 15l6-6 6 6" />
+    </Icon>
+  )
+}
+
+/** Two sheets — copy to the clipboard. */
+export function CopyIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect x="9" y="9" width="12" height="12" rx="2" />
+      <path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1" />
     </Icon>
   )
 }

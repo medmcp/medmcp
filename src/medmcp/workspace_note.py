@@ -132,8 +132,19 @@ def parse_dataset_index(stack: str, raw: object) -> DatasetIndex | None:
         {"summary": ".index/summary.json", "build": "build_index",
          "query": ["summarize_index", "pick_scans"]}
 
-    ``summary`` must be a relative path that stays inside the folder; tool names
-    are plain identifiers, since they are written into the prompt.
+    ``summary`` must be a relative path that stays inside the folder; ``build`` is
+    the tool that indexes a folder; ``query`` lists up to four tools that answer
+    from an index (may be empty). Tool names are plain identifiers, since they are
+    written into the prompt. A declaration that does not fit is dropped and the
+    stack installs without it.
+
+    The summary file is a JSON object; the core reads only ``description``, one
+    line on what the folder holds (e.g. ``"3 subjects, 18 sessions, 315 scans"``),
+    quoted to the assistant on one line, square brackets replaced, cut at 400
+    characters. With a summary the assistant is told the folder has a table of
+    its scans and to call the ``query`` tools instead of reading its files; a
+    folder with scans but no summary, to call ``build`` first; a folder without
+    scans, nothing.
     """
     if not isinstance(raw, dict):
         return None

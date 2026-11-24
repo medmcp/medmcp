@@ -69,7 +69,7 @@ quality = [
     "ruff>=0.17.1",
     "pyright>=1.1.414",
     "pre-commit>=4.7.0",
-    "types-pyyaml>=6.0.12.20260906",
+    "types-pyyaml>=6.0.12.20261113",
     "types-jsonschema>=4.23",
 ]
 dev = [

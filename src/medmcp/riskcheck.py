@@ -15,6 +15,8 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from medmcp import tooleffect
+
 JsonDict = dict[str, Any]
 
 _NETWORK = re.compile(
@@ -96,17 +98,36 @@ def runs_assistant_code(tool: str, arguments: JsonDict) -> bool:
     return False
 
 
+def effect_key(effect: str | None) -> str | None:
+    """The label key for a stack tool's declared effect (``effect_read_only`` …), if any."""
+    return f"effect_{effect}" if effect in tooleffect.EFFECTS else None
+
+
 def signals(
-    tool: str, arguments: JsonDict, path_findings: Iterable[Mapping[str, object]] = ()
+    tool: str,
+    arguments: JsonDict,
+    path_findings: Iterable[Mapping[str, object]] = (),
+    *,
+    stack_tool: bool = False,
+    effect: str | None = None,
 ) -> list[str]:
     """Risk keys (see :data:`medmcp.explain.RISK_CATEGORIES`) for one tool call.
 
     *tool* is MedMCP's name for it (``bash``, ``write_file``, ``<stack>_<tool>``);
     *path_findings* are :func:`medmcp.pathcheck.check_tool_call_paths`' results,
     which say whether a path lies outside the workspace or overwrites a file.
+
+    For a call to an installed stack (*stack_tool*), what it does to files is not
+    guessed from its argument names: the key of the *effect* it declared comes
+    first (see :mod:`medmcp.tooleffect`), and an untagged tool gets none. The
+    path-derived labels follow either way; a declaration never removes one.
     """
     keys: list[str] = []
-    if tool == "bash":
+    if stack_tool:
+        declared = effect_key(effect)
+        if declared is not None:
+            _add(keys, declared)
+    elif tool == "bash":
         command = arguments.get("command")
         _shell_signals(command if isinstance(command, str) else str(arguments), keys)
     elif tool in {"write_file", "edit"}:
@@ -120,7 +141,8 @@ def signals(
     elif tool == "skill":
         _add(keys, "skill_load")
     elif "_" in tool:
-        # A stack tool: it reads its inputs, and writes when it is given somewhere to.
+        # A tool of no installed stack (an external server's, say): it reads its
+        # inputs, and writes when it is given somewhere to.
         _add(keys, "file_read")
         if any(_OUTPUT_ARG.search(k) for k in arguments):
             _add(keys, "file_write")

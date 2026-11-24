@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentPropsWithoutRef, ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
+import type { ExtraProps } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
@@ -462,8 +463,17 @@ function CopyButton({ label, text }: { label: string; text: () => string }) {
   )
 }
 
+/** The props react-markdown hands a component, minus its syntax-tree node,
+ *  which is not an attribute for the page. */
+function withoutNode<P extends ExtraProps>(given: P): Omit<P, 'node'> {
+  const props = { ...given }
+  delete props.node
+  return props
+}
+
 /** A code block with a copy button for its contents. */
-function CodeBlock(props: ComponentPropsWithoutRef<'pre'>) {
+function CodeBlock(given: ComponentPropsWithoutRef<'pre'> & ExtraProps) {
+  const props = withoutNode(given)
   const pre = useRef<HTMLPreElement>(null)
   return (
     <div className="code-wrap">
@@ -473,7 +483,26 @@ function CodeBlock(props: ComponentPropsWithoutRef<'pre'>) {
   )
 }
 
-const MARKDOWN_COMPONENTS = { pre: CodeBlock }
+/** A span, or — for a displayed equation — the equation with a button that
+ *  copies its LaTeX source (KaTeX keeps it in the MathML annotation). */
+function MathOrSpan(given: ComponentPropsWithoutRef<'span'> & ExtraProps) {
+  const props = withoutNode(given)
+  const math = useRef<HTMLSpanElement>(null)
+  if (!props.className?.split(' ').includes('katex-display')) return <span {...props} />
+  return (
+    <span className="math-wrap">
+      <span ref={math} {...props} />
+      <CopyButton
+        label="Copy LaTeX"
+        text={() => math.current?.querySelector('annotation')?.textContent?.trim() ?? ''}
+      />
+    </span>
+  )
+}
+
+// Copy buttons only where something specific is copied: code (Markdown blocks
+// included) and displayed equations.
+const MARKDOWN_COMPONENTS = { pre: CodeBlock, span: MathOrSpan }
 
 const MarkdownBlock = memo(function MarkdownBlock({ source }: { source: string }) {
   return (
@@ -514,13 +543,6 @@ const AssistantMessage = memo(function AssistantMessage({
       <div className="msg-bubble bubble-ai">
         {head && <MarkdownBlock source={head} />}
         {tail && <MarkdownBlock source={tail} />}
-        {/* The answer as the model wrote it: Markdown and LaTeX source, which a
-            text selection of the rendered page cannot give. */}
-        {!streaming && (
-          <div className="msg-actions">
-            <CopyButton label="Copy as Markdown" text={() => text} />
-          </div>
-        )}
       </div>
     </div>
   )
@@ -633,7 +655,7 @@ function PermissionCard({
 }
 
 /** The message box's tallest, in pixels, before it scrolls: eight lines. */
-const COMPOSER_MAX_PX = 8 * 22 + 12
+const COMPOSER_MAX_PX = 8 * 22 + 10
 
 // The message composer, split out (with its own draft state) so a keystroke
 // re-renders only this textarea — not the whole transcript above it. Memoized,
@@ -699,37 +721,20 @@ const ChatInput = memo(function ChatInput({
         className={sent ? 'composer-card composer-sent' : 'composer-card'}
         onMouseDown={(e) => {
           setSent(false)
-          if (e.target === e.currentTarget || e.target === e.currentTarget.lastChild) {
+          const target = e.target as HTMLElement
+          if (target === e.currentTarget || target.classList.contains('composer-row')) {
             e.preventDefault()
             field.current?.focus()
           }
         }}
       >
-        <textarea
-          ref={field}
-          value={input}
-          placeholder="Message the agent…"
-          rows={1}
-          onChange={(e) => {
-            setInput(e.target.value)
-            setSent(false)
-          }}
-          onFocus={() => setSent(false)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault()
-              submit()
-            }
-          }}
-        />
-        <div className="composer-bar">
-          {/* What "this image" will resolve to. The server appends the open file
-              to the prompt as a workspace-context note and strips it from the
-              transcript, so without this the pointer is invisible — "segment
-              this" would act on whatever happened to be open. ✕ sends prompts
-              without it. The bar's height is the send button's, so the box
-              never moves when a file is opened, dropped or sent. */}
-          {contextPath && (
+        {/* What "this image" will resolve to. The server appends the open file
+            to the prompt as a workspace-context note and strips it from the
+            transcript, so without this the pointer is invisible — "segment
+            this" would act on whatever happened to be open. ✕ sends prompts
+            without it. Shown only while a file is open, above the text. */}
+        {contextPath && (
+          <div className="composer-files">
             <span className="composer-file">
               <FileIcon size={12} />
               <span className="composer-file-label">Viewing</span>
@@ -744,7 +749,28 @@ const ChatInput = memo(function ChatInput({
                 <XIcon size={12} />
               </button>
             </span>
-          )}
+          </div>
+        )}
+        {/* One line by default: the text, then background work and send beside
+            it; the text grows upward only when it needs more lines. */}
+        <div className="composer-row">
+          <textarea
+            ref={field}
+            value={input}
+            placeholder="Message the agent…"
+            rows={1}
+            onChange={(e) => {
+              setInput(e.target.value)
+              setSent(false)
+            }}
+            onFocus={() => setSent(false)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                submit()
+              }
+            }}
+          />
           {/* Background work (tasks and jobs): "1 running task", next to send. */}
           <JobPill refreshSignal={bgSignal} />
           {busy ? (

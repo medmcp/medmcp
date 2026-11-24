@@ -336,16 +336,13 @@ button:disabled {
 
 /* Background work indicator (JobPill.tsx): a small chip in the message box's
  * bar, left of send, while something runs. */
+/* Centred on the send button's line (32px) while sitting on the text's last. */
 .job-pill-box {
   display: flex;
   flex: none;
-  margin-left: auto;
+  margin-bottom: 4px;
 }
 
-/* The chip takes the free space's push; send then sits right beside it. */
-.job-pill-box + .composer-send {
-  margin-left: 0;
-}
 
 .job-pill {
   display: inline-flex;
@@ -1494,30 +1491,28 @@ button:disabled {
   margin-top: 10px;
 }
 
-/* Copy buttons: under an answer (its Markdown source) and on a code block (its
- * code). Revealed on hover or keyboard focus, like the rewind button. */
-.msg-actions {
-  display: flex;
-  gap: 4px;
-  margin-top: 4px;
-}
-
+/* Copy buttons, only where something specific is copied: a code block (its
+ * code) and a displayed equation (its LaTeX). Revealed on hover or keyboard
+ * focus, like the rewind button. */
 .copy-btn {
   opacity: 0;
   transition: opacity 120ms ease;
 }
 
-.msg-ai:hover .msg-actions .copy-btn,
 .code-wrap:hover .copy-btn,
+.math-wrap:hover .copy-btn,
 .copy-btn:focus-visible {
   opacity: 1;
 }
 
-.code-wrap {
+.code-wrap,
+.math-wrap {
   position: relative;
+  display: block;
 }
 
-.code-wrap > .copy-btn {
+.code-wrap > .copy-btn,
+.math-wrap > .copy-btn {
   position: absolute;
   top: 6px;
   right: 6px;
@@ -1835,21 +1830,33 @@ button.model-name:hover {
   }
 }
 
+/* One line by default: the text, background work and send side by side,
+ * bottom-aligned, so a growing text pushes the box up while the buttons stay on
+ * its last line. */
+.composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 6px 6px 16px;
+}
+
 /* Grows with its text (Chat.tsx sets the height; COMPOSER_MAX_PX is 8 lines of
-   22px plus this padding). Whole-pixel line height, so the lines stay sharp. */
+   22px plus this padding). Whole-pixel line height, so the lines stay sharp; one
+   line plus its padding is the send button's 32px. */
 .composer-card textarea {
   display: block;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   resize: none;
   overflow-y: hidden;
   margin: 0;
-  padding: 10px 16px 2px;
+  padding: 5px 0;
   font: inherit;
   line-height: 22px;
   color: var(--text);
   background: transparent;
   border: 0;
-  border-radius: 16px 16px 0 0;
 }
 
 .composer-card textarea::placeholder {
@@ -1861,13 +1868,11 @@ button.model-name:hover {
   outline: none;
 }
 
-/* As tall as the send button whether or not a file is open. */
-.composer-bar {
+/* The open file, above the text, only while there is one. */
+.composer-files {
   display: flex;
-  align-items: center;
-  gap: 8px;
   min-width: 0;
-  padding: 6px 8px 8px 10px;
+  padding: 8px 10px 0;
 }
 
 /* The file the next message is about. */
@@ -1939,7 +1944,6 @@ button.model-name:hover {
   flex: none;
   width: 32px;
   height: 32px;
-  margin-left: auto;
   padding: 0;
   color: #fff;
   background: var(--blue);

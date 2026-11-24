@@ -11,11 +11,11 @@ Notable, user-visible changes to MedMCP. Format follows
 - Approvals: a stack tool's declared effect (read-only, writes new files, destructive) shows on the approval card and in Tool stacks; a destructive tool asks every time.
 - Long stack calls continue in the background as tasks: the chat stays usable, the message box shows how many run, with Stop, and the assistant picks up the result when it is ready.
 - Chat: the assistant can stop a running task or background job; it asks you first.
-- Chat: copy an answer as Markdown (LaTeX source included) or a code block's contents.
+- Chat: copy buttons on code blocks (Markdown included) and on equations, which copy their LaTeX.
 
 ### Changed
 
-- Chat: one centred column without avatars; answers as plain text, your messages as right-aligned bubbles, background work as a chip in the message box.
+- Chat: one centred column without avatars; answers as plain text, your messages as right-aligned bubbles; the message box starts as one line, with background work as a chip beside Send.
 - The `docs/` folder is gone; the stack-author contracts for background jobs and the dataset index are in `jobspec.py` and `workspace_note.py`.
 
 ### Fixed

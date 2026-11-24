@@ -4873,8 +4873,26 @@ async def ws_chat(ws: WebSocket, resume: str | None = None) -> None:
 
 # ── Static frontend ────────────────────────────────────────
 
+
+class _FrontendFiles(StaticFiles):
+    """The built frontend; its page is revalidated on every load.
+
+    The page names the current hashed assets, so a browser that reuses a stale
+    copy after an update (no cache header lets it guess a lifetime from the file's
+    age) keeps showing the previous UI until a hard reload. The hashed assets
+    themselves never change under one name and are left to normal caching.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        """The file at *path*, with ``Cache-Control: no-cache`` on HTML."""
+        response = await super().get_response(path, scope)
+        if response.media_type == "text/html":
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 if FRONTEND_DIST.is_dir():
-    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+    app.mount("/", _FrontendFiles(directory=FRONTEND_DIST, html=True), name="frontend")
 else:
 
     @app.get("/")

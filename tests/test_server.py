@@ -3236,3 +3236,18 @@ def test_workspace_is_exported_without_the_stack_pool(
 
     with TestClient(server.app, base_url="http://127.0.0.1:8100"):
         assert os.environ["MEDMCP_WORKSPACE"] == str(resolved)
+
+
+def test_the_frontend_page_is_revalidated_but_its_assets_are_not(tmp_path: Path) -> None:
+    """After an update the browser fetches the new page instead of reusing an old copy."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "index.html").write_text("<!doctype html><title>x</title>")
+    (tmp_path / "assets" / "index-abc.css").write_text("body{}")
+    app = FastAPI()
+    app.mount("/", server._FrontendFiles(directory=tmp_path, html=True))
+    client = TestClient(app)
+    assert client.get("/").headers.get("cache-control") == "no-cache"
+    assert "cache-control" not in client.get("/assets/index-abc.css").headers

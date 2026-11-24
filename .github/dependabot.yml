@@ -13,6 +13,10 @@ updates:
       # vibe 3.x is a migration (60 s cap on stack calls, crashed stacks not restarted).
       - dependency-name: "mistral-vibe"
         update-types: ["version-update:semver-major"]
+      # Stubs from 6.0.12.20261113 on leave yaml.safe_dump partially unknown under
+      # strict pyright; lift once the calls are adapted.
+      - dependency-name: "types-pyyaml"
+        versions: [">= 6.0.12.20261113"]
 
   - package-ecosystem: "github-actions"
     directory: "/"

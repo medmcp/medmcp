@@ -8,7 +8,7 @@ import {
   stopJob,
   uninstallStack,
 } from '../api'
-import type { CatalogEntry, JobInfo, SettingsState } from '../types'
+import type { CatalogEntry, JobInfo, SettingsState, StackTool, ToolEffect } from '../types'
 import { XIcon } from './icons'
 import { Toggle } from './SettingsControls'
 import { modalLayer } from '../modalLayer'
@@ -19,6 +19,36 @@ interface StackMarketplaceProps {
 }
 
 type Filter = 'all' | 'installed' | 'available' | 'gpu'
+
+/** The approval card's chip for each declared effect: label and colour class. */
+const EFFECT_CHIPS: Record<ToolEffect, { label: string; tone: string }> = {
+  read_only: { label: 'Read-only', tone: 'risk-low' },
+  writes_new: { label: 'Writes new files', tone: 'risk-info' },
+  destructive: { label: 'Destructive', tone: 'risk-high' },
+}
+
+/** An installed stack's tools, one line each, behind a disclosure that starts closed. */
+function StackTools({ tools }: { tools: StackTool[] }) {
+  return (
+    <details className="market-tools">
+      <summary>
+        {tools.length} {tools.length === 1 ? 'tool' : 'tools'}
+      </summary>
+      <ul>
+        {tools.map((t) => (
+          <li key={t.name}>
+            <code>{t.name}</code>
+            {t.effect && EFFECT_CHIPS[t.effect] && (
+              <span className={`risk-chip ${EFFECT_CHIPS[t.effect].tone}`}>
+                {EFFECT_CHIPS[t.effect].label}
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </details>
+  )
+}
 
 /** One row of the merged view: what is installable, what is installed, and its state. */
 interface StackItem {
@@ -54,6 +84,8 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
   // Installed stacks that run with egress, so the badge is right for stacks
   // installed before this was surfaced (and for off-catalogue ones).
   const [networkNames, setNetworkNames] = useState<Set<string>>(new Set())
+  // Each installed stack's tools with their declared effects (empty until listed).
+  const [toolsByStack, setToolsByStack] = useState<Map<string, StackTool[]>>(new Map())
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const [busy, setBusy] = useState(false)
@@ -111,6 +143,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
     setState(s)
     setContainerNames(new Set(inst.map((i) => i.name)))
     setNetworkNames(new Set(inst.filter((i) => i.network).map((i) => i.name)))
+    setToolsByStack(new Map(inst.map((i) => [i.name, i.tools ?? []])))
     setCatalog(cat)
   }
 
@@ -123,6 +156,7 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
         setState(s)
         setContainerNames(new Set(inst.map((i) => i.name)))
         setNetworkNames(new Set(inst.filter((i) => i.network).map((i) => i.name)))
+        setToolsByStack(new Map(inst.map((i) => [i.name, i.tools ?? []])))
         setCatalog(cat)
         setError(null)
       })
@@ -383,6 +417,9 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
                   <div className="market-image">
                     {i.version ? `v${i.version}` : i.image}
                   </div>
+                  {i.installed && (toolsByStack.get(i.name)?.length ?? 0) > 0 && (
+                    <StackTools tools={toolsByStack.get(i.name) ?? []} />
+                  )}
                   <div className="market-card-foot">
                     {installingImage === i.image ? (
                       <div className="install-inline">

@@ -261,6 +261,39 @@ def _tool_schema_op(req: JsonDict) -> JsonDict:
 _core_ops["tool_schema"] = _tool_schema_op
 
 
+def tool_effect(stack: str, tool: str) -> str | None:
+    """The effect *stack*'s *tool* declared (``read_only`` …), or ``None`` (untagged).
+
+    Read from the pool's tool lists (see :mod:`medmcp.tooleffect`); nothing is
+    started to find out. With the stack pool off — the host-native default — the
+    core never lists a stack's tools itself, so every tool is untagged: the
+    approval card then shows no effect, and nothing about approval changes.
+    """
+    return _pool.tool_effect(stack, tool) if _pool is not None else None
+
+
+def _server_has_network(server: JsonDict) -> bool:
+    """Whether a discovered stack runs as a container with network egress.
+
+    Only an install the operator consented to network access for has that
+    (``network: true`` on the image's label, see ``settings.install_stack_image``).
+    """
+    args = server.get("args")
+    return (
+        Path(str(server.get("command") or "")).name == "docker"
+        and isinstance(args, list)
+        and settings.stack_has_network([str(a) for a in cast("list[Any]", args)])
+    )
+
+
+def stack_tools(stack: str) -> list[JsonDict]:
+    """*stack*'s tools as the pool last listed them: ``[{name, effect}]``, empty if unknown."""
+    if _pool is None:
+        return []
+    effects = _pool.known_effects(stack) or {}
+    return [{"name": name, "effect": effects.get(name)} for name in _pool.known_tools(stack) or {}]
+
+
 def _resolve_backend_spec(name: str) -> BackendSpec | None:
     """Map an active stack name to its persistent-backend launch spec (pool callback)."""
     servers = settings.active_servers()
@@ -1393,8 +1426,13 @@ async def get_gpus() -> JsonDict:
 
 @app.get("/api/stacks")
 async def get_stacks() -> JsonDict:
-    """List installed container stacks (from ``stacks.d`` manifests)."""
-    return {"stacks": await asyncio.to_thread(settings.list_installed_stacks)}
+    """List installed container stacks (from ``stacks.d`` manifests), each with its tools.
+
+    ``tools`` is ``[{name, effect}]`` from the pool's last listing of the stack
+    (:func:`stack_tools`); empty when that is unknown.
+    """
+    stacks = await asyncio.to_thread(settings.list_installed_stacks)
+    return {"stacks": [{**s, "tools": stack_tools(str(s["name"]))} for s in stacks]}
 
 
 @app.get("/api/catalog")
@@ -3115,9 +3153,12 @@ def _call_needs_a_look(rule_keys: list[str], path_findings: list[Any]) -> bool:
     workspace. A call that would overwrite an existing file, touch a path outside
     the workspace, or whose paths could not be resolved is a different decision
     from the one the person made, so it is put to them again. So is a call that
-    starts a background job: each one runs for hours with its own arguments.
+    starts a background job: each one runs for hours with its own arguments. And
+    so is every call of a tool its stack declares destructive — checked on each
+    call against the declaration as it stands then, so a grant made while the
+    tool said otherwise never covers it.
     """
-    if "outside_workspace" in rule_keys or "background_job" in rule_keys:
+    if {"outside_workspace", "background_job", "effect_destructive"} & set(rule_keys):
         return True
     for finding in path_findings:
         if finding.get("severity") == "error":
@@ -4125,13 +4166,30 @@ class _ChatConnection:
                 ", ".join(f"{f['param']}={f['value']!r} ({f['status']})" for f in path_findings),
             )
 
+        stack, tool = provenance.split_tool_name(
+            str(tool_call.get("toolName") or title), self._server_names
+        )
+        # An external server's tool is not an installed stack's: it declares no
+        # effect, and is never offered the chat-long option below (each call sends
+        # data off the premises, and its arguments carry no paths that would bring
+        # the dialog back).
+        external = any(s.get("name") == stack and s.get("url") for s in self.servers)
+        stack_tool = stack != "builtin" and not external
         # Rule-based labels from the call itself: shown whatever the model says,
         # and the model's own labels can only add to them (see medmcp.riskcheck).
+        # A stack tool is labelled by the effect its stack declares, first.
         rule_keys = riskcheck.signals(
             str(tool_call.get("toolName") or title),
             pathcheck.coerce_arguments(tool_call.get("rawInput")),
             path_findings,
+            stack_tool=stack_tool,
+            effect=tool_effect(stack, tool) if stack_tool else None,
         )
+        # A stack installed with network access can send what it reads.
+        if stack_tool and any(
+            s.get("name") == stack and _server_has_network(s) for s in self.servers
+        ):
+            rule_keys = _merge_keys(rule_keys, ["network"])
         # Code the assistant wrote itself is never run on a standing approval: with
         # MEDMCP_ASSISTANT_CODE=deny it is refused here, otherwise it is put to the
         # user on its own, labelled as such.
@@ -4145,22 +4203,13 @@ class _ChatConnection:
             )
             return
         # A call that starts a background job says so, whatever the model says.
-        job_stack, job_tool = provenance.split_tool_name(
-            str(tool_call.get("toolName") or title), self._server_names
-        )
-        if _jobs is not None and _jobs.declares(job_stack, job_tool):
+        if _jobs is not None and _jobs.declares(stack, tool):
             rule_keys = _merge_keys(rule_keys, ["background_job"])
 
         # A stack tool can be approved once for the rest of the chat. Calls it then
-        # covers are answered here; anything that needs a look is still shown, and
-        # is shown without the chat-long option.
-        stack, tool = provenance.split_tool_name(
-            str(tool_call.get("toolName") or title), self._server_names
-        )
-        # Not for an external server: each call sends data off the premises, and
-        # its arguments carry no paths that would bring the dialog back.
-        external = any(s.get("name") == stack and s.get("url") for s in self.servers)
-        if stack != "builtin" and not external and _stack_tool_approval_enabled():
+        # covers are answered here; anything that needs a look (a destructive tool
+        # always does) is still shown, and is shown without the chat-long option.
+        if stack_tool and _stack_tool_approval_enabled():
             needs_look = _call_needs_a_look(rule_keys, path_findings)
             offered = {o.get("optionId") for o in options}
             if (stack, tool) in self._granted_stack_tools and not needs_look:

@@ -38,6 +38,16 @@
         "bug",
         "review"
       ]
+    },
+    {
+      "login": "Hendrik-code",
+      "name": "Hendrik",
+      "avatar_url": "https://avatars.githubusercontent.com/u/19862882?v=4",
+      "profile": "https://github.com/Hendrik-code",
+      "contributions": [
+        "code",
+        "ideas"
+      ]
     }
   ],
   "commitType": "docs"

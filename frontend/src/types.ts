@@ -39,7 +39,8 @@ export interface ToolCallState {
 export interface RiskTag {
   key: string
   label: string
-  severity: 'low' | 'medium' | 'high'
+  /** `info` is a stack tool's "writes new files": not a risk, shown in blue. */
+  severity: 'low' | 'medium' | 'high' | 'info'
 }
 
 /** One path argument of a pending tool call, checked against the filesystem.
@@ -127,6 +128,17 @@ export interface InstalledStack {
    *  every stack, so this is the difference between a stack that can read your
    *  data and one that can also send it somewhere. */
   network: boolean
+  /** The stack's tools as last listed, each with the effect it declares (null:
+   *  none). Empty until the core has listed them (always, with the pool off). */
+  tools: StackTool[]
+}
+
+/** What a stack tool declares it does to the data. */
+export type ToolEffect = 'read_only' | 'writes_new' | 'destructive'
+
+export interface StackTool {
+  name: string
+  effect: ToolEffect | null
 }
 
 /** One catalog entry (from GET /api/catalog): an installable stack. */

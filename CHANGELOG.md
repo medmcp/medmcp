@@ -6,6 +6,10 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Added
+
+- Approvals: a stack tool's declared effect (read-only, writes new files, destructive) shows on the approval card and in Tool stacks; a destructive tool asks every time.
+
 ### Fixed
 
 - `just install-stack` keeps a stack on mcp 1.x; it picked up mcp 2, which stacks cannot import.

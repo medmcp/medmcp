@@ -54,12 +54,22 @@ RISK_CATEGORIES: dict[str, tuple[str, str]] = {
     "background_job": ("Starts a job that keeps running after this chat", "medium"),
 }
 
+# What a stack tool declares it does to the data (medmcp.tooleffect), keyed as
+# medmcp.riskcheck.effect_key spells it. Kept apart from RISK_CATEGORIES because
+# they are the stack's word, not a risk the model may pick: the explanation
+# prompt never offers them. The severity picks the chip colour (``info`` = blue).
+EFFECT_CATEGORIES: dict[str, tuple[str, str]] = {
+    "effect_read_only": ("Read-only", "low"),
+    "effect_writes_new": ("Writes new files", "info"),
+    "effect_destructive": ("Destructive", "high"),
+}
+
 
 def resolve_risks(risks: list[str]) -> list[JsonDict]:
-    """Expand risk keys into ``{key, label, severity}`` dicts for structured UIs."""
+    """Expand risk and effect keys into ``{key, label, severity}`` dicts for structured UIs."""
     resolved: list[JsonDict] = []
     for key in risks:
-        entry = RISK_CATEGORIES.get(key)
+        entry = RISK_CATEGORIES.get(key) or EFFECT_CATEGORIES.get(key)
         if entry is not None:
             resolved.append({"key": key, "label": entry[0], "severity": entry[1]})
     return resolved

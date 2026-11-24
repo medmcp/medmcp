@@ -44,6 +44,7 @@ import mcp.types as mcp_types
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from medmcp import tooleffect
 from medmcp.statefile import atomic_write_json, read_json
 
 log: logging.Logger = logging.getLogger(__name__)
@@ -302,14 +303,17 @@ class BackendPool:
                 Clamped to at least 1.
             cwd: Working directory passed to every backend (the workspace root).
             reaper_interval_sec: How often the idle reaper sweeps.
-            schema_cache: A JSON file that keeps each stack's input schemas across
-                restarts; see :meth:`known_tools`.
+            schema_cache: A JSON file that keeps each stack's input schemas and
+                declared effects across restarts; see :meth:`known_tools`.
         """
         self._resolve = resolve_spec
         self._schema_cache = schema_cache
         # Each stack's input schemas as last listed, kept after its backend is
-        # reaped (vibe keeps using a tool list for a day without asking again).
-        self._known: dict[str, dict[str, JsonDict]] = self._load_schemas()
+        # reaped (vibe keeps using a tool list for a day without asking again),
+        # and the effect each tagged tool declares (see medmcp.tooleffect).
+        self._known: dict[str, dict[str, JsonDict]] = {}
+        self._effects: dict[str, dict[str, str]] = {}
+        self._load_schemas()
         self._max_warm_gpu = max(1, max_warm_gpu)
         self._cwd = cwd
         self._reaper_interval = reaper_interval_sec
@@ -388,32 +392,78 @@ class BackendPool:
         """The stacks whose tool lists the pool holds (see :meth:`known_tools`)."""
         return list(self._known)
 
+    def known_effects(self, name: str) -> dict[str, str] | None:
+        """Stack *name*'s declared effects as last listed (tool → effect), never warming it.
+
+        Only tagged tools appear (see :mod:`medmcp.tooleffect`). ``None`` when the
+        pool has never listed the stack; kept, refreshed and dropped together with
+        :meth:`known_tools`.
+        """
+        if name not in self._known:
+            return None
+        return dict(self._effects.get(name, {}))
+
+    def tool_effect(self, name: str, tool: str) -> str | None:
+        """The effect stack *name*'s *tool* declared when last listed, or ``None``."""
+        return self._effects.get(name, {}).get(tool)
+
     def _remember(self, name: str, tools: list[mcp_types.Tool]) -> None:
         listed = {t.name: dict(t.inputSchema) for t in tools if t.name != WARMUP_TOOL}
-        if self._known.get(name) == listed:
+        effects: dict[str, str] = {}
+        for t in tools:
+            effect = tooleffect.tool_effect(t)
+            if t.name != WARMUP_TOOL and effect is not None:
+                effects[t.name] = effect
+        if self._known.get(name) == listed and self._effects.get(name) == effects:
             return
         self._known[name] = listed
+        self._effects[name] = effects
         self._save_schemas()
 
     def _save_schemas(self) -> None:
         if self._schema_cache is None:
             return
+        stacks: JsonDict = {
+            stack: {
+                tool: {"schema": schema, "effect": self._effects.get(stack, {}).get(tool)}
+                for tool, schema in tools.items()
+            }
+            for stack, tools in self._known.items()
+        }
         try:
-            atomic_write_json(self._schema_cache, cast("JsonDict", self._known))
+            atomic_write_json(self._schema_cache, {"version": 2, "stacks": stacks})
         except OSError as exc:
             log.debug("could not write the tool schema cache: %s", exc)
 
-    def _load_schemas(self) -> dict[str, dict[str, JsonDict]]:
-        data = read_json(self._schema_cache) if self._schema_cache is not None else None
-        return {
-            str(stack): {
-                str(tool): cast("JsonDict", schema)
-                for tool, schema in cast("JsonDict", tools).items()
-                if isinstance(schema, dict)
-            }
-            for stack, tools in (data or {}).items()
-            if isinstance(tools, dict)
-        }
+    def _load_schemas(self) -> None:
+        """Read the cache: ``{"version": 2, "stacks": {stack: {tool: {schema, effect}}}}``.
+
+        A file from before effects were kept (``{stack: {tool: schema}}``) still
+        gives the schemas; its effects are unknown until the stack is listed again.
+        """
+        data = (read_json(self._schema_cache) if self._schema_cache is not None else None) or {}
+        versioned = data.get("version") == 2
+        stacks = data.get("stacks") if versioned else data
+        if not isinstance(stacks, dict):
+            return
+        for stack, raw_tools in cast("JsonDict", stacks).items():
+            if not isinstance(raw_tools, dict):
+                continue
+            schemas: dict[str, JsonDict] = {}
+            effects: dict[str, str] = {}
+            for tool, raw in cast("JsonDict", raw_tools).items():
+                if not isinstance(raw, dict):
+                    continue
+                entry = cast("JsonDict", raw)
+                schema = entry.get("schema") if versioned else entry
+                if not isinstance(schema, dict):
+                    continue
+                schemas[str(tool)] = cast("JsonDict", schema)
+                effect = entry.get("effect") if versioned else None
+                if isinstance(effect, str) and effect in tooleffect.EFFECTS:
+                    effects[str(tool)] = effect
+            self._known[str(stack)] = schemas
+            self._effects[str(stack)] = effects
 
     async def prewarm(self, names: Iterable[str]) -> dict[str, str | None]:
         """Warm each named stack now (activation hook); never raises.
@@ -437,9 +487,10 @@ class BackendPool:
         """Tear down a backend now (deactivation), freeing its RAM/VRAM.
 
         Its remembered tool list goes too: a stack that comes back, possibly as a
-        new image, is listed again before its schemas are trusted.
+        new image, is listed again before its schemas and effects are trusted.
         """
         await self._drop(name)
+        self._effects.pop(name, None)
         if self._known.pop(name, None) is not None:
             self._save_schemas()
 

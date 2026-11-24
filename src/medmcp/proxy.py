@@ -31,6 +31,7 @@ from mcp.client.stdio import stdio_client
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
+from medmcp import tooleffect
 from medmcp.acp import VIBE_HOME
 from medmcp.backend_broker import STREAM_LIMIT
 
@@ -188,6 +189,20 @@ class _Forwarder:
             return await session.call_tool(name, args, read_timeout_seconds=self._tool_timeout())
 
 
+def with_effect_line(tool: mcp_types.Tool) -> mcp_types.Tool:
+    """*tool* with its declared effect appended to its description, for the model.
+
+    vibe drops MCP annotations and ``_meta`` before the model sees a tool, so the
+    description is the one place the effect can reach it. An untagged tool is
+    returned unchanged; a tagged one gets one line, the rest of the text kept
+    byte for byte (see :func:`medmcp.tooleffect.describe`).
+    """
+    effect = tooleffect.tool_effect(tool)
+    if effect is None:
+        return tool
+    return tool.model_copy(update={"description": tooleffect.describe(tool.description, effect)})
+
+
 async def _serve(stack: str) -> None:
     """Run the proxy MCP server for *stack* over stdio until vibe disconnects."""
     server: Server[object, object] = Server(f"medmcp-proxy-{stack}")
@@ -199,7 +214,7 @@ async def _serve(stack: str) -> None:
         # Hide pool-machinery tools (e.g. ``warmup``) from the model; the pool still
         # discovers them by listing tools directly on the backend.
         tools = await forwarder.list_tools()
-        return [t for t in tools if t.name not in _HIDDEN_TOOLS]
+        return [with_effect_line(t) for t in tools if t.name not in _HIDDEN_TOOLS]
 
     @server.call_tool(validate_input=False)
     async def _call_tool(  # pyright: ignore[reportUnusedFunction]

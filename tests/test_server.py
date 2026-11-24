@@ -524,7 +524,7 @@ class TestSettingsMerge:
         def _active_servers() -> list[object]:
             return []
 
-        async def _no_restart() -> None:
+        async def _no_restart(*_changed: object) -> None:
             return None
 
         monkeypatch.setattr(settings, "load_active_server_names", lambda: set(old_stacks))
@@ -2444,6 +2444,177 @@ class TestChatSessionLifecycle:
             ("turn-ended", "session/prompt"),
             ("request", "session/close"),
         ]
+
+
+class TestSessionRaceRetry:
+    """Opening a chat waits out vibe 2.26.1's post-close race, and only that."""
+
+    RACE: ClassVar[dict[str, object]] = {
+        "error": {"message": "The child Runtime access method is not implemented yet."}
+    }
+    OK: ClassVar[dict[str, object]] = {"result": {"sessionId": "s1"}}
+
+    @pytest.fixture
+    def waits(self, monkeypatch: pytest.MonkeyPatch) -> list[float]:
+        """Record the pauses between attempts instead of sleeping through them."""
+        slept: list[float] = []
+
+        async def _sleep(delay: float) -> None:
+            slept.append(delay)
+
+        monkeypatch.setattr(server.asyncio, "sleep", _sleep)
+        return slept
+
+    def _answers(self, monkeypatch: pytest.MonkeyPatch, races: int) -> list[str]:
+        """Let vibe answer *races* times with the race error, then succeed."""
+        calls: list[str] = []
+
+        async def _request(method: str, params: object) -> dict[str, object]:
+            del params
+            calls.append(method)
+            return self.RACE if len(calls) <= races else self.OK
+
+        monkeypatch.setattr(server._client, "request", _request)
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_a_race_that_clears_on_the_sixth_attempt_opens_the_chat(
+        self, monkeypatch: pytest.MonkeyPatch, waits: list[float]
+    ) -> None:
+        """The comparison saw races last to the fourth try; a longer one still opens."""
+        calls = self._answers(monkeypatch, races=5)
+        resp = await server._session_request("session/new", {})
+        assert resp == self.OK
+        assert len(calls) == 6
+        assert sum(waits) < 3.5
+
+    @pytest.mark.asyncio
+    async def test_a_race_that_never_clears_gives_up_with_the_error(
+        self, monkeypatch: pytest.MonkeyPatch, waits: list[float]
+    ) -> None:
+        """A permanent race ends after a bounded wait, returning vibe's error."""
+        calls = self._answers(monkeypatch, races=1000)
+        resp = await server._session_request("session/load", {})
+        assert resp == self.RACE
+        assert len(calls) == 8
+        assert sum(waits) <= 6.0
+
+    @pytest.mark.asyncio
+    async def test_any_other_error_is_not_retried(
+        self, monkeypatch: pytest.MonkeyPatch, waits: list[float]
+    ) -> None:
+        """Only the race is waited out; a real failure comes back at once."""
+        calls: list[str] = []
+
+        async def _request(method: str, params: object) -> dict[str, object]:
+            del params
+            calls.append(method)
+            return {"error": {"message": "Session not found"}}
+
+        monkeypatch.setattr(server._client, "request", _request)
+        resp = await server._session_request("session/load", {})
+        assert resp == {"error": {"message": "Session not found"}}
+        assert calls == ["session/load"]
+        assert waits == []
+
+
+class TestStackChangeForgetsToolLists:
+    """A stack change clears vibe's cached tool list for that stack while vibe is down."""
+
+    @pytest.fixture
+    def events(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]:
+        """Record vibe-acp's stop and every cache clear, in order."""
+        seen: list[tuple[str, object]] = []
+
+        async def _stop() -> None:
+            seen.append(("stop", None))
+
+        def _clear(names: Iterable[str], root: Path | None = None) -> int:
+            del root
+            seen.append(("clear", set(names)))
+            return 0
+
+        monkeypatch.setattr(server._client, "stop", _stop)
+        monkeypatch.setattr(settings, "clear_tool_cache", _clear)
+        monkeypatch.setattr(server, "_apply_stack_change", lambda: None)
+        return seen
+
+    def test_install_clears_the_installed_stack(
+        self, events: list[tuple[str, object]], client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A (re)install drops the stack's cached tools after vibe-acp stopped."""
+
+        def _install(image: str, *_args: object, **_kwargs: object) -> str:
+            del image
+            return "medmcp-neuro"
+
+        monkeypatch.setattr(settings, "install_stack_image", _install)
+        resp = client.post("/api/stacks/install", json={"image": "ghcr.io/medmcp/neuro:main"})
+        assert resp.status_code == 200
+        assert events == [("stop", None), ("clear", {"medmcp-neuro"})]
+
+    def test_streamed_install_clears_the_installed_stack(
+        self, events: list[tuple[str, object]], client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The Tool stacks window's install path does the same."""
+
+        def _install(image: str, *_args: object, **_kwargs: object) -> str:
+            del image
+            return "medmcp-neuro"
+
+        monkeypatch.setattr(settings, "install_stack_image", _install)
+        with client.websocket_connect("/ws/stacks/install", headers=WS_HEADERS) as ws:
+            ws.send_json({"image": "ghcr.io/medmcp/neuro:main"})
+            frame = ws.receive_json()
+        assert frame == {"type": "done", "name": "medmcp-neuro"}
+        assert events == [("stop", None), ("clear", {"medmcp-neuro"})]
+
+    def test_uninstall_clears_the_removed_stack(
+        self, events: list[tuple[str, object]], client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stack installed again later must not come back with the old list."""
+
+        def _uninstall(_name: str) -> None:
+            return None
+
+        monkeypatch.setattr(settings, "uninstall_stack", _uninstall)
+        resp = client.post("/api/stacks/uninstall", json={"name": "medmcp-neuro"})
+        assert resp.status_code == 200
+        assert events == [("stop", None), ("clear", {"medmcp-neuro"})]
+
+    def test_toggling_stacks_clears_exactly_those(
+        self, events: list[tuple[str, object]], client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Switching stacks on or off clears those, and leaves the others cached."""
+        saved: list[set[str]] = []
+
+        def _save(names: Iterable[str]) -> None:
+            saved.append(set(names))
+
+        def _noop(*_args: object) -> None:
+            return None
+
+        monkeypatch.setattr(settings, "load_active_server_names", lambda: {"alpha", "beta"})
+        monkeypatch.setattr(settings, "save_active_server_names", _save)
+        monkeypatch.setattr(settings, "save_explain_enabled", _noop)
+        monkeypatch.setattr(settings, "save_provenance_enabled", _noop)
+        monkeypatch.setattr(settings, "sync_servers_to_vibe_config", _noop)
+        monkeypatch.setattr(settings, "active_servers", list)
+        stacks = [
+            {"name": "alpha", "active": False},
+            {"name": "beta", "active": True},
+            {"name": "gamma", "active": True},
+        ]
+        body = {"explain_tools": False, "record_provenance": False, "stacks": stacks}
+        resp = client.put("/api/settings", json=body)
+        assert resp.status_code == 200
+        assert saved == [{"beta", "gamma"}]
+        assert events == [("stop", None), ("clear", {"alpha", "gamma"})]
+
+    def test_other_restarts_leave_the_cache_alone(self, events: list[tuple[str, object]]) -> None:
+        """A model or external-server change restarts vibe without clearing anything."""
+        asyncio.run(server._restart_vibe())
+        assert events == [("stop", None)]
 
 
 def _approval_request(req_id: int) -> dict[str, object]:

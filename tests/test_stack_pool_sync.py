@@ -225,3 +225,43 @@ def test_sync_drops_revision_when_image_is_gone(
     assert not any(
         k.startswith(settings.STACK_REVISION_ENV) for k in cast("JsonDict", neuro.get("env", {}))
     )
+
+
+# ── vibe's on-disk tool lists (cleared on a stack change) ───────────────────
+
+
+def _cache_record(path: Path, source: str) -> Path:
+    """Write a descriptor record the way vibe 2.26 does (only ``sourceName`` matters)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"key": {}, "sourceName": source, "descriptors": []}))
+    return path
+
+
+def test_clear_tool_cache_removes_only_the_named_stacks(tmp_path: Path) -> None:
+    """Every record of a named server goes; other servers and other vibe state stay."""
+    root = tmp_path / "logs" / "mcp-descriptors"
+    gone = [
+        _cache_record(root / "unified" / "a1.json", "fakestack"),
+        _cache_record(root / "legacy" / "a2.json", "fakestack"),
+        _cache_record(root / "unified" / "b1.json", "medmcp-dicom"),
+    ]
+    kept = [
+        _cache_record(root / "unified" / "c1.json", "medmcp-neuro"),
+        _cache_record(root / "plugins" / "c2.json", "vibe"),
+        _cache_record(tmp_path / "logs" / "session" / "s1" / "meta.json", "fakestack"),
+    ]
+    (root / "unified" / "broken.json").write_text("{not json")
+    (root / "unified" / ".x.json.tmp").write_text("{}")
+
+    removed = settings.clear_tool_cache({"fakestack", "medmcp-dicom"}, root)
+
+    assert removed == 3
+    assert not any(p.exists() for p in gone)
+    assert all(p.exists() for p in kept)
+    assert (root / "unified" / "broken.json").exists()
+    assert (root / "unified" / ".x.json.tmp").exists()
+
+
+def test_clear_tool_cache_tolerates_a_missing_cache(tmp_path: Path) -> None:
+    """Before vibe ever cached anything there is nothing to clear, and no error."""
+    assert settings.clear_tool_cache({"fakestack"}, tmp_path / "absent") == 0

@@ -68,12 +68,16 @@ def _isolate_stacks_d(  # pyright: ignore[reportUnusedFunction]  # autouse fixtu
     ``stacks.d/`` dir) as a real on-disk source; without this, any test that
     exercises discovery would pick up the shipped container manifests. Points it
     at a non-existent dir by default; the stacks.d tests override it themselves.
-    The discovery cache is cleared around every test so no result leaks between.
+    The discovery cache is cleared around every test so no result leaks between,
+    and vibe's tool-list cache is pointed away from the repo's ``.vibe``.
     """
     absent = tmp_path_factory.mktemp("no_stacks") / "absent"
     clear_cache = settings.load_mcp_servers.cache_clear  # a test may monkeypatch the function
     clear_cache()
-    with patch("medmcp.settings.STACKS_D_PATH", absent):
+    with (
+        patch("medmcp.settings.STACKS_D_PATH", absent),
+        patch("medmcp.settings.TOOL_CACHE_DIR", absent),
+    ):
         yield
     clear_cache()
 

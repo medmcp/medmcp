@@ -4,7 +4,7 @@ Today every stack tool call spawns a fresh MCP stdio server (``docker run`` +
 import + CUDA init), runs one tool, and tears it down. This module holds each
 stack's server **persistent** so that cost is paid once (ideally pre-warmed at
 activation) instead of on every call. It is the UI/vibe-agnostic core of the
-stack pre-warm design (``docs/stack-prewarm-proxy.md``, Layer 1); the broker and
+stack pre-warm design (Layer 1); the broker and
 proxy shim that connect vibe-acp to this pool live in separate modules.
 
 A :class:`Backend` wraps one long-lived ``stdio_client`` + ``ClientSession`` (the

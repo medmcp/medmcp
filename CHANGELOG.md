@@ -15,6 +15,7 @@ Notable, user-visible changes to MedMCP. Format follows
 ### Changed
 
 - Chat: one centred column without avatars; answers as plain text, your messages as right-aligned bubbles, background work as a chip in the message box.
+- The `docs/` folder is gone; the stack-author contracts for background jobs and the dataset index are in `jobspec.py` and `workspace_note.py`.
 
 ### Fixed
 

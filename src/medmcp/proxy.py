@@ -10,7 +10,8 @@ nothing, so vibe's per-call spawn stays cheap.
 If the broker socket is unreachable (the pool isn't running), the shim falls back
 to spawning the real stack directly from the backend registry
 (``MEDMCP_BACKENDS_FILE`` / ``.vibe/backends.json``) — degraded to a per-call cold
-start, but a chat never breaks. See ``docs/stack-prewarm-proxy.md`` (Layer 1).
+start, but a chat never breaks (the stack pre-warm's Layer 1, see
+:mod:`medmcp.backend_pool`).
 """
 
 from __future__ import annotations

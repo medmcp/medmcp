@@ -6,8 +6,8 @@ shim connects to this broker over a unix domain socket and forwards ``list_tools
 warming the backend if needed — and relays the result back, so the expensive
 spawn/import/CUDA cost is paid once in the pool instead of on every call.
 
-This is the server half of the broker protocol (Layer 1 of
-``docs/stack-prewarm-proxy.md``). Activation pre-warm / eviction are driven
+This is the server half of the broker protocol (the stack pre-warm's Layer 1,
+see :mod:`medmcp.backend_pool`). Activation pre-warm / eviction are driven
 in-process by the workspace server holding the pool directly; the socket carries
 only the per-call forwarding ops.
 

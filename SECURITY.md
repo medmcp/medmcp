@@ -105,8 +105,8 @@ user control:
   only mount, and the same isolation as any stack; the Docker guard refuses a
   job container in any other shape. The approval dialog marks such a call
   "Starts a job that keeps running after this chat". One job runs at a time by
-  default; running jobs are listed, and can be stopped, in the Tool stacks
-  window and at `/api/jobs`. See [docs/stack-jobs.md](docs/stack-jobs.md).
+  default; running jobs are listed, and can be stopped, from the running-tasks
+  chip in the message box and at `/api/jobs`.
 - **Tasks: one read without a dialog.** A stack call that runs past
   `MEDMCP_TASK_AFTER_SEC` continues in the background as a task. The assistant
   may read a task's status and result with `get_task` without an approval

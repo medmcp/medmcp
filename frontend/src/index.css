@@ -1441,6 +1441,7 @@ button:disabled {
 .msg-user {
   align-self: flex-end;
   max-width: 80%;
+  margin-right: 6px;
 }
 
 /* Rewind (replayed user turns): ghost button revealed on hover, plus the
@@ -1505,11 +1506,25 @@ button:disabled {
   min-width: 0;
 }
 
+/* A speech bubble: a small tail at the bottom right, its tip on the column's
+ * right edge (the row leaves 6px for it, see .msg-user). */
 .bubble-user {
+  position: relative;
   background: linear-gradient(135deg, var(--blue), var(--blue-l));
   color: #fff;
-  border-radius: 16px;
+  border-radius: 16px 16px 4px 16px;
   white-space: pre-wrap;
+}
+
+.bubble-user::after {
+  content: '';
+  position: absolute;
+  right: -6px;
+  bottom: 0;
+  width: 12px;
+  height: 14px;
+  background: var(--blue-l);
+  clip-path: path('M 0 0 C 1 8, 5 13, 12 14 L 0 14 Z');
 }
 
 .msg-bubble.bubble-ai {

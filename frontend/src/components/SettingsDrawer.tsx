@@ -291,11 +291,6 @@ export function SettingsDrawer({
                   size={12}
                   className={advancedOpen ? 'settings-chevron open' : 'settings-chevron'}
                 />
-                {!advancedOpen && (
-                  <span className="settings-advanced-peek">
-                    provenance, approvals, updates, external servers, cloud model
-                  </span>
-                )}
               </button>
               {advancedOpen && (
                 <div className="settings-advanced-body">
@@ -305,19 +300,6 @@ export function SettingsDrawer({
                     checked={state.record_provenance}
                     onChange={(v) => apply({ ...state, record_provenance: v })}
                   />
-                  {autoApprove && (
-                    <Row
-                      label="Allow everything in a chat"
-                      hint={
-                        autoApprove.available
-                          ? 'Approvals can be skipped for the rest of a chat.'
-                          : 'Turned off for this deployment.'
-                      }
-                      checked={autoApprove.enabled}
-                      disabled={!autoApprove.available}
-                      onChange={onAutoApproveToggle}
-                    />
-                  )}
                   {update && (
                     <Row
                       label="Check for updates automatically"
@@ -331,6 +313,21 @@ export function SettingsDrawer({
                       onChange={(v) => {
                         onSetAutoCheck(v).catch(() => {})
                       }}
+                    />
+                  )}
+                  {/* Everything that loosens the approvals or lets data leave the machine. */}
+                  <div className="settings-subsection">Security</div>
+                  {autoApprove && (
+                    <Row
+                      label="Allow everything in a chat"
+                      hint={
+                        autoApprove.available
+                          ? 'Approvals can be skipped for the rest of a chat.'
+                          : 'Turned off for this deployment.'
+                      }
+                      checked={autoApprove.enabled}
+                      disabled={!autoApprove.available}
+                      onChange={onAutoApproveToggle}
                     />
                   )}
                   <div className="settings-row">
@@ -357,11 +354,6 @@ export function SettingsDrawer({
                   </div>
                 </div>
               )}
-
-              <div className="drawer-footnote">
-                Model, GPU and external access changes restart the agent.
-                {saving ? ' Saving…' : ''}
-              </div>
             </>
           )}
         </div>

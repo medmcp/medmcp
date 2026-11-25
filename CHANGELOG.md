@@ -6,6 +6,10 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Changed
+
+- Tool stacks: all cards are the same size; long descriptions open on click, the tool list from the card's footer.
+
 ## 0.9.0 — 2026-11-24
 
 ### Added

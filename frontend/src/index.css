@@ -171,7 +171,9 @@ button:active:is(
     .vs-advanced-toggle,
     .settings-advanced-toggle,
     .ext-mcp-token-mode,
-    .ext-mcp-replace
+    .ext-mcp-replace,
+    .market-desc,
+    .market-tools-toggle
   ):not(:disabled) {
   box-shadow: none;
   opacity: 0.7;
@@ -3847,13 +3849,14 @@ textarea.wf-input {
 }
 
 /* auto-fill rather than auto-fit: with few stacks the cards keep their width
-   instead of stretching to fill the row, which looks broken at two items. */
+   instead of stretching to fill the row, which looks broken at two items.
+   Every card has the same parts (one-line head, three-line description, image,
+   footer), so closed cards are one size without stretching; each keeps its own
+   height, so opening one card's tools does not stretch the others in its row. */
 .market-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(255px, 1fr));
   gap: 12px;
-  /* Each card keeps its own height, so opening one card's tool list does not
-     stretch the other cards in its row. */
   align-items: start;
 }
 
@@ -3875,7 +3878,19 @@ textarea.wf-input {
   display: flex;
   align-items: center;
   gap: 7px;
-  flex-wrap: wrap;
+  min-height: 18px;
+}
+
+.market-card-head > * {
+  flex: none;
+}
+
+.market-card-head > .market-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .market-name {
@@ -3899,11 +3914,41 @@ textarea.wf-input {
   background: rgba(74, 222, 128, 0.1);
 }
 
-.market-desc {
-  flex: 1;
+/* Three lines, always: short descriptions reserve the space, long ones are
+   clamped until clicked. Flex so the text sits at the top, not centred as a
+   button's content otherwise is. */
+.market-desc,
+.market-desc:hover {
+  display: flex;
+  align-items: flex-start;
+  min-height: 51px;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
+  text-align: left;
   font-size: 12px;
-  line-height: 1.45;
+  font-weight: 400;
+  line-height: 17px;
   color: var(--muted2);
+}
+
+.market-desc-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+
+.market-desc.open .market-desc-text {
+  display: block;
+}
+
+.market-desc:focus-visible {
+  outline: 1px solid var(--blue-l);
+  outline-offset: 2px;
 }
 
 .market-image {
@@ -3915,24 +3960,24 @@ textarea.wf-input {
   white-space: nowrap;
 }
 
-/* An installed stack's tools: closed by default, one line per tool. */
-.market-tools summary {
+/* An installed stack's tools: a toggle at the right of the footer, the list
+   below it, one line per tool. */
+.market-tools-toggle {
   display: flex;
   align-items: center;
   gap: 4px;
-  list-style: none;
-  cursor: pointer;
+  margin-left: auto;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
   color: var(--muted);
   font-size: 11.5px;
+  font-weight: 400;
   line-height: 16px;
-  user-select: none;
 }
 
-.market-tools summary::-webkit-details-marker {
-  display: none;
-}
-
-.market-tools summary::before {
+.market-tools-toggle::after {
   content: '';
   flex: none;
   width: 12px;
@@ -3943,31 +3988,33 @@ textarea.wf-input {
   transition: transform 0.12s ease;
 }
 
-.market-tools[open] > summary::before {
+.market-tools-toggle.open::after {
   transform: rotate(90deg);
 }
 
-.market-tools summary:hover {
+.market-tools-toggle:hover {
+  background: none;
   color: var(--text);
 }
 
-.market-tools ul {
+.market-tools-list {
   list-style: none;
-  margin: 6px 0 0 16px;
-  padding: 0;
+  margin: 2px 0 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.market-tools li {
+.market-tools-list li {
   display: flex;
   align-items: center;
   gap: 8px;
   min-height: 20px;
 }
 
-.market-tools code {
+.market-tools-list code {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--muted2);
@@ -3976,7 +4023,7 @@ textarea.wf-input {
   white-space: nowrap;
 }
 
-.market-tools .risk-chip {
+.market-tools-list .risk-chip {
   flex: none;
   font-size: 10px;
   padding: 1px 6px;

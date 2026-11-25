@@ -27,27 +27,29 @@ const EFFECT_CHIPS: Record<ToolEffect, { label: string; tone: string }> = {
   destructive: { label: 'Destructive', tone: 'risk-high' },
 }
 
-/** An installed stack's tools, one line each, behind a disclosure that starts closed. */
+/** An installed stack's tools, one line each. Opened from the card's footer. */
 function StackTools({ tools }: { tools: StackTool[] }) {
   return (
-    <details className="market-tools">
-      <summary>
-        {tools.length} {tools.length === 1 ? 'tool' : 'tools'}
-      </summary>
-      <ul>
-        {tools.map((t) => (
-          <li key={t.name}>
-            <code>{t.name}</code>
-            {t.effect && EFFECT_CHIPS[t.effect] && (
-              <span className={`risk-chip ${EFFECT_CHIPS[t.effect].tone}`}>
-                {EFFECT_CHIPS[t.effect].label}
-              </span>
-            )}
-          </li>
-        ))}
-      </ul>
-    </details>
+    <ul className="market-tools-list">
+      {tools.map((t) => (
+        <li key={t.name}>
+          <code>{t.name}</code>
+          {t.effect && EFFECT_CHIPS[t.effect] && (
+            <span className={`risk-chip ${EFFECT_CHIPS[t.effect].tone}`}>
+              {EFFECT_CHIPS[t.effect].label}
+            </span>
+          )}
+        </li>
+      ))}
+    </ul>
   )
+}
+
+/** Add or remove one name from a set, returning a new set (for React state). */
+function toggled(set: Set<string>, name: string): Set<string> {
+  const next = new Set(set)
+  if (!next.delete(name)) next.add(name)
+  return next
 }
 
 /** One row of the merged view: what is installable, what is installed, and its state. */
@@ -86,6 +88,9 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
   const [networkNames, setNetworkNames] = useState<Set<string>>(new Set())
   // Each installed stack's tools with their declared effects (empty until listed).
   const [toolsByStack, setToolsByStack] = useState<Map<string, StackTool[]>>(new Map())
+  // Cards whose full description / tool list the reader opened.
+  const [openDescs, setOpenDescs] = useState<Set<string>>(new Set())
+  const [openTools, setOpenTools] = useState<Set<string>>(new Set())
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const [busy, setBusy] = useState(false)
@@ -394,69 +399,85 @@ export function StackMarketplace({ open, onClose }: StackMarketplaceProps) {
             </div>
           ) : (
             <div className="market-grid">
-              {visible.map((i) => (
-                <div className={`market-card${i.installed ? ' installed' : ''}`} key={i.name}>
-                  <div className="market-card-head">
-                    <span className="market-name">{i.name}</span>
-                    {i.gpu && <span className="stack-badge">GPU</span>}
-                    {/* Not a feature badge: this is the one stack capability
+              {visible.map((i) => {
+                const tools = i.installed ? (toolsByStack.get(i.name) ?? []) : []
+                const toolsOpen = tools.length > 0 && openTools.has(i.name)
+                return (
+                  <div className={`market-card${i.installed ? ' installed' : ''}`} key={i.name}>
+                    <div className="market-card-head">
+                      <span className="market-name">{i.name}</span>
+                      {i.gpu && <span className="stack-badge">GPU</span>}
+                      {/* Not a feature badge: this is the one stack capability
                         the sandbox around it cannot take back. */}
-                    {i.network && <span className="stack-badge egress">internet</span>}
-                    {i.installed && (
-                      <span className={`market-state${i.active ? ' on' : ''}`}>
-                        {i.active ? 'enabled' : 'disabled'}
+                      {i.network && <span className="stack-badge egress">internet</span>}
+                      {i.installed && (
+                        <span className={`market-state${i.active ? ' on' : ''}`}>
+                          {i.active ? 'enabled' : 'disabled'}
+                        </span>
+                      )}
+                    </div>
+                    {/* Clamped to three lines so the cards line up; a click shows it all. */}
+                    <button
+                      className={`market-desc${openDescs.has(i.name) ? ' open' : ''}`}
+                      aria-expanded={openDescs.has(i.name)}
+                      onClick={() => setOpenDescs((s) => toggled(s, i.name))}
+                    >
+                      <span className="market-desc-text">
+                        {i.description ||
+                          (i.offCatalog
+                            ? 'Installed outside the catalogue.'
+                            : 'No description provided.')}
                       </span>
-                    )}
-                  </div>
-                  <div className="market-desc">
-                    {i.description ||
-                      (i.offCatalog
-                        ? 'Installed outside the catalogue.'
-                        : 'No description provided.')}
-                  </div>
-                  <div className="market-image">
-                    {i.version ? `v${i.version}` : i.image}
-                  </div>
-                  {i.installed && (toolsByStack.get(i.name)?.length ?? 0) > 0 && (
-                    <StackTools tools={toolsByStack.get(i.name) ?? []} />
-                  )}
-                  <div className="market-card-foot">
-                    {installingImage === i.image ? (
-                      <div className="install-inline">
-                        <div className="install-bar">
-                          <span className="install-bar-fill" />
+                    </button>
+                    <div className="market-image">{i.version ? `v${i.version}` : i.image}</div>
+                    <div className="market-card-foot">
+                      {installingImage === i.image ? (
+                        <div className="install-inline">
+                          <div className="install-bar">
+                            <span className="install-bar-fill" />
+                          </div>
+                          <div className="install-line">{progress ?? 'Starting…'}</div>
                         </div>
-                        <div className="install-line">{progress ?? 'Starting…'}</div>
-                      </div>
-                    ) : i.installed ? (
-                      <>
-                        <Toggle
-                          checked={i.active}
-                          disabled={busy}
-                          onChange={(v) => setActive(i.name, v)}
-                        />
-                        {containerNames.has(i.name) && (
-                          <button
-                            className="btn-plain stack-uninstall"
+                      ) : i.installed ? (
+                        <>
+                          <Toggle
+                            checked={i.active}
                             disabled={busy}
-                            onClick={() => remove(i.name)}
-                          >
-                            Uninstall
-                          </button>
-                        )}
-                      </>
-                    ) : (
-                      <button
-                        className="btn-primary btn-sm"
-                        disabled={busy}
-                        onClick={() => install(i.image)}
-                      >
-                        Install
-                      </button>
-                    )}
+                            onChange={(v) => setActive(i.name, v)}
+                          />
+                          {containerNames.has(i.name) && (
+                            <button
+                              className="btn-plain stack-uninstall"
+                              disabled={busy}
+                              onClick={() => remove(i.name)}
+                            >
+                              Uninstall
+                            </button>
+                          )}
+                        </>
+                      ) : (
+                        <button
+                          className="btn-primary btn-sm"
+                          disabled={busy}
+                          onClick={() => install(i.image)}
+                        >
+                          Install
+                        </button>
+                      )}
+                      {tools.length > 0 && (
+                        <button
+                          className={`market-tools-toggle${toolsOpen ? ' open' : ''}`}
+                          aria-expanded={toolsOpen}
+                          onClick={() => setOpenTools((s) => toggled(s, i.name))}
+                        >
+                          {tools.length} {tools.length === 1 ? 'tool' : 'tools'}
+                        </button>
+                      )}
+                    </div>
+                    {toolsOpen && <StackTools tools={tools} />}
                   </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>

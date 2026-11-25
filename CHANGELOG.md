@@ -10,6 +10,10 @@ Notable, user-visible changes to MedMCP. Format follows
 
 - Approvals: "Allow everything in this chat", off unless enabled in Settings › Advanced (with consent), runs a chat's later steps without asking; changing or deleting files, network access, paths outside the workspace, background jobs, destructive tools and assistant code still ask.
 
+### Changed
+
+- Tool stacks: all cards are the same size; long descriptions open on click, the tool list from the card's footer.
+
 ## 0.9.0 — 2026-11-24
 
 ### Added

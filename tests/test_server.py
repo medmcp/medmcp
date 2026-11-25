@@ -3251,3 +3251,135 @@ def test_the_frontend_page_is_revalidated_but_its_assets_are_not(tmp_path: Path)
     client = TestClient(app)
     assert client.get("/").headers.get("cache-control") == "no-cache"
     assert "cache-control" not in client.get("/assets/index-abc.css").headers
+
+
+class TestAllowEverythingInThisChat:
+    """Allow everything in this chat: the core answers ordinary approvals itself."""
+
+    ALLOW: ClassVar[dict[str, object]] = {
+        "outcome": {"outcome": "selected", "optionId": "allow_once"}
+    }
+    responses = TestStackToolGrantForTheChat.responses
+    _request = staticmethod(TestStackToolGrantForTheChat._request)
+    _dialogs = staticmethod(TestStackToolGrantForTheChat._dialogs)
+    _answer = TestStackToolGrantForTheChat._answer
+
+    @pytest.fixture(autouse=True)
+    def _default_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(server.CHAT_AUTO_APPROVE_ENV_VAR, raising=False)
+
+    async def _turn_on(self, conn: server._ChatConnection) -> None:
+        await self._answer(
+            conn, self._request(1, "bash", command="mkdir x"), server._CHAT_AUTO_APPROVE_OPTION
+        )
+
+    async def test_ordinary_dialogs_offer_it(
+        self, responses: list[tuple[int, object]], tmp_path: Path
+    ) -> None:
+        """A shell command, a new file and a stack call all offer it."""
+        conn, _ = _connection()
+        await self._answer(conn, self._request(1, "bash", command="mkdir x"), "allow_once")
+        await self._answer(
+            conn, self._request(2, "write_file", path=str(tmp_path / "a.txt")), "allow_once"
+        )
+        await self._answer(
+            conn,
+            self._request(3, "medmcp-cohort_index_dataset", dataset_dir=str(tmp_path / "study")),
+            "allow_once",
+        )
+        for dialog in self._dialogs(conn):
+            offered = {o["optionId"]: o["name"] for o in dialog["options"]}
+            assert offered[server._CHAT_AUTO_APPROVE_OPTION] == "Allow everything in this chat"
+
+    async def test_later_ordinary_calls_run_without_a_dialog_and_are_recorded(
+        self,
+        responses: list[tuple[int, object]],
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Each call gets allow_once, no dialog; the browser hears it is on; audited as auto."""
+        conn, _ = _connection()
+        await self._turn_on(conn)
+        with caplog.at_level(logging.INFO, logger="medmcp.audit"):
+            await conn._handle_permission(self._request(2, "bash", command="mkdir y"))
+            await conn._handle_permission(
+                self._request(3, "write_file", path=str(tmp_path / "a.txt"))
+            )
+            await conn._handle_permission(
+                self._request(4, "medmcp-cohort_index_dataset", dataset_dir=str(tmp_path / "study"))
+            )
+        assert responses == [(n, self.ALLOW) for n in (1, 2, 3, 4)]
+        assert len(self._dialogs(conn)) == 1
+        frames = [m for m in cast("_StubWs", conn.ws).sent if m.get("type") == "auto_approve"]
+        assert frames[0]["enabled"] is True and frames[0]["since"]
+        assert sum("auto-approved" in r.getMessage() for r in caplog.records) == 3
+
+    @pytest.mark.parametrize(
+        ("tool", "arguments"),
+        [
+            ("bash", {"command": "rm -r y"}),
+            ("bash", {"command": "python3 - <<'EOF'\nprint(1)\nEOF"}),
+            ("medmcp-cohort_index_dataset", {"dataset_dir": "/etc"}),
+        ],
+        ids=["delete", "assistant-code", "outside-workspace"],
+    )
+    async def test_risky_calls_still_ask_without_the_option(
+        self,
+        responses: list[tuple[int, object]],
+        tool: str,
+        arguments: dict[str, str],
+    ) -> None:
+        """A deletion, code the assistant wrote and a path outside the workspace ask each time."""
+        conn, _ = _connection()
+        await self._turn_on(conn)
+        await self._answer(conn, self._request(2, tool, **arguments), "allow_once")
+        dialogs = self._dialogs(conn)
+        assert len(dialogs) == 2
+        assert server._CHAT_AUTO_APPROVE_OPTION not in {
+            o["optionId"] for o in dialogs[1]["options"]
+        }
+
+    async def test_a_destructive_stack_tool_still_asks(
+        self,
+        responses: list[tuple[int, object]],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A tool its stack declares destructive is never covered, as under #206."""
+
+        def _effect(stack: str, tool: str) -> str | None:
+            return "destructive" if tool == "erase" else None
+
+        monkeypatch.setattr(server, "tool_effect", _effect)
+        conn, _ = _connection()
+        await self._turn_on(conn)
+        req = self._request(2, "medmcp-cohort_erase", path=str(tmp_path / "study"))
+        await self._answer(conn, req, "allow_once")
+        assert len(self._dialogs(conn)) == 2
+
+    async def test_it_can_be_turned_off_and_a_new_chat_asks_again(
+        self, responses: list[tuple[int, object]]
+    ) -> None:
+        """Off from the browser restores the dialog; a new chat connection starts off."""
+        conn, _ = _connection()
+        await self._turn_on(conn)
+        await conn._set_auto_approve(False)
+        await self._answer(conn, self._request(2, "bash", command="mkdir y"), "reject_once")
+        assert len(self._dialogs(conn)) == 2
+        off = {"type": "auto_approve", "enabled": False, "since": None}
+        assert off in cast("_StubWs", conn.ws).sent
+        fresh, _ = _connection()
+        await self._answer(fresh, self._request(3, "bash", command="mkdir z"), "allow_once")
+        assert len(self._dialogs(fresh)) == 1
+
+    async def test_the_kill_switch_hides_it_and_a_forged_choice_is_refused(
+        self, responses: list[tuple[int, object]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MEDMCP_CHAT_AUTO_APPROVE=0: not offered, and sending its id anyway grants nothing."""
+        monkeypatch.setenv(server.CHAT_AUTO_APPROVE_ENV_VAR, "0")
+        conn, _ = _connection()
+        await self._turn_on(conn)
+        offered = {o["optionId"] for o in self._dialogs(conn)[0]["options"]}
+        assert server._CHAT_AUTO_APPROVE_OPTION not in offered
+        assert conn._auto_approve is None
+        assert responses == [(1, {"outcome": {"outcome": "cancelled"}})]

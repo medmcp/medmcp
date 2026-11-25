@@ -83,6 +83,11 @@ export class ChatSocket {
     this.send({ type: 'permission', requestId, optionId })
   }
 
+  /** Turn "Allow everything in this chat" off (it is turned on in an approval). */
+  sendAutoApproveOff(): void {
+    this.send({ type: 'auto_approve', enabled: false })
+  }
+
   cancel(): void {
     this.send({ type: 'cancel' })
   }

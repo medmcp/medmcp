@@ -3292,6 +3292,17 @@ _STACK_TOOL_CHAT_OPTION = "medmcp_allow_tool_for_chat"
 # Kill switch: ``MEDMCP_STACK_TOOL_APPROVAL=0`` restores strict per-call approval.
 STACK_TOOL_APPROVAL_ENV_VAR = "MEDMCP_STACK_TOOL_APPROVAL"
 
+# "Allow everything in this chat": once chosen in an approval dialog, the core
+# answers this chat's later approval requests with ``allow_once`` itself. Like
+# the chat-long stack-tool option it is MedMCP's own: never a vibe rule, never
+# written to config.toml, gone when the chat closes or reconnects. It covers only
+# what a chat-long approval may cover (see :func:`_auto_approve_covers`): a call
+# that needs a look, assistant-written code, an external server's tool and
+# ``cancel_task`` still ask. The path guard still refuses what it refuses.
+# Kill switch: ``MEDMCP_CHAT_AUTO_APPROVE=0`` hides the option.
+_CHAT_AUTO_APPROVE_OPTION = "medmcp_allow_all_for_chat"
+CHAT_AUTO_APPROVE_ENV_VAR = "MEDMCP_CHAT_AUTO_APPROVE"
+
 # Kill switch: ``MEDMCP_READ_ONLY_APPROVAL=0`` restores strict per-call approval.
 READ_ONLY_APPROVAL_ENV_VAR = "MEDMCP_READ_ONLY_APPROVAL"
 # Code the assistant wrote itself (a Python heredoc, ``Rscript``, a ``.py`` it
@@ -3339,6 +3350,36 @@ def _read_only_approval_enabled() -> bool:
 def _assistant_code_denied() -> bool:
     """Whether code the assistant wrote itself is refused outright (default: asked)."""
     return os.environ.get(ASSISTANT_CODE_ENV_VAR, "").strip().lower() in {"deny", "off", "0", "no"}
+
+
+# Risk labels that keep a call out of "Allow everything in this chat".
+_AUTO_APPROVE_NEVER_KEYS = frozenset(
+    {"assistant_code", "file_delete", "system_config", "hidden_code", "data_exfil"}
+)
+
+
+def _chat_auto_approve_enabled() -> bool:
+    """Whether approval dialogs offer "Allow everything in this chat" (default on)."""
+    value = os.environ.get(CHAT_AUTO_APPROVE_ENV_VAR, "").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _auto_approve_covers(
+    rule_keys: list[str], path_findings: list[Any], *, external: bool, task_tool: str | None
+) -> bool:
+    """Whether "Allow everything in this chat" may answer this call without a dialog.
+
+    Never a call that needs a look (a destructive tool, a background job, an
+    overwrite, a path outside the workspace or one that does not resolve), a
+    shell command the fixed rules label as deleting files, changing the system,
+    hiding code or sending data out, code the assistant wrote itself, an
+    external server's tool, or ``cancel_task``: those ask on every call.
+    """
+    if _call_needs_a_look(rule_keys, path_findings):
+        return False
+    if _AUTO_APPROVE_NEVER_KEYS & set(rule_keys) or external:
+        return False
+    return task_tool != tasks.CANCEL_TASK
 
 
 def _stack_tool_approval_enabled() -> bool:
@@ -3647,6 +3688,8 @@ class _ChatConnection:
         self._read_only_granted = False
         # Stack tools the person approved for the rest of this chat, as (stack, tool).
         self._granted_stack_tools: set[tuple[str, str]] = set()
+        # "Allow everything in this chat": when and by whom it was turned on, or None.
+        self._auto_approve: JsonDict | None = None
         self._prompt_task: asyncio.Task[None] | None = None
         # The session/prompt RPC of the current turn. It outlives a cancelled
         # prompt task: vibe-acp ends the turn only after it handles session/cancel,
@@ -3702,6 +3745,10 @@ class _ChatConnection:
                     if fut is not None and not fut.done():
                         option_id = data.get("optionId")
                         fut.set_result(option_id if isinstance(option_id, str) else None)
+            elif kind == "auto_approve":
+                # The browser may only turn it off; on is chosen in a dialog.
+                if data.get("enabled") is False:
+                    await self._set_auto_approve(False)
             elif kind == "cancel":
                 await self._stop_idle_pump()
                 await self._cancel_prompt()
@@ -4625,6 +4672,25 @@ class _ChatConnection:
         if _jobs is not None and _jobs.declares(stack, tool):
             rule_keys = _merge_keys(rule_keys, ["background_job"])
 
+        offered_ids = {o.get("optionId") for o in options}
+        auto_ok = (
+            _chat_auto_approve_enabled()
+            and "allow_once" in offered_ids
+            and _auto_approve_covers(
+                rule_keys, path_findings, external=external, task_tool=task_tool
+            )
+        )
+        # "Allow everything in this chat" is on and covers this call: no dialog.
+        if auto_ok and self._auto_approve is not None:
+            _audit.info(
+                "auto-approved (allow everything in this chat, on since %s by %s): %s",
+                self._auto_approve["since"],
+                self._auto_approve["by"],
+                title,
+            )
+            await self._resolve_permission(req_id_raw, title, cached, "allow_once", auto=True)
+            return
+
         # A stack tool can be approved once for the rest of the chat. Calls it then
         # covers are answered here; anything that needs a look (a destructive tool
         # always does) is still shown, and is shown without the chat-long option.
@@ -4650,6 +4716,16 @@ class _ChatConnection:
                         "kind": "allow_always",
                     },
                 ]
+
+        if auto_ok:
+            options = [
+                *options,
+                {
+                    "optionId": _CHAT_AUTO_APPROVE_OPTION,
+                    "name": "Allow everything in this chat",
+                    "kind": "allow_always",
+                },
+            ]
 
         _audit.info("permission requested: %s", title)
         loop = asyncio.get_running_loop()
@@ -4709,7 +4785,41 @@ class _ChatConnection:
             self._granted_stack_tools.add((stack, tool))
             _audit.info("stack tool approved for the rest of this chat: %s/%s", stack, tool)
             option_id = "allow_once"
+        if option_id == _CHAT_AUTO_APPROVE_OPTION:
+            # MedMCP's own option: vibe gets allow_once for this call only.
+            await self._set_auto_approve(True)
+            option_id = "allow_once"
         await self._resolve_permission(req_id_raw, title, cached, option_id)
+
+    async def _set_auto_approve(self, enabled: bool) -> None:
+        """Turn "Allow everything in this chat" on or off; audit it and tell the browser."""
+        client = getattr(self.ws, "client", None)
+        by = f"browser {client.host}" if client is not None else "browser"
+        if enabled:
+            self._auto_approve = {"since": provenance._utc_now_iso(), "by": by}  # pyright: ignore[reportPrivateUsage]
+            event = f"auto_approve_on (by {by})"
+        else:
+            if self._auto_approve is None:
+                return
+            self._auto_approve = None
+            event = f"auto_approve_off (by {by})"
+        _audit.info("allow everything in this chat: %s (chat %s)", event, self.canonical_id)
+
+        def _mirror() -> None:
+            if settings.load_provenance_enabled():
+                provenance.log_permission(
+                    self.canonical_id, title="allow everything in this chat", decision=event
+                )
+
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(_mirror)
+        await self._send(
+            {
+                "type": "auto_approve",
+                "enabled": enabled,
+                "since": (self._auto_approve or {}).get("since"),
+            }
+        )
 
     def _grant_stack_call(self, tool_call: JsonDict) -> None:
         """Let the broker run the stack call just approved, once, as approved."""
@@ -4758,9 +4868,18 @@ class _ChatConnection:
             )
 
     async def _resolve_permission(
-        self, req_id: int, title: object, cached: JsonDict, option_id: str | None
+        self,
+        req_id: int,
+        title: object,
+        cached: JsonDict,
+        option_id: str | None,
+        *,
+        auto: bool = False,
     ) -> None:
-        """Audit, mirror to provenance, and answer one permission request."""
+        """Audit, mirror to provenance, and answer one permission request.
+
+        *auto*: answered by "Allow everything in this chat", recorded as such.
+        """
         if option_id is None:
             _audit.warning("permission cancelled/timed out: %s", title)
             decision = "cancelled"
@@ -4768,6 +4887,11 @@ class _ChatConnection:
         else:
             _audit.info("permission decision: %s -> %s", title, option_id)
             decision = option_id
+            if auto and self._auto_approve is not None:
+                decision = (
+                    f"{option_id} (auto-approved: allow everything in this chat, on since "
+                    f"{self._auto_approve['since']} by {self._auto_approve['by']})"
+                )
             outcome = {"outcome": "selected", "optionId": option_id}
             if option_id.startswith("allow"):
                 self._grant_stack_call(cached)

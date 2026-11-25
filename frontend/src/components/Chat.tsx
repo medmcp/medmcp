@@ -840,6 +840,8 @@ export const Chat = memo(function Chat({
   const [retrying, setRetrying] = useState<{ category: string; detail: string } | null>(null)
   const [usage, setUsage] = useState<{ used: number; size: number | null } | null>(null)
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
+  // "Allow everything in this chat": the core answers ordinary approvals itself.
+  const [autoApprove, setAutoApprove] = useState(false)
   // Pending rewind confirmation: set after the preview call, cleared on
   // confirm/cancel/reconnect. `paths` are the workspace files a rewind restores.
   const [rewind, setRewind] = useState<{
@@ -1119,6 +1121,9 @@ export const Chat = memo(function Chat({
         case 'retrying':
           setRetrying({ category: frame.category, detail: frame.detail })
           break
+        case 'auto_approve':
+          setAutoApprove(frame.enabled)
+          break
         case 'user':
           // Two sources: history replay on resume, and vibe ≥2.23's echo of a
           // *live* prompt. Live sends are already rendered locally in send(),
@@ -1162,6 +1167,7 @@ export const Chat = memo(function Chat({
           setToolCalls({})
           setBusy(false)
           setPermission(null)
+          setAutoApprove(false)
           setRewind(null)
           if (frame.model) setModel(frame.model)
           setCloud(frame.cloud === true)
@@ -1181,6 +1187,8 @@ export const Chat = memo(function Chat({
         endTurn()
         setBusy(false)
         setPermission(null)
+        // The server's flag lives on the closed connection; a new one asks again.
+        setAutoApprove(false)
       }
     }
     const socket = new ChatSocket({ onFrame, onStatusChange }, resumeIdRef.current)
@@ -1359,6 +1367,15 @@ export const Chat = memo(function Chat({
         </span>
       </div>
       <div className="panel-body chat-scroll" ref={scrollRef} onScroll={onScroll}>
+        {autoApprove && (
+          <div className="auto-approve-banner" role="status">
+            <span>
+              Allow everything is on for this chat. Deleting, overwriting, leaving the workspace
+              and code the assistant wrote still ask.
+            </span>
+            <button onClick={() => socketRef.current?.sendAutoApproveOff()}>Turn off</button>
+          </div>
+        )}
         {items.length === 0 && (
           <div className="viewer-message">Ask the MedMCP agent anything about your workspace.</div>
         )}

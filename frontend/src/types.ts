@@ -413,6 +413,8 @@ export type ServerFrame =
   | { type: 'title'; title: string }
   /** vibe is backing off and retrying the model backend. */
   | { type: 'retrying'; category: string; detail: string }
+  /** "Allow everything in this chat" turned on (with when) or off. */
+  | { type: 'auto_approve'; enabled: boolean; since?: string | null }
   | { type: 'notice'; text: string }
   // A user turn: replayed from a resumed session (session/load), or vibe's
   // echo of a live prompt (merged into the locally-rendered bubble by id).

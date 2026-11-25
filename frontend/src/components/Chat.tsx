@@ -690,12 +690,17 @@ const ChatInput = memo(function ChatInput({
   onSend,
   onCancel,
   bgSignal,
+  autoApprove,
+  onAutoApproveOff,
 }: {
   busy: boolean
   canSend: boolean
   onSend: (text: string) => void
   onCancel: () => void
   bgSignal: number
+  /** "Allow everything in this chat" is on: the box turns red and says so. */
+  autoApprove: boolean
+  onAutoApproveOff: () => void
 }) {
   const [input, setInput] = useState('')
   // The box keeps focus after a send so the next message can follow at once,
@@ -737,7 +742,7 @@ const ChatInput = memo(function ChatInput({
     <div className="composer">
       {/* A click on the card's empty space puts the cursor in the box. */}
       <div
-        className={sent ? 'composer-card composer-sent' : 'composer-card'}
+        className={`composer-card${sent ? ' composer-sent' : ''}${autoApprove ? ' composer-auto' : ''}`}
         onMouseDown={(e) => {
           setSent(false)
           const target = e.target as HTMLElement
@@ -767,6 +772,15 @@ const ChatInput = memo(function ChatInput({
               }
             }}
           />
+          {/* Steps run without approval in this chat; a click turns that off. */}
+          {autoApprove && (
+            <span className="auto-pill-box">
+              <button className="auto-pill" onClick={onAutoApproveOff}>
+                Allow everything
+                <XIcon size={12} />
+              </button>
+            </span>
+          )}
           {/* Background work (tasks and jobs): "1 running task", next to send. */}
           <JobPill refreshSignal={bgSignal} />
           {busy ? (
@@ -842,6 +856,7 @@ export const Chat = memo(function Chat({
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
   // "Allow everything in this chat": the core answers ordinary approvals itself.
   const [autoApprove, setAutoApprove] = useState(false)
+  const turnAutoApproveOff = useCallback(() => socketRef.current?.sendAutoApproveOff(), [])
   // Pending rewind confirmation: set after the preview call, cleared on
   // confirm/cancel/reconnect. `paths` are the workspace files a rewind restores.
   const [rewind, setRewind] = useState<{
@@ -1367,15 +1382,6 @@ export const Chat = memo(function Chat({
         </span>
       </div>
       <div className="panel-body chat-scroll" ref={scrollRef} onScroll={onScroll}>
-        {autoApprove && (
-          <div className="auto-approve-banner" role="status">
-            <span>
-              Allow everything is on for this chat. Changing or deleting files, network access and
-              code the assistant wrote still ask.
-            </span>
-            <button onClick={() => socketRef.current?.sendAutoApproveOff()}>Turn off</button>
-          </div>
-        )}
         {items.length === 0 && (
           <div className="viewer-message">Ask the MedMCP agent anything about your workspace.</div>
         )}
@@ -1501,6 +1507,8 @@ export const Chat = memo(function Chat({
         onSend={send}
         onCancel={cancel}
         bgSignal={bgSignal}
+        autoApprove={autoApprove}
+        onAutoApproveOff={turnAutoApproveOff}
       />
     </div>
   )

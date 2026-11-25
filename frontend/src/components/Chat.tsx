@@ -690,12 +690,17 @@ const ChatInput = memo(function ChatInput({
   onSend,
   onCancel,
   bgSignal,
+  autoApprove,
+  onAutoApproveOff,
 }: {
   busy: boolean
   canSend: boolean
   onSend: (text: string) => void
   onCancel: () => void
   bgSignal: number
+  /** "Allow everything in this chat" is on: the box turns red and says so. */
+  autoApprove: boolean
+  onAutoApproveOff: () => void
 }) {
   const [input, setInput] = useState('')
   // The box keeps focus after a send so the next message can follow at once,
@@ -737,7 +742,7 @@ const ChatInput = memo(function ChatInput({
     <div className="composer">
       {/* A click on the card's empty space puts the cursor in the box. */}
       <div
-        className={sent ? 'composer-card composer-sent' : 'composer-card'}
+        className={`composer-card${sent ? ' composer-sent' : ''}${autoApprove ? ' composer-auto' : ''}`}
         onMouseDown={(e) => {
           setSent(false)
           const target = e.target as HTMLElement
@@ -767,6 +772,15 @@ const ChatInput = memo(function ChatInput({
               }
             }}
           />
+          {/* Steps run without approval in this chat; a click turns that off. */}
+          {autoApprove && (
+            <span className="auto-pill-box">
+              <button className="auto-pill" onClick={onAutoApproveOff}>
+                Allow everything
+                <XIcon size={12} />
+              </button>
+            </span>
+          )}
           {/* Background work (tasks and jobs): "1 running task", next to send. */}
           <JobPill refreshSignal={bgSignal} />
           {busy ? (
@@ -840,6 +854,9 @@ export const Chat = memo(function Chat({
   const [retrying, setRetrying] = useState<{ category: string; detail: string } | null>(null)
   const [usage, setUsage] = useState<{ used: number; size: number | null } | null>(null)
   const [permission, setPermission] = useState<PermissionRequest | null>(null)
+  // "Allow everything in this chat": the core answers ordinary approvals itself.
+  const [autoApprove, setAutoApprove] = useState(false)
+  const turnAutoApproveOff = useCallback(() => socketRef.current?.sendAutoApproveOff(), [])
   // Pending rewind confirmation: set after the preview call, cleared on
   // confirm/cancel/reconnect. `paths` are the workspace files a rewind restores.
   const [rewind, setRewind] = useState<{
@@ -1119,6 +1136,9 @@ export const Chat = memo(function Chat({
         case 'retrying':
           setRetrying({ category: frame.category, detail: frame.detail })
           break
+        case 'auto_approve':
+          setAutoApprove(frame.enabled)
+          break
         case 'user':
           // Two sources: history replay on resume, and vibe ≥2.23's echo of a
           // *live* prompt. Live sends are already rendered locally in send(),
@@ -1162,6 +1182,7 @@ export const Chat = memo(function Chat({
           setToolCalls({})
           setBusy(false)
           setPermission(null)
+          setAutoApprove(false)
           setRewind(null)
           if (frame.model) setModel(frame.model)
           setCloud(frame.cloud === true)
@@ -1181,6 +1202,8 @@ export const Chat = memo(function Chat({
         endTurn()
         setBusy(false)
         setPermission(null)
+        // The server's flag lives on the closed connection; a new one asks again.
+        setAutoApprove(false)
       }
     }
     const socket = new ChatSocket({ onFrame, onStatusChange }, resumeIdRef.current)
@@ -1484,6 +1507,8 @@ export const Chat = memo(function Chat({
         onSend={send}
         onCancel={cancel}
         bgSignal={bgSignal}
+        autoApprove={autoApprove}
+        onAutoApproveOff={turnAutoApproveOff}
       />
     </div>
   )

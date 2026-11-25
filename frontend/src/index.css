@@ -1833,6 +1833,44 @@ button.model-name:hover {
   box-shadow: 0 0 0 3px rgba(58, 99, 204, 0.16);
 }
 
+/* "Allow everything in this chat" is on: the box is red while steps run unasked. */
+.composer-card.composer-auto,
+.composer-card.composer-auto:focus-within:not(.composer-sent) {
+  border-color: rgba(210, 34, 41, 0.75);
+}
+
+.composer-card.composer-auto:focus-within:not(.composer-sent) {
+  box-shadow: 0 0 0 3px rgba(210, 34, 41, 0.18);
+}
+
+.auto-pill-box {
+  display: flex;
+  flex: none;
+  margin-bottom: 4px;
+}
+
+.auto-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px 0 10px;
+  font-size: 11.5px;
+  line-height: 22px;
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--red-tint);
+  background: rgba(210, 34, 41, 0.2);
+  border: 1px solid rgba(210, 34, 41, 0.6);
+  border-radius: 12px;
+}
+
+.auto-pill:hover {
+  color: var(--text);
+  background: rgba(210, 34, 41, 0.35);
+  border-color: rgba(210, 34, 41, 0.85);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .composer-card {
     transition: none;
@@ -2338,13 +2376,6 @@ button.model-name:hover {
   }
 }
 
-.drawer-footnote {
-  margin-top: 20px;
-  font-size: 11.5px;
-  color: var(--muted);
-  line-height: 1.6;
-}
-
 .settings-section {
   font-size: 11px;
   font-weight: 700;
@@ -2407,22 +2438,20 @@ button.model-name:hover {
 
 /* Says what is behind the disclosure, so it is not a door with no sign on it.
    Body face, lowercase: a description, not part of the heading. */
-.settings-advanced-peek {
-  margin-left: 2px;
-  font-size: 11px;
-  font-weight: 400;
-  letter-spacing: 0;
-  text-transform: none;
-  color: var(--muted);
-}
-
-.settings-advanced-toggle:hover .settings-advanced-peek {
-  color: var(--muted2);
-}
-
 .settings-advanced-body {
   margin-top: 2px;
   padding-left: 12px;
+}
+
+/* A group inside Advanced: smaller and quieter than a section heading. */
+.settings-subsection {
+  margin: 18px 0 2px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  line-height: 14px;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .settings-chevron {

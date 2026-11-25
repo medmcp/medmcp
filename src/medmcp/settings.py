@@ -1364,6 +1364,48 @@ def set_cloud_model_enabled(enabled: bool) -> JsonDict:
     return state
 
 
+# ── "Allow everything in this chat" (advanced) ───────────────────────────────
+# The approval dialog offers it only while this is on, and it can only be turned
+# on through a consent dialog: the same double gate (toggle and recorded
+# acknowledgement) as the two controls above, for the same reason — it removes
+# the per-call decision the rest of the security posture rests on.
+CHAT_AUTO_APPROVE_PATH: Path = VIBE_STATE_DIR / "chat_auto_approve.json"
+
+
+def load_chat_auto_approve() -> JsonDict:
+    """Return the state (``enabled``/``acknowledged_at``); off when absent."""
+    data = read_json(CHAT_AUTO_APPROVE_PATH) or {}
+    ack = data.get("acknowledged_at")
+    return {"enabled": bool(data.get("enabled")), "acknowledged_at": str(ack) if ack else None}
+
+
+def chat_auto_approve_enabled() -> bool:
+    """Whether approval dialogs may offer it: toggle *and* acknowledgement."""
+    state = load_chat_auto_approve()
+    return bool(state["enabled"]) and bool(state["acknowledged_at"])
+
+
+def acknowledge_chat_auto_approve() -> JsonDict:
+    """Record that the operator accepted the risks (idempotent within one activation)."""
+    state = load_chat_auto_approve()
+    if not state["acknowledged_at"]:
+        state["acknowledged_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+        atomic_write_json(CHAT_AUTO_APPROVE_PATH, state)
+    return state
+
+
+def set_chat_auto_approve_enabled(enabled: bool) -> JsonDict:
+    """Turn it on or off; on needs a current acknowledgement, off clears it."""
+    state = load_chat_auto_approve()
+    if enabled and not state["acknowledged_at"]:
+        raise ValueError("allow everything must be acknowledged before it can be enabled")
+    state["enabled"] = bool(enabled)
+    if not enabled:
+        state["acknowledged_at"] = None
+    atomic_write_json(CHAT_AUTO_APPROVE_PATH, state)
+    return state
+
+
 def cloud_model_key_present(entry: JsonDict) -> bool:
     """Whether the key *entry* names is actually available — presence, never the value."""
     env_var = str(entry.get("api_key_env") or "")

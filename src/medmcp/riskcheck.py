@@ -79,6 +79,20 @@ def _shell_signals(command: str, keys: list[str]) -> None:
         _add(keys, "assistant_code")
 
 
+# A shell command that can replace or change a file that already exists: a
+# redirect into a file, copying or moving onto one, tee, dd, or an in-place edit.
+# (``mkdir`` and ``touch`` write too, but cannot lose what a file held.)
+_REPLACES = re.compile(
+    r"(?<![0-9&])>>?(?!&)\s*(?!/dev/null)\S|\b(tee|mv|cp|dd|install|rsync)\b"
+    r"|\bsed\b[^|;&]*\s-i"
+)
+
+
+def may_replace_files(command: str) -> bool:
+    """Whether a shell command can replace or change an existing file."""
+    return bool(_REPLACES.search(command))
+
+
 def runs_assistant_code(tool: str, arguments: JsonDict) -> bool:
     """Whether this call runs, or writes, code the assistant wrote itself.
 

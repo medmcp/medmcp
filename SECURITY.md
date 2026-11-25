@@ -69,6 +69,13 @@ user control:
   for a read-only command (`ls`, `cat`, `grep`, …) in your workspace; it ends
   with the chat. Reading a file inside the workspace needs no approval; outside
   it, it asks first.
+- **"Allow everything in this chat" is off unless you switch it on.** Settings ›
+  Advanced can enable it after a consent dialog (`MEDMCP_CHAT_AUTO_APPROVE=0`
+  forbids it). Chosen in an approval, it lets that chat's later steps run
+  without asking, each one audit-logged. Deleting or changing existing files,
+  network access, paths outside the workspace, background jobs, destructive
+  tools and code the assistant wrote still ask every time. Switching it off
+  ends it in every chat and withdraws the consent.
 - **What approving a command grants.** A shell command runs with the agent's
   rights. In a `docker compose` install the agent has its own container: the
   workspace, its own configuration read-only, and nothing else — no Docker

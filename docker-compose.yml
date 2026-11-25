@@ -182,6 +182,7 @@ services:
       MEDMCP_UPDATE_URL: "${MEDMCP_UPDATE_URL:-}"
       # Chat-long approval of read-only shell commands (ls, cat, …); off with 0.
       MEDMCP_READ_ONLY_APPROVAL: "${MEDMCP_READ_ONLY_APPROVAL:-}"
+      MEDMCP_CHAT_AUTO_APPROVE: "${MEDMCP_CHAT_AUTO_APPROVE:-}"
       # Code the assistant wrote itself (a Python heredoc, Rscript, a .py file):
       # "ask" (default) shows every such call on its own; "deny" refuses it.
       MEDMCP_ASSISTANT_CODE: "${MEDMCP_ASSISTANT_CODE:-}"

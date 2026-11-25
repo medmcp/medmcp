@@ -1,6 +1,17 @@
 import { useEffect, useState } from 'react'
-import { fetchCloudModel, fetchExternalMcp, fetchGpus, fetchSettings, saveSettings } from '../api'
+import { createPortal } from 'react-dom'
+import {
+  acknowledgeChatAutoApprove,
+  fetchChatAutoApprove,
+  fetchCloudModel,
+  fetchExternalMcp,
+  fetchGpus,
+  fetchSettings,
+  saveSettings,
+  setChatAutoApproveEnabled,
+} from '../api'
 import type {
+  ChatAutoApproveState,
   CloudModelState,
   ExternalMcpState,
   GpuInfo,
@@ -91,6 +102,10 @@ export function SettingsDrawer({
   // the rest.
   const [external, setExternal] = useState<ExternalMcpState | null>(null)
   const [cloud, setCloud] = useState<CloudModelState | null>(null)
+  // "Allow everything in this chat": switched on only through its consent dialog.
+  const [autoApprove, setAutoApprove] = useState<ChatAutoApproveState | null>(null)
+  const [consenting, setConsenting] = useState(false)
+  const [understood, setUnderstood] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -134,6 +149,36 @@ export function SettingsDrawer({
       .then(setCloud)
       .catch(() => setCloud(null)) // summary hides rather than guesses
   }, [open, cloudVersion])
+
+  useEffect(() => {
+    if (!open) return
+    fetchChatAutoApprove()
+      .then(setAutoApprove)
+      .catch(() => setAutoApprove(null)) // the row hides rather than guesses
+  }, [open])
+
+  const onAutoApproveToggle = (next: boolean) => {
+    // Turning it on explains itself first, every time: the server clears the
+    // consent when it is switched off.
+    if (next) {
+      setUnderstood(false)
+      setConsenting(true)
+      return
+    }
+    setChatAutoApproveEnabled(false)
+      .then(setAutoApprove)
+      .catch((e: unknown) => setError(String(e)))
+  }
+
+  const acceptAutoApprove = () => {
+    acknowledgeChatAutoApprove()
+      .then(() => setChatAutoApproveEnabled(true))
+      .then((s) => {
+        setAutoApprove(s)
+        setConsenting(false)
+      })
+      .catch((e: unknown) => setError(String(e)))
+  }
 
   const apply = (next: SettingsState) => {
     const before = state
@@ -247,7 +292,9 @@ export function SettingsDrawer({
                   className={advancedOpen ? 'settings-chevron open' : 'settings-chevron'}
                 />
                 {!advancedOpen && (
-                  <span className="settings-advanced-peek">provenance, updates, external servers, cloud model</span>
+                  <span className="settings-advanced-peek">
+                    provenance, approvals, updates, external servers, cloud model
+                  </span>
                 )}
               </button>
               {advancedOpen && (
@@ -258,6 +305,19 @@ export function SettingsDrawer({
                     checked={state.record_provenance}
                     onChange={(v) => apply({ ...state, record_provenance: v })}
                   />
+                  {autoApprove && (
+                    <Row
+                      label="Allow everything in a chat"
+                      hint={
+                        autoApprove.available
+                          ? 'Approvals can be skipped for the rest of a chat.'
+                          : 'Turned off for this deployment.'
+                      }
+                      checked={autoApprove.enabled}
+                      disabled={!autoApprove.available}
+                      onChange={onAutoApproveToggle}
+                    />
+                  )}
                   {update && (
                     <Row
                       label="Check for updates automatically"
@@ -347,6 +407,61 @@ export function SettingsDrawer({
           </div>
         )}
       </aside>
+      {/* Portalled: the drawer is a stacking context, so a backdrop rendered in
+          place could not cover it and the switches behind would stay clickable. */}
+      {consenting &&
+        createPortal(
+          <div className="modal-backdrop over-window" onClick={() => setConsenting(false)}>
+            <div
+              ref={modalLayer}
+              className="modal ext-mcp-consent"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="auto-approve-consent-title"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 id="auto-approve-consent-title">Let a chat run without approvals?</h3>
+              <p>
+                Every step the assistant takes waits for your approval. With this on, approval
+                dialogs also offer “Allow everything in this chat”: once chosen, that chat’s later
+                steps run without asking.
+              </p>
+              <ul>
+                <li>
+                  The assistant can be misled by what it reads (a file, a report, a tool result) and
+                  then act on it with nobody looking.
+                </li>
+                <li>
+                  Still asked every time: deleting or changing existing files, network access,
+                  paths outside the workspace, background jobs, destructive tools and code the
+                  assistant wrote.
+                </li>
+                <li>Every step that runs this way is recorded in the audit log and provenance.</li>
+                <li>
+                  Turning this off ends it in every chat, and you will be asked to accept this
+                  again before it can be switched back on.
+                </li>
+              </ul>
+              <label className="ext-mcp-understood">
+                <input
+                  type="checkbox"
+                  checked={understood}
+                  onChange={(e) => setUnderstood(e.target.checked)}
+                />
+                I understand that steps will run without my approval.
+              </label>
+              <div className="modal-actions">
+                <button className="btn-text" onClick={() => setConsenting(false)}>
+                  Cancel
+                </button>
+                <button className="btn-primary" disabled={!understood} onClick={acceptAutoApprove}>
+                  Enable
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
     </>
   )
 }

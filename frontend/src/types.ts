@@ -565,6 +565,15 @@ export interface CloudModelConfig {
   key_present: boolean
 }
 
+/** "Allow everything in this chat" in Settings › Advanced. */
+export interface ChatAutoApproveState {
+  /** Approval dialogs offer it (switched on and consent given). */
+  enabled: boolean
+  acknowledged: boolean
+  /** False when the deployment forbids it (MEDMCP_CHAT_AUTO_APPROVE=0). */
+  available: boolean
+}
+
 /** State of the cloud-model feature (advanced settings). */
 export interface CloudModelState {
   enabled: boolean

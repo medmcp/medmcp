@@ -8,7 +8,7 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ### Added
 
-- Approvals: "Allow everything in this chat" runs the chat's later ordinary steps without asking; deleting, overwriting, leaving the workspace, background jobs, destructive tools and code the assistant wrote still ask. Before, a long task asked at every new tool.
+- Approvals: "Allow everything in this chat", off unless enabled in Settings › Advanced (with consent), runs a chat's later steps without asking; changing or deleting files, network access, paths outside the workspace, background jobs, destructive tools and assistant code still ask.
 
 ## 0.9.0 — 2026-11-24
 

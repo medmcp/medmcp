@@ -2121,6 +2121,56 @@ async def _apply_cloud_change(was_active: bool) -> bool:
     return True
 
 
+class ChatAutoApprovePayload(BaseModel):
+    """Request body for switching "Allow everything in this chat" on or off."""
+
+    enabled: bool
+
+
+def _chat_auto_approve_state() -> JsonDict:
+    state = settings.load_chat_auto_approve()
+    return {
+        "enabled": _chat_auto_approve_enabled(),
+        "acknowledged": bool(state["acknowledged_at"]),
+        "available": _chat_auto_approve_allowed(),
+    }
+
+
+@app.get("/api/chat-auto-approve")
+async def get_chat_auto_approve() -> JsonDict:
+    """Whether approval dialogs offer "Allow everything in this chat"."""
+    return await asyncio.to_thread(_chat_auto_approve_state)
+
+
+@app.post("/api/chat-auto-approve/acknowledge")
+async def post_chat_auto_approve_acknowledge() -> JsonDict:
+    """Record that the operator accepted that steps may run without a dialog."""
+    if not _chat_auto_approve_allowed():
+        raise HTTPException(status_code=400, detail=f"forbidden by {CHAT_AUTO_APPROVE_ENV_VAR}=0")
+    state = await asyncio.to_thread(settings.acknowledge_chat_auto_approve)
+    _audit.info("allow everything in this chat acknowledged at %s", state["acknowledged_at"])
+    return {"ok": True}
+
+
+@app.put("/api/chat-auto-approve")
+async def put_chat_auto_approve(payload: ChatAutoApprovePayload) -> JsonDict:
+    """Switch the option on (needs the acknowledgement) or off (ends it in every chat)."""
+    if payload.enabled and not _chat_auto_approve_allowed():
+        raise HTTPException(status_code=400, detail=f"forbidden by {CHAT_AUTO_APPROVE_ENV_VAR}=0")
+    try:
+        await asyncio.to_thread(settings.set_chat_auto_approve_enabled, payload.enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit.info(
+        "allow everything in this chat %s in settings", "enabled" if payload.enabled else "disabled"
+    )
+    if not payload.enabled:
+        for conn in list(_connections):
+            with contextlib.suppress(Exception):
+                await conn._set_auto_approve(False)  # pyright: ignore[reportPrivateUsage]
+    return await asyncio.to_thread(_chat_auto_approve_state)
+
+
 @app.get("/api/cloud-model")
 async def get_cloud_model() -> JsonDict:
     """Return the cloud-model state: toggle, acknowledgement, configuration, presets."""
@@ -3295,11 +3345,14 @@ STACK_TOOL_APPROVAL_ENV_VAR = "MEDMCP_STACK_TOOL_APPROVAL"
 # "Allow everything in this chat": once chosen in an approval dialog, the core
 # answers this chat's later approval requests with ``allow_once`` itself. Like
 # the chat-long stack-tool option it is MedMCP's own: never a vibe rule, never
-# written to config.toml, gone when the chat closes or reconnects. It covers only
-# what a chat-long approval may cover (see :func:`_auto_approve_covers`): a call
-# that needs a look, assistant-written code, an external server's tool and
-# ``cancel_task`` still ask. The path guard still refuses what it refuses.
-# Kill switch: ``MEDMCP_CHAT_AUTO_APPROVE=0`` hides the option.
+# written to config.toml, gone when the chat closes or reconnects. It is offered
+# only while Settings > Advanced has it switched on, which takes a consent dialog
+# (``settings.chat_auto_approve_enabled``: toggle and acknowledgement). It covers
+# only what :func:`_auto_approve_covers` allows: a call that needs a look, one
+# that changes or deletes an existing file, uses the network or runs
+# assistant-written code, an external server's tool and ``cancel_task`` still
+# ask. The path guard still refuses what it refuses.
+# ``MEDMCP_CHAT_AUTO_APPROVE=0`` forbids it outright, whatever the setting says.
 _CHAT_AUTO_APPROVE_OPTION = "medmcp_allow_all_for_chat"
 CHAT_AUTO_APPROVE_ENV_VAR = "MEDMCP_CHAT_AUTO_APPROVE"
 
@@ -3354,30 +3407,52 @@ def _assistant_code_denied() -> bool:
 
 # Risk labels that keep a call out of "Allow everything in this chat".
 _AUTO_APPROVE_NEVER_KEYS = frozenset(
-    {"assistant_code", "file_delete", "system_config", "hidden_code", "data_exfil"}
+    {"assistant_code", "file_delete", "system_config", "hidden_code", "data_exfil", "network"}
 )
 
 
-def _chat_auto_approve_enabled() -> bool:
-    """Whether approval dialogs offer "Allow everything in this chat" (default on)."""
+def _chat_auto_approve_allowed() -> bool:
+    """Whether this deployment permits it at all (``MEDMCP_CHAT_AUTO_APPROVE=0`` forbids)."""
     value = os.environ.get(CHAT_AUTO_APPROVE_ENV_VAR, "").strip().lower()
     return value not in {"0", "false", "no", "off"}
 
 
+def _chat_auto_approve_enabled() -> bool:
+    """Whether approval dialogs offer "Allow everything in this chat" (default off)."""
+    return _chat_auto_approve_allowed() and settings.chat_auto_approve_enabled()
+
+
 def _auto_approve_covers(
-    rule_keys: list[str], path_findings: list[Any], *, external: bool, task_tool: str | None
+    tool: str,
+    arguments: JsonDict,
+    rule_keys: list[str],
+    path_findings: list[Any],
+    *,
+    external: bool,
+    task_tool: str | None,
 ) -> bool:
     """Whether "Allow everything in this chat" may answer this call without a dialog.
 
     Never a call that needs a look (a destructive tool, a background job, an
     overwrite, a path outside the workspace or one that does not resolve), a
     shell command the fixed rules label as deleting files, changing the system,
-    hiding code or sending data out, code the assistant wrote itself, an
-    external server's tool, or ``cancel_task``: those ask on every call.
+    hiding code or sending data out, anything that uses the network, a change to
+    a file that exists (``edit``, ``write_file`` onto one, a shell redirect,
+    ``mv``/``cp``/``sed -i`` …), code the assistant wrote itself, an external
+    server's tool, or ``cancel_task``: those ask on every call.
     """
     if _call_needs_a_look(rule_keys, path_findings):
         return False
     if _AUTO_APPROVE_NEVER_KEYS & set(rule_keys) or external:
+        return False
+    if tool == "edit":
+        return False
+    if tool == "write_file" and any(f.get("status") == "ok" for f in path_findings):
+        return False
+    command = arguments.get("command")
+    if tool == "bash" and riskcheck.may_replace_files(
+        command if isinstance(command, str) else str(arguments)
+    ):
         return False
     return task_tool != tasks.CANCEL_TASK
 
@@ -4673,11 +4748,20 @@ class _ChatConnection:
             rule_keys = _merge_keys(rule_keys, ["background_job"])
 
         offered_ids = {o.get("optionId") for o in options}
+        gate_on = _chat_auto_approve_enabled()
+        if not gate_on and self._auto_approve is not None:
+            # Switched off in Settings since this chat turned it on.
+            await self._set_auto_approve(False)
         auto_ok = (
-            _chat_auto_approve_enabled()
+            gate_on
             and "allow_once" in offered_ids
             and _auto_approve_covers(
-                rule_keys, path_findings, external=external, task_tool=task_tool
+                str(tool_call.get("toolName") or title),
+                pathcheck.coerce_arguments(tool_call.get("rawInput")),
+                rule_keys,
+                path_findings,
+                external=external,
+                task_tool=task_tool,
             )
         )
         # "Allow everything in this chat" is on and covers this call: no dialog.
@@ -4786,8 +4870,10 @@ class _ChatConnection:
             _audit.info("stack tool approved for the rest of this chat: %s/%s", stack, tool)
             option_id = "allow_once"
         if option_id == _CHAT_AUTO_APPROVE_OPTION:
-            # MedMCP's own option: vibe gets allow_once for this call only.
-            await self._set_auto_approve(True)
+            # MedMCP's own option: vibe gets allow_once for this call only. The
+            # setting is read again: it may have been switched off meanwhile.
+            if _chat_auto_approve_enabled():
+                await self._set_auto_approve(True)
             option_id = "allow_once"
         await self._resolve_permission(req_id_raw, title, cached, option_id)
 

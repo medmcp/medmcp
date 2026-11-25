@@ -1,6 +1,7 @@
 import type {
   BatchFromPlanResult,
   CatalogEntry,
+  ChatAutoApproveState,
   CloudModelState,
   ExternalMcpState,
   GpuInfo,
@@ -491,6 +492,21 @@ export async function deleteLocalModel(id: string): Promise<void> {
 // ── Cloud model (advanced) ───────────────────────────────────
 // A change to the model in force restarts the agent server-side, so callers
 // should refetch rather than assume their optimistic view survived.
+
+export async function fetchChatAutoApprove(): Promise<ChatAutoApproveState> {
+  const res = await check(await fetch('/api/chat-auto-approve'))
+  return (await res.json()) as ChatAutoApproveState
+}
+
+/** Record that the operator accepted the risks. Required before enabling. */
+export async function acknowledgeChatAutoApprove(): Promise<void> {
+  await postJson('/api/chat-auto-approve/acknowledge', {})
+}
+
+export async function setChatAutoApproveEnabled(enabled: boolean): Promise<ChatAutoApproveState> {
+  const res = await sendJson('PUT', '/api/chat-auto-approve', { enabled })
+  return (await res.json()) as ChatAutoApproveState
+}
 
 export async function fetchCloudModel(): Promise<CloudModelState> {
   const res = await check(await fetch('/api/cloud-model'))

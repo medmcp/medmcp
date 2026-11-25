@@ -1370,8 +1370,8 @@ export const Chat = memo(function Chat({
         {autoApprove && (
           <div className="auto-approve-banner" role="status">
             <span>
-              Allow everything is on for this chat. Deleting, overwriting, leaving the workspace
-              and code the assistant wrote still ask.
+              Allow everything is on for this chat. Changing or deleting files, network access and
+              code the assistant wrote still ask.
             </span>
             <button onClick={() => socketRef.current?.sendAutoApproveOff()}>Turn off</button>
           </div>

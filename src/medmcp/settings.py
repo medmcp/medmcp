@@ -235,6 +235,14 @@ def backend_socket_path() -> Path:
     return VIBE_HOME / "backend.sock"
 
 
+def tool_image_dir() -> Path:
+    """Where the broker keeps stack-result images for the LLM shim (see ``toolimages``).
+
+    Core-only: the agent never reads it, so it stays out of the agent home.
+    """
+    return VIBE_STATE_DIR / "tool-images"
+
+
 def backends_registry_path() -> Path:
     """Registry of real stack launch specs (pool + proxy direct-spawn fallback)."""
     return VIBE_HOME / "backends.json"

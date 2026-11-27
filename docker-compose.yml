@@ -173,6 +173,7 @@ services:
       MEDMCP_SHIM_TOOLS: "${MEDMCP_SHIM_TOOLS:-glimmer}"
       # Seed for the model's sampling, so a chat can be rerun with the same draws.
       MEDMCP_SHIM_SEED: "${MEDMCP_SHIM_SEED:-}"
+      MEDMCP_SHIM_TOOL_IMAGES: "${MEDMCP_SHIM_TOOL_IMAGES:-}"
       # Largest file (MB) a workflow run checksums for its record; 0 turns
       # checksums off. Empty: 2048.
       MEDMCP_RUN_HASH_MAX_MB: "${MEDMCP_RUN_HASH_MAX_MB:-}"

@@ -61,6 +61,14 @@ This shim sits between vibe and Ollama and applies these repairs:
    tool result holding that error gets the reason for the tool it names added as
    ``[MedMCP] <reason>`` (:func:`note_denied_calls`), and the same note again
    whenever the result is sent again later in the chat.
+8. **Tool-result images** (both modes). vibe 2.26.1 drops the image blocks of an
+   MCP result, so the core keeps them and leaves a ``[medmcp-image:<id> ...]``
+   marker in the text (:mod:`medmcp.toolimages`). When the model can see images
+   (Ollama lists ``vision`` among its capabilities), the most recent images the
+   tool results name -- at most ``MEDMCP_SHIM_TOOL_IMAGES``, default 8, 0 turns
+   this off -- are attached in a user-role message after those results, and each
+   marker says whether its image is attached, too old to be attached, gone, or
+   not shown at all.
 
 **Relay mode** (``MEDMCP_SHIM_RELAY``). ``live`` (default): reasoning and
 ``content`` deltas stream straight through, so the answer appears as it is
@@ -104,7 +112,7 @@ import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from medmcp import brokerclient
+from medmcp import brokerclient, toolimages
 
 log: logging.Logger = logging.getLogger(__name__)
 
@@ -142,6 +150,8 @@ _KEEPALIVE_ENV = "MEDMCP_SHIM_KEEPALIVE"
 _SSE_KEEPALIVE = b": keepalive\n\n"
 
 _SEED_ENV = "MEDMCP_SHIM_SEED"
+# Most tool-result images attached to one request (repair 8); 0 turns it off.
+_TOOL_IMAGES_ENV = "MEDMCP_SHIM_TOOL_IMAGES"
 
 # ATEM markers, as in Ollama's ``model/parsers/glimmer.go``.
 ATEM_CALLS_OPEN = "<atem:function_calls>"
@@ -858,6 +868,43 @@ def failure_event(model: str, detail: str) -> JsonDict:
     }
 
 
+SeesImages = Callable[[str], Awaitable[bool]]
+
+
+def ollama_capabilities(base: str) -> SeesImages:
+    """Ask Ollama at *base* whether a model can see images, once per model.
+
+    An answer is kept for the shim's lifetime; a failed lookup is not, and counts
+    as "no" for that request, so images are never sent to a model not known to
+    take them.
+    """
+    known: dict[str, bool] = {}
+
+    async def sees_images(model: str) -> bool:
+        if model in known:
+            return known[model]
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                resp = await client.post(f"{base}/api/show", json={"model": model})
+            if resp.status_code != 200:
+                return False
+            body: object = resp.json()
+        except (httpx.HTTPError, ValueError):
+            return False
+        caps = cast("JsonDict", body).get("capabilities") if isinstance(body, dict) else None
+        known[model] = isinstance(caps, list) and "vision" in cast("list[object]", caps)
+        return known[model]
+
+    return sees_images
+
+
+def _core_image_store() -> toolimages.ImageStore:
+    """The store the core's broker writes (beside the core, never in the agent)."""
+    from medmcp import settings  # the settings module is large; only when asked
+
+    return toolimages.ImageStore(settings.tool_image_dir())
+
+
 # ── proxy app ──────────────────────────────────────────────
 
 
@@ -875,11 +922,16 @@ def create_app(
     keepalive_sec: float = DEFAULT_KEEPALIVE_SEC,
     seed: int | None = None,
     take_denial: TakeDenial = take_denial_from_core,
+    max_images: int = toolimages.DEFAULT_MAX_ATTACHED,
+    image_store: toolimages.ImageStore | None = None,
+    sees_images: SeesImages | None = None,
 ) -> FastAPI:
     """Build the shim ASGI app forwarding to ``upstream``; ``seed`` turns on seeded sampling.
 
     *take_denial* answers which reason the path guard gave for denying a tool's
-    call (repair 7); by default the core's broker is asked.
+    call (repair 7); by default the core's broker is asked. Up to *max_images*
+    tool-result images from *image_store* (default: the core's) are attached for
+    a model *sees_images* confirms (default: Ollama's capabilities) (repair 8).
     """
     if relay not in RELAY_MODES:
         raise ValueError(f"unknown relay mode {relay!r}; expected one of {RELAY_MODES}")
@@ -894,6 +946,20 @@ def create_app(
     inverse = _inverse(mapping)
     base = upstream.rstrip("/")
     denial_memo: dict[str, str] = {}
+    vision = sees_images or ollama_capabilities(base)
+    stores: list[toolimages.ImageStore] = [image_store] if image_store is not None else []
+
+    async def attach_tool_images(payload: JsonDict) -> None:
+        if "medmcp-image:" not in json.dumps(payload.get("messages")):
+            return
+        if not stores:
+            stores.append(_core_image_store())
+        model_sees = max_images > 0 and await vision(str(payload.get("model") or ""))
+        attached = toolimages.attach_images(
+            payload, stores[0], vision=model_sees, max_images=max_images
+        )
+        if attached:
+            log.info("shim: attached %d tool-result image(s)", attached)
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Response:  # pyright: ignore[reportUnusedFunction]
@@ -909,6 +975,10 @@ def create_app(
             await note_denied_calls(payload, denial_memo, take_denial)
         except Exception:
             log.exception("could not add the path guard's denial reasons")
+        try:
+            await attach_tool_images(payload)
+        except Exception:
+            log.exception("could not attach the tool results' images")
         sampling_seed = None if seed is None else conversation_seed(payload, seed)
         model = str(payload.get("model") or "")
         url = f"{base}/v1/chat/completions"
@@ -1214,14 +1284,23 @@ def main() -> None:
             seed = int(raw_seed)
         except ValueError:
             log.warning("shim: unreadable %s=%r, sampling unseeded", _SEED_ENV, raw_seed)
+    max_images = toolimages.DEFAULT_MAX_ATTACHED
+    if raw_images := os.environ.get(_TOOL_IMAGES_ENV, "").strip():
+        try:
+            max_images = max(0, int(raw_images))
+        except ValueError:
+            log.warning(
+                "shim: unreadable %s=%r, using %d", _TOOL_IMAGES_ENV, raw_images, max_images
+            )
     log.info(
-        "medmcp-llm-shim -> %s (tools=%s, renames=%s, attempts=%d, relay=%s, seed=%s)",
+        "medmcp-llm-shim -> %s (tools=%s, renames=%s, attempts=%d, relay=%s, seed=%s, images=%d)",
         upstream,
         tool_mode,
         renames or "none",
         attempts,
         relay,
         "off" if seed is None else seed,
+        max_images,
     )
     uvicorn.run(
         create_app(
@@ -1232,6 +1311,7 @@ def main() -> None:
             tool_mode=tool_mode,
             keepalive_sec=keepalive_sec,
             seed=seed,
+            max_images=max_images,
         ),
         host=host,
         port=port,

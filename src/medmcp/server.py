@@ -100,6 +100,7 @@ from medmcp import (
     signing,
     tasks,
     titles,
+    toolimages,
     update,
     workflow,
 )
@@ -172,6 +173,8 @@ _approvals: approvals.ApprovalLedger = approvals.ApprovalLedger()
 # Background jobs (see ``jobs.py``): containers the core starts for an approved
 # stack call and leaves running. None when stacks cannot run jobs here.
 _jobs: jobs.JobManager | None = None
+# Images taken out of stack results for the LLM shim to attach (see toolimages.py).
+_tool_images: toolimages.ImageStore = toolimages.ImageStore(settings.tool_image_dir())
 # Ops the broker answers from this process for the agent-side helpers (the path
 # guard, the LLM shim); each handler registers itself where it is defined.
 _core_ops: dict[str, CoreOp] = {}
@@ -227,11 +230,18 @@ def _record_job(started: jobs.Started) -> None:
 async def _after_stack_call(
     stack: str, tool: str, args: JsonDict, approval: object, result: mcp_types.CallToolResult
 ) -> mcp_types.CallToolResult:
-    """Broker hook: start the job an approved call's result asks for (if any)."""
-    if _jobs is None:
+    """Broker hook: start the job an approved call's result asks for (if any).
+
+    Then take the result's images out for the LLM shim: vibe would drop them.
+    """
+    if _jobs is not None:
+        session = approval.session if isinstance(approval, approvals.Approval) else ""
+        result = await jobs.after_call(_jobs, stack, tool, args, session, result, _record_job)
+    try:
+        return await asyncio.to_thread(toolimages.extract, result, _tool_images)
+    except OSError:
+        log.exception("could not keep the images of %s.%s; relayed without them", stack, tool)
         return result
-    session = approval.session if isinstance(approval, approvals.Approval) else ""
-    return await jobs.after_call(_jobs, stack, tool, args, session, result, _record_job)
 
 
 def _tool_schema_op(req: JsonDict) -> JsonDict:

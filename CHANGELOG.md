@@ -6,6 +6,10 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Added
+
+- Images that stack tools return (rendered slices, montages, plots) now reach a local model that can see images, such as the default Muse Glimmer; vibe used to drop them. At most the 8 most recent per request (`MEDMCP_SHIM_TOOL_IMAGES`, 0 turns this off). The chat shows a `[medmcp-image:…]` line where an image was. The cloud model is not sent the images.
+
 ### Changed
 
 - Tool stacks: all cards are the same size; long descriptions open on click, the tool list from the card's footer.

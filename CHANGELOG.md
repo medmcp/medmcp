@@ -6,6 +6,10 @@ Notable, user-visible changes to MedMCP. Format follows
 
 ## Unreleased
 
+### Added
+
+- Tool stacks: `medmcp-nninteractive` (the nnInteractive Agent: segment any structure you can name, object by object, with nnInteractive scribble, box and point prompts; saves an instance map and an object table) in both install catalogs. GPU; the nnInteractive weights are non-commercial (CC BY-NC-SA 4.0).
+
 ### Changed
 
 - Tool stacks: all cards are the same size; long descriptions open on click, the tool list from the card's footer.

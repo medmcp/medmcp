@@ -42,6 +42,12 @@
       "image": "medmcp-stats:dev",
       "description": "Statistics and publication figures on any table: t-tests, ANOVA, rank tests, correlations, chi-square/Fisher with effect sizes and a draft results sentence; box, violin, scatter, Bland-Altman and other plots at journal size (PNG, SVG, PDF), restyled without re-running the analysis.",
       "gpu": false
+    },
+    {
+      "name": "medmcp-nninteractive",
+      "image": "medmcp-nninteractive:dev",
+      "description": "Interactive segmentation of any structure you can name (nnInteractive Agent): the assistant prompts nnInteractive with scribbles, boxes and points, corrects the 3D result and saves one label per object, for CT, MRI, PET and microscopy. Weights CC BY-NC-SA 4.0 (non-commercial).",
+      "gpu": true
     }
   ]
 }

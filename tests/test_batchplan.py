@@ -499,8 +499,39 @@ def test_parse_role() -> None:
     assert batchplan.parse_role("T1?contrast") == batchplan.Role("T1", "unknown")
     assert batchplan.parse_role(" flair@Coronal ") == batchplan.Role("flair", "", "coronal")
     assert batchplan.Role("flair").matches({"sequence": "FLAIR", "contrast": "no"})
-    with pytest.raises(batchplan.BatchPlanError):
-        batchplan.parse_role("+contrast")
+    for bad in ("+contrast", "-contrast", "?contrast", "@axial", ""):
+        with pytest.raises(batchplan.BatchPlanError):
+            batchplan.parse_role(bad)
+
+
+def test_parse_role_and_selection_with_hyphenated_sequences() -> None:
+    """Hyphenated sequence names (e.g. ``T1-MPRAGE``, ``T2-FLAIR``) parse and round-trip."""
+    assert batchplan.parse_role("T1-MPRAGE") == batchplan.Role("T1-MPRAGE")
+    assert batchplan.parse_role("T1-MPRAGE+contrast") == batchplan.Role("T1-MPRAGE", "yes")
+    assert batchplan.parse_role("T1-MPRAGE-contrast") == batchplan.Role("T1-MPRAGE", "no")
+    assert batchplan.parse_role("T1-MPRAGE?contrast") == batchplan.Role("T1-MPRAGE", "unknown")
+    assert batchplan.parse_role("T2-FLAIR@Axial") == batchplan.Role("T2-FLAIR", "", "axial")
+    assert batchplan.parse_role("T1-MPRAGE-contrast@Coronal") == batchplan.Role(
+        "T1-MPRAGE", "no", "coronal"
+    )
+
+    recipe = Recipe(
+        name="describe",
+        description="d",
+        inputs=[WorkflowInput(name="in_1", example="/d/P1/t1.nii.gz")],
+        steps=[RecipeStep(server="s", tool="describe", arguments={"image_path": "{{in_1}}"})],
+    )
+    rows = [
+        _series("P1", "", "T1-MPRAGE", "yes", "/d/P1/t1.nii.gz"),
+        _series("P2", "", "T1-MPRAGE", "yes", "/d/P2/t1.nii.gz"),
+        _series("P2", "", "T2-FLAIR", "no", "/d/P2/flair.nii.gz"),
+    ]
+    inferred = batchplan.runs_from_selection(recipe, rows)
+    assert inferred.role_map == {"in_1": "T1-MPRAGE+contrast"}
+    assert inferred.runs == [{"in_1": "/d/P1/t1.nii.gz"}, {"in_1": "/d/P2/t1.nii.gz"}]
+
+    explicit = batchplan.runs_from_selection(recipe, rows, role_map={"in_1": "T2-FLAIR"})
+    assert explicit.runs == [{"in_1": "/d/P2/flair.nii.gz"}]
 
 
 def test_bind_manifest_reads_either_kind_and_resolves_relative_paths(tmp_path: Path) -> None:

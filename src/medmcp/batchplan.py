@@ -544,7 +544,9 @@ class Role:
 
 
 _CONTRAST_MARKS = {"+": "yes", "-": "no", "?": "unknown"}
-_ROLE_RE = re.compile(r"^(?P<seq>[^@+?-]+?)(?:(?P<mark>[+?-])contrast)?(?:@(?P<plane>\w+))?$", re.I)
+_ROLE_RE = re.compile(
+    r"^(?P<seq>[^@+?-][^@+?]*?)(?:(?P<mark>[+?-])contrast)?(?:@(?P<plane>\w+))?$", re.I
+)
 
 
 def parse_role(text: str) -> Role:
